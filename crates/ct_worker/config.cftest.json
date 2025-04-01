@@ -1,0 +1,27 @@
+{
+    "logging_level": "info",
+    "logs": {
+        "cftest2025h1a": {
+            "description": "Cloudflare Research 2025h1a",
+            "log_type": "test",
+            "submission_url": "https://static-ct.cloudflareresearch.com/logs/cftest2025h1a/",
+            "monitoring_url": "https://static-ct-public-cftest2025h1a.cloudflareresearch.com/",
+            "temporal_interval": {
+                "start_inclusive": "2025-01-01T00:00:00Z",
+                "end_exclusive": "2025-07-01T00:00:00Z"
+            },
+            "location_hint": "enam"
+        },
+        "cftest2025h2a": {
+            "description": "Cloudflare Research 2025h2a",
+            "log_type": "test",
+            "submission_url": "https://static-ct.cloudflareresearch.com/logs/cftest2025h2a/",
+            "monitoring_url": "https://static-ct-public-cftest2025h2a.cloudflareresearch.com/",
+            "temporal_interval": {
+                "start_inclusive": "2025-07-01T00:00:00Z",
+                "end_exclusive": "2026-01-01T00:00:00Z"
+            },
+            "location_hint": "enam"
+        }
+    }
+}

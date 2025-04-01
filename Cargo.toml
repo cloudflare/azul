@@ -1,0 +1,40 @@
+# Copyright (c) 2025 Cloudflare, Inc. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+[workspace]
+# This is needed to avoid pulling in tokio features in wasm targets, due to new features in version 0.0.18 of the `worker` crate
+# See: https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html#details
+resolver = "2"
+members = ["crates/*", "fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+authors = [ "Luke Valenta <lvalenta@cloudflare.com>" ]
+edition = "2021"
+license = "BSD-3-Clause"
+readme = "README.md"
+homepage = "https://github.com/cloudflare/azul"
+repository = "https://github.com/cloudflare/azul"
+description = "An implementation of the Static Certificate Transparency API on Cloudflare Workers"
+
+[profile.release]
+opt-level = "s"
+# This is needed as a workaround for https://github.com/cloudflare/workers-rs/issues/654.
+strip = true
+
+[profile.release-symbols]
+inherits = "release"
+opt-level = 3
+debug = 1
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_with = { version = "3.9.0", features = ["base64"] }
+sha2 = "0.10"
+rand = "0.8.5"
+signature = "2.2.0"
+base64 = "0.21"
+anyhow = "1.0"
+ed25519-dalek = "2.1.1"
+thiserror = "1.0"

@@ -1,0 +1,26 @@
+[package]
+name = "tlog-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tlog_tiles = "0.1.0"
+
+[[bin]]
+name = "fuzz_parse_tile_path"
+path = "fuzz_targets/fuzz_parse_tile_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_checkpoint"
+path = "fuzz_targets/fuzz_parse_checkpoint.rs"
+test = false
+doc = false
+bench = false

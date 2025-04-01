@@ -1,0 +1,74 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Build",
+      "cargo": {
+        "args": [
+          "build",
+          "--manifest-path",
+          "${fileDirname}/../Cargo.toml"
+        ]
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Build Docs",
+      "cargo": {
+        "args": [
+          "doc",
+          //"--document-private-items",
+          "--manifest-path",
+          "${fileDirname}/../Cargo.toml"
+        ]
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Test",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--manifest-path",
+          "${fileDirname}/../Cargo.toml"
+        ]
+      },
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Benchmark",
+      "cargo": {
+        "args": [
+          "bench",
+          "--manifest-path",
+          "${fileDirname}/../Cargo.toml"
+        ]
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Test Matching Selected Text",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--manifest-path",
+          "${fileDirname}/../Cargo.toml"
+        ]
+      },
+      "args": [
+        "${selectedText}"
+      ],
+    },
+  ]
+}

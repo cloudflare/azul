@@ -1,0 +1,40 @@
+[package]
+name = "static_ct_api"
+readme = "README.md"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of c2sp.org/static-ct-api"
+categories = ["cryptography"]
+keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1247
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+base64.workspace = true
+byteorder = "1.4"
+chrono = "0.4"
+const-oid = "0.9.6"
+der = "0.7.9"
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+sha2.workspace = true
+signature.workspace = true
+signed_note = "0.1.0"
+thiserror.workspace = true
+tlog_tiles = "0.1.0"
+x509-verify = { version = "0.4.4", features = ["md2", "md5", "sha1", "dsa", "rsa", "k256", "p192", "p224", "p256", "p384", "ecdsa", "ed25519", "x509", "pem"] }

@@ -1,0 +1,38 @@
+[package]
+name = "signed_note"
+readme = "README.md"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of c2sp.org/signed-note"
+categories = ["cryptography"]
+keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1247
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek = { workspace = true, features=["alloc", "rand_core"] }
+rand_core = "0.6.4"
+sha2.workspace = true
+signature.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmark_verify"
+harness = false

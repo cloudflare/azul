@@ -1,0 +1,30 @@
+[package]
+name = "tlog_tiles"
+readme = "README.md"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of c2sp.org/tlog-tiles and c2sp.org/tlog-checkpoint"
+categories = ["cryptography"]
+keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1247
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+base64.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url = "2.2"
