@@ -1,3 +1,8 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+// Build script to include per-environment configuration and trusted roots.
+
 use serde_json::from_str;
 use std::env;
 use std::fs;

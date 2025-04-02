@@ -39,4 +39,8 @@ See documentation for more complete examples.
 
 ## Acknowledgements
 
-The project ports code from [note](https://golang.org/x/mod/sumdb/note), which is licensed under the BSD-3-Clause License. See the LICENSE file in the root of this repository for the full license text.
+The project ports code from [note](https://golang.org/x/mod/sumdb/note).
+
+## License
+
+The project is licensed under the [BSD-3-Clause License](./LICENSE).

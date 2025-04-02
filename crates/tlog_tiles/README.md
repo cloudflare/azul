@@ -8,4 +8,8 @@ A Rust implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) and 
 
 ## Acknowledgements
 
-The project ports code from [tlog](https://golang.org/x/mod/sumdb/tlog), which is licensed under the BSD-3-Clause License. See the LICENSE file in the root of this repository for the full license text.
+The project ports code from [tlog](https://golang.org/x/mod/sumdb/tlog).
+
+## License
+
+The project is licensed under the [BSD-3-Clause License](./LICENSE).

@@ -70,22 +70,26 @@ Follow these instructions to spin up a CT log on your local machine using the `d
 
     Submit a certificate from a server:
 
-        openssl s_client -showcerts -connect google.com:443 -servername google.com </dev/null 2>/dev/null |\
-        while (set -o pipefail; openssl x509 -outform DER 2>/dev/null | base64); do :; done |\
-        sed '/^$/d' | sed 's/.*/"&"/' | jq -sc '{"chain":.}' |\
-        curl -s "http://localhost:8787/logs/dev2025h1a/ct/v1/add-chain" -d@-
+    ```text
+    openssl s_client -showcerts -connect google.com:443 -servername google.com </dev/null 2>/dev/null |\
+    while (set -o pipefail; openssl x509 -outform DER 2>/dev/null | base64); do :; done |\
+    sed '/^$/d' | sed 's/.*/"&"/' | jq -sc '{"chain":.}' |\
+    curl -s "http://localhost:8787/logs/dev2025h1a/ct/v1/add-chain" -d@-
+    ```
 
     Use [ctclient](https://github.com/google/certificate-transparency-go/tree/master/client/ctclient) to 'cross-pollinate' entries from another log (RFC6962 logs only, until [static-ct-api support is added](https://github.com/google/certificate-transparency-go/issues/1669)) with overlapping roots and NotAfter temporal interval:
 
-        tmpdir=$(mktemp -d)
-        ./ctclient get-entries --first 0 --last 31 --log_name "Google 'Argon2025h1' log" --chain --text=false | csplit -s -f $tmpdir/ - '/^Index=/' '{30}'
-        for file in $tmpdir/*; do
-          prefix=$(head -n1 $file | grep -o "pre-")
-          cat $file | while (set -o pipefail; openssl x509 -outform DER 2>/dev/null | base64); do :; done |\
-          sed '/^$/d' | sed 's/.*/"&"/' | jq -sc '{"chain":.}' |\
-          curl -s "http://localhost:8787/logs/dev2025h1a/ct/v1/add-${prefix}chain" -d@- &
-        done
-        rm -r $tmpdir
+    ```text
+    tmpdir=$(mktemp -d)
+    ./ctclient get-entries --first 0 --last 31 --log_name "Google 'Argon2025h1' log" --chain --text=false | csplit -s -f $tmpdir/ - '/^Index=/' '{30}'
+    for file in $tmpdir/*; do
+      prefix=$(head -n1 $file | grep -o "pre-")
+      cat $file | while (set -o pipefail; openssl x509 -outform DER 2>/dev/null | base64); do :; done |\
+      sed '/^$/d' | sed 's/.*/"&"/' | jq -sc '{"chain":.}' |\
+      curl -s "http://localhost:8787/logs/dev2025h1a/ct/v1/add-${prefix}chain" -d@- &
+    done
+    rm -r $tmpdir
+    ```
 
     Checkpoints and other static data can also be retrieved through the worker (or directly from the R2 bucket):
 
@@ -116,8 +120,10 @@ Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to co
 
 1.  Create KV namespace for per-log deduplication cache.
 
-        # After running, add generated namespace ID to `wrangler.jsonc`
-        npx wrangler kv namespace create static-ct-cache-${LOG_NAME}
+    ```text
+    # After running, add generated namespace ID to `wrangler.jsonc`
+    npx wrangler kv namespace create static-ct-cache-${LOG_NAME}
+    ```
 
 1.  Generate [secrets](https://developers.cloudflare.com/workers/configuration/secrets) for the signing and witness keys. NOTE: this will overwrite any existing secrets of the same name.
 
@@ -189,4 +195,8 @@ profiling and debugging. Use `worker-build --dev` as the build command in `wrang
 
 ## Acknowledgements
 
-This project ports code from [sunlight](https://github.com/FiloSottile/sunlight) and [certificate-transparency-go](https://github.com/google/certificate-transparency-go). See the LICENSE file in the root of this repository for the full license text.
+This project ports code from [sunlight](https://github.com/FiloSottile/sunlight) and [certificate-transparency-go](https://github.com/google/certificate-transparency-go).
+
+## License
+
+The project is licensed under the [BSD-3-Clause License](./LICENSE).

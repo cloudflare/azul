@@ -1,8 +1,16 @@
+// Ported from "sunlight" (https://github.com/FiloSottile/sunlight)
+// Copyright 2023 The Sunlight Authors
+// Licensed under ISC License found in the LICENSE file or at https://opensource.org/license/isc-license-txt
+//
+// This ports code from the original Go project "sunlight" and adapts it to Rust idioms.
+//
+// Modifications and Rust implementation Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 //! Core functionality for a [Static CT API](https://c2sp.org/static-ct-api) log, including
 //! creating and loading logs from persistent storage, adding leaves to logs, and sequencing logs.
 //!
-//! This file contains code ported from the original project [sunlight](https://github.com/FiloSottile/sunlight) (ISC license).
-//! See the LICENSE file in the root of this repository for the full license text.
+//! This file contains code ported from the original project [sunlight](https://github.com/FiloSottile/sunlight).
 //!
 //! References:
 //! - [http.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/http.go)

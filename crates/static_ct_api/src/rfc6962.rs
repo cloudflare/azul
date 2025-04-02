@@ -1,8 +1,19 @@
+// Ported from "sunlight" (https://github.com/FiloSottile/sunlight)
+// Copyright 2023 The Sunlight Authors
+// Licensed under ISC License found in the LICENSE file or at https://opensource.org/license/isc-license-txt
+//
+// Ported from "certificate-transparency-go" (https://github.com/google/certificate-transparency-go)
+// Copyright 2016 Google LLC. All Rights Reserved.
+// Licensed under Apache-2.0 License found in the LICENSE file or at https://www.apache.org/licenses/LICENSE-2.0
+//
+// This ports code from the original Go projects "sunlight" and "certificate-transparency-go" and adapts it to Rust idioms.
+//
+// Modifications and Rust implementation Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 //! Provides functionality for parsing and validating certificates based on the requirements of [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962).
 //!
-//! This file contains code ported from the original projects [sunlight](https://github.com/FiloSottile/sunlight) ([ISC license](https://github.com/FiloSottile/sunlight?tab=ISC-1-ov-file#readme))
-//! and [certificate-transparency-go](https://github.com/google/certificate-transparency-go) ([Apache 2.0 license](https://github.com/google/certificate-transparency-go/?tab=Apache-2.0-1-ov-file#readme)).
-//! See the LICENSE file in the root of this repository for the full license text.
+//! This file contains code ported from the original projects [sunlight](https://github.com/FiloSottile/sunlight) and [certificate-transparency-go](https://github.com/google/certificate-transparency-go).
 //!
 //! References:
 //! - [http.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/http.go)

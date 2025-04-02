@@ -1,3 +1,16 @@
+// Ported from "mod" (https://pkg.go.dev/golang.org/x/mod)
+// Copyright 2009 The Go Authors
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+//
+// Ported from "sunlight" (https://github.com/FiloSottile/sunlight)
+// Copyright 2023 The Sunlight Authors
+// Licensed under ISC License found in the LICENSE file or at https://opensource.org/license/isc-license-txt
+//
+// This ports code from the original Go projects "mod" and "sunlight" and adapts it to Rust idioms.
+//
+// Modifications and Rust implementation Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 //! A Checkpoint is a tree head to be formatted according to the [C2SP tlog-checkpoint](https://c2sp.org/tlog-checkpoint) specification.
 //!
 //! A checkpoint looks like this:
@@ -9,8 +22,7 @@
 //!
 //! It can be followed by extra extension lines.
 //!
-//! This file contains code ported from the original projects [tlog](https://pkg.go.dev/golang.org/x/mod/sumdb/tlog) ([BSD-3-Clause license](https://pkg.go.dev/golang.org/x/mod/sumdb/note?tab=licenses)) and [sunlight](https://github.com/FiloSottile/sunlight) ([ISC license](https://github.com/FiloSottile/sunlight?tab=ISC-1-ov-file#readme)).
-//! See the LICENSE file in the root of this repository for the full license text.
+//! This file contains code ported from the original projects [tlog](https://pkg.go.dev/golang.org/x/mod/sumdb/tlog) and [sunlight](https://github.com/FiloSottile/sunlight).
 //!
 //! References:
 //! - [note.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/note.go)

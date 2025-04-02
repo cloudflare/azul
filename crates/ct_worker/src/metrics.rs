@@ -1,4 +1,8 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 //! Metrics for CT log operations.
+
 use prometheus::{
     self, register_counter_vec_with_registry, register_counter_with_registry,
     register_gauge_with_registry, register_histogram_vec_with_registry,

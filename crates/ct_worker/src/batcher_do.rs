@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 //! Batcher buffers entries to be sequenced, submits batches to the sequencer, and
 //! waits until the entries are sequenced. Each time the Batcher gets an update with
 //! new sequenced entry metadata, it writes to an in-memory cache and signals all waiting

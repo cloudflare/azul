@@ -1,4 +1,8 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 //! Entrypoint for the static CT submission APIs.
+
 use crate::{
     ctlog, get_stub, load_signing_key, load_witness_key, util, CacheKey, CacheValue, ObjectBucket,
     TemporalInterval, CONFIG, ROOTS, UNKNOWN_LOG_MSG,
