@@ -145,12 +145,10 @@ impl DurableObject for Batcher {
     }
 
     async fn alarm(&mut self) -> Result<Response> {
-        if !self.initialized {
+        if !self.initialized || self.batch.pending_leaves.is_empty() {
             return Response::empty();
         }
-        if !self.batch.pending_leaves.is_empty()
-            && self.last_batch_millis + MAX_BATCH_TIMEOUT_MILLIS < util::now_millis()
-        {
+        if self.last_batch_millis + MAX_BATCH_TIMEOUT_MILLIS < util::now_millis() {
             if let Err(e) = self.submit_batch().await {
                 log::warn!("failed to submit batch: {e}");
             }
