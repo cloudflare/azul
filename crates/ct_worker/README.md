@@ -24,7 +24,7 @@ Two prototype logs are available for testing, with configuration in `wrangler.js
 
     curl -s https://static-ct.cloudflareresearch.com/logs/cftest2025h1a/metadata | jq
     {
-      "description": "Cloudflare Research 2025h1a",
+      "description": "Cloudflare Research 'cftest2025h1a' log",
       "log_type": "test",
       "log_id": "7DSwkhPo35hYEZa4DVlPq6Pm/bG4aOw/kqhHvYd6z/k=",
       "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8LxK0sAKYODiZe9gDeak7agggQ0wvBOeEMSi7cLlFzcTlm1AexxsC04r/4rBIhf8liQqyRTrL3u1jpz6NJ4tLg==",
@@ -40,7 +40,7 @@ Two prototype logs are available for testing, with configuration in `wrangler.js
 
     curl -s https://static-ct.cloudflareresearch.com/logs/cftest2025h2a/metadata | jq
     {
-      "description": "Cloudflare Research 2025h2a",
+      "description": "Cloudflare Research 'cftest2025h2a' log",
       "log_type": "test",
       "log_id": "2KJiliJSBM2181NJWC5O1mWiRRsPJ6i2iWE2s7n8Bwg=",
       "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYipauBOPEktPb0JVpkRQq6wtRDRIj8GmKYvzM0Lpw1oSh9Uis9khpPCH6xyrDstk019AHuCq19KT5f+/MkY/yA==",
@@ -161,7 +161,7 @@ Follow these instructions to deploy to a custom domain, suitable for running a p
     1. Add a [Cache Rule](https://developers.cloudflare.com/cache/how-to/cache-rules/) for the entire bucket, specifying `Respect origin TTL` as the `Browser TTL` option.
     1. Add a [Compression Rule](https://developers.cloudflare.com/rules/compression-rules/) to enable compression for the `/tile/data` path.
 
-1.   Deploy the worker with `npx wrangler -e=${ENV} deploy`.
+1.  Deploy the worker with `npx wrangler -e=${ENV} deploy`.
 
 ### Reset the worker
 

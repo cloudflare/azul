@@ -2,7 +2,7 @@
     "logging_level": "info",
     "logs": {
         "cftest2025h1a": {
-            "description": "Cloudflare Research 2025h1a",
+            "description": "Cloudflare Research 'cftest2025h1a' log",
             "log_type": "test",
             "submission_url": "https://static-ct.cloudflareresearch.com/logs/cftest2025h1a/",
             "monitoring_url": "https://static-ct-public-cftest2025h1a.cloudflareresearch.com/",
@@ -13,7 +13,7 @@
             "location_hint": "enam"
         },
         "cftest2025h2a": {
-            "description": "Cloudflare Research 2025h2a",
+            "description": "Cloudflare Research 'cftest2025h2a' log",
             "log_type": "test",
             "submission_url": "https://static-ct.cloudflareresearch.com/logs/cftest2025h2a/",
             "monitoring_url": "https://static-ct-public-cftest2025h2a.cloudflareresearch.com/",
