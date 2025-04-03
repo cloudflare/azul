@@ -14,6 +14,7 @@ keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
 [package.metadata.release]
 release = false
 
+# https://github.com/rustwasm/wasm-pack/issues/1351
 [package.metadata.wasm-pack.profile.dev.wasm-bindgen]
 dwarf-debug-info = true
 
