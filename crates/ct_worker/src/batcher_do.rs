@@ -38,8 +38,6 @@ struct Batcher {
     memory: MemoryCache,
     batch: Batch,
     in_flight: usize,
-    last_batch_millis: u64,
-    initialized: bool,
 }
 
 // A batch of entries to be submitted to the Sequencer together.
@@ -54,7 +52,7 @@ impl Default for Batch {
     fn default() -> Self {
         let (tx, _) = watch::channel(());
         Self {
-            pending_leaves: vec![],
+            pending_leaves: Vec::new(),
             by_hash: HashSet::new(),
             done: tx,
         }
@@ -77,19 +75,12 @@ impl DurableObject for Batcher {
             name: None,
             memory: MemoryCache::new(MEMORY_CACHE_SIZE),
             batch: Batch::default(),
-            last_batch_millis: util::now_millis(),
             in_flight: 0,
-            initialized: false,
         }
     }
     async fn fetch(&mut self, mut req: Request) -> Result<Response> {
-        if !self.initialized {
-            self.state
-                .storage()
-                .set_alarm(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS))
-                .await?;
+        if self.name.is_none() {
             self.name = Some(req.query::<QueryParams>()?.name);
-            self.initialized = true;
         }
         match req.path().as_str() {
             "/add_leaf" => {
@@ -109,6 +100,14 @@ impl DurableObject for Batcher {
                 }
                 self.in_flight += 1;
 
+                // Set an alarm to flush the batch if it times out.
+                if self.batch.pending_leaves.is_empty() {
+                    self.state
+                        .storage()
+                        .set_alarm(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS))
+                        .await?;
+                }
+
                 // Add entry to the current pending batch if it isn't already present.
                 // If we maintained a cache of in-flight batches, we could also check
                 // if the entry is present in one of those, but the Sequencer will already
@@ -118,15 +117,18 @@ impl DurableObject for Batcher {
                     self.batch.pending_leaves.push(entry);
                 }
 
-                // Subscribe to the batch, and submit if it's full.
                 let mut recv = self.batch.done.subscribe();
+
+                // Submit the current pending batch if it's full.
                 if self.batch.pending_leaves.len() >= MAX_BATCH_SIZE {
+                    // Delete the alarm as we're flushing the batch now.
+                    self.state.storage().delete_alarm().await?;
                     if let Err(e) = self.submit_batch().await {
                         log::warn!("failed to submit batch: {e}");
                     }
                 }
 
-                // Wait until the batch has been processed (it's 'done' channel dropped).
+                // Wait until the batch has been processed.
                 let _ = recv.changed().await;
                 let resp = if let Some(value) = self.memory.get_entry(&key) {
                     // The entry has been sequenced!
@@ -143,23 +145,14 @@ impl DurableObject for Batcher {
             _ => Response::error("not found", 404),
         }
     }
-
     async fn alarm(&mut self) -> Result<Response> {
-        if !self.initialized || self.batch.pending_leaves.is_empty() {
+        // Ignore the alarm if it fired just after the DO was re-initialized.
+        if self.name.is_none() {
             return Response::empty();
         }
-        if self.last_batch_millis + MAX_BATCH_TIMEOUT_MILLIS < util::now_millis() {
-            if let Err(e) = self.submit_batch().await {
-                log::warn!("failed to submit batch: {e}");
-            }
+        if let Err(e) = self.submit_batch().await {
+            log::warn!("failed to submit batch: {e}");
         }
-
-        // Schedule the next alarm.
-        self.state
-            .storage()
-            .set_alarm(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS))
-            .await?;
-
         Response::empty()
     }
 }
@@ -173,7 +166,6 @@ impl Batcher {
 
         // Take the current pending batch, replacing it with a new one.
         let batch = std::mem::take(&mut self.batch);
-        self.last_batch_millis = util::now_millis();
 
         // Submit the batch, and wait for it to be sequenced.
         let sequenced_entries = stub
