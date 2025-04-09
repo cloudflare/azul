@@ -95,7 +95,7 @@ impl DurableObject for Batcher {
                     return Response::from_json(&value);
                 }
 
-                if self.in_flight > MAX_IN_FLIGHT {
+                if self.in_flight >= MAX_IN_FLIGHT {
                     return Response::error("too many requests in flight", 429);
                 }
                 self.in_flight += 1;
