@@ -157,6 +157,24 @@ impl DurableObject for Batcher {
         if let Err(e) = self.submit_batch(batch).await {
             log::warn!("failed to submit batch: {e}");
         }
+
+        // It's possible that a new alarm was set and failed to fire while
+        // the current alarm() was executing, since only one instance of alarm()
+        // can run at a time per Durable Object instance.
+        // In that case, schedule the alarm for immediate execution.
+        if self
+            .state
+            .storage()
+            .get_alarm()
+            .await?
+            .is_some_and(|t| t < i64::try_from(util::now_millis()).unwrap())
+        {
+            self.state
+                .storage()
+                .set_alarm(Duration::from_millis(0))
+                .await?;
+        }
+
         Response::empty()
     }
 }
