@@ -4,14 +4,14 @@ Azul (short for [azulejos](https://en.wikipedia.org/wiki/Azulejo), the colorful 
 
 The crates in the repository are organized as follows:
 
-* **[ct_worker](crates/ct_worker)**: A Static CT API log implementation for deployment on Cloudflare Workers.
-* **[static_ct_api](crates/static_ct_api)**: An implementation of the [C2SP static-ct-api](https://c2sp.org/static-ct-api) specification.
-* **[signed_note](crates/signed_note)**: An implementation of the [C2SP signed-note](https://c2sp.org/signed-note) specification.
-* **[tlog_tiles](crates/tlog_tiles)**: An implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) and [C2SP checkpoint](https://c2sp.org/tlog-checkpoint) specifications.
+- **[ct_worker](crates/ct_worker)**: A Static CT API log implementation for deployment on Cloudflare Workers.
+- **[static_ct_api](crates/static_ct_api)** ([crates.io](https://crates.io/crates/static_ct_api)): An implementation of the [C2SP static-ct-api](https://c2sp.org/static-ct-api) specification.
+- **[signed_note](crates/signed_note)** ([crates.io](https://crates.io/crates/signed_note)): An implementation of the [C2SP signed-note](https://c2sp.org/signed-note) specification.
+- **[tlog_tiles](crates/tlog_tiles)** ([crates.io](https://crates.io/crates/tlog_tiles)): An implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) and [C2SP checkpoint](https://c2sp.org/tlog-checkpoint) specifications.
 
 ## Deploy
 
-See instructions in the [ct\_worker](crates/ct_worker/README.md) crate for deployment instructions.
+See instructions in the [ct_worker](crates/ct_worker/README.md) crate for deployment instructions.
 
 ## Build
 
