@@ -101,7 +101,7 @@ impl DurableObject for Batcher {
                 self.in_flight += 1;
 
                 // Set an alarm to flush the batch if it times out.
-                if self.batch.pending_leaves.is_empty() {
+                if self.state.storage().get_alarm().await?.is_none() {
                     self.state
                         .storage()
                         .set_alarm(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS))
