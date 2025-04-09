@@ -131,6 +131,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                         .ok_or("R2 object missing body")?
                         .response_body()?,
                 )
+                .map(|r| r.with_headers(headers_from_http_metadata(obj.http_metadata())))
             } else {
                 Response::error("Not found", 404)
             }
@@ -265,4 +266,18 @@ async fn add_chain_or_pre_chain(
 
 fn shard_id_from_cache_key(key: &CacheKey) -> u8 {
     key[0] % NUM_BATCHER_PROXIES
+}
+
+fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
+    let mut h = Headers::new();
+    if let Some(hdr) = meta.cache_control {
+        h.append("Cache-Control", &hdr).unwrap();
+    }
+    if let Some(hdr) = meta.content_encoding {
+        h.append("Content-Encoding", &hdr).unwrap();
+    }
+    if let Some(hdr) = meta.content_type {
+        h.append("Content-Type", &hdr).unwrap();
+    }
+    h
 }
