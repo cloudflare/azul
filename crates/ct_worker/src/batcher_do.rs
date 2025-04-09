@@ -100,8 +100,15 @@ impl DurableObject for Batcher {
                 }
                 self.in_flight += 1;
 
-                // Set an alarm to flush the batch if it times out.
-                if self.state.storage().get_alarm().await?.is_none() {
+                // Set an alarm to flush the batch if it times out, or if the alarm is expired.
+                if self
+                    .state
+                    .storage()
+                    .get_alarm()
+                    .await?
+                    .filter(|t| *t > i64::try_from(util::now_millis()).unwrap())
+                    .is_none()
+                {
                     self.state
                         .storage()
                         .set_alarm(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS))
@@ -157,6 +164,24 @@ impl DurableObject for Batcher {
         if let Err(e) = self.submit_batch(batch).await {
             log::warn!("failed to submit batch: {e}");
         }
+
+        // It's possible that a new alarm was set and failed to fire while
+        // the current alarm() was executing, since only one instance of alarm()
+        // can run at a time per Durable Object instance.
+        // In that case, schedule the alarm for immediate execution.
+        if self
+            .state
+            .storage()
+            .get_alarm()
+            .await?
+            .is_some_and(|t| t < i64::try_from(util::now_millis()).unwrap())
+        {
+            self.state
+                .storage()
+                .set_alarm(Duration::from_millis(0))
+                .await?;
+        }
+
         Response::empty()
     }
 }
