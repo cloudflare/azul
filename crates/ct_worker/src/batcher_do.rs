@@ -123,7 +123,9 @@ impl DurableObject for Batcher {
                 if self.batch.pending_leaves.len() >= MAX_BATCH_SIZE {
                     // Delete the alarm as we're flushing the batch now.
                     self.state.storage().delete_alarm().await?;
-                    if let Err(e) = self.submit_batch().await {
+                    // Take the current pending batch, replacing it with a new one.
+                    let batch = std::mem::take(&mut self.batch);
+                    if let Err(e) = self.submit_batch(batch).await {
                         log::warn!("failed to submit batch: {e}");
                     }
                 }
@@ -150,7 +152,9 @@ impl DurableObject for Batcher {
         if self.name.is_none() {
             return Response::empty();
         }
-        if let Err(e) = self.submit_batch().await {
+        // Take the current pending batch, replacing it with a new one.
+        let batch = std::mem::take(&mut self.batch);
+        if let Err(e) = self.submit_batch(batch).await {
             log::warn!("failed to submit batch: {e}");
         }
         Response::empty()
@@ -159,13 +163,10 @@ impl DurableObject for Batcher {
 
 impl Batcher {
     // Submit the current pending batch to be sequenced.
-    async fn submit_batch(&mut self) -> Result<()> {
+    async fn submit_batch(&mut self, batch: Batch) -> Result<()> {
         let name = self.name.as_ref().unwrap();
         let params = CONFIG.params_or_err(name)?;
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;
-
-        // Take the current pending batch, replacing it with a new one.
-        let batch = std::mem::take(&mut self.batch);
 
         // Submit the batch, and wait for it to be sequenced.
         let sequenced_entries = stub
