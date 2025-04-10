@@ -131,7 +131,12 @@ impl DurableObject for Batcher {
                 }
 
                 // Wait until the batch has been processed.
-                let _ = recv.changed().await;
+                if recv.changed().await.is_err() {
+                    // If we see an error, the Sender for this channel was dropped, which
+                    // could happen if the batch submission failed due to rate-limiting
+                    // or other communication failures with the Sequencer.
+                    // Proceed and check the in-memory cache before returning an error response.
+                }
                 let resp = if let Some(value) = self.memory.get_entry(&key) {
                     // The entry has been sequenced!
                     Response::from_json(&value)
