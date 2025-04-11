@@ -6,7 +6,7 @@ A Rust implementation of the [Static CT API](https://c2sp.org/static-ct-api) for
 
 This project can be used to run multiple CT log shards within a single Workers application.
 
-The 'brain' of each CT log is a single-threaded 'Sequencer' Durable Object, and much of the system is architected around offloading as much work as possible to other components of the system (like 'Batcher' Durable Objects) to improve overall throughput. Read the [blog post](https://blog.cloudflare.com/static-ct) for more details.
+The 'brain' of each CT log is a single-threaded 'Sequencer' Durable Object, and much of the system is architected around offloading as much work as possible to other components of the system (like 'Batcher' Durable Objects) to improve overall throughput. Read the [blog post](https://blog.cloudflare.com/azul-certificate-transparency-log) for more details.
 
 ![System Diagram](doc/img/static-ct.drawio.svg)
 
