@@ -2,17 +2,18 @@
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 //! Batcher buffers entries to be sequenced, submits batches to the sequencer, and
-//! waits until the entries are sequenced. Each time the Batcher gets an update with
-//! new sequenced entry metadata, it writes to an in-memory cache and signals all waiting
-//! requests to check if metadata for their entry is available.
+//! sends sequenced entry metadata to fetch tasks waiting on that batch.
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{ctlog, get_stub, CacheKey, CacheValue, MemoryCache, QueryParams, CONFIG};
+use crate::{ctlog, get_stub, CacheKey, CacheValue, QueryParams, CONFIG};
 use base64::prelude::*;
-use futures_util::future::join_all;
+use futures_util::future::{join_all, select, Either};
 use static_ct_api::LogEntry;
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tokio::sync::watch::{self, Sender};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -26,34 +27,29 @@ const MAX_BATCH_SIZE: usize = 100;
 // The maximum amount of time to wait before submitting a batch.
 const MAX_BATCH_TIMEOUT_MILLIS: u64 = 1_000;
 
-// How many cached entries to keep in the in-memory FIFO cache.
-const MEMORY_CACHE_SIZE: usize = 100_000;
-
 #[durable_object]
 struct Batcher {
-    state: State,
     env: Env,
-    name: Option<String>,
-    memory: MemoryCache,
     batch: Batch,
     in_flight: usize,
+    processed: usize,
 }
 
 // A batch of entries to be submitted to the Sequencer together.
 struct Batch {
     pending_leaves: Vec<LogEntry>,
     by_hash: HashSet<CacheKey>,
-    done: Sender<()>,
+    done: Sender<HashMap<CacheKey, CacheValue>>,
 }
 
 impl Default for Batch {
     /// Returns a batch initialized with a watch channel.
     fn default() -> Self {
-        let (tx, _) = watch::channel(());
+        let (done, _) = watch::channel(HashMap::new());
         Self {
             pending_leaves: Vec::new(),
             by_hash: HashSet::new(),
-            done: tx,
+            done,
         }
     }
 }
@@ -62,48 +58,31 @@ impl Default for Batch {
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
         Self {
-            state,
             env,
-            name: None,
-            memory: MemoryCache::new(MEMORY_CACHE_SIZE),
             batch: Batch::default(),
             in_flight: 0,
+            processed: 0,
         }
     }
     async fn fetch(&mut self, mut req: Request) -> Result<Response> {
-        if self.name.is_none() {
-            self.name = Some(req.query::<QueryParams>()?.name);
-        }
         match req.path().as_str() {
             "/add_leaf" => {
+                let name = &req.query::<QueryParams>()?.name;
                 let entry: LogEntry = req.json().await?;
                 let key = ctlog::compute_cache_hash(
                     entry.is_precert,
                     &entry.certificate,
                     &entry.issuer_key_hash,
                 );
-                // First check if the entry is already in the cache.
-                if let Some(value) = self.memory.get_entry(&key) {
-                    return Response::from_json(&value);
-                }
 
                 if self.in_flight >= MAX_IN_FLIGHT {
                     return Response::error("too many requests in flight", 429);
                 }
                 self.in_flight += 1;
-
-                // Set an alarm to flush the batch if it times out.
-                if self.state.storage().get_alarm().await?.is_none() {
-                    self.state
-                        .storage()
-                        .set_alarm(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS))
-                        .await?;
-                }
+                self.processed += 1;
 
                 // Add entry to the current pending batch if it isn't already present.
-                // If we maintained a cache of in-flight batches, we could also check
-                // if the entry is present in one of those, but the Sequencer will already
-                // deduplicate those.
+                // Rely on the Sequencer to deduplicate entries across batches.
                 if !self.batch.by_hash.contains(&key) {
                     self.batch.by_hash.insert(key);
                     self.batch.pending_leaves.push(entry);
@@ -113,28 +92,43 @@ impl DurableObject for Batcher {
 
                 // Submit the current pending batch if it's full.
                 if self.batch.pending_leaves.len() >= MAX_BATCH_SIZE {
-                    // Delete the alarm as we're flushing the batch now.
-                    self.state.storage().delete_alarm().await?;
-                    // Take the current pending batch, replacing it with a new one.
-                    let batch = std::mem::take(&mut self.batch);
-                    if let Err(e) = self.submit_batch(batch).await {
-                        log::warn!("failed to submit batch: {e}");
+                    if let Err(e) = self.submit_batch(name).await {
+                        log::warn!("{name} failed to submit full batch: {e}");
+                    }
+                } else {
+                    let batch_done = recv.changed();
+                    let timeout = Delay::from(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS));
+                    futures_util::pin_mut!(batch_done);
+                    match select(batch_done, timeout).await {
+                        Either::Left((batch_done, _timeout)) => {
+                            if batch_done.is_err() {
+                                log::warn!("{name} failed to sequence: batch dropped");
+                            }
+                        }
+                        Either::Right(((), batch_done)) => {
+                            // Batch timeout reached; submit this entry's batch if no-one has already.
+                            if self.batch.by_hash.contains(&key) {
+                                if let Err(e) = self.submit_batch(name).await {
+                                    log::warn!("{name} failed to submit timed-out batch: {e}");
+                                }
+                            } else {
+                                // Someone else submitted the batch; wait for it to finish.
+                                if batch_done.await.is_err() {
+                                    log::warn!("{name} failed to sequence: batch dropped");
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Wait until the batch has been processed.
-                if recv.changed().await.is_err() {
-                    // If we see an error, the Sender for this channel was dropped, which
-                    // could happen if the batch submission failed due to rate-limiting
-                    // or other communication failures with the Sequencer.
-                    // Proceed and check the in-memory cache before returning an error response.
-                }
-                let resp = if let Some(value) = self.memory.get_entry(&key) {
+                let resp = if let Some(value) = recv.borrow().get(&key) {
                     // The entry has been sequenced!
                     Response::from_json(&value)
                 } else {
                     // Failed to sequence this entry, either due to an error
                     // submitting the batch or rate limiting at the Sequencer.
+                    // The entry's batch could have also been dropped before
+                    // this fetch task woke up and received the channel update.
                     Response::error("rate limited", 429)
                 };
                 self.in_flight -= 1;
@@ -144,48 +138,43 @@ impl DurableObject for Batcher {
             _ => Response::error("not found", 404),
         }
     }
-    async fn alarm(&mut self) -> Result<Response> {
-        // Ignore the alarm if it fired just after the DO was re-initialized.
-        if self.name.is_none() {
-            return Response::empty();
-        }
-        // Take the current pending batch, replacing it with a new one.
-        let batch = std::mem::take(&mut self.batch);
-        if let Err(e) = self.submit_batch(batch).await {
-            log::warn!("failed to submit batch: {e}");
-        }
-        Response::empty()
-    }
 }
 
 impl Batcher {
     // Submit the current pending batch to be sequenced.
-    async fn submit_batch(&mut self, batch: Batch) -> Result<()> {
-        let name = self.name.as_ref().unwrap();
+    async fn submit_batch(&mut self, name: &str) -> Result<()> {
         let params = CONFIG.params_or_err(name)?;
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;
 
+        // Take the current pending batch and replace it with a new one.
+        let batch = std::mem::take(&mut self.batch);
+
+        log::debug!(
+            "{name} submitting batch: leaves={} inflight={} processed={}",
+            batch.pending_leaves.len(),
+            self.in_flight,
+            self.processed,
+        );
+
         // Submit the batch, and wait for it to be sequenced.
-        let sequenced_entries = stub
-            .fetch_with_request(Request::new_with_init(
-                &format!("http://fake_url.com/add_batch?name={name}"),
-                &RequestInit {
-                    method: Method::Post,
-                    body: Some(serde_json::to_string(&batch.pending_leaves)?.into()),
-                    ..Default::default()
-                },
-            )?)
+        let req = Request::new_with_init(
+            &format!("http://fake_url.com/add_batch?name={name}"),
+            &RequestInit {
+                method: Method::Post,
+                body: Some(serde_json::to_string(&batch.pending_leaves)?.into()),
+                ..Default::default()
+            },
+        )?;
+        let sequenced_entries: HashMap<CacheKey, CacheValue> = stub
+            .fetch_with_request(req)
             .await?
             .json::<Vec<(CacheKey, CacheValue)>>()
-            .await?;
+            .await?
+            .into_iter()
+            .collect();
 
-        // Put the sequenced entries into the in-memory store, where they can be retrieved
-        // and returned to clients.
-        self.memory.put_entries(&sequenced_entries);
-
-        // We could wait until the batch's 'done' channel goes out of scope, but send an
-        // explicit 'finished' signal here to allow waiting requests to respond faster.
-        batch.done.send_modify(|()| {});
+        // Send the sequenced entries to channel subscribers.
+        batch.done.send_modify(|v| v.clone_from(&sequenced_entries));
 
         // Write sequenced entries to the long-term deduplication cache in Workers KV.
         let kv = self.env.kv(&params.cache_kv).unwrap();
