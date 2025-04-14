@@ -10,7 +10,7 @@
 
 use crate::{ctlog, get_stub, util, CacheKey, CacheValue, MemoryCache, QueryParams, CONFIG};
 use base64::prelude::*;
-use futures::future::join_all;
+use futures_util::future::join_all;
 use log::Level;
 use static_ct_api::LogEntry;
 use std::{collections::HashSet, str::FromStr, time::Duration};

@@ -40,6 +40,7 @@ static_ct_api = "0.1.0"
 rand = { workspace = true, features = ["small_rng"]}
 itertools = "0.13.0"
 parking_lot = "0.11"
+futures-executor = "0.3.31"
 
 [dependencies]
 anyhow.workspace = true
@@ -49,7 +50,6 @@ chrono = { version = "0.4", features = ["serde"] }
 console_error_panic_hook = "0.1.1"
 console_log = { version = "1.0" }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
-futures = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
 hex = "0.4"
 log = { version = "0.4"}
@@ -69,6 +69,7 @@ tlog_tiles = "0.1.0"
 tokio = { version = "1", features = ["sync"] }
 worker = { version = "0.5.0" }
 x509-verify = "0.4.4"
+futures-util = "0.3.31"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }

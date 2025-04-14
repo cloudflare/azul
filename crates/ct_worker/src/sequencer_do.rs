@@ -11,7 +11,7 @@ use crate::{
 };
 use chrono::Duration as ChronoDuration;
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
-use futures::future::join_all;
+use futures_util::future::join_all;
 use log::{info, warn, Level};
 use static_ct_api::LogEntry;
 use std::str::FromStr;

@@ -27,7 +27,7 @@ use crate::{
 use anyhow::{anyhow, bail};
 use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
-use futures::future::try_join_all;
+use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
@@ -1094,7 +1094,7 @@ fn staging_path(mut tree_size: u64, tree_hash: &Hash) -> String {
 mod tests {
     use super::*;
     use crate::{util, CacheKey, CacheValue};
-    use futures::executor::block_on;
+    use futures_executor::block_on;
     use itertools::Itertools;
     use rand::{
         rngs::{OsRng, SmallRng},
