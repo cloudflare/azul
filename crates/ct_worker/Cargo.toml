@@ -11,6 +11,11 @@ description = "An implementation of c2sp.org/static-ct-api on Cloudflare Workers
 categories = ["cryptography"]
 keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
 
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+
 [package.metadata.release]
 release = false
 
