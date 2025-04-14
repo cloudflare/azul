@@ -8,12 +8,11 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{ctlog, get_stub, util, CacheKey, CacheValue, MemoryCache, QueryParams, CONFIG};
+use crate::{ctlog, get_stub, CacheKey, CacheValue, MemoryCache, QueryParams, CONFIG};
 use base64::prelude::*;
 use futures_util::future::join_all;
-use log::Level;
 use static_ct_api::LogEntry;
-use std::{collections::HashSet, str::FromStr, time::Duration};
+use std::{collections::HashSet, time::Duration};
 use tokio::sync::watch::{self, Sender};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -62,13 +61,6 @@ impl Default for Batch {
 #[durable_object]
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
-        let level = CONFIG
-            .logging_level
-            .as_ref()
-            .and_then(|level| Level::from_str(level).ok())
-            .unwrap_or(Level::Info);
-        util::init_logging(level);
-        console_error_panic_hook::set_once();
         Self {
             state,
             env,

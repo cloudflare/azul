@@ -51,6 +51,17 @@ struct MetadataResponse<'a> {
     temporal_interval: &'a TemporalInterval,
 }
 
+#[event(start)]
+fn start() {
+    let level = CONFIG
+        .logging_level
+        .as_ref()
+        .and_then(|level| Level::from_str(level).ok())
+        .unwrap_or(Level::Info);
+    util::init_logging(level);
+    console_error_panic_hook::set_once();
+}
+
 /// Worker entrypoint.
 ///
 /// # Errors
@@ -62,14 +73,6 @@ struct MetadataResponse<'a> {
 /// Panics if there are issues parsing route parameters, which should never happen.
 #[event(fetch, respond_with_errors)]
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let level = CONFIG
-        .logging_level
-        .as_ref()
-        .and_then(|level| Level::from_str(level).ok())
-        .unwrap_or(Level::Info);
-    util::init_logging(level);
-    console_error_panic_hook::set_once();
-
     let router = Router::new();
     router
         .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
