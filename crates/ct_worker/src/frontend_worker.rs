@@ -75,7 +75,7 @@ fn start() {
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let router = Router::new();
     router
-        .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
+        .get("/logs/:log/ct/v1/get-roots", |_req, ctx| {
             let name = ctx.param("log").unwrap();
             CONFIG.params_or_err(name)?;
             Response::from_json(&GetRootsResponse {
@@ -88,7 +88,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/logs/:log/ct/v1/add-pre-chain", |req, ctx| async move {
             add_chain_or_pre_chain(req, &ctx.env, ctx.param("log").unwrap(), true).await
         })
-        .get_async("/logs/:log/metadata", |_req, ctx| async move {
+        .get("/logs/:log/metadata", |_req, ctx| {
             let name = ctx.param("log").unwrap();
             let params = CONFIG.params_or_err(name)?;
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
