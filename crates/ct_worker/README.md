@@ -105,7 +105,7 @@ Follow these instructions to spin up a CT log on your local machine using the `d
 
 ### Deployment to a workers.dev subdomain
 
-Follow these instructions to deploy a CT log with the `dev` configuration to Cloudflare's network. This requires the [Workers paid plan](https://developers.cloudflare.com/workers/platform/pricing) as this project uses Durable Objects.
+Follow these instructions to deploy a CT log with the `dev` configuration to Cloudflare's network.
 
 Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to configure resources.
 

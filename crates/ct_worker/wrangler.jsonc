@@ -50,7 +50,7 @@
                 {
                     // tag should be unique for each entry
                     "tag": "v1",
-                    "new_classes": [
+                    "new_sqlite_classes": [
                         "Sequencer",
                         "Batcher"
                     ]
@@ -103,7 +103,7 @@
                 {
                     // tag should be unique for each entry
                     "tag": "v1",
-                    "new_classes": [
+                    "new_sqlite_classes": [
                         "Sequencer",
                         "Batcher"
                     ]
