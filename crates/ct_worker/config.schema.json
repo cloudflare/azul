@@ -60,26 +60,6 @@
                                 "end_exclusive"
                             ]
                         },
-                        "signing_key_binding": {
-                            "type": "string",
-                            "default": "SIGNING_KEY_<log-name>",
-                            "description": "Binding for a Workers Secret containing a DER-encoded P-256 signing key."
-                        },
-                        "witness_key_binding": {
-                            "type": "string",
-                            "default": "WITNESS_KEY_<log-name>",
-                            "description": "Binding for a Workers Secret containing a DER-encoded Ed25519 signing key."
-                        },
-                        "public_bucket_binding": {
-                            "type": "string",
-                            "default": "static_ct_public_<log-name>",
-                            "description": "Binding for a public R2 bucket from which to serve this log's static assets."
-                        },
-                        "cache_kv_binding": {
-                            "type": "string",
-                            "default": "cache_<log-name>",
-                            "description": "Binding for a Workers KV namespace to use for this log's deduplication cache. The KV namespace must NOT be shared across logs."
-                        },
                         "location_hint": {
                             "type": "string",
                             "description": "Provide a hint to place the log in a specific geographic location. See https://developers.cloudflare.com/durable-objects/reference/data-location/ for supported locations. If unspecified, the Durable Object will be created in proximity to the first request."

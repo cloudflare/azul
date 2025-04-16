@@ -11,12 +11,12 @@ mod sequencer_do;
 mod util;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use chrono::{DateTime, Utc};
+use config::AppConfig;
 use ctlog::UploadOptions;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use static_ct_api::{CertPool, UnixTimestamp};
 use std::collections::{HashMap, VecDeque};
@@ -26,86 +26,10 @@ use util::now_millis;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct TemporalInterval {
-    start_inclusive: DateTime<Utc>,
-    end_exclusive: DateTime<Utc>,
-}
-
-#[derive(Deserialize, Debug)]
-struct AppConfig {
-    logging_level: Option<String>,
-    logs: HashMap<String, LogParams>,
-}
-
-impl AppConfig {
-    // Returns the parameters for the given log name.
-    //
-    // # Errors
-    //
-    // If the parameters do not exist, return an "Unknown log" error.
-    fn params_or_err(&self, name: &str) -> Result<&LogParams> {
-        Ok(self.logs.get(name).ok_or("unknown log")?)
-    }
-}
-
-#[derive(Deserialize, Debug)]
-struct LogParams {
-    description: Option<String>,
-    log_type: Option<String>,
-    #[serde(default)]
-    monitoring_url: String,
-    submission_url: String,
-    temporal_interval: TemporalInterval,
-    #[serde(default)]
-    signing_key_env: String,
-    #[serde(default)]
-    witness_key_env: String,
-    #[serde(default)]
-    public_bucket: String,
-    #[serde(default)]
-    cache_kv: String,
-    location_hint: Option<String>,
-    #[serde(default = "default_pool_size")]
-    pool_size: usize,
-    #[serde(default = "default_sequence_interval")]
-    sequence_interval: u64,
-}
-
-// Limit on the number of entries per batch. Tune this parameter to avoid running into various size limitations.
-// - DO storage with the key-value backend has a value limit of 128KiB (https://developers.cloudflare.com/durable-objects/platform/limits/), which means we can store at most 4096 32-byte cache values. In reality it's slightly less since we need some room for metadata. We could remove this limitation by writing to multiple KV entries, but it's unlikely to be a limitation in practice. Switching to the SQLite DO backend (after <https://github.com/cloudflare/workers-rs/issues/645>) will also remove this limit.
-// - Workers have a 128MB memory limit, so unexpectedly large leaves (e.g., with PQ signatures) could cause us to exceed this limit. Storing 4000 10KB certificates is 40MB.
-fn default_pool_size() -> usize {
-    4000
-}
-
-fn default_sequence_interval() -> u64 {
-    1
-}
-
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
-    let mut ac: AppConfig =
-        serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/config.json")))
-            .expect("Failed to parse config");
-    for (name, params) in &mut ac.logs {
-        if params.monitoring_url.is_empty() {
-            params.monitoring_url = params.submission_url.clone();
-        }
-        if params.signing_key_env.is_empty() {
-            params.signing_key_env = format!("SIGNING_KEY_{name}");
-        }
-        if params.witness_key_env.is_empty() {
-            params.witness_key_env = format!("WITNESS_KEY_{name}");
-        }
-        if params.public_bucket.is_empty() {
-            params.public_bucket = format!("public_{name}");
-        }
-        if params.cache_kv.is_empty() {
-            params.cache_kv = format!("cache_{name}");
-        }
-    }
-    ac
+    serde_json::from_str::<AppConfig>(include_str!(concat!(env!("OUT_DIR"), "/config.json")))
+        .expect("Failed to parse config")
 });
 
 static ROOTS: LazyLock<CertPool> = LazyLock::new(|| {
@@ -118,7 +42,6 @@ static ROOTS: LazyLock<CertPool> = LazyLock::new(|| {
 
 static SIGNING_KEY_MAP: OnceLock<HashMap<String, OnceLock<EcdsaSigningKey>>> = OnceLock::new();
 static WITNESS_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
-const UNKNOWN_LOG_MSG: &str = "unknown log";
 
 fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Result<Stub> {
     let namespace = env.durable_object(binding)?;
@@ -128,7 +51,7 @@ fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Resul
         name
     };
     let object_id = namespace.id_from_name(object_name)?;
-    if let Some(hint) = &CONFIG.params_or_err(name)?.location_hint {
+    if let Some(hint) = &CONFIG.logs[name].location_hint {
         Ok(object_id.get_stub_with_location_hint(hint)?)
     } else {
         Ok(object_id.get_stub()?)
@@ -136,21 +59,18 @@ fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Resul
 }
 
 fn load_signing_key(env: &Env, name: &str) -> Result<&'static EcdsaSigningKey> {
-    let once = SIGNING_KEY_MAP
-        .get_or_init(|| {
-            CONFIG
-                .logs
-                .keys()
-                .map(|name| (name.clone(), OnceLock::new()))
-                .collect()
-        })
-        .get(name)
-        .ok_or(UNKNOWN_LOG_MSG)?;
+    let once = &SIGNING_KEY_MAP.get_or_init(|| {
+        CONFIG
+            .logs
+            .keys()
+            .map(|name| (name.clone(), OnceLock::new()))
+            .collect()
+    })[name];
     if let Some(key) = once.get() {
         Ok(key)
     } else {
         let key = EcdsaSigningKey::from_pkcs8_pem(
-            &env.secret(&CONFIG.logs[name].signing_key_env)?.to_string(),
+            &env.secret(&format!("SIGNING_KEY_{name}"))?.to_string(),
         )
         .map_err(|e| e.to_string())?;
         Ok(once.get_or_init(|| key))
@@ -158,25 +78,32 @@ fn load_signing_key(env: &Env, name: &str) -> Result<&'static EcdsaSigningKey> {
 }
 
 fn load_witness_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
-    let once = WITNESS_KEY_MAP
-        .get_or_init(|| {
-            CONFIG
-                .logs
-                .keys()
-                .map(|name| (name.clone(), OnceLock::new()))
-                .collect()
-        })
-        .get(name)
-        .ok_or(UNKNOWN_LOG_MSG)?;
+    let once = &WITNESS_KEY_MAP.get_or_init(|| {
+        CONFIG
+            .logs
+            .keys()
+            .map(|name| (name.clone(), OnceLock::new()))
+            .collect()
+    })[name];
     if let Some(key) = once.get() {
         Ok(key)
     } else {
         let key = Ed25519SigningKey::from_pkcs8_pem(
-            &env.secret(&CONFIG.logs[name].witness_key_env)?.to_string(),
+            &env.secret(&format!("WITNESS_KEY_{name}"))?.to_string(),
         )
         .map_err(|e| e.to_string())?;
         Ok(once.get_or_init(|| key))
     }
+}
+
+// Public R2 bucket from which to serve this log's static assets.
+fn load_public_bucket(env: &Env, name: &str) -> Result<Bucket> {
+    env.bucket(&format!("public_{name}"))
+}
+
+// KV namespace to use for this log's deduplication cache.
+fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
+    env.kv(&format!("cache_{name}"))
 }
 
 #[derive(Deserialize)]
