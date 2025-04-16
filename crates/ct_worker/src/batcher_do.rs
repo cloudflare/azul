@@ -6,7 +6,7 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{ctlog, get_stub, CacheKey, CacheValue, QueryParams, CONFIG};
+use crate::{ctlog, get_stub, load_cache_kv, CacheKey, CacheValue, QueryParams};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use static_ct_api::LogEntry;
@@ -143,7 +143,6 @@ impl DurableObject for Batcher {
 impl Batcher {
     // Submit the current pending batch to be sequenced.
     async fn submit_batch(&mut self, name: &str) -> Result<()> {
-        let params = CONFIG.params_or_err(name)?;
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;
 
         // Take the current pending batch and replace it with a new one.
@@ -177,7 +176,7 @@ impl Batcher {
         batch.done.send_modify(|v| v.clone_from(&sequenced_entries));
 
         // Write sequenced entries to the long-term deduplication cache in Workers KV.
-        let kv = self.env.kv(&params.cache_kv).unwrap();
+        let kv = load_cache_kv(&self.env, name)?;
         let futures = sequenced_entries
             .into_iter()
             .map(|(k, v)| {

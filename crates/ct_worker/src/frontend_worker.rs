@@ -4,10 +4,11 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{
-    ctlog, get_stub, load_signing_key, load_witness_key, util, CacheKey, CacheValue, ObjectBucket,
-    TemporalInterval, CONFIG, ROOTS, UNKNOWN_LOG_MSG,
+    ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
+    CacheKey, CacheValue, ObjectBucket, CONFIG, ROOTS,
 };
 use base64::prelude::*;
+use config::TemporalInterval;
 use log::{debug, warn, Level};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -31,6 +32,8 @@ const MAX_MERGE_DELAY: usize = 86_400;
 // Setting this too low could cause individual Batchers to hit the
 // Durable Objects rate limits.
 const NUM_BATCHER_PROXIES: u8 = 8;
+
+const UNKNOWN_LOG_MSG: &str = "unknown log";
 
 #[serde_as]
 #[derive(Serialize)]
@@ -76,21 +79,20 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let router = Router::new();
     router
         .get("/logs/:log/ct/v1/get-roots", |_req, ctx| {
-            let name = ctx.param("log").unwrap();
-            CONFIG.params_or_err(name)?;
+            let _name = valid_log_name(&ctx)?;
             Response::from_json(&GetRootsResponse {
                 certificates: static_ct_api::certs_to_bytes(&ROOTS.certs).unwrap(),
             })
         })
         .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {
-            add_chain_or_pre_chain(req, &ctx.env, ctx.param("log").unwrap(), false).await
+            add_chain_or_pre_chain(req, &ctx.env, valid_log_name(&ctx)?, false).await
         })
         .post_async("/logs/:log/ct/v1/add-pre-chain", |req, ctx| async move {
-            add_chain_or_pre_chain(req, &ctx.env, ctx.param("log").unwrap(), true).await
+            add_chain_or_pre_chain(req, &ctx.env, valid_log_name(&ctx)?, true).await
         })
         .get("/logs/:log/metadata", |_req, ctx| {
-            let name = ctx.param("log").unwrap();
-            let params = CONFIG.params_or_err(name)?;
+            let name = valid_log_name(&ctx)?;
+            let params = &CONFIG.logs[name];
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
             let log_id = &static_ct_api::log_id_from_key(verifying_key)
                 .map_err(|e| e.to_string())?
@@ -110,24 +112,26 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 key: key.as_bytes(),
                 witness_key: witness_key.as_bytes(),
                 submission_url: &params.submission_url,
-                monitoring_url: &params.monitoring_url,
+                monitoring_url: if params.monitoring_url.is_empty() {
+                    &params.submission_url
+                } else {
+                    &params.monitoring_url
+                },
                 mmd: MAX_MERGE_DELAY,
                 temporal_interval: &params.temporal_interval,
             })
         })
         .get_async("/logs/:log/metrics", |_req, ctx| async move {
-            let name = ctx.param("log").unwrap();
-            CONFIG.params_or_err(name)?;
+            let name = valid_log_name(&ctx)?;
             let stub = get_stub(&ctx.env, name, None, "SEQUENCER")?;
             stub.fetch_with_str(&format!("http://fake_url.com/metrics?name={name}"))
                 .await
         })
         .get_async("/logs/:log/:key", |_req, ctx| async move {
-            let name = ctx.param("log").unwrap();
+            let name = valid_log_name(&ctx)?;
             let key = ctx.param("key").unwrap();
-            let params = CONFIG.params_or_err(name)?;
 
-            let bucket = ctx.env.bucket(&params.public_bucket)?;
+            let bucket = load_public_bucket(&ctx.env, name)?;
             if let Some(obj) = bucket.get(key).execute().await? {
                 Response::from_body(
                     obj.body()
@@ -159,7 +163,7 @@ async fn add_chain_or_pre_chain(
     name: &str,
     expect_precert: bool,
 ) -> Result<Response> {
-    let params = CONFIG.params_or_err(name)?;
+    let params = &CONFIG.logs[name];
     let req: AddChainRequest = req.json().await?;
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
@@ -206,7 +210,7 @@ async fn add_chain_or_pre_chain(
     let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
-    let kv = env.kv(&params.cache_kv).unwrap();
+    let kv = load_cache_kv(env, name)?;
     if let Some(v) = kv
         .get(&BASE64_STANDARD.encode(hash))
         .bytes_with_metadata::<CacheValue>()
@@ -226,7 +230,7 @@ async fn add_chain_or_pre_chain(
     // First persist issuers.
     let public_bucket = ObjectBucket {
         sequence_interval: params.sequence_interval,
-        bucket: env.bucket(&params.public_bucket).unwrap(),
+        bucket: load_public_bucket(env, name)?,
         metrics: None,
     };
     ctlog::upload_issuers(
@@ -265,6 +269,18 @@ async fn add_chain_or_pre_chain(
         signing_key,
         &entry,
     ))
+}
+
+fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
+    if let Some(name) = ctx.param("log") {
+        if CONFIG.logs.contains_key(name) {
+            Ok(name)
+        } else {
+            Err(UNKNOWN_LOG_MSG.into())
+        }
+    } else {
+        Err("missing 'log' route param".into())
+    }
 }
 
 fn shard_id_from_cache_key(key: &CacheKey) -> u8 {

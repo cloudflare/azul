@@ -4,12 +4,11 @@
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
 use crate::{
-    ctlog, load_signing_key, load_witness_key,
+    ctlog, load_public_bucket, load_signing_key, load_witness_key,
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
     util::{self, now_millis},
     DedupCache, MemoryCache, ObjectBucket, QueryParams, CONFIG, ROOTS,
 };
-use chrono::Duration as ChronoDuration;
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
@@ -137,7 +136,7 @@ impl DurableObject for Sequencer {
 impl Sequencer {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self, name: &str) -> Result<()> {
-        let params = CONFIG.params_or_err(name)?;
+        let params = &CONFIG.logs[name];
 
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
@@ -156,18 +155,6 @@ impl Sequencer {
         let signing_key = load_signing_key(&self.env, name)?.clone();
         let witness_key = load_witness_key(&self.env, name)?.clone();
         let sequence_interval = Duration::from_secs(params.sequence_interval);
-        // According to Chrome's CT policy (<https://googlechrome.github.io/CertificateTransparency/log_policy.html>):
-        // "The certificate expiry ranges for CT Logs must be no longer than one calendar year and should be no shorter than six months."
-        if !(params.temporal_interval.start_inclusive + ChronoDuration::days(180)
-            ..params.temporal_interval.start_inclusive + ChronoDuration::days(366))
-            .contains(&params.temporal_interval.end_exclusive)
-        {
-            return Err(format!(
-                "{name}: invalid temporal interval: [{}, {})",
-                params.temporal_interval.start_inclusive, params.temporal_interval.end_exclusive,
-            )
-            .into());
-        }
 
         self.config = Some(LogConfig {
             name: name.to_string(),
@@ -179,7 +166,7 @@ impl Sequencer {
         });
         self.public_bucket = Some(ObjectBucket {
             sequence_interval: params.sequence_interval,
-            bucket: self.env.bucket(&params.public_bucket)?,
+            bucket: load_public_bucket(&self.env, name)?,
             metrics: Some(ObjectMetrics::new(&self.metrics.registry)),
         });
         self.cache = Some(DedupCache {

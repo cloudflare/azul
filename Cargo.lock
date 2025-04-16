@@ -292,6 +292,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
+name = "config"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +437,7 @@ dependencies = [
  "base64 0.21.7",
  "byteorder",
  "chrono",
+ "config",
  "console_error_panic_hook",
  "console_log",
  "ed25519-dalek",
@@ -454,8 +463,8 @@ dependencies = [
  "thiserror",
  "tlog_tiles 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
+ "url",
  "worker",
- "x509-verify",
 ]
 
 [[package]]
