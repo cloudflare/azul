@@ -429,7 +429,7 @@ impl TreeWithTimestamp {
     ) -> Result<Vec<u8>, CheckpointError> {
         let sth_bytes = serialize_sth_signature_input(self.time, self.size, &self.hash);
 
-        let tree_head_signature = sign(signing_key, sth_bytes.as_slice());
+        let tree_head_signature = sign(signing_key, &sth_bytes);
 
         // struct {
         //     uint64 timestamp;
