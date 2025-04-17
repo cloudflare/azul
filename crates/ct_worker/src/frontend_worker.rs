@@ -127,7 +127,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             stub.fetch_with_str(&format!("http://fake_url.com/metrics?name={name}"))
                 .await
         })
-        .get_async("/logs/:log/:key", |_req, ctx| async move {
+        .get_async("/logs/:log/*key", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
             let key = ctx.param("key").unwrap();
 
