@@ -229,10 +229,10 @@ impl LogEntry {
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
     pub fn merkle_tree_leaf(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-
-        buffer.write_u8(0).unwrap(); // version = v1
-        buffer.write_u8(0).unwrap(); // leaf_type = timestamped_entry
+        let mut buffer = vec![
+            0, // version = v1 (0)
+            0, // leaf_type = timestamped_entry (0)
+        ];
         buffer.extend(self.marshal_timestamped_entry());
 
         buffer
@@ -772,8 +772,12 @@ pub fn signed_certificate_timestamp(
     signing_key: &EcdsaSigningKey,
     entry: &LogEntry,
 ) -> AddChainResponse {
-    let leaf = entry.merkle_tree_leaf();
-    let signature = sign(signing_key, &leaf);
+    let mut buffer = vec![
+        0, // sct_version = v1 (0)
+        0, // signature_type = certificate_timestamp (0)
+    ];
+    buffer.extend(entry.marshal_timestamped_entry());
+    let signature = sign(signing_key, &buffer);
     let id = log_id_from_key(signing_key.verifying_key())
         .unwrap()
         .to_vec();
