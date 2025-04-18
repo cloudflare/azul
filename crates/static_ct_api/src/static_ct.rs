@@ -783,7 +783,7 @@ pub fn signed_certificate_timestamp(
         .to_vec();
 
     AddChainResponse {
-        sct_version: 1,
+        sct_version: 0, // sct_version = v1 (0)
         id,
         timestamp: entry.timestamp,
         extensions: Extensions {
