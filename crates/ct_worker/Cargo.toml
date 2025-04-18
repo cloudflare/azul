@@ -30,7 +30,7 @@ crate-type = ["cdylib"]
 serde.workspace = true
 serde_json.workspace = true
 jsonschema = "0.26.2"
-static_ct_api = "0.1.0"
+static_ct_api = "0.2.0"
 config = { path = "./config" }
 chrono.workspace = true
 url = "2.5.4"
@@ -52,7 +52,7 @@ ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 getrandom = { version = "0.2", features = ["js"] }
 hex = "0.4"
 log = { version = "0.4"}
-signed_note = "0.1.0"
+signed_note = "0.2.0"
 prometheus = "0.13.4"
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand.workspace = true
@@ -62,9 +62,9 @@ serde_json.workspace = true
 serde_with.workspace = true
 serde-wasm-bindgen = "0.6.5"
 sha2.workspace = true
-static_ct_api = "0.1.0"
+static_ct_api = "0.2.0"
 thiserror.workspace = true
-tlog_tiles = "0.1.0"
+tlog_tiles = "0.2.0"
 tokio = { version = "1", features = ["sync"] }
 worker = { version = "0.5.0" }
 futures-util = "0.3.31"

@@ -293,7 +293,7 @@ checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
 name = "config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "ct_worker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
@@ -458,10 +458,10 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
- "signed_note 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "static_ct_api 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "static_ct_api 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
- "tlog_tiles 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "url",
  "worker",
@@ -2174,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "signed_note"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.21.7",
  "criterion",
@@ -2188,9 +2188,9 @@ dependencies = [
 
 [[package]]
 name = "signed_note"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdd94935fdd52698630b18ff345d491e95a973eb6118367f7b301438bdb376d4"
+checksum = "aee127accd55881df0c941dc799efc824cb506c38df4a95fd30c307f3bc96504"
 dependencies = [
  "base64 0.21.7",
  "ed25519-dalek",
@@ -2249,7 +2249,7 @@ checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 
 [[package]]
 name = "static_ct_api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
@@ -2263,17 +2263,17 @@ dependencies = [
  "serde_with",
  "sha2",
  "signature",
- "signed_note 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
- "tlog_tiles 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "x509-verify",
 ]
 
 [[package]]
 name = "static_ct_api"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8381c5d1b6d90de5c595c941ba614429391c7894bc844082f9be615b974ae7f4"
+checksum = "017c1730eec9da316f08623d5ebbef8924ebbc436808f07c308865515e85d699"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
@@ -2287,9 +2287,9 @@ dependencies = [
  "serde_with",
  "sha2",
  "signature",
- "signed_note 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
- "tlog_tiles 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "x509-verify",
 ]
 
@@ -2412,12 +2412,14 @@ name = "tlog-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "tlog_tiles 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tlog_tiles 0.1.0",
 ]
 
 [[package]]
 name = "tlog_tiles"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "565169fae5bfd22f9f706bd6afc957bb52ba33ef23ddec6c202f0385d90caaf9"
 dependencies = [
  "base64 0.21.7",
  "serde",
@@ -2429,9 +2431,21 @@ dependencies = [
 
 [[package]]
 name = "tlog_tiles"
-version = "0.1.0"
+version = "0.2.0"
+dependencies = [
+ "base64 0.21.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "tlog_tiles"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "565169fae5bfd22f9f706bd6afc957bb52ba33ef23ddec6c202f0385d90caaf9"
+checksum = "7e403c85c5336d8f18b08330749b706a9179265d7d4b111ab90a35d2a51d0e0b"
 dependencies = [
  "base64 0.21.7",
  "serde",
