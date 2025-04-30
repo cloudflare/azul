@@ -12,53 +12,34 @@
             ],
             "description": "Log verbosity."
         },
-        "logs": {
+        "cas": {
             "type": "object",
-            "description": "Dictionary CT log shard names to configurations.",
+            "description": "Dictionary MTCAs to configurations.",
             "patternProperties": {
                 "^[a-zA-Z0-9_]+$": {
                     "type": "object",
                     "properties": {
                         "description": {
                             "type": "string",
-                            "description": "Description of the log."
+                            "description": "Description of the MTCA."
                         },
-                        "log_type": {
-                            "description": "The purpose of this log, e.g. test.",
+                        "evidence_policy": {
+                            "description": "The evidence policy for the CA.",
                             "type": "string",
                             "enum": [
-                                "prod",
-                                "test",
-                                "monitoring_only"
+                                "unset",
+                                "empty",
+                                "umbilical"
                             ]
                         },
-                        "submission_url": {
+                        "origin_url": {
                             "type": "string",
-                            "description": "URL for log submissions."
+                            "description": "URL for CA origin used in checkpoint signatures."
                         },
                         "monitoring_url": {
                             "type": "string",
                             "default": "<submission_url>",
                             "description": "URL for log monitoring. If unspecified, use the submission URL and the Worker will proxy requests to the R2 bucket."
-                        },
-                        "temporal_interval": {
-                            "type": "object",
-                            "properties": {
-                                "start_inclusive": {
-                                    "type": "string",
-                                    "format": "date-time",
-                                    "description": "All certificates must expire on this date or later."
-                                },
-                                "end_exclusive": {
-                                    "type": "string",
-                                    "format": "date-time",
-                                    "description": "All certificates must expire before this date."
-                                }
-                            },
-                            "required": [
-                                "start_inclusive",
-                                "end_exclusive"
-                            ]
                         },
                         "location_hint": {
                             "type": "string",
@@ -78,14 +59,13 @@
                         }
                     },
                     "required": [
-                        "temporal_interval",
-                        "submission_url"
+                        "origin_url"
                     ]
                 }
             }
         }
     },
     "required": [
-        "logs"
+        "cas"
     ]
 }

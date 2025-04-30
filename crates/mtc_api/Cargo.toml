@@ -1,5 +1,5 @@
 [package]
-name = "static_ct_api"
+name = "mtc_api"
 readme = "README.md"
 version.workspace = true
 authors.workspace = true
@@ -7,9 +7,9 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "An implementation of c2sp.org/static-ct-api"
+description = "An implementation of Merkle Tree Certificates API"
 categories = ["cryptography"]
-keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
+keywords = ["ca", "certificate", "transparency", "crypto", "pki"]
 
 [package.metadata.release]
 release = false

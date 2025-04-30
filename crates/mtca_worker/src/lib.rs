@@ -15,10 +15,10 @@ use config::AppConfig;
 use ctlog::UploadOptions;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
+use mtc_api::{CertPool, UnixTimestamp};
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
-use static_ct_api::{CertPool, UnixTimestamp};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{LazyLock, OnceLock};
@@ -34,7 +34,7 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 
 static ROOTS: LazyLock<CertPool> = LazyLock::new(|| {
     CertPool::new(
-        static_ct_api::load_pem_chain(include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem")))
+        mtc_api::load_pem_chain(include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem")))
             .expect("Failed to parse roots"),
     )
     .unwrap()
@@ -51,7 +51,7 @@ fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Resul
         name
     };
     let object_id = namespace.id_from_name(object_name)?;
-    if let Some(hint) = &CONFIG.logs[name].location_hint {
+    if let Some(hint) = &CONFIG.cas[name].location_hint {
         Ok(object_id.get_stub_with_location_hint(hint)?)
     } else {
         Ok(object_id.get_stub()?)
@@ -61,7 +61,7 @@ fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Resul
 fn load_signing_key(env: &Env, name: &str) -> Result<&'static EcdsaSigningKey> {
     let once = &SIGNING_KEY_MAP.get_or_init(|| {
         CONFIG
-            .logs
+            .cas
             .keys()
             .map(|name| (name.clone(), OnceLock::new()))
             .collect()
@@ -80,7 +80,7 @@ fn load_signing_key(env: &Env, name: &str) -> Result<&'static EcdsaSigningKey> {
 fn load_witness_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
     let once = &WITNESS_KEY_MAP.get_or_init(|| {
         CONFIG
-            .logs
+            .cas
             .keys()
             .map(|name| (name.clone(), OnceLock::new()))
             .collect()

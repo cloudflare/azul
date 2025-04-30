@@ -1393,6 +1393,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtc_api"
+version = "0.2.0"
+dependencies = [
+ "base64 0.21.7",
+ "byteorder",
+ "chrono",
+ "const-oid",
+ "der",
+ "ed25519-dalek",
+ "p256",
+ "rand",
+ "serde",
+ "serde_with",
+ "sha2",
+ "signature",
+ "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "thiserror",
+ "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "x509-verify",
+]
+
+[[package]]
 name = "mtca_worker"
 version = "0.2.0"
 dependencies = [
@@ -1410,6 +1432,7 @@ dependencies = [
  "itertools 0.13.0",
  "jsonschema",
  "log",
+ "mtc_api",
  "mtca_worker_config",
  "p256",
  "parking_lot 0.11.2",
@@ -1422,12 +1445,12 @@ dependencies = [
  "serde_with",
  "sha2",
  "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "static_ct_api 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "url",
  "worker",
+ "x509-verify",
 ]
 
 [[package]]
