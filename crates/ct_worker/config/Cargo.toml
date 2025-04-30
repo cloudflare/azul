@@ -1,5 +1,5 @@
 [package]
-name = "config"
+name = "ct_worker_config"
 publish = false
 version.workspace = true
 authors.workspace = true
