@@ -31,7 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 jsonschema = "0.26.2"
 static_ct_api = "0.2.0"
-config = { path = "./config" }
+config = { path = "./config", package = "ct_worker_config" }
 chrono.workspace = true
 url = "2.5.4"
 
@@ -45,7 +45,7 @@ futures-executor = "0.3.31"
 anyhow.workspace = true
 base64.workspace = true
 byteorder = "1.4"
-config = { path = "./config" }
+config = { path = "./config", package = "ct_worker_config" }
 console_error_panic_hook = "0.1.1"
 console_log = { version = "1.0" }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
