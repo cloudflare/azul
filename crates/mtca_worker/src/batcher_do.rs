@@ -9,7 +9,7 @@
 use crate::{ctlog, get_stub, load_cache_kv, CacheKey, CacheValue, QueryParams};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::LogEntry;
+use mtc_api::LogEntry;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,

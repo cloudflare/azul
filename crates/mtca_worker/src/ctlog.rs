@@ -29,10 +29,10 @@ use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
+use mtc_api::{LogEntry, TileIterator, TreeWithTimestamp, TILE_HEIGHT, TILE_WIDTH};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use static_ct_api::{LogEntry, TileIterator, TreeWithTimestamp, TILE_HEIGHT, TILE_WIDTH};
 use std::time::Duration;
 use std::{
     cmp::{Ord, Ordering},
@@ -170,7 +170,7 @@ impl SequenceState {
             "{name}: Loaded checkpoint; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c, timestamp) = static_ct_api::open_checkpoint(
+        let (c, timestamp) = mtc_api::open_checkpoint(
             &config.origin,
             config.signing_key.verifying_key(),
             &config.witness_key.verifying_key(),
@@ -188,7 +188,7 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) = static_ct_api::open_checkpoint(
+        let (c1, _) = mtc_api::open_checkpoint(
             &config.origin,
             config.signing_key.verifying_key(),
             &config.witness_key.verifying_key(),
@@ -238,7 +238,7 @@ impl SequenceState {
                 .clone();
             data_tile.tile.set_is_data();
             data_tile.b = object
-                .fetch(&static_ct_api::tile_path(&data_tile.tile))
+                .fetch(&mtc_api::tile_path(&data_tile.tile))
                 .await?
                 .ok_or(anyhow!("no data tile in object storage"))?;
             edge_tiles.insert(DATA_TILE_KEY, data_tile.clone());
@@ -589,7 +589,7 @@ async fn sequence_pool(
             );
         }
         let action = UploadAction {
-            key: static_ct_api::tile_path(&tile),
+            key: mtc_api::tile_path(&tile),
             data,
             opts: OPTS_HASH_TILE.clone(),
         };
@@ -738,7 +738,7 @@ fn stage_data_tile(
         },
     );
     let action = UploadAction {
-        key: static_ct_api::tile_path(&tile),
+        key: mtc_api::tile_path(&tile),
         data: data_tile.to_owned(),
         opts: OPTS_DATA_TILE.clone(),
     };
@@ -865,11 +865,11 @@ async fn read_and_verify_tiles(
     let mut data = Vec::new();
     for tile in &tiles {
         let result = object
-            .fetch(&static_ct_api::tile_path(tile))
+            .fetch(&mtc_api::tile_path(tile))
             .await?
             .ok_or(anyhow!(
                 "no tile {} in object storage",
-                static_ct_api::tile_path(tile)
+                mtc_api::tile_path(tile)
             ))?;
         data.push(result);
     }
@@ -884,7 +884,7 @@ async fn read_and_verify_tiles(
         if data[i].len() != tile.width() as usize * HASH_SIZE {
             bail!(
                 "bad result slice ({} len={}, want {})",
-                static_ct_api::tile_path(tile),
+                mtc_api::tile_path(tile),
                 data[i].len(),
                 tile.width() as usize * HASH_SIZE
             );
@@ -1080,7 +1080,7 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
 
 /// Returns the path to which to upload staging bundles.
 fn staging_path(mut tree_size: u64, tree_hash: &Hash) -> String {
-    // Encode size in three-digit chunks like [static_ct_api::tile_path].
+    // Encode size in three-digit chunks like [mtc_api::tile_path].
     let mut n_str = format!("{:03}", tree_size % 1000);
     while tree_size >= 1000 {
         tree_size /= 1000;
@@ -1096,12 +1096,12 @@ mod tests {
     use crate::{util, CacheKey, CacheValue};
     use futures_executor::block_on;
     use itertools::Itertools;
+    use mtc_api::{RFC6962Verifier, TILE_HEIGHT, TILE_WIDTH};
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::{RFC6962Verifier, TILE_HEIGHT, TILE_WIDTH};
     use std::cell::{Cell, RefCell};
     use tlog_tiles::Checkpoint;
 
@@ -1951,8 +1951,7 @@ mod tests {
                 .verify(&VerifierList::new(vec![Box::new(v.clone())]))
                 .unwrap();
             assert_eq!(verified_sigs.len(), 1);
-            let sth_timestamp =
-                static_ct_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
+            let sth_timestamp = mtc_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
 
             let c = Checkpoint::from_bytes(n.text()).unwrap();
 
@@ -1972,7 +1971,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(verified_sigs.len(), 1);
                 let sth_timestamp1 =
-                    static_ct_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
+                    mtc_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
                 let c1 = Checkpoint::from_bytes(n.text()).unwrap();
 
                 assert_eq!(c1.origin(), c.origin());
@@ -2009,7 +2008,7 @@ mod tests {
                     Tile::new(TILE_HEIGHT, 0, n, TILE_WIDTH, true)
                 };
                 for (i, entry) in TileIterator::new(
-                    block_on(self.object.fetch(&static_ct_api::tile_path(&tile)))
+                    block_on(self.object.fetch(&mtc_api::tile_path(&tile)))
                         .unwrap()
                         .unwrap(),
                     tile.width() as usize,

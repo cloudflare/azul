@@ -12,7 +12,7 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::LogEntry;
+use mtc_api::LogEntry;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -136,7 +136,7 @@ impl DurableObject for Sequencer {
 impl Sequencer {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self, name: &str) -> Result<()> {
-        let params = &CONFIG.logs[name];
+        let params = &CONFIG.cas[name];
 
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
@@ -148,7 +148,7 @@ impl Sequencer {
         // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
         // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
         let origin = params
-            .submission_url
+            .origin_url
             .trim_start_matches("http://")
             .trim_start_matches("https://")
             .trim_end_matches('/');
@@ -202,16 +202,6 @@ impl Sequencer {
         self.do_state.storage().set_alarm(sequence_interval).await?;
 
         self.metrics.config_roots.set(ROOTS.certs.len().as_f64());
-        self.metrics.config_start.set(
-            params
-                .temporal_interval
-                .start_inclusive
-                .timestamp()
-                .as_f64(),
-        );
-        self.metrics
-            .config_end
-            .set(params.temporal_interval.end_exclusive.timestamp().as_f64());
 
         self.initialized = true;
 

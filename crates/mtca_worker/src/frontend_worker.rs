@@ -8,23 +8,15 @@ use crate::{
     CacheKey, CacheValue, ObjectBucket, CONFIG, ROOTS,
 };
 use base64::prelude::*;
-use config::TemporalInterval;
 use log::{debug, warn, Level};
+use mtc_api::{AddChainRequest, GetRootsResponse, LogEntry, UnixTimestamp};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use static_ct_api::{AddChainRequest, GetRootsResponse, LogEntry, UnixTimestamp};
 use std::str::FromStr;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
-
-// The Maximum Merge Delay (MMD) of a log indicates the maximum period of time
-// between when a SCT is issued and the corresponding entry is sequenced
-// in the log. For static CT logs, this is effectively zero since SCT issuance
-// happens only once the entry is sequenced. However, we can leave this value
-// in the metadata as the default (1 day).
-const MAX_MERGE_DELAY: usize = 86_400;
 
 // Number of Batchers to use to proxy requests to the Sequencer.
 // Setting this too high could result in a high number of requests
@@ -33,7 +25,7 @@ const MAX_MERGE_DELAY: usize = 86_400;
 // Durable Objects rate limits.
 const NUM_BATCHER_PROXIES: u8 = 8;
 
-const UNKNOWN_LOG_MSG: &str = "unknown log";
+const UNKNOWN_CA_MSG: &str = "unknown CA";
 
 #[serde_as]
 #[derive(Serialize)]
@@ -41,17 +33,15 @@ struct MetadataResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    log_type: &'a Option<String>,
+    evidence_policy: &'a Option<String>,
     #[serde_as(as = "Base64")]
-    log_id: &'a [u8],
+    ca_id: &'a [u8],
     #[serde_as(as = "Base64")]
     key: &'a [u8],
     #[serde_as(as = "Base64")]
     witness_key: &'a [u8],
-    mmd: usize,
     submission_url: &'a str,
     monitoring_url: &'a str,
-    temporal_interval: &'a TemporalInterval,
 }
 
 #[event(start)]
@@ -78,23 +68,20 @@ fn start() {
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let router = Router::new();
     router
-        .get("/logs/:log/ct/v1/get-roots", |_req, ctx| {
-            let _name = valid_log_name(&ctx)?;
+        .get("/cas/:ca/mtc/v1/get-umbilical-roots", |_req, ctx| {
+            let _name = valid_ca_name(&ctx)?;
             Response::from_json(&GetRootsResponse {
-                certificates: static_ct_api::certs_to_bytes(&ROOTS.certs).unwrap(),
+                certificates: mtc_api::certs_to_bytes(&ROOTS.certs).unwrap(),
             })
         })
-        .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {
-            add_chain_or_pre_chain(req, &ctx.env, valid_log_name(&ctx)?, false).await
+        .post_async("/cas/:ca/mtc/v1/add-assertion", |req, ctx| async move {
+            add_assertion(req, &ctx.env, valid_ca_name(&ctx)?, false).await
         })
-        .post_async("/logs/:log/ct/v1/add-pre-chain", |req, ctx| async move {
-            add_chain_or_pre_chain(req, &ctx.env, valid_log_name(&ctx)?, true).await
-        })
-        .get("/logs/:log/metadata", |_req, ctx| {
-            let name = valid_log_name(&ctx)?;
-            let params = &CONFIG.logs[name];
+        .get("/cas/:ca/metadata", |_req, ctx| {
+            let name = valid_ca_name(&ctx)?;
+            let params = &CONFIG.cas[name];
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-            let log_id = &static_ct_api::log_id_from_key(verifying_key)
+            let ca_id = &mtc_api::log_id_from_key(verifying_key)
                 .map_err(|e| e.to_string())?
                 .to_vec();
             let key = verifying_key
@@ -107,28 +94,26 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .map_err(|e| e.to_string())?;
             Response::from_json(&MetadataResponse {
                 description: &params.description,
-                log_type: &params.log_type,
-                log_id,
+                evidence_policy: &params.evidence_policy,
+                ca_id,
                 key: key.as_bytes(),
                 witness_key: witness_key.as_bytes(),
-                submission_url: &params.submission_url,
+                submission_url: &params.origin_url,
                 monitoring_url: if params.monitoring_url.is_empty() {
-                    &params.submission_url
+                    &params.origin_url
                 } else {
                     &params.monitoring_url
                 },
-                mmd: MAX_MERGE_DELAY,
-                temporal_interval: &params.temporal_interval,
             })
         })
-        .get_async("/logs/:log/metrics", |_req, ctx| async move {
-            let name = valid_log_name(&ctx)?;
+        .get_async("/cas/:ca/metrics", |_req, ctx| async move {
+            let name = valid_ca_name(&ctx)?;
             let stub = get_stub(&ctx.env, name, None, "SEQUENCER")?;
             stub.fetch_with_str(&format!("http://fake_url.com/metrics?name={name}"))
                 .await
         })
-        .get_async("/logs/:log/*key", |_req, ctx| async move {
-            let name = valid_log_name(&ctx)?;
+        .get_async("/cas/:ca/*key", |_req, ctx| async move {
+            let name = valid_ca_name(&ctx)?;
             let key = ctx.param("key").unwrap();
 
             let bucket = load_public_bucket(&ctx.env, name)?;
@@ -146,7 +131,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .run(req, env)
         .await
         .or_else(|e| match e {
-            Error::RustError(ref msg) if msg == UNKNOWN_LOG_MSG => {
+            Error::RustError(ref msg) if msg == UNKNOWN_CA_MSG => {
                 Response::error("Unknown log", 400)
             }
             _ => {
@@ -157,30 +142,18 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn add_chain_or_pre_chain(
+async fn add_assertion(
     mut req: Request,
     env: &Env,
     name: &str,
     expect_precert: bool,
 ) -> Result<Response> {
-    let params = &CONFIG.logs[name];
+    let params = &CONFIG.cas[name];
     let req: AddChainRequest = req.json().await?;
 
-    // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
-    let chain = match static_ct_api::validate_chain(
-        &req.chain,
-        &ROOTS,
-        Some(
-            u64::try_from(params.temporal_interval.start_inclusive.timestamp_millis())
-                .unwrap_or_default(),
-        ),
-        Some(
-            u64::try_from(params.temporal_interval.end_exclusive.timestamp_millis())
-                .unwrap_or_default(),
-        ),
-        expect_precert,
-        true,
-    ) {
+    // TODO modify to validate assertion and evidence
+    let chain = match mtc_api::validate_chain(&req.chain, &ROOTS, None, None, expect_precert, true)
+    {
         Ok(v) => v,
         Err(e) => {
             debug!("{name}: Bad request: {e}");
@@ -219,10 +192,7 @@ async fn add_chain_or_pre_chain(
     {
         debug!("{name}: Entry is cached");
         (entry.leaf_index, entry.timestamp) = v;
-        return Response::from_json(&static_ct_api::signed_certificate_timestamp(
-            signing_key,
-            &entry,
-        ));
+        return Response::from_json(&mtc_api::signed_certificate_timestamp(signing_key, &entry));
     }
 
     // Entry is not cached, so we need to sequence it.
@@ -265,18 +235,15 @@ async fn add_chain_or_pre_chain(
     let (leaf_index, timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
     entry.leaf_index = leaf_index;
     entry.timestamp = timestamp;
-    Response::from_json(&static_ct_api::signed_certificate_timestamp(
-        signing_key,
-        &entry,
-    ))
+    Response::from_json(&mtc_api::signed_certificate_timestamp(signing_key, &entry))
 }
 
-fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
-    if let Some(name) = ctx.param("log") {
-        if CONFIG.logs.contains_key(name) {
+fn valid_ca_name(ctx: &RouteContext<()>) -> Result<&str> {
+    if let Some(name) = ctx.param("ca") {
+        if CONFIG.cas.contains_key(name) {
             Ok(name)
         } else {
-            Err(UNKNOWN_LOG_MSG.into())
+            Err(UNKNOWN_CA_MSG.into())
         }
     } else {
         Err("missing 'log' route param".into())

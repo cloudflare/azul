@@ -2,13 +2,12 @@
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 // Build script to include per-environment configuration and trusted roots.
-
-use chrono::Months;
 use config::AppConfig;
 use serde_json::from_str;
 use std::env;
 use std::fs;
 use url::Url;
+use x509_verify::x509_cert::Certificate;
 
 fn main() {
     let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
@@ -32,17 +31,14 @@ fn main() {
     let conf = serde_json::from_str::<AppConfig>(config_contents).unwrap_or_else(|e| {
         panic!("failed to deserialize JSON config '{config_file}': {e}");
     });
-    for (name, params) in conf.logs {
-        // Chrome's CT policy (https://googlechrome.github.io/CertificateTransparency/log_policy.html) states:
-        // "The certificate expiry ranges for CT Logs must be no longer than one calendar year and should be no shorter than six months."
-        assert!(
-            (params.temporal_interval.start_inclusive + Months::new(6)
-                ..=params.temporal_interval.start_inclusive + Months::new(12))
-                .contains(&params.temporal_interval.end_exclusive),
-            "{name} invalid temporal interval: [{}, {})",
-            params.temporal_interval.start_inclusive,
-            params.temporal_interval.end_exclusive
-        );
+    for (name, params) in conf.cas {
+        if let Some(evidence_policy) = &params.evidence_policy {
+            assert!(
+                ["unset", "empty", "umbilical"].contains(&evidence_policy.as_str()),
+                "{name} invalid evidence policy: {evidence_policy}"
+            );
+        }
+
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {
             assert!(
@@ -52,7 +48,7 @@ fn main() {
             );
         }
 
-        check_url(&params.submission_url);
+        check_url(&params.origin_url);
         if !params.monitoring_url.is_empty() {
             check_url(&params.monitoring_url);
         }
@@ -64,7 +60,7 @@ fn main() {
         roots_file = "default_roots.pem";
     }
     let roots =
-        static_ct_api::load_pem_chain(&fs::read(roots_file).expect("failed to read roots file"))
+        Certificate::load_pem_chain(&fs::read(roots_file).expect("failed to read roots file"))
             .expect("unable to decode certificates");
     assert!(!roots.is_empty(), "Roots file is empty");
 

@@ -30,10 +30,10 @@ crate-type = ["cdylib"]
 serde.workspace = true
 serde_json.workspace = true
 jsonschema = "0.26.2"
-static_ct_api = "0.2.0"
 config = { path = "./config", package = "mtca_worker_config" }
 chrono.workspace = true
 url = "2.5.4"
+x509-verify.workspace = true
 
 [dev-dependencies]
 rand = { workspace = true, features = ["small_rng"]}
@@ -62,7 +62,7 @@ serde_json.workspace = true
 serde_with.workspace = true
 serde-wasm-bindgen = "0.6.5"
 sha2.workspace = true
-static_ct_api = "0.2.0"
+mtc_api = { path = "../mtc_api" }
 thiserror.workspace = true
 tlog_tiles = "0.2.0"
 tokio = { version = "1", features = ["sync"] }
