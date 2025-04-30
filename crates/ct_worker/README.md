@@ -8,6 +8,8 @@ This project can be used to run multiple CT log shards within a single Workers a
 
 The 'brain' of each CT log is a single-threaded 'Sequencer' Durable Object, and much of the system is architected around offloading as much work as possible to other components of the system (like 'Batcher' Durable Objects) to improve overall throughput. Read the [blog post](https://blog.cloudflare.com/azul-certificate-transparency-log) for more details.
 
+> :warning: **Warning** The software in this crate is written specifically for the [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/) execution model, with single-threaded execution and [input/output gates](https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three) to avoid race conditions. Running it elsewhere could lead to concurrency bugs.
+
 ![System Diagram](doc/img/static-ct.drawio.svg)
 
 ### Life of an add-[pre-]chain request
