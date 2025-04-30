@@ -1,0 +1,163 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" version="26.1.0">
+  <diagram name="Page-1" id="ie9WA1xqFhhYVzCyQSn7">
+    <mxGraphModel dx="1242" dy="819" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="rCOPVDcByiwwKELXjNFz-16" value="" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="260" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-15" value="" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="390" y="270" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-2" value="&lt;div&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;&lt;b&gt;Frontend&lt;/b&gt;&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;(Worker)&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;2. validate&lt;/span&gt;&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="180" y="279.98" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-4" value="&lt;div&gt;&lt;b&gt;Object Backend&lt;br&gt;&lt;/b&gt;&lt;div&gt;(R2)&lt;/div&gt;&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" parent="1" vertex="1">
+          <mxGeometry x="180" y="160" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-5" value="" style="endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" target="TYK9S4TuqPi9MkygmUOM-4" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="10" y="200" as="sourcePoint" />
+            <mxPoint x="121" y="160" as="targetPoint" />
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-6" value="&lt;b&gt;Monitoring APIs&lt;/b&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-5" vertex="1" connectable="0">
+          <mxGeometry x="0.15" y="-1" relative="1" as="geometry">
+            <mxPoint x="-18" y="-1" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-7" value="" style="endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" parent="1" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="10" y="319.52" as="sourcePoint" />
+            <mxPoint x="180" y="319.5" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-8" value="&lt;b&gt;Submission APIs&lt;/b&gt;&lt;div&gt;1. add-[pre-]chain request&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-7" vertex="1" connectable="0">
+          <mxGeometry x="0.15" y="-1" relative="1" as="geometry">
+            <mxPoint x="-18" y="-7" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-11" value="" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" source="TYK9S4TuqPi9MkygmUOM-9" target="TYK9S4TuqPi9MkygmUOM-10" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="775" y="400.02" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-12" value="6b. update&lt;div&gt;checkpoint&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-11" vertex="1" connectable="0">
+          <mxGeometry x="0.05" y="2" relative="1" as="geometry">
+            <mxPoint x="-1" y="-6" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-9" value="&lt;b&gt;Sequencer&lt;/b&gt;&lt;div&gt;(Durable Object&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;)&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;6. sequence pool&amp;nbsp;&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;when alarm fires&lt;/span&gt;&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="620" y="279.98" width="120" height="120.02" as="geometry" />
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-10" value="&lt;b&gt;Lock Backend&amp;nbsp;&lt;/b&gt;&lt;div&gt;(DO Storage)&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" parent="1" vertex="1">
+          <mxGeometry x="635" y="440" width="90" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-14" value="&lt;div&gt;&lt;b&gt;Dedup cache&lt;/b&gt;&lt;div&gt;(KV)&lt;/div&gt;&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" parent="1" vertex="1">
+          <mxGeometry x="180" y="440" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-43" value="" style="endArrow=classic;html=1;rounded=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;exitX=0;exitY=0.75;exitDx=0;exitDy=0;" parent="1" source="TYK9S4TuqPi9MkygmUOM-9" target="rCOPVDcByiwwKELXjNFz-5" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="540" y="390" as="sourcePoint" />
+            <mxPoint x="430" y="390" as="targetPoint" />
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-47" value="7a. write batch&lt;div&gt;metadata&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-43" vertex="1" connectable="0">
+          <mxGeometry x="-0.358" y="1" relative="1" as="geometry">
+            <mxPoint x="-17" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-45" value="" style="endArrow=classic;html=1;rounded=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="TYK9S4TuqPi9MkygmUOM-9" target="TYK9S4TuqPi9MkygmUOM-4" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="760" y="300" as="sourcePoint" />
+            <mxPoint x="660" y="140" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="680" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-46" value="6a. write staging bundle&lt;div&gt;6c. apply staged tiles&lt;br&gt;&lt;div&gt;6d. update checkpoint&lt;/div&gt;&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-45" vertex="1" connectable="0">
+          <mxGeometry x="-0.6491" y="-2" relative="1" as="geometry">
+            <mxPoint x="-1" y="34" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-75" value="" style="endArrow=classic;html=1;rounded=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" source="TYK9S4TuqPi9MkygmUOM-2" target="TYK9S4TuqPi9MkygmUOM-14" edge="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="400" y="370" as="sourcePoint" />
+            <mxPoint x="450" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-76" value="3. check" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-75" vertex="1" connectable="0">
+          <mxGeometry x="-0.0002" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-64" value="" style="endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;exitX=1;exitY=0.25;exitDx=0;exitDy=0;" parent="1" target="rCOPVDcByiwwKELXjNFz-5" edge="1" source="TYK9S4TuqPi9MkygmUOM-2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="320" y="310" as="sourcePoint" />
+            <mxPoint x="420" y="384" as="targetPoint" />
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="TYK9S4TuqPi9MkygmUOM-65" value="4. add leaf&lt;div&gt;to batch&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="TYK9S4TuqPi9MkygmUOM-64" vertex="1" connectable="0">
+          <mxGeometry x="-0.44" y="-1" relative="1" as="geometry">
+            <mxPoint x="15" y="-3" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-5" value="&lt;b&gt;Batcher&lt;/b&gt;&lt;div&gt;(Durable Object)&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="400" y="280" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-9" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="rCOPVDcByiwwKELXjNFz-5" target="TYK9S4TuqPi9MkygmUOM-9">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="400" y="450" as="sourcePoint" />
+            <mxPoint x="450" y="400" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-10" value="5. add batch&lt;div&gt;to pool&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rCOPVDcByiwwKELXjNFz-9">
+          <mxGeometry x="-0.025" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-11" value="" style="endArrow=classic;html=1;rounded=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;exitX=0;exitY=0.75;exitDx=0;exitDy=0;" edge="1" parent="1" source="rCOPVDcByiwwKELXjNFz-5" target="TYK9S4TuqPi9MkygmUOM-2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="400" y="480" as="sourcePoint" />
+            <mxPoint x="450" y="430" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-14" value="7b. write entry&lt;div&gt;metadata&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rCOPVDcByiwwKELXjNFz-11">
+          <mxGeometry x="-0.12" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-12" value="" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="rCOPVDcByiwwKELXjNFz-5" target="TYK9S4TuqPi9MkygmUOM-14">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="400" y="480" as="sourcePoint" />
+            <mxPoint x="460" y="480" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="460" y="480" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-13" value="7c. write batch&lt;div&gt;metadata&lt;/div&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rCOPVDcByiwwKELXjNFz-12">
+          <mxGeometry x="-0.65" y="2" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-18" value="" style="endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="180" y="360" as="sourcePoint" />
+            <mxPoint x="10" y="360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rCOPVDcByiwwKELXjNFz-19" value="8. sequenced entry" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="rCOPVDcByiwwKELXjNFz-18">
+          <mxGeometry x="0.15" y="-1" relative="1" as="geometry">
+            <mxPoint x="12" y="-2" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

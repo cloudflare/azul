@@ -1,0 +1,76 @@
+[package]
+name = "mtca_worker"
+readme = "README.md"
+publish = false
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of a Merkle Tree Certificate Authority on Cloudflare Workers"
+categories = ["cryptography"]
+keywords = ["ca", "certificate", "transparency", "crypto", "pki"]
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1351
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = true
+
+# https://github.com/rustwasm/wasm-pack/issues/1247
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+jsonschema = "0.26.2"
+static_ct_api = "0.2.0"
+config = { path = "./config", package = "mtca_worker_config" }
+chrono.workspace = true
+url = "2.5.4"
+
+[dev-dependencies]
+rand = { workspace = true, features = ["small_rng"]}
+itertools = "0.13.0"
+parking_lot = "0.11"
+futures-executor = "0.3.31"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+byteorder = "1.4"
+config = { path = "./config", package = "mtca_worker_config"  }
+console_error_panic_hook = "0.1.1"
+console_log = { version = "1.0" }
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+getrandom = { version = "0.2", features = ["js"] }
+hex = "0.4"
+log = { version = "0.4"}
+signed_note = "0.2.0"
+prometheus = "0.13.4"
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+serde_json.workspace = true
+serde_with.workspace = true
+serde-wasm-bindgen = "0.6.5"
+sha2.workspace = true
+static_ct_api = "0.2.0"
+thiserror.workspace = true
+tlog_tiles = "0.2.0"
+tokio = { version = "1", features = ["sync"] }
+worker = { version = "0.5.0" }
+futures-util = "0.3.31"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]

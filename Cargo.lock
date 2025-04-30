@@ -1393,6 +1393,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtca_worker"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.21.7",
+ "byteorder",
+ "chrono",
+ "console_error_panic_hook",
+ "console_log",
+ "ed25519-dalek",
+ "futures-executor",
+ "futures-util",
+ "getrandom",
+ "hex",
+ "itertools 0.13.0",
+ "jsonschema",
+ "log",
+ "mtca_worker_config",
+ "p256",
+ "parking_lot 0.11.2",
+ "prometheus",
+ "rand",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "serde_bytes",
+ "serde_json",
+ "serde_with",
+ "sha2",
+ "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "static_ct_api 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "thiserror",
+ "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+ "url",
+ "worker",
+]
+
+[[package]]
+name = "mtca_worker_config"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
