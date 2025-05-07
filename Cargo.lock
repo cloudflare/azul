@@ -1398,12 +1398,12 @@ version = "0.2.0"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
- "chrono",
  "const-oid",
  "der",
  "ed25519-dalek",
  "p256",
  "rand",
+ "regex",
  "serde",
  "serde_with",
  "sha2",
@@ -1420,7 +1420,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
- "byteorder",
  "chrono",
  "console_error_panic_hook",
  "console_log",
@@ -1439,8 +1438,6 @@ dependencies = [
  "prometheus",
  "rand",
  "serde",
- "serde-wasm-bindgen 0.6.5",
- "serde_bytes",
  "serde_json",
  "serde_with",
  "sha2",
@@ -1457,7 +1454,6 @@ dependencies = [
 name = "mtca_worker_config"
 version = "0.2.0"
 dependencies = [
- "chrono",
  "serde",
 ]
 

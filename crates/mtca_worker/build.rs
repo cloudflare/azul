@@ -3,6 +3,7 @@
 
 // Build script to include per-environment configuration and trusted roots.
 use config::AppConfig;
+use mtc_api::EvidencePolicy;
 use serde_json::from_str;
 use std::env;
 use std::fs;
@@ -34,7 +35,7 @@ fn main() {
     for (name, params) in conf.cas {
         if let Some(evidence_policy) = &params.evidence_policy {
             assert!(
-                ["unset", "empty", "umbilical"].contains(&evidence_policy.as_str()),
+                EvidencePolicy::try_from(evidence_policy.as_str()).is_ok(),
                 "{name} invalid evidence policy: {evidence_policy}"
             );
         }

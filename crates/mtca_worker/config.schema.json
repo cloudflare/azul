@@ -56,6 +56,12 @@
                             "minimum": 1,
                             "default": 1,
                             "description": "The duration in between sequencing operations, in seconds."
+                        },
+                        "cert_lifetime": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1209600,
+                            "description": "The maximum lifetime of each issued certificate, in seconds."
                         }
                     },
                     "required": [

@@ -21,8 +21,10 @@ pub struct CaParams {
     pub location_hint: Option<String>,
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
-    #[serde(default = "default_sequence_interval")]
+    #[serde(default = "default_sequence_interval_seconds")]
     pub sequence_interval: u64,
+    #[serde(default = "default_cert_lifetime_seconds")]
+    pub cert_lifetime: u64,
 }
 
 // Limit on the number of entries per batch. Tune this parameter to avoid running into various size limitations.
@@ -31,6 +33,10 @@ fn default_pool_size() -> usize {
     4000
 }
 
-fn default_sequence_interval() -> u64 {
+fn default_sequence_interval_seconds() -> u64 {
     1
+}
+
+fn default_cert_lifetime_seconds() -> u64 {
+    1_209_600 // two weeks
 }

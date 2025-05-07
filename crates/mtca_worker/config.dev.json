@@ -1,5 +1,5 @@
 {
-    "logging_level": "info",
+    "logging_level": "debug",
     "cas": {
         "dev0": {
             "description": "Dev 2025h1a",
