@@ -19,17 +19,15 @@
 //! - [testlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/testlog_test.go)
 
 use crate::{
-    ctlog,
     metrics::{millis_diff_as_secs, AsF64, Metrics},
     util::now_millis,
-    CacheKey, CacheRead, CacheValue, CacheWrite, LockBackend, ObjectBackend,
+    LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
 };
 use anyhow::{anyhow, bail};
-use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
-use mtc_api::{LogEntry, TileIterator, TreeWithTimestamp, TILE_HEIGHT, TILE_WIDTH};
+use mtc_api::{LogEntry, Marshal, TileIterator, TreeWithTimestamp, TILE_HEIGHT, TILE_WIDTH};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -75,8 +73,8 @@ pub(crate) struct PoolState {
     // in_sequencing is the [Pool::by_hash] map of the pool that's currently being
     // sequenced. These entries might not be sequenced yet or might not yet be
     // committed to the deduplication cache.
-    in_sequencing: HashMap<CacheKey, u64>,
-    in_sequencing_done: Option<Receiver<CacheValue>>,
+    in_sequencing: HashMap<LookupKey, u64>,
+    in_sequencing_done: Option<Receiver<SequenceMetadata>>,
 }
 
 // State owned by the sequencing loop.
@@ -285,17 +283,15 @@ impl SequenceState {
 /// Result of an [`add_leaf_to_pool`] request containing either a cached log
 /// entry or a pending entry that must be resolved.
 pub(crate) enum AddLeafResult {
-    Cached(CacheValue),
-    Pending((u64, Receiver<CacheValue>)),
+    Pending((u64, Receiver<SequenceMetadata>)),
     RateLimited,
 }
 
 impl AddLeafResult {
     /// Resolve an `AddLeafResult` to a leaf entry, or None if the
     /// entry was not sequenced.
-    pub(crate) async fn resolve(self) -> Option<CacheValue> {
+    pub(crate) async fn resolve(self) -> Option<SequenceMetadata> {
         match self {
-            AddLeafResult::Cached(entry) => Some(entry),
             AddLeafResult::Pending((pool_index, mut rx)) => {
                 // Wait until sequencing completes for this entry's pool.
                 if rx.changed().await.is_ok() {
@@ -311,9 +307,6 @@ impl AddLeafResult {
     }
 }
 pub(crate) enum AddLeafResultSource {
-    InSequencing,
-    Pool,
-    Cache,
     Sequencer,
     RateLimit,
 }
@@ -321,56 +314,31 @@ pub(crate) enum AddLeafResultSource {
 impl std::fmt::Display for AddLeafResultSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AddLeafResultSource::InSequencing => write!(f, "sequencing"),
-            AddLeafResultSource::Pool => write!(f, "pool"),
-            AddLeafResultSource::Cache => write!(f, "cache"),
             AddLeafResultSource::Sequencer => write!(f, "sequencer"),
             AddLeafResultSource::RateLimit => write!(f, "ratelimit"),
         }
     }
 }
 
-/// Add a leaf (a certificate or pre-certificate) to the pool of pending entries.
+/// Add a leaf (a certificate or pre-certificate) to the pool of pending
+/// entries.
 ///
-/// If the entry is has already been sequenced and is in the cache, return immediately
-/// with a [`AddLeafResult::Cached`]. If the pool is full, return
-/// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
-/// can be resolved once the entry has been sequenced.
+/// If the pool is full, return [`AddLeafResult::RateLimited`]. Otherwise,
+/// return a [`AddLeafResult::Pending`] which can be resolved once the entry has
+/// been sequenced.
 pub(crate) fn add_leaf_to_pool(
     state: &mut PoolState,
     pool_size: usize,
-    cache: &impl CacheRead,
-    leaf: &LogEntry,
+    leaf: LogEntry,
 ) -> (AddLeafResult, AddLeafResultSource) {
-    let hash = compute_cache_hash(leaf.is_precert, &leaf.certificate, &leaf.issuer_key_hash);
-    let pool_index: u64;
-    let rx: Receiver<CacheValue>;
-    let source: AddLeafResultSource;
-
-    if let Some(index) = state.in_sequencing.get(&hash) {
-        // Entry is being sequenced.
-        pool_index = *index;
-        rx = state.in_sequencing_done.clone().unwrap();
-        source = AddLeafResultSource::InSequencing;
-    } else if let Some(index) = state.current_pool.by_hash.get(&hash) {
-        // Entry is already pending.
-        pool_index = *index;
-        rx = state.current_pool.done.subscribe();
-        source = AddLeafResultSource::Pool;
-    } else if let Some(v) = cache.get_entry(&hash) {
-        // Entry is cached.
-        return (AddLeafResult::Cached(v), AddLeafResultSource::Cache);
-    } else {
-        // This is a new entry. Add it to the pool.
-        if pool_size > 0 && state.current_pool.pending_leaves.len() >= pool_size {
-            return (AddLeafResult::RateLimited, AddLeafResultSource::RateLimit);
-        }
-        state.current_pool.pending_leaves.push(leaf.clone());
-        pool_index = (state.current_pool.pending_leaves.len() as u64) - 1;
-        state.current_pool.by_hash.insert(hash, pool_index);
-        rx = state.current_pool.done.subscribe();
-        source = AddLeafResultSource::Sequencer;
-    };
+    // This is a new entry. Add it to the pool.
+    if pool_size > 0 && state.current_pool.pending_leaves.len() >= pool_size {
+        return (AddLeafResult::RateLimited, AddLeafResultSource::RateLimit);
+    }
+    state.current_pool.pending_leaves.push(leaf);
+    let pool_index = (state.current_pool.pending_leaves.len() as u64) - 1;
+    let rx = state.current_pool.done.subscribe();
+    let source = AddLeafResultSource::Sequencer;
 
     (AddLeafResult::Pending((pool_index, rx)), source)
 }
@@ -423,7 +391,6 @@ pub(crate) async fn sequence(
     config: &LogConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &mut impl CacheWrite,
     metrics: &Metrics,
 ) -> Result<(), anyhow::Error> {
     let mut p = std::mem::take(&mut pool_state.current_pool);
@@ -434,26 +401,25 @@ pub(crate) async fn sequence(
         .seq_pool_size
         .observe(p.pending_leaves.len().as_f64());
 
-    let result =
-        match sequence_pool(sequence_state, config, object, lock, cache, &mut p, metrics).await {
-            Ok(()) => {
-                metrics.seq_count.with_label_values(&[""]).inc();
-                Ok(())
-            }
-            Err(SequenceError::Fatal(e)) => {
-                // Clear ephemeral sequencing state, as it may no longer be valid.
-                // It will be loaded again the next time sequence_pool is called.
-                metrics.seq_count.with_label_values(&["fatal"]).inc();
-                error!("{}: Fatal sequencing error {e}", config.name);
-                *sequence_state = None;
-                Err(anyhow!(e))
-            }
-            Err(SequenceError::NonFatal(e)) => {
-                metrics.seq_count.with_label_values(&["non-fatal"]).inc();
-                error!("{}: Non-fatal sequencing error {e}", config.name);
-                Ok(())
-            }
-        };
+    let result = match sequence_pool(sequence_state, config, object, lock, &mut p, metrics).await {
+        Ok(()) => {
+            metrics.seq_count.with_label_values(&[""]).inc();
+            Ok(())
+        }
+        Err(SequenceError::Fatal(e)) => {
+            // Clear ephemeral sequencing state, as it may no longer be valid.
+            // It will be loaded again the next time sequence_pool is called.
+            metrics.seq_count.with_label_values(&["fatal"]).inc();
+            error!("{}: Fatal sequencing error {e}", config.name);
+            *sequence_state = None;
+            Err(anyhow!(e))
+        }
+        Err(SequenceError::NonFatal(e)) => {
+            metrics.seq_count.with_label_values(&["non-fatal"]).inc();
+            error!("{}: Non-fatal sequencing error {e}", config.name);
+            Ok(())
+        }
+    };
 
     // Once [sequence_pool] returns, the entries are either in the deduplication
     // cache or finalized with an error. In the latter case, we don't want
@@ -483,7 +449,6 @@ async fn sequence_pool(
     config: &LogConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &mut impl CacheWrite,
     p: &mut Pool,
     metrics: &Metrics,
 ) -> Result<(), SequenceError> {
@@ -512,15 +477,17 @@ async fn sequence_pool(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_leaves: Vec<LogEntry> = Vec::new();
 
     for leaf in &mut p.pending_leaves {
-        leaf.leaf_index = n;
-        leaf.timestamp = timestamp;
-        sequenced_leaves.push(leaf.clone());
-        let tile_leaf = leaf.tile_leaf();
-        metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
-        data_tile.extend(tile_leaf);
+        let old_len = data_tile.len();
+        leaf.marshal(&mut data_tile).map_err(|e| {
+            SequenceError::NonFatal(format!(
+                "couldn't compute new hashes for leaf {leaf:?}: {e}"
+            ))
+        })?;
+        metrics
+            .seq_leaf_size
+            .observe((data_tile.len() - old_len).as_f64());
 
         // Compute the new tree hashes and add them to the hashReader overlay
         // (we will use them later to insert more leaves and finally to produce
@@ -668,34 +635,6 @@ async fn sequence_pool(
     // Return SCTs to clients. Clients can recover the leaf index
     // from the old tree size and their index in the sequenced pool.
     p.done.send_replace((old_size, timestamp));
-
-    // At this point if the cache put fails, there's no reason to return errors to users. The
-    // only consequence of cache false negatives are duplicated leaves anyway. In fact, an
-    // error might cause the clients to resubmit, producing more cache false negatives and
-    // duplicates.
-    if let Err(e) = cache
-        .put_entries(
-            &sequenced_leaves
-                .iter()
-                .map(|entry| {
-                    (
-                        ctlog::compute_cache_hash(
-                            entry.is_precert,
-                            &entry.certificate,
-                            &entry.issuer_key_hash,
-                        ),
-                        (entry.leaf_index, entry.timestamp),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .await
-    {
-        warn!(
-            "{name}: Cache put failed (entries={}): {e}",
-            sequenced_leaves.len()
-        );
-    }
 
     for tile in &sequence_state.as_ref().unwrap().edge_tiles {
         trace!("{name}: Edge tile: {tile:?}");
@@ -968,10 +907,10 @@ impl HashReader for HashReaderWithOverlay<'_> {
 #[derive(Debug)]
 struct Pool {
     pending_leaves: Vec<LogEntry>,
-    by_hash: HashMap<CacheKey, u64>,
+    by_hash: HashMap<LookupKey, u64>,
     // Sends the index of the first sequenced entry in the pool,
     // and the pool's sequencing timestamp.
-    done: Sender<CacheValue>,
+    done: Sender<SequenceMetadata>,
 }
 
 impl Default for Pool {
@@ -984,46 +923,6 @@ impl Default for Pool {
             done: tx,
         }
     }
-}
-
-/// Compute the cache key for a log entry.
-pub(crate) fn compute_cache_hash(
-    is_precert: bool,
-    certificate: &[u8],
-    issuer_key_hash: &[u8; 32],
-) -> CacheKey {
-    let mut buffer = Vec::new();
-    if is_precert {
-        // Add entry type = 1 (precert_entry)
-        buffer.write_u16::<BigEndian>(1).unwrap();
-
-        // Add issuer key hash
-        buffer.extend_from_slice(issuer_key_hash);
-
-        // Add certificate with a 24-bit length prefix
-        buffer
-            .write_uint::<BigEndian>(certificate.len() as u64, 3)
-            .unwrap();
-        buffer.extend_from_slice(certificate);
-    } else {
-        // Add entry type = 0 (x509_entry)
-        buffer.write_u16::<BigEndian>(0).unwrap();
-
-        // Add certificate with a 24-bit length prefix
-        buffer
-            .write_uint::<BigEndian>(certificate.len() as u64, 3)
-            .unwrap();
-        buffer.extend_from_slice(certificate);
-    }
-
-    // Compute the SHA-256 hash of the buffer
-    let hash = Sha256::digest(&buffer);
-
-    // Return the first 16 bytes of the hash as the cacheHash
-    let mut cache_hash = [0u8; 16];
-    cache_hash.copy_from_slice(&hash[..16]);
-
-    cache_hash
 }
 
 /// A pending upload.
@@ -1093,10 +992,13 @@ fn staging_path(mut tree_size: u64, tree_hash: &Hash) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{util, CacheKey, CacheValue};
+    use crate::util;
     use futures_executor::block_on;
     use itertools::Itertools;
-    use mtc_api::{RFC6962Verifier, TILE_HEIGHT, TILE_WIDTH};
+    use mtc_api::{
+        AbridgedSubject, Claims, RFC6962Verifier, SignatureScheme, Subject, TLSSubject,
+        UmbilicalEvidence, TILE_HEIGHT, TILE_WIDTH,
+    };
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
@@ -1119,7 +1021,7 @@ mod tests {
     fn sequence_one_leaf(n: u64) {
         let mut log = TestLog::new();
         for i in 0..n {
-            let res = log.add_certificate();
+            let res = log.add_leaf();
             log.sequence().unwrap();
             // Wait until sequencing completes for this entry's pool.
             let (leaf_index, _) = block_on(res.resolve()).unwrap();
@@ -1135,19 +1037,26 @@ mod tests {
         let mut log = TestLog::new();
 
         for _ in 0..5 {
-            log.add_certificate();
+            log.add_leaf();
         }
         log.sequence().unwrap();
         log.check(5);
 
         for i in 0..500_u64 {
             for k in 0..3000_u64 {
-                let certificate = (i * 3000 + k).to_be_bytes().to_vec();
+                let data = (i * 3000 + k).to_be_bytes().to_vec();
                 let leaf = LogEntry {
-                    certificate,
-                    ..Default::default()
+                    abridged_subject: Subject::TLS(TLSSubject::new(
+                        SignatureScheme::from(0),
+                        &data,
+                    ))
+                    .abridge()
+                    .unwrap(),
+                    claims: Claims::default(),
+                    not_after: 0,
+                    extra_data: Vec::new(),
                 };
-                add_leaf_to_pool(&mut log.pool_state, log.config.pool_size, &log.cache, &leaf);
+                add_leaf_to_pool(&mut log.pool_state, log.config.pool_size, leaf);
             }
             log.sequence().unwrap();
         }
@@ -1166,7 +1075,7 @@ mod tests {
         };
         let add_certs = |log: &mut TestLog, n: usize| {
             for _ in 0..n {
-                log.add_certificate();
+                log.add_leaf();
             }
         };
 
@@ -1186,7 +1095,7 @@ mod tests {
         let mut log = TestLog::new();
 
         for _ in 0..=TILE_WIDTH {
-            log.add_certificate();
+            log.add_leaf();
         }
         log.sequence().unwrap();
 
@@ -1207,7 +1116,7 @@ mod tests {
         // One entry in steady state (not at tile boundary) should cause four
         // uploads (the staging bundle, the checkpoint, a level -1 tile, and a level
         // 0 tile).
-        log.add_certificate();
+        log.add_leaf();
         log.sequence().unwrap();
         assert_eq!(uploads(&mut log, &mut old), 4);
 
@@ -1215,7 +1124,7 @@ mod tests {
         // bundle, the checkpoint, two level -1 tiles, two level 0 tiles, and one
         // level 1 tile).
         for _ in 0..TILE_WIDTH {
-            log.add_certificate();
+            log.add_leaf();
         }
         log.sequence().unwrap();
         assert_eq!(uploads(&mut log, &mut old), 7);
@@ -1232,11 +1141,11 @@ mod tests {
         let mut log = TestLog::new();
 
         for i in 0..u64::from(TILE_WIDTH) + 5 {
-            log.add_certificate_with_seed(i);
+            log.add_leaf_with_seed(i);
         }
         log.sequence().unwrap();
         for i in 0..u64::from(TILE_WIDTH) + 10 {
-            log.add_certificate_with_seed(1000 + i);
+            log.add_leaf_with_seed(1000 + i);
         }
         log.sequence().unwrap();
 
@@ -1281,84 +1190,11 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicates_certificates() {
-        test_duplicates(false);
-    }
-
-    #[test]
-    fn test_duplicates_pre_certificates() {
-        test_duplicates(true);
-    }
-
-    fn test_duplicates(is_precert: bool) {
-        let mut log = TestLog::new();
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 1
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 2
-        log.sequence().unwrap();
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 3
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 4
-
-        // Two pairs of duplicates from the by_hash pool.
-        let res01 = log.add_with_seed(is_precert, 0); // 5
-        let res02 = log.add_with_seed(is_precert, 0);
-        let res11 = log.add_with_seed(is_precert, 1); // 6
-        let res12 = log.add_with_seed(is_precert, 1);
-        log.sequence().unwrap();
-        log.sequence().unwrap();
-        log.check(6);
-
-        let entry01 = block_on(res01.resolve()).unwrap();
-        let entry02 = block_on(res02.resolve()).unwrap();
-        assert_eq!(entry01, entry02);
-
-        let entry11 = block_on(res11.resolve()).unwrap();
-        let entry12 = block_on(res12.resolve()).unwrap();
-        assert_eq!(entry11, entry12);
-
-        // A duplicate from the cache.
-        let res03 = log.add_with_seed(is_precert, 0);
-        log.sequence().unwrap();
-        let entry03 = block_on(res03.resolve()).unwrap();
-        assert_eq!(entry01, entry03);
-
-        // A pair of duplicates from the in_sequencing pool.
-        let res21 = log.add_with_seed(is_precert, 2); // 7
-        let mut p = log.sequence_start();
-        let res22 = log.add_with_seed(is_precert, 2);
-        log.sequence_finish(&mut p);
-        let entry21 = block_on(res21.resolve()).unwrap();
-        let entry22 = block_on(res22.resolve()).unwrap();
-        assert_eq!(entry21, entry22);
-
-        // A failed sequencing immediately allows resubmission (i.e., the failed
-        // entry in the inSequencing pool is not picked up).
-        log.object.mode.set(ObjectBreakMode::FailStagingButPersist);
-        let res = log.add_with_seed(is_precert, 3);
-        log.sequence().unwrap();
-        assert!(block_on(res.resolve()).is_none());
-
-        log.object.mode.set(ObjectBreakMode::None);
-        let res = log.add_with_seed(is_precert, 3); // 8
-        log.sequence().unwrap();
-        block_on(res.resolve()).unwrap();
-        log.check(8);
-    }
-
-    #[test]
-    fn test_reload_log_certificates() {
-        test_reload_log(false);
-    }
-
-    #[test]
-    fn test_reload_log_pre_certificates() {
-        test_reload_log(true);
-    }
-
-    fn test_reload_log(is_precert: bool) {
+    fn test_reload_log() {
         let mut log = TestLog::new();
         let n = u64::from(TILE_WIDTH) + 2;
         for i in 0..n {
-            log.add(is_precert);
+            log.add();
             log.sequence().unwrap();
             log.check(i + 1);
 
@@ -1398,15 +1234,15 @@ mod tests {
     #[test]
     fn test_staging_collision() {
         let mut log = TestLog::new();
-        log.add_certificate();
+        log.add_leaf();
         log.sequence().unwrap();
 
         // Freeze time, acquiring lock so other tests aren't impacted.
         let _lock = util::TIME_MUX.lock();
         util::set_freeze_time(true);
 
-        log.add_certificate_with_seed('A' as u64);
-        log.add_certificate_with_seed('B' as u64);
+        log.add_leaf_with_seed('A' as u64);
+        log.add_leaf_with_seed('B' as u64);
 
         log.lock.mode.set(LockBreakMode::FailLockAndNotPersist);
         log.sequence().unwrap_err();
@@ -1419,8 +1255,8 @@ mod tests {
 
         // First, cause the exact same staging bundle to be uploaded.
 
-        log.add_certificate_with_seed('A' as u64);
-        log.add_certificate_with_seed('B' as u64);
+        log.add_leaf_with_seed('A' as u64);
+        log.add_leaf_with_seed('B' as u64);
         log.sequence().unwrap();
         log.check(3);
 
@@ -1428,8 +1264,8 @@ mod tests {
 
         util::set_global_time(now_millis() + 1);
 
-        log.add_certificate_with_seed('C' as u64);
-        log.add_certificate_with_seed('D' as u64);
+        log.add_leaf_with_seed('C' as u64);
+        log.add_leaf_with_seed('D' as u64);
 
         log.object.mode.set(ObjectBreakMode::FailStagingButPersist);
         log.sequence().unwrap();
@@ -1437,8 +1273,8 @@ mod tests {
 
         log.object.mode.set(ObjectBreakMode::None);
 
-        log.add_certificate_with_seed('C' as u64);
-        log.add_certificate_with_seed('D' as u64);
+        log.add_leaf_with_seed('C' as u64);
+        log.add_leaf_with_seed('D' as u64);
         log.sequence().unwrap();
         log.check(5);
 
@@ -1450,12 +1286,12 @@ mod tests {
     fn test_fatal_error() {
         let mut log = TestLog::new();
 
-        log.add_certificate();
-        log.add_certificate();
+        log.add_leaf();
+        log.add_leaf();
         log.sequence().unwrap();
 
         log.lock.mode.set(LockBreakMode::FailLockAndNotPersist);
-        let res = log.add_certificate();
+        let res = log.add_leaf();
         log.sequence().unwrap_err();
         assert!(block_on(res.resolve()).is_none());
         log.check(2);
@@ -1463,7 +1299,7 @@ mod tests {
         log.lock.mode.set(LockBreakMode::None);
         log.sequence_state =
             Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
-        log.add_certificate();
+        log.add_leaf();
         log.sequence().unwrap();
         log.check(3);
     }
@@ -1514,7 +1350,7 @@ mod tests {
                 let mut expected_size = 0;
 
                 for _ in 0..u64::from(TILE_WIDTH) - 2 {
-                    log.add_certificate();
+                    log.add_leaf();
                 }
                 sequence(
                     &mut log,
@@ -1525,18 +1361,18 @@ mod tests {
 
                 break_seq(&mut log, &mut broken);
 
-                let res1 = log.add_certificate();
-                let res2 = log.add_certificate();
-                let res3 = log.add_certificate();
+                let res1 = log.add_leaf();
+                let res2 = log.add_leaf();
+                let res3 = log.add_leaf();
                 sequence(&mut log, &mut expected_size, broken, 3);
                 assert!(block_on(res1.resolve()).is_none());
                 assert!(block_on(res2.resolve()).is_none());
                 assert!(block_on(res3.resolve()).is_none());
 
                 // Re-failing the same tile sizes.
-                let res1 = log.add_certificate();
-                let res2 = log.add_certificate();
-                let res3 = log.add_certificate();
+                let res1 = log.add_leaf();
+                let res2 = log.add_leaf();
+                let res3 = log.add_leaf();
                 sequence(&mut log, &mut expected_size, broken, 3);
                 assert!(block_on(res1.resolve()).is_none());
                 assert!(block_on(res2.resolve()).is_none());
@@ -1545,9 +1381,9 @@ mod tests {
                 unbreak_seq(&mut log, &mut broken);
 
                 // Succeeding with the same size that failed.
-                let res1 = log.add_certificate();
-                let res2 = log.add_certificate();
-                let res3 = log.add_certificate();
+                let res1 = log.add_leaf();
+                let res2 = log.add_leaf();
+                let res3 = log.add_leaf();
                 sequence(&mut log, &mut expected_size, broken, 3);
                 block_on(res1.resolve()).unwrap();
                 block_on(res2.resolve()).unwrap();
@@ -1556,7 +1392,7 @@ mod tests {
                 log = TestLog::new();
                 expected_size = 0;
                 for _ in 0..u64::from(TILE_WIDTH) - 2 {
-                    log.add_certificate();
+                    log.add_leaf();
                 }
                 sequence(
                     &mut log,
@@ -1566,9 +1402,9 @@ mod tests {
                 );
 
                 break_seq(&mut log, &mut broken);
-                let res1 = log.add_certificate();
-                let res2 = log.add_certificate();
-                let res3 = log.add_certificate();
+                let res1 = log.add_leaf();
+                let res2 = log.add_leaf();
+                let res3 = log.add_leaf();
                 sequence(&mut log, &mut expected_size, broken, 3);
                 assert!(block_on(res1.resolve()).is_none());
                 assert!(block_on(res2.resolve()).is_none());
@@ -1577,7 +1413,7 @@ mod tests {
                 unbreak_seq(&mut log, &mut broken);
 
                 // Succeeding with a different set of tiles.
-                log.add_certificate();
+                log.add_leaf();
                 sequence(&mut log, &mut expected_size, broken, 1);
             }
         };
@@ -1747,26 +1583,6 @@ mod tests {
         }
     }
 
-    struct TestCacheBackend(HashMap<CacheKey, CacheValue>);
-
-    impl CacheRead for TestCacheBackend {
-        fn get_entry(&self, key: &CacheKey) -> Option<CacheValue> {
-            self.0.get(key).copied()
-        }
-    }
-
-    impl CacheWrite for TestCacheBackend {
-        async fn put_entries(&mut self, entries: &[(CacheKey, CacheValue)]) -> worker::Result<()> {
-            for (key, value) in entries {
-                if self.0.contains_key(key) {
-                    continue;
-                }
-                self.0.insert(*key, *value);
-            }
-            Ok(())
-        }
-    }
-
     #[derive(Copy, Clone)]
     enum LockBreakMode {
         None,
@@ -1832,13 +1648,11 @@ mod tests {
         sequence_state: Option<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
-        cache: TestCacheBackend,
         metrics: Metrics,
     }
 
     impl TestLog {
         fn new() -> Self {
-            let cache = TestCacheBackend(HashMap::new());
             let object = TestObjectBackend::new();
             let lock = TestLockBackend::new();
             let config = LogConfig {
@@ -1858,7 +1672,6 @@ mod tests {
                 sequence_state: None,
                 lock,
                 object,
-                cache,
                 metrics,
             }
         }
@@ -1869,71 +1682,35 @@ mod tests {
                 &self.config,
                 &self.object,
                 &self.lock,
-                &mut self.cache,
                 &self.metrics,
             ))
         }
-        fn sequence_start(&mut self) -> Pool {
-            let mut p = std::mem::take(&mut self.pool_state.current_pool);
-            self.pool_state.in_sequencing = std::mem::take(&mut p.by_hash);
-            self.pool_state.in_sequencing_done = Some(p.done.subscribe());
-            p
+        fn add_leaf(&mut self) -> AddLeafResult {
+            self.add_leaf_with_seed(rand::thread_rng().next_u64())
         }
-        fn sequence_finish(&mut self, p: &mut Pool) {
-            block_on(sequence_pool(
-                &mut self.sequence_state,
-                &self.config,
-                &self.object,
-                &self.lock,
-                &mut self.cache,
-                p,
-                &self.metrics,
-            ))
-            .unwrap();
-            self.pool_state.in_sequencing.clear();
+        fn add_leaf_with_seed(&mut self, seed: u64) -> AddLeafResult {
+            self.add_with_seed(seed)
         }
-        fn add_certificate(&mut self) -> AddLeafResult {
-            self.add_certificate_with_seed(rand::thread_rng().next_u64())
+        fn add(&mut self) -> AddLeafResult {
+            self.add_with_seed(rand::thread_rng().next_u64())
         }
-        fn add_certificate_with_seed(&mut self, seed: u64) -> AddLeafResult {
-            self.add_with_seed(false, seed)
-        }
-        fn add(&mut self, is_precert: bool) -> AddLeafResult {
-            self.add_with_seed(is_precert, rand::thread_rng().next_u64())
-        }
-        fn add_with_seed(&mut self, is_precert: bool, seed: u64) -> AddLeafResult {
+        fn add_with_seed(&mut self, seed: u64) -> AddLeafResult {
             let mut rng = SmallRng::seed_from_u64(seed);
-            let mut certificate = vec![0; rng.gen_range(8..12)];
-            rng.fill(&mut certificate[..]);
-            let mut pre_certificate: Vec<u8>;
-            let mut issuer_key_hash = [0; 32];
-            if is_precert {
-                pre_certificate = vec![0; rng.gen_range(1..5)];
-                rng.fill(&mut pre_certificate[..]);
-                rng.fill(&mut issuer_key_hash);
-            } else {
-                pre_certificate = Vec::new();
-            }
-            let issuers = CHAINS[rng.gen_range(0..CHAINS.len())];
+            let mut pubkey = vec![0; rng.gen_range(8..12)];
+            rng.fill(&mut pubkey[..]);
+            let evidence = UmbilicalEvidence(CHAINS[rng.gen_range(0..CHAINS.len())].concat());
             let leaf = LogEntry {
-                certificate,
-                pre_certificate,
-                is_precert,
-                issuer_key_hash,
-                chain_fingerprints: issuers.iter().map(|&x| Sha256::digest(x).into()).collect(),
-                leaf_index: 0,
-                timestamp: 0,
+                abridged_subject: AbridgedSubject::TLS(
+                    TLSSubject::new(SignatureScheme::from(0), &pubkey)
+                        .abridge()
+                        .unwrap(),
+                ),
+                claims: Claims::default(),
+                not_after: 1234,
+                extra_data: evidence.compress().unwrap(),
             };
 
-            block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
-
-            add_leaf_to_pool(
-                &mut self.pool_state,
-                self.config.pool_size,
-                &self.cache,
-                &leaf,
-            )
-            .0
+            add_leaf_to_pool(&mut self.pool_state, self.config.pool_size, leaf).0
         }
 
         fn check(&self, size: u64) -> u64 {
@@ -2017,28 +1794,11 @@ mod tests {
                 {
                     let entry = entry.unwrap();
                     let idx = n * u64::from(TILE_WIDTH) + i as u64;
-                    assert_eq!(entry.leaf_index, idx);
-                    assert!(entry.timestamp <= sth_timestamp);
+
                     assert_eq!(
                         leaf_hashes[usize::try_from(idx).unwrap()],
                         tlog_tiles::record_hash(&entry.merkle_tree_leaf())
                     );
-
-                    assert!(!entry.certificate.is_empty());
-                    if entry.is_precert {
-                        assert!(!entry.pre_certificate.is_empty());
-                        assert_ne!(entry.issuer_key_hash, [0; 32]);
-                    } else {
-                        assert!(entry.pre_certificate.is_empty());
-                        assert_eq!(entry.issuer_key_hash, [0; 32]);
-                    }
-
-                    for fp in entry.chain_fingerprints {
-                        let b = block_on(self.object.fetch(&format!("issuer/{}", hex::encode(fp))))
-                            .unwrap()
-                            .unwrap();
-                        assert_eq!(Sha256::digest(b).to_vec(), fp);
-                    }
                 }
             }
 

@@ -4,16 +4,17 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{
-    ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
-    CacheKey, CacheValue, ObjectBucket, CONFIG, ROOTS,
+    get_stub, load_public_bucket, load_signing_key, load_witness_key, mtcalog, now_millis, util,
+    LookupKey, ObjectBucket, CONFIG, ROOTS,
 };
-use base64::prelude::*;
-use log::{debug, warn, Level};
-use mtc_api::{AddChainRequest, GetRootsResponse, LogEntry, UnixTimestamp};
+use log::{warn, Level};
+use mtc_api::{
+    check_claims_valid_for_x509, unmarshal_exact, AbridgedSubject, AssertionRequest, Evidence,
+    EvidencePolicy, GetUmbilicalRootsResponse, LogEntry, Marshal, UnixTimestamp,
+};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
-use sha2::{Digest, Sha256};
 use std::str::FromStr;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -68,16 +69,16 @@ fn start() {
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let router = Router::new();
     router
-        .get("/cas/:ca/mtc/v1/get-umbilical-roots", |_req, ctx| {
+        .get("/logs/:ca/umbilical-roots", |_req, ctx| {
             let _name = valid_ca_name(&ctx)?;
-            Response::from_json(&GetRootsResponse {
+            Response::from_json(&GetUmbilicalRootsResponse {
                 certificates: mtc_api::certs_to_bytes(&ROOTS.certs).unwrap(),
             })
         })
-        .post_async("/cas/:ca/mtc/v1/add-assertion", |req, ctx| async move {
-            add_assertion(req, &ctx.env, valid_ca_name(&ctx)?, false).await
+        .post_async("/logs/:ca/add-assertion", |req, ctx| async move {
+            add_assertion(req, &ctx.env, valid_ca_name(&ctx)?).await
         })
-        .get("/cas/:ca/metadata", |_req, ctx| {
+        .get("/logs/:ca/metadata", |_req, ctx| {
             let name = valid_ca_name(&ctx)?;
             let params = &CONFIG.cas[name];
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
@@ -106,13 +107,13 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 },
             })
         })
-        .get_async("/cas/:ca/metrics", |_req, ctx| async move {
+        .get_async("/logs/:ca/metrics", |_req, ctx| async move {
             let name = valid_ca_name(&ctx)?;
             let stub = get_stub(&ctx.env, name, None, "SEQUENCER")?;
             stub.fetch_with_str(&format!("http://fake_url.com/metrics?name={name}"))
                 .await
         })
-        .get_async("/cas/:ca/*key", |_req, ctx| async move {
+        .get_async("/logs/:ca/*key", |_req, ctx| async move {
             let name = valid_ca_name(&ctx)?;
             let key = ctx.param("key").unwrap();
 
@@ -142,88 +143,87 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn add_assertion(
-    mut req: Request,
-    env: &Env,
-    name: &str,
-    expect_precert: bool,
-) -> Result<Response> {
+async fn add_assertion(mut req: Request, env: &Env, name: &str) -> Result<Response> {
     let params = &CONFIG.cas[name];
-    let req: AddChainRequest = req.json().await?;
+    let mut body: &[u8] = &req.bytes().await?;
+    let req: AssertionRequest =
+        unmarshal_exact(&mut body).map_err(|e| format!("failed to unmarshal: {e}"))?;
 
-    // TODO modify to validate assertion and evidence
-    let chain = match mtc_api::validate_chain(&req.chain, &ROOTS, None, None, expect_precert, true)
-    {
-        Ok(v) => v,
-        Err(e) => {
-            debug!("{name}: Bad request: {e}");
-            return Response::error("Bad request", 400);
+    let abridged_subject = req.assertion.subject.abridge().map_err(|e| e.to_string())?;
+    let not_before = now_millis();
+    let mut not_after = std::cmp::min(req.not_after, not_before + params.cert_lifetime);
+
+    let mut extra_data = Vec::new();
+    if let Some(policy) = &params.evidence_policy {
+        if let Ok(p) = EvidencePolicy::try_from(policy.as_str()) {
+            match p {
+                EvidencePolicy::Unset | EvidencePolicy::Empty => {}
+                EvidencePolicy::Umbilical => {
+                    let tls_subj = match &abridged_subject {
+                        AbridgedSubject::TLS(s) => s,
+                        AbridgedSubject::Unknown(_) => return Response::error("Bad request", 400),
+                    };
+
+                    let Some(umbilical) = req.evidence.0.iter().find_map(|evidence| {
+                        if let Evidence::Umbilical(umbilical) = evidence {
+                            Some(umbilical)
+                        } else {
+                            None
+                        }
+                    }) else {
+                        return Response::error("Bad request", 400);
+                    };
+                    let raw_chain = umbilical.raw_chain().map_err(|e| e.to_string())?;
+
+                    not_after = check_claims_valid_for_x509(
+                        &req.assertion.claims,
+                        tls_subj,
+                        not_before,
+                        not_after,
+                        &raw_chain,
+                        &ROOTS,
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    extra_data = umbilical.compress().map_err(|e| e.to_string())?;
+
+                    // Persist evidence issuers.
+                    let public_bucket = ObjectBucket {
+                        sequence_interval: params.sequence_interval,
+                        bucket: load_public_bucket(env, name)?,
+                        metrics: None,
+                    };
+                    mtcalog::upload_issuers(
+                        &public_bucket,
+                        &umbilical.raw_chain().unwrap()[1..],
+                        name,
+                    )
+                    .await?;
+                }
+            }
         }
-    };
-
-    // Retrieve the sequenced entry for this pending log entry by first checking the
-    // deduplication cache and then sending a request to the DO to sequence the entry.
-
-    // Convert chain to a pending log entry.
-    let mut entry = LogEntry {
-        certificate: chain.certificate,
-        is_precert: chain.is_precert,
-        issuer_key_hash: chain.issuer_key_hash,
-        chain_fingerprints: chain
-            .issuers
-            .iter()
-            .map(|issuer| Sha256::digest(issuer).into())
-            .collect(),
-        pre_certificate: chain.pre_certificate,
-        leaf_index: 0,
-        timestamp: 0,
-    };
-    let hash =
-        ctlog::compute_cache_hash(entry.is_precert, &entry.certificate, &entry.issuer_key_hash);
-    let signing_key = load_signing_key(env, name)?;
-
-    // Check if entry is cached and return right away if so.
-    let kv = load_cache_kv(env, name)?;
-    if let Some(v) = kv
-        .get(&BASE64_STANDARD.encode(hash))
-        .bytes_with_metadata::<CacheValue>()
-        .await?
-        .1
-    {
-        debug!("{name}: Entry is cached");
-        (entry.leaf_index, entry.timestamp) = v;
-        return Response::from_json(&mtc_api::signed_certificate_timestamp(signing_key, &entry));
     }
 
-    // Entry is not cached, so we need to sequence it.
-
-    // First persist issuers.
-    let public_bucket = ObjectBucket {
-        sequence_interval: params.sequence_interval,
-        bucket: load_public_bucket(env, name)?,
-        metrics: None,
+    let leaf = LogEntry {
+        abridged_subject,
+        claims: req.assertion.claims,
+        not_after,
+        extra_data,
     };
-    ctlog::upload_issuers(
-        &public_bucket,
-        &chain
-            .issuers
-            .iter()
-            .map(Vec::as_slice)
-            .collect::<Vec<&[u8]>>(),
-        name,
-    )
-    .await?;
 
     // Add leaf to the Batcher, which will submit the entry to the Sequencer,
     // wait for the entry to be sequenced, and return the response.
-    let shard_id = shard_id_from_cache_key(&hash);
+    let hash = leaf.lookup_key();
+    let shard_id = shard_id_from_lookup_key(&hash);
     let batcher_stub = get_stub(env, name, Some(shard_id), "BATCHER")?;
+    let mut body = Vec::new();
+    leaf.marshal(&mut body).map_err(|e| e.to_string())?;
     let mut response = batcher_stub
         .fetch_with_request(Request::new_with_init(
             &format!("http://fake_url.com/add_leaf?name={name}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&entry)?.into()),
+                body: Some(body.into()),
                 ..Default::default()
             },
         )?)
@@ -232,10 +232,8 @@ async fn add_assertion(
         // Return the response from the Batcher directly to the client.
         return Ok(response);
     }
-    let (leaf_index, timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
-    entry.leaf_index = leaf_index;
-    entry.timestamp = timestamp;
-    Response::from_json(&mtc_api::signed_certificate_timestamp(signing_key, &entry))
+    let (leaf_index, _timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
+    Response::from_json(&mtc_api::AssertionResponse { leaf_index })
 }
 
 fn valid_ca_name(ctx: &RouteContext<()>) -> Result<&str> {
@@ -250,7 +248,7 @@ fn valid_ca_name(ctx: &RouteContext<()>) -> Result<&str> {
     }
 }
 
-fn shard_id_from_cache_key(key: &CacheKey) -> u8 {
+fn shard_id_from_lookup_key(key: &LookupKey) -> u8 {
     key[0] % NUM_BATCHER_PROXIES
 }
 

@@ -1,5 +1,5 @@
 {
-    "name": "static-ct",
+    "name": "mtca",
     "main": "build/worker/shim.mjs",
     "compatibility_date": "2025-04-01",
     "workers_dev": false,
@@ -14,77 +14,14 @@
                 "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
             },
             "workers_dev": true,
-            "kv_namespaces": [
-                {
-                    "id": "3a23691917c844d59aea47fdf964850f", // REPLACE ME
-                    "binding": "cache_dev2025h1a"
-                },
-                {
-                    "id": "38045c90369140b091b3b68451dc6c29", // REPLACE ME
-                    "binding": "cache_dev2025h2a"
-                }
-            ],
             "r2_buckets": [
                 {
-                    "bucket_name": "static-ct-public-dev2025h1a",
-                    "binding": "public_dev2025h1a"
+                    "bucket_name": "mtca-public-dev0",
+                    "binding": "public_dev0"
                 },
                 {
-                    "bucket_name": "static-ct-public-dev2025h2a",
-                    "binding": "public_dev2025h2a"
-                }
-            ],
-            "durable_objects": {
-                "bindings": [
-                    {
-                        "name": "SEQUENCER",
-                        "class_name": "Sequencer"
-                    },
-                    {
-                        "name": "BATCHER",
-                        "class_name": "Batcher"
-                    }
-                ]
-            },
-            "migrations": [
-                {
-                    // tag should be unique for each entry
-                    "tag": "v1",
-                    "new_sqlite_classes": [
-                        "Sequencer",
-                        "Batcher"
-                    ]
-                }
-            ]
-        },
-        "cftest": {
-            "build": {
-                // Change '--release' to '--dev' to compile with debug symbols.
-                // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build && DEPLOY_ENV=cftest worker-build --release"
-            },
-            "route": {
-                "pattern": "static-ct.cloudflareresearch.com",
-                "custom_domain": true
-            },
-            "kv_namespaces": [
-                {
-                    "id": "252e2e33dda544ce9660ca16d48afd50",
-                    "binding": "cache_cftest2025h1a"
-                },
-                {
-                    "id": "b68bffb07b954aa09c6f4225ab00d0b7",
-                    "binding": "cache_cftest2025h2a"
-                }
-            ],
-            "r2_buckets": [
-                {
-                    "bucket_name": "static-ct-public-cftest2025h1a",
-                    "binding": "public_cftest2025h1a"
-                },
-                {
-                    "bucket_name": "static-ct-public-cftest2025h2a",
-                    "binding": "public_cftest2025h2a"
+                    "bucket_name": "mtca-public-dev1",
+                    "binding": "public_dev1"
                 }
             ],
             "durable_objects": {

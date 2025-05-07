@@ -6,10 +6,9 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{ctlog, get_stub, load_cache_kv, CacheKey, CacheValue, QueryParams};
-use base64::prelude::*;
-use futures_util::future::{join_all, select, Either};
-use mtc_api::LogEntry;
+use crate::{get_stub, LookupKey, QueryParams, SequenceMetadata};
+use futures_util::future::{select, Either};
+use mtc_api::{unmarshal_exact, LogEntry, Marshal};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -38,8 +37,8 @@ struct Batcher {
 // A batch of entries to be submitted to the Sequencer together.
 struct Batch {
     pending_leaves: Vec<LogEntry>,
-    by_hash: HashSet<CacheKey>,
-    done: Sender<HashMap<CacheKey, CacheValue>>,
+    by_hash: HashSet<LookupKey>,
+    done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
 
 impl Default for Batch {
@@ -68,12 +67,9 @@ impl DurableObject for Batcher {
         match req.path().as_str() {
             "/add_leaf" => {
                 let name = &req.query::<QueryParams>()?.name;
-                let entry: LogEntry = req.json().await?;
-                let key = ctlog::compute_cache_hash(
-                    entry.is_precert,
-                    &entry.certificate,
-                    &entry.issuer_key_hash,
-                );
+                let mut data: &[u8] = &req.bytes().await?;
+                let entry: LogEntry = unmarshal_exact(&mut data).map_err(|e| e.to_string())?;
+                let lookup_key = entry.lookup_key();
 
                 if self.in_flight >= MAX_IN_FLIGHT {
                     return Response::error("too many requests in flight", 429);
@@ -83,8 +79,8 @@ impl DurableObject for Batcher {
 
                 // Add entry to the current pending batch if it isn't already present.
                 // Rely on the Sequencer to deduplicate entries across batches.
-                if !self.batch.by_hash.contains(&key) {
-                    self.batch.by_hash.insert(key);
+                if !self.batch.by_hash.contains(&lookup_key) {
+                    self.batch.by_hash.insert(lookup_key);
                     self.batch.pending_leaves.push(entry);
                 }
 
@@ -107,7 +103,7 @@ impl DurableObject for Batcher {
                         }
                         Either::Right(((), batch_done)) => {
                             // Batch timeout reached; submit this entry's batch if no-one has already.
-                            if self.batch.by_hash.contains(&key) {
+                            if self.batch.by_hash.contains(&lookup_key) {
                                 if let Err(e) = self.submit_batch(name).await {
                                     log::warn!("{name} failed to submit timed-out batch: {e}");
                                 }
@@ -121,7 +117,7 @@ impl DurableObject for Batcher {
                     }
                 }
 
-                let resp = if let Some(value) = recv.borrow().get(&key) {
+                let resp = if let Some(value) = recv.borrow().get(&lookup_key) {
                     // The entry has been sequenced!
                     Response::from_json(&value)
                 } else {
@@ -155,19 +151,24 @@ impl Batcher {
             self.processed,
         );
 
+        let mut data = Vec::new();
+        for entry in batch.pending_leaves {
+            entry.marshal(&mut data).map_err(|e| e.to_string())?;
+        }
+
         // Submit the batch, and wait for it to be sequenced.
         let req = Request::new_with_init(
             &format!("http://fake_url.com/add_batch?name={name}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&batch.pending_leaves)?.into()),
+                body: Some(data.into()),
                 ..Default::default()
             },
         )?;
-        let sequenced_entries: HashMap<CacheKey, CacheValue> = stub
+        let sequenced_entries: HashMap<LookupKey, SequenceMetadata> = stub
             .fetch_with_request(req)
             .await?
-            .json::<Vec<(CacheKey, CacheValue)>>()
+            .json::<Vec<(LookupKey, SequenceMetadata)>>()
             .await?
             .into_iter()
             .collect();
@@ -175,19 +176,7 @@ impl Batcher {
         // Send the sequenced entries to channel subscribers.
         batch.done.send_modify(|v| v.clone_from(&sequenced_entries));
 
-        // Write sequenced entries to the long-term deduplication cache in Workers KV.
-        let kv = load_cache_kv(&self.env, name)?;
-        let futures = sequenced_entries
-            .into_iter()
-            .map(|(k, v)| {
-                kv.put(&BASE64_STANDARD.encode(k), "")
-                    .unwrap()
-                    .metadata::<CacheValue>(v)
-                    .unwrap()
-                    .execute()
-            })
-            .collect::<Vec<_>>();
-        join_all(futures).await;
+        // TODO will the batch get dropped immediately before subscribers get their responses?
         Ok(())
     }
 }

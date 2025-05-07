@@ -11,5 +11,4 @@ repository.workspace = true
 description = "Configuration for mtca_worker"
 
 [dependencies]
-chrono.workspace = true
 serde.workspace = true

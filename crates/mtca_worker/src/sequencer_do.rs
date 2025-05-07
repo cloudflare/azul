@@ -4,32 +4,27 @@
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
 use crate::{
-    ctlog, load_public_bucket, load_signing_key, load_witness_key,
+    load_public_bucket, load_signing_key, load_witness_key,
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
+    mtcalog,
     util::{self, now_millis},
-    DedupCache, MemoryCache, ObjectBucket, QueryParams, CONFIG, ROOTS,
+    ObjectBucket, QueryParams, CONFIG, ROOTS,
 };
-use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use mtc_api::LogEntry;
+use mtc_api::{LogEntry, Unmarshal};
+use mtcalog::{CreateError, LogConfig, PoolState, SequenceState};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-// The number of entries in the short-term deduplication cache.
-// This cache provides a secondary deduplication layer to bridge the gap in KV's eventual consistency.
-// It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
-const MEMORY_CACHE_SIZE: usize = 300_000;
-
 #[durable_object]
 struct Sequencer {
     do_state: State, // implements LockBackend
     env: Env,
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
-    cache: Option<DedupCache>,           // implements CacheRead, CacheWrite
     config: Option<LogConfig>,
     sequence_state: Option<SequenceState>,
     pool_state: PoolState,
@@ -52,7 +47,6 @@ impl DurableObject for Sequencer {
             do_state: state,
             env,
             public_bucket: None,
-            cache: None,
             config: None,
             sequence_state: None,
             pool_state: PoolState::default(),
@@ -81,8 +75,13 @@ impl DurableObject for Sequencer {
             }
             "/add_batch" => {
                 endpoint = "add_batch";
-                let pending_entries: Vec<LogEntry> = req.json().await?;
-                self.add_batch(&pending_entries).await
+                let mut pending_entries = Vec::new();
+                let mut batch: &[u8] = &req.bytes().await?;
+                while !batch.is_empty() {
+                    pending_entries
+                        .push(LogEntry::unmarshal(&mut batch).map_err(|e| e.to_string())?);
+                }
+                self.add_batch(pending_entries).await
             }
             _ => {
                 endpoint = "unknown";
@@ -115,13 +114,12 @@ impl DurableObject for Sequencer {
             .set_alarm(config.sequence_interval)
             .await?;
 
-        if let Err(e) = ctlog::sequence(
+        if let Err(e) = mtcalog::sequence(
             &mut self.pool_state,
             &mut self.sequence_state,
             config,
             self.public_bucket.as_ref().unwrap(),
             &self.do_state,
-            self.cache.as_mut().unwrap(),
             &self.metrics,
         )
         .await
@@ -169,17 +167,9 @@ impl Sequencer {
             bucket: load_public_bucket(&self.env, name)?,
             metrics: Some(ObjectMetrics::new(&self.metrics.registry)),
         });
-        self.cache = Some(DedupCache {
-            memory: MemoryCache::new(MEMORY_CACHE_SIZE),
-            storage: self.do_state.storage(),
-        });
-
-        if let Err(e) = self.cache.as_mut().unwrap().load().await {
-            warn!("Failed to load short-term dedup cache from DO storage: {e}");
-        };
 
         // Safe to unwrap here as the relevant fields were set above.
-        match ctlog::create_log(
+        match mtcalog::create_log(
             self.config.as_ref().unwrap(),
             self.public_bucket.as_ref().unwrap(),
             &self.do_state,
@@ -211,50 +201,33 @@ impl Sequencer {
     // Add a batch of entries, returning a Response with metadata for
     // successfully sequenced entries. Entries that fail to be added (e.g., due to rate limiting)
     // are omitted.
-    async fn add_batch(&mut self, pending_entries: &[LogEntry]) -> Result<Response> {
+    async fn add_batch(&mut self, pending_entries: Vec<LogEntry>) -> Result<Response> {
         // Safe to unwrap config here as the log must be initialized.
         let config = self.config.as_ref().unwrap();
         let mut futures = Vec::with_capacity(pending_entries.len());
+        let lookup_keys = pending_entries
+            .iter()
+            .map(LogEntry::lookup_key)
+            .collect::<Vec<_>>();
         for pending_entry in pending_entries {
-            let typ = if pending_entry.is_precert {
-                "add-pre-chain"
-            } else {
-                "add-chain"
-            };
-
-            let (add_leaf_result, source) = ctlog::add_leaf_to_pool(
-                &mut self.pool_state,
-                config.pool_size,
-                self.cache.as_ref().unwrap(),
-                pending_entry,
-            );
+            let (add_leaf_result, source) =
+                mtcalog::add_leaf_to_pool(&mut self.pool_state, config.pool_size, pending_entry);
 
             self.metrics
                 .entry_count
-                .with_label_values(&[typ, &source.to_string()])
+                .with_label_values(&[&source.to_string()])
                 .inc();
 
             futures.push(add_leaf_result.resolve());
         }
-        let cache_values = join_all(futures).await;
+        let sequence_values = join_all(futures).await;
 
-        // Zip the cache keys with the cache values, filtering out entries that
+        // Zip the sequence keys with the sequence values, filtering out entries that
         // were not sequenced (e.g., due to rate limiting).
-        let result = pending_entries
+        let result = lookup_keys
             .iter()
-            .zip(cache_values.iter())
-            .filter_map(|(entry, value)| {
-                value.as_ref().map(|v| {
-                    (
-                        ctlog::compute_cache_hash(
-                            entry.is_precert,
-                            &entry.certificate,
-                            &entry.issuer_key_hash,
-                        ),
-                        v,
-                    )
-                })
-            })
+            .zip(sequence_values.iter())
+            .filter_map(|(key, value)| value.as_ref().map(|v| (key, v)))
             .collect::<Vec<_>>();
 
         Response::from_json(&result)
