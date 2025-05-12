@@ -25,6 +25,7 @@ use std::sync::{LazyLock, OnceLock};
 use util::now_millis;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+use x509_verify::x509_cert::Certificate;
 
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
@@ -34,7 +35,7 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 
 static ROOTS: LazyLock<CertPool> = LazyLock::new(|| {
     CertPool::new(
-        static_ct_api::load_pem_chain(include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem")))
+        Certificate::load_pem_chain(include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem")))
             .expect("Failed to parse roots"),
     )
     .unwrap()
