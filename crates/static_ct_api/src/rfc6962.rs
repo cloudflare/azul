@@ -391,15 +391,6 @@ pub fn certs_to_bytes(certs: &[Certificate]) -> Result<Vec<Vec<u8>>, DerError> {
         .collect::<Result<_, _>>()
 }
 
-/// Loads a PEM chain from the passed input.
-///
-/// # Errors
-///
-/// Returns an error if any of the certificates cannot be decoded.
-pub fn load_pem_chain(input: &[u8]) -> Result<Vec<Certificate>, DerError> {
-    Certificate::load_pem_chain(input)
-}
-
 /// A `CertPool` is a set of certificates.
 pub struct CertPool {
     by_name: HashMap<String, Vec<usize>>,
@@ -458,6 +449,7 @@ impl CertPool {
 mod tests {
     use super::*;
     use chrono::prelude::*;
+    use x509_verify::x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
@@ -480,14 +472,14 @@ mod tests {
 
     test_is_precert!(
         valid_precert,
-        &load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0],
+        &Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0],
         true,
         false
     );
 
     test_is_precert!(
         valid_cert,
-        &load_pem_chain(include_bytes!("../tests/ca-cert.pem")).unwrap()[0],
+        &Certificate::load_pem_chain(include_bytes!("../tests/ca-cert.pem")).unwrap()[0],
         false,
         false
     );
@@ -495,7 +487,8 @@ mod tests {
     test_is_precert!(
         remove_exts_from_precert,
         wipe_extensions(
-            &mut load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0]
+            &mut Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()
+                [0]
         ),
         false,
         false
@@ -504,7 +497,8 @@ mod tests {
     test_is_precert!(
         poison_non_critical,
         make_poison_non_critical(
-            &mut load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0]
+            &mut Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()
+                [0]
         ),
         false,
         true
@@ -513,7 +507,8 @@ mod tests {
     test_is_precert!(
         poison_non_null,
         make_poison_non_null(
-            &mut load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0]
+            &mut Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()
+                [0]
         ),
         false,
         true
@@ -525,11 +520,11 @@ mod tests {
             fn $name() {
                 let mut roots = Vec::new();
                 $(
-                    roots.append(&mut load_pem_chain(include_bytes!($root_file)).unwrap());
+                    roots.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
                 )*
                 let mut chain = Vec::new();
                 $(
-                    chain.append(&mut load_pem_chain(include_bytes!($chain_file)).unwrap());
+                    chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
                 )*
 
                 assert_eq!(validate_chain(
@@ -628,7 +623,8 @@ mod tests {
 
     #[test]
     fn test_build_precert_tbs() {
-        let precert_chain = load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
+        let precert_chain =
+            Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
         let precert = &precert_chain[0].tbs_certificate;
         let pre_issuer = &precert_chain[1].tbs_certificate;
 
