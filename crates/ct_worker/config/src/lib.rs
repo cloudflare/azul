@@ -27,18 +27,18 @@ pub struct LogParams {
     pub submission_url: String,
     pub temporal_interval: TemporalInterval,
     pub location_hint: Option<String>,
-    #[serde(default = "default_pool_size")]
+    #[serde(default = "default_pool_size_seconds")]
     pub pool_size: usize,
-    #[serde(default = "default_sequence_interval")]
+    #[serde(default = "default_sequence_interval_seconds")]
     pub sequence_interval: u64,
 }
 
 // Limit on the number of entries per batch. Tune this parameter to avoid running into various size limitations.
 // For instance, unexpectedly large leaves (e.g., with PQ signatures) could cause us to exceed the 128MB Workers memory limit. Storing 4000 10KB certificates is 40MB.
-fn default_pool_size() -> usize {
+fn default_pool_size_seconds() -> usize {
     4000
 }
 
-fn default_sequence_interval() -> u64 {
+fn default_sequence_interval_seconds() -> u64 {
     1
 }
