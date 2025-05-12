@@ -457,6 +457,7 @@ dependencies = [
  "tokio",
  "url",
  "worker",
+ "x509-verify",
 ]
 
 [[package]]
