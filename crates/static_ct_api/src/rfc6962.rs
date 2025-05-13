@@ -20,20 +20,18 @@
 //! - [cert_checker.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker.go)
 //! - [cert_checker_test.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker_test.go)
 
+use crate::{Error, Result};
 use crate::{UnixTimestamp, ValidatedChain};
 use const_oid::{
     db::rfc5280::{ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_KP_SERVER_AUTH},
     db::rfc6962::{CT_PRECERT_POISON, CT_PRECERT_SIGNING_CERT},
     AssociatedOid, ObjectIdentifier,
 };
-use der::{
-    asn1::{Null, OctetString},
-    Error as DerError,
-};
+use der::asn1::{Null, OctetString};
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
+use std::result::Result as StdResult;
 use x509_util::CertPool;
 use x509_verify::{
     x509_cert::{
@@ -93,12 +91,12 @@ pub fn validate_chain(
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<ValidatedChain, ValidationError> {
+) -> Result<ValidatedChain> {
     // First make sure the cert parses as X.509.
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
         Some(v) => Certificate::from_der(v)?,
-        None => return Err(ValidationError::EmptyChain),
+        None => return Err(Error::EmptyChain),
     };
 
     // Check whether the expiry date is within the acceptable range for this log shard.
@@ -109,17 +107,17 @@ pub fn validate_chain(
             .to_unix_duration()
             .as_millis(),
     )
-    .map_err(|_| ValidationError::InvalidLeaf)?;
+    .map_err(|_| Error::InvalidLeaf)?;
     if not_after_start.is_some_and(|start| start > not_after)
         || not_after_end.is_some_and(|end| end <= not_after)
     {
-        return Err(ValidationError::InvalidLeaf);
+        return Err(Error::InvalidLeaf);
     }
 
     // Check if the CT poison extension is present. If present, it must be critical.
     let is_precert = is_precert(&leaf)?;
     if is_precert != expect_precert {
-        return Err(ValidationError::EndpointMismatch { is_precert });
+        return Err(Error::EndpointMismatch { is_precert });
     }
 
     // Check that Server Auth EKU is present. Chrome's CT policy lists this as one acceptable
@@ -130,7 +128,7 @@ pub fn validate_chain(
             .get::<ExtendedKeyUsage>()?
             .is_some_and(|(_, eku)| eku.0.iter().any(|v| *v == ID_KP_SERVER_AUTH))
     {
-        return Err(ValidationError::InvalidLeaf);
+        return Err(Error::InvalidLeaf);
     }
 
     // We can now do the verification. Use fairly lax options for verification, as
@@ -138,7 +136,7 @@ pub fn validate_chain(
 
     let mut intermediates: Vec<Certificate> = iter
         .map(|v| Certificate::from_der(v))
-        .collect::<Result<_, _>>()?;
+        .collect::<StdResult<_, _>>()?;
 
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
@@ -146,7 +144,7 @@ pub fn validate_chain(
     let mut has_precert_signing_cert = false;
     for (idx, ca) in intermediates.iter().enumerate() {
         if !is_link_valid(to_verify, ca) {
-            return Err(ValidationError::InvalidLinkInChain);
+            return Err(Error::InvalidLinkInChain);
         }
         to_verify = ca;
 
@@ -160,7 +158,7 @@ pub fn validate_chain(
             .get::<BasicConstraints>()?
             .is_some_and(|(_, bc)| !bc.ca)
         {
-            return Err(ValidationError::IntermediateMissingCABasicConstraint);
+            return Err(Error::IntermediateMissingCABasicConstraint);
         }
     }
 
@@ -180,14 +178,14 @@ pub fn validate_chain(
         }
     }
     if !found {
-        return Err(ValidationError::NoPathToTrustedRoot { to_verify_issuer });
+        return Err(Error::NoPathToTrustedRoot { to_verify_issuer });
     }
 
     // Return a [ValidatedChain] constructed from the chain.
     let issuers = intermediates
         .iter()
         .map(der::Encode::to_der)
-        .collect::<Result<_, _>>()?;
+        .collect::<StdResult<_, _>>()?;
     let issuer_key_hash: [u8; 32];
     let pre_certificate: Vec<u8>;
     let certificate: Vec<u8>;
@@ -196,7 +194,7 @@ pub fn validate_chain(
         if has_precert_signing_cert {
             pre_issuer = Some(&intermediates[0].tbs_certificate);
             if intermediates.len() < 2 {
-                return Err(ValidationError::MissingPrecertSigningCertificateIssuer);
+                return Err(Error::MissingPrecertSigningCertificateIssuer);
             }
             issuer_key_hash = Sha256::digest(
                 intermediates[1]
@@ -231,31 +229,6 @@ pub fn validate_chain(
     })
 }
 
-/// An error that can occur when validating a certificate chain.
-#[derive(Error, Debug)]
-pub enum ValidationError {
-    #[error("empty chain")]
-    EmptyChain,
-    #[error("invalid DER")]
-    InvalidDER(#[from] DerError),
-    #[error("invalid leaf certificate")]
-    InvalidLeaf,
-    #[error("intermediate missing cA basic constraint")]
-    IntermediateMissingCABasicConstraint,
-    #[error("invalid link in chain")]
-    InvalidLinkInChain,
-    #[error("issuer not in root store: {to_verify_issuer}")]
-    NoPathToTrustedRoot { to_verify_issuer: String },
-    #[error("CT poison extension is not critical or invalid")]
-    InvalidCTPoison,
-    #[error("missing precertificate signing certificate issuer")]
-    MissingPrecertSigningCertificateIssuer,
-    #[error(
-        "{}certificate submitted to add-{}chain", if *.is_precert { "pre-" } else { "final " }, if *.is_precert { "" } else { "pre-" }
-    )]
-    EndpointMismatch { is_precert: bool },
-}
-
 /// Precertificate poison extension that can be decoded with [`TbsCertificate::get`].
 #[derive(Debug)]
 struct CTPrecertPoison(Null);
@@ -282,16 +255,16 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
 }
 
 /// Returns whether or not the certificate contains the precertificate poison extension.
-fn is_precert(cert: &Certificate) -> Result<bool, ValidationError> {
+fn is_precert(cert: &Certificate) -> Result<bool> {
     match cert.tbs_certificate.get::<CTPrecertPoison>()? {
         Some((true, _)) => Ok(true),
-        Some((false, _)) => Err(ValidationError::InvalidCTPoison),
+        Some((false, _)) => Err(Error::InvalidCTPoison),
         None => Ok(false),
     }
 }
 
 /// Returns whether or not the certificate contains the `CertificateTransparency` extended key usage.
-fn is_pre_issuer(cert: &Certificate) -> Result<bool, ValidationError> {
+fn is_pre_issuer(cert: &Certificate) -> Result<bool> {
     match cert.tbs_certificate.get::<ExtendedKeyUsage>()? {
         Some((_, eku)) => {
             for usage in eku.0 {
@@ -320,22 +293,16 @@ fn is_pre_issuer(cert: &Certificate) -> Result<bool, ValidationError> {
 ///   - The precert's `Issuer` is changed to the Issuer of the intermediate
 ///   - The precert's `AuthorityKeyId` is changed to the `AuthorityKeyId` of the
 ///     intermediate.
-fn build_precert_tbs(
-    tbs: &TbsCertificate,
-    issuer_opt: Option<&TbsCertificate>,
-) -> Result<Vec<u8>, ValidationError> {
+fn build_precert_tbs(tbs: &TbsCertificate, issuer_opt: Option<&TbsCertificate>) -> Result<Vec<u8>> {
     let mut tbs = tbs.clone();
 
-    let exts = tbs
-        .extensions
-        .as_mut()
-        .ok_or(ValidationError::InvalidCTPoison)?;
+    let exts = tbs.extensions.as_mut().ok_or(Error::InvalidCTPoison)?;
 
     // Remove CT poison extension.
     let ct_poison_idx = exts
         .iter()
         .position(|v| v.extn_id == CT_PRECERT_POISON)
-        .ok_or(ValidationError::InvalidCTPoison)?;
+        .ok_or(Error::InvalidCTPoison)?;
     exts.remove(ct_poison_idx);
 
     if let Some(issuer) = issuer_opt {
