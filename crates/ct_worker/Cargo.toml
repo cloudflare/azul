@@ -63,7 +63,7 @@ serde-wasm-bindgen = "0.6.5"
 serde.workspace = true
 sha2.workspace = true
 signed_note = "0.2.0"
-static_ct_api = "0.2.0"
+static_ct_api = { path = "../static_ct_api" } # TODO switch back after next release
 thiserror.workspace = true
 tlog_tiles = "0.2.0"
 tokio = { version = "1", features = ["sync"] }

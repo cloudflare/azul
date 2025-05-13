@@ -5,7 +5,7 @@
 
 use crate::{
     ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
-    LookupKey, SequenceMetadata, ObjectBucket, CONFIG, ROOTS,
+    LookupKey, ObjectBucket, SequenceMetadata, CONFIG, ROOTS,
 };
 use base64::prelude::*;
 use config::TemporalInterval;
@@ -205,14 +205,13 @@ async fn add_chain_or_pre_chain(
         leaf_index: 0,
         timestamp: 0,
     };
-    let hash =
-        ctlog::compute_cache_hash(entry.is_precert, &entry.certificate, &entry.issuer_key_hash);
+    let lookup_key = entry.lookup_key();
     let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
     if let Some(v) = kv
-        .get(&BASE64_STANDARD.encode(hash))
+        .get(&BASE64_STANDARD.encode(lookup_key))
         .bytes_with_metadata::<SequenceMetadata>()
         .await?
         .1
@@ -246,7 +245,7 @@ async fn add_chain_or_pre_chain(
 
     // Add leaf to the Batcher, which will submit the entry to the Sequencer,
     // wait for the entry to be sequenced, and return the response.
-    let shard_id = shard_id_from_cache_key(&hash);
+    let shard_id = shard_id_from_lookup_key(&lookup_key);
     let batcher_stub = get_stub(env, name, Some(shard_id), "BATCHER")?;
     let mut response = batcher_stub
         .fetch_with_request(Request::new_with_init(
@@ -283,7 +282,7 @@ fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
     }
 }
 
-fn shard_id_from_cache_key(key: &LookupKey) -> u8 {
+fn shard_id_from_lookup_key(key: &LookupKey) -> u8 {
     key[0] % NUM_BATCHER_PROXIES
 }
 

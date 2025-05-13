@@ -451,7 +451,7 @@ dependencies = [
  "serde_with",
  "sha2",
  "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "static_ct_api 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "static_ct_api",
  "thiserror",
  "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
@@ -2251,30 +2251,6 @@ checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 [[package]]
 name = "static_ct_api"
 version = "0.2.0"
-dependencies = [
- "base64 0.21.7",
- "byteorder",
- "chrono",
- "const-oid",
- "der",
- "ed25519-dalek",
- "p256",
- "rand",
- "serde",
- "serde_with",
- "sha2",
- "signature",
- "signed_note 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "thiserror",
- "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "x509-verify",
-]
-
-[[package]]
-name = "static_ct_api"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "017c1730eec9da316f08623d5ebbef8924ebbc436808f07c308865515e85d699"
 dependencies = [
  "base64 0.21.7",
  "byteorder",

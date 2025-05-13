@@ -253,18 +253,7 @@ impl Sequencer {
         let result = pending_entries
             .iter()
             .zip(cache_values.iter())
-            .filter_map(|(entry, value)| {
-                value.as_ref().map(|v| {
-                    (
-                        ctlog::compute_cache_hash(
-                            entry.is_precert,
-                            &entry.certificate,
-                            &entry.issuer_key_hash,
-                        ),
-                        v,
-                    )
-                })
-            })
+            .filter_map(|(entry, value)| value.as_ref().map(|v| (entry.lookup_key(), v)))
             .collect::<Vec<_>>();
 
         Response::from_json(&result)
