@@ -94,9 +94,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let name = valid_log_name(&ctx)?;
             let params = &CONFIG.logs[name];
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-            let log_id = &static_ct_api::log_id_from_key(verifying_key)
-                .map_err(|e| e.to_string())?
-                .to_vec();
+            let log_id = &static_ct_api::log_id_from_key(verifying_key);
             let key = verifying_key
                 .to_public_key_der()
                 .map_err(|e| e.to_string())?;

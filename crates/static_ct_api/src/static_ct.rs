@@ -89,7 +89,7 @@
 //! }));
 //! ```
 
-use crate::AddChainResponse;
+use crate::{AddChainResponse, Error, Result};
 use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey as Ed25519VerifyingKey};
@@ -106,12 +106,12 @@ use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, NoteError as SignedNoteError, Signature as NoteSignature, Signer as NoteSigner,
-    StandardVerifier, Verifier as NoteVerifier, VerifierError, VerifierList,
+    Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
+    Verifier as NoteVerifier, VerifierError, VerifierList,
 };
 use std::io::{Cursor, Read};
-use thiserror::Error;
-use tlog_tiles::{Checkpoint, Error as TlogError, Hash, HashReader, Tile};
+use std::result::Result as StdResult;
+use tlog_tiles::{Checkpoint, Hash, HashReader, Tile};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
@@ -162,9 +162,13 @@ pub fn tile_path(t: &Tile) -> String {
 /// # Errors
 ///
 /// Returns an error if decoding the verifying key fails.
-pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], x509_verify::spki::Error> {
-    let pkix = vkey.to_public_key_der()?;
-    Ok(Sha256::digest(&pkix).into())
+///
+/// # Panics
+///
+/// Panics if decoding the verifying key fails.
+pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> [u8; 32] {
+    let pkix = vkey.to_public_key_der().unwrap();
+    Sha256::digest(&pkix).into()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -309,7 +313,7 @@ pub struct TileIterator {
 }
 
 impl std::iter::Iterator for TileIterator {
-    type Item = Result<LogEntry, TileParseError>;
+    type Item = Result<LogEntry>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == self.size {
             return None;
@@ -317,18 +321,6 @@ impl std::iter::Iterator for TileIterator {
         self.count += 1;
         Some(self.parse_next())
     }
-}
-
-#[derive(Error, Debug)]
-pub enum TileParseError {
-    #[error("unknown type")]
-    UnknownType,
-    #[error("unexpected extension type")]
-    UnexpectedExtension,
-    #[error("trailing data")]
-    TrailingData,
-    #[error(transparent)]
-    IOError(#[from] std::io::Error),
 }
 
 impl TileIterator {
@@ -343,7 +335,7 @@ impl TileIterator {
     }
 
     /// Parse the next [`LogEntry`] from the internal buffer.
-    fn parse_next(&mut self) -> Result<LogEntry, TileParseError> {
+    fn parse_next(&mut self) -> Result<LogEntry> {
         // https://c2sp.org/static-ct-api#log-entries
         // struct {
         //     TimestampedEntry timestamped_entry;
@@ -379,18 +371,18 @@ impl TileIterator {
                 fingerprints = self.s.read_length_prefixed(2)?;
             }
             _ => {
-                return Err(TileParseError::UnknownType);
+                return Err(Error::UnknownType);
             }
         }
 
         let mut extensions = Cursor::new(extensions);
         if extensions.read_u8()? != 0 {
-            return Err(TileParseError::UnexpectedExtension);
+            return Err(Error::UnexpectedExtension);
         }
         let extension_data = extensions.read_length_prefixed(2)?;
         entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
         if extensions.position() != extensions.get_ref().len() as u64 {
-            return Err(TileParseError::TrailingData);
+            return Err(Error::TrailingData);
         }
 
         let mut fingerprints = Cursor::new(fingerprints);
@@ -428,7 +420,7 @@ impl TreeWithTimestamp {
         size: u64,
         r: &R,
         time: UnixTimestamp,
-    ) -> Result<TreeWithTimestamp, TlogError> {
+    ) -> Result<TreeWithTimestamp> {
         let hash = tlog_tiles::tree_hash(size, r)?;
         Ok(Self { size, hash, time })
     }
@@ -463,7 +455,7 @@ impl TreeWithTimestamp {
         signing_key: &EcdsaSigningKey,
         witness_key: &Ed25519SigningKey,
         rng: &mut impl Rng,
-    ) -> Result<Vec<u8>, CheckpointError> {
+    ) -> Result<Vec<u8>> {
         let sth_bytes = serialize_sth_signature_input(self.time, self.size, &self.hash);
 
         let tree_head_signature = sign(signing_key, &sth_bytes);
@@ -488,7 +480,7 @@ impl TreeWithTimestamp {
         };
 
         let Ok(checkpoint) = Checkpoint::new(origin, self.size, self.hash, "") else {
-            return Err(CheckpointError::Malformed);
+            return Err(Error::Malformed);
         };
         let mut signed_note =
             Note::new(&checkpoint.to_bytes(), &gen_grease_signatures(origin, rng))?;
@@ -511,7 +503,7 @@ impl NoteSigner for InjectedSigner {
     fn key_id(&self) -> u32 {
         self.v.key_id()
     }
-    fn sign(&self, _msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
+    fn sign(&self, _msg: &[u8]) -> StdResult<Vec<u8>, signature::Error> {
         Ok(self.sig.clone())
     }
 }
@@ -524,7 +516,7 @@ struct Ed25519Signer<'a> {
 
 impl<'a> Ed25519Signer<'a> {
     /// Returns a new `Ed25519Signer`.
-    fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self, VerifierError> {
+    fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self> {
         let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
         let v = StandardVerifier::new(&vk)?;
         Ok(Self { v: Box::new(v), k })
@@ -538,7 +530,7 @@ impl NoteSigner for Ed25519Signer<'_> {
     fn key_id(&self) -> u32 {
         self.v.key_id()
     }
-    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
+    fn sign(&self, msg: &[u8]) -> StdResult<Vec<u8>, signature::Error> {
         let sig = self.k.try_sign(msg)?;
         Ok(sig.to_vec())
     }
@@ -549,19 +541,6 @@ impl NoteSigner for Ed25519Signer<'_> {
 #[derive(Default)]
 pub struct Extensions {
     pub leaf_index: u64,
-}
-
-/// An error returned when opening a checkpoint.
-#[derive(Error, Debug)]
-pub enum ExtensionError {
-    #[error("invalid length")]
-    InvalidLength,
-    #[error("trailing data")]
-    TrailingData,
-    #[error("missing leaf_index extension")]
-    MissingLeafIndex,
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
 }
 
 impl Extensions {
@@ -600,7 +579,7 @@ impl Extensions {
     ///
     /// Returns an error if the `leaf_index` extension is missing
     /// or the extension is otherwise malformed.
-    pub fn from_bytes(ext_bytes: &[u8]) -> Result<Self, ExtensionError> {
+    pub fn from_bytes(ext_bytes: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(ext_bytes);
         let mut e = Extensions::default();
 
@@ -609,7 +588,7 @@ impl Extensions {
             let length = cursor.read_u16::<BigEndian>()? as usize;
 
             if cursor.position() + length as u64 > ext_bytes.len() as u64 {
-                return Err(ExtensionError::InvalidLength);
+                return Err(Error::InvalidLength);
             }
 
             let mut extension = vec![0; length];
@@ -620,36 +599,15 @@ impl Extensions {
                 e.leaf_index = extension_cursor.read_uint::<BigEndian>(5)?;
 
                 if extension_cursor.position() != extension.len() as u64 {
-                    return Err(ExtensionError::TrailingData);
+                    return Err(Error::TrailingData);
                 }
 
                 return Ok(e);
             }
         }
 
-        Err(ExtensionError::MissingLeafIndex)
+        Err(Error::MissingLeafIndex)
     }
-}
-
-/// An error returned when opening or signing a checkpoint.
-#[derive(Error, Debug)]
-pub enum CheckpointError {
-    #[error("missing verifier signature")]
-    MissingVerifierSignature,
-    #[error("malformed")]
-    Malformed,
-    #[error("timestamp is after current time")]
-    InvalidTimestamp,
-    #[error("checkpoint origin does not match")]
-    OriginMismatch,
-    #[error("unexpected extension")]
-    UnexpectedExtension,
-    #[error(transparent)]
-    VerifierError(#[from] VerifierError),
-    #[error(transparent)]
-    NoteError(#[from] SignedNoteError),
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
 }
 
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a [Checkpoint] and its timestamp.
@@ -663,7 +621,7 @@ pub fn open_checkpoint(
     witness_vkey: &Ed25519VerifyingKey,
     current_time: UnixTimestamp,
     b: &[u8],
-) -> Result<(Checkpoint, UnixTimestamp), CheckpointError> {
+) -> Result<(Checkpoint, UnixTimestamp)> {
     let v1 = RFC6962Verifier::new(origin, rfc6962_vkey)?;
     let vk = signed_note::new_ed25519_verifier_key(origin, witness_vkey);
     let v2 = StandardVerifier::new(&vk)?;
@@ -689,19 +647,19 @@ pub fn open_checkpoint(
         }
     }
     if !v1_found || !v2_found {
-        return Err(CheckpointError::MissingVerifierSignature);
+        return Err(Error::MissingVerifierSignature);
     }
     let Ok(checkpoint) = Checkpoint::from_bytes(n.text()) else {
-        return Err(CheckpointError::Malformed);
+        return Err(Error::Malformed);
     };
     if current_time < timestamp {
-        return Err(CheckpointError::InvalidTimestamp);
+        return Err(Error::InvalidTimestamp);
     }
     if checkpoint.origin() != origin {
-        return Err(CheckpointError::OriginMismatch);
+        return Err(Error::OriginMismatch);
     }
     if !checkpoint.extension().is_empty() {
-        return Err(CheckpointError::UnexpectedExtension);
+        return Err(Error::UnexpectedExtension);
     }
 
     Ok((checkpoint, timestamp))
@@ -723,7 +681,7 @@ impl RFC6962Verifier {
     /// # Errors
     ///
     /// Returns an error if the key name is invalid or if there are encoding issues.
-    pub fn new(name: &str, verifying_key: &EcdsaVerifyingKey) -> Result<Self, VerifierError> {
+    pub fn new(name: &str, verifying_key: &EcdsaVerifyingKey) -> StdResult<Self, VerifierError> {
         if !signed_note::is_key_name_valid(name) {
             return Err(VerifierError::Format);
         }
@@ -732,7 +690,7 @@ impl RFC6962Verifier {
             .to_public_key_der()
             .map_err(|_| VerifierError::Format)?
             .to_vec();
-        let key_id = Sha256::digest(&pkix).to_vec();
+        let key_id = Sha256::digest(&pkix);
 
         let id = signed_note::key_id(
             name,
@@ -815,9 +773,7 @@ pub fn signed_certificate_timestamp(
     ];
     buffer.extend(entry.marshal_timestamped_entry());
     let signature = sign(signing_key, &buffer);
-    let id = log_id_from_key(signing_key.verifying_key())
-        .unwrap()
-        .to_vec();
+    let id = log_id_from_key(signing_key.verifying_key()).to_vec();
 
     AddChainResponse {
         sct_version: 0, // sct_version = v1 (0)
@@ -910,7 +866,7 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 /// # Errors
 ///
 /// Returns an error if the note signature is not at least eight bytes long.
-pub fn rfc6962_signature_timestamp(sig: &NoteSignature) -> Result<u64, std::io::Error> {
+pub fn rfc6962_signature_timestamp(sig: &NoteSignature) -> Result<u64> {
     let timestamp = sig.signature().read_u64::<BigEndian>()?;
     Ok(timestamp)
 }
