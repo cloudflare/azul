@@ -25,7 +25,6 @@ crate-type = ["rlib"]
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
-const-oid.workspace = true
 der.workspace = true
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 length_prefixed.workspace = true

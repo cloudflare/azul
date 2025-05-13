@@ -22,12 +22,14 @@
 
 use crate::StaticCTError;
 use crate::{UnixTimestamp, ValidatedChain};
-use const_oid::{
-    db::rfc5280::{ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_KP_SERVER_AUTH},
-    db::rfc6962::{CT_PRECERT_POISON, CT_PRECERT_SIGNING_CERT},
-    AssociatedOid, ObjectIdentifier,
+use der::{
+    asn1::{Null, OctetString},
+    oid::{
+        db::rfc5280::{ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_KP_SERVER_AUTH},
+        db::rfc6962::{CT_PRECERT_POISON, CT_PRECERT_SIGNING_CERT},
+        AssociatedOid, ObjectIdentifier,
+    },
 };
-use der::asn1::{Null, OctetString};
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
