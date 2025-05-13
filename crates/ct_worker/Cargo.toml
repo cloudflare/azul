@@ -29,47 +29,47 @@ crate-type = ["cdylib"]
 [build-dependencies]
 chrono.workspace = true
 config = { path = "./config", package = "ct_worker_config" }
-jsonschema = "0.26.2"
+jsonschema.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-url = "2.5.4"
+url.workspace = true
 x509-verify.workspace = true
 
 [dev-dependencies]
 rand = { workspace = true, features = ["small_rng"]}
-itertools = "0.13.0"
-parking_lot = "0.11"
-futures-executor = "0.3.31"
+itertools.workspace = true
+parking_lot.workspace = true
+futures-executor.workspace = true
 
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
 byteorder.workspace = true
 config = { path = "./config", package = "ct_worker_config" }
-console_error_panic_hook = "0.1.1"
-console_log = { version = "1.0" }
-ed25519-dalek = { workspace = true, features = ["pkcs8"] }
-futures-util = "0.3.31"
-getrandom = { version = "0.2", features = ["js"] }
-hex = "0.4"
-log = { version = "0.4"}
-p256 = { version = "0.13", features = ["ecdsa"] }
-prometheus = "0.13.4"
+console_error_panic_hook.workspace = true
+console_log.workspace = true
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+log.workspace = true
+p256.workspace = true
+prometheus.workspace = true
 rand.workspace = true
-serde_bytes = "0.11"
+serde-wasm-bindgen.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
-serde-wasm-bindgen = "0.6.5"
-serde.workspace = true
 sha2.workspace = true
-signed_note = "0.2.0"
-static_ct_api = { path = "../static_ct_api" } # TODO switch back after next release
+signed_note.workspace = true
+static_ct_api.workspace = true
 thiserror.workspace = true
-tlog_tiles = "0.2.0"
-tokio = { version = "1", features = ["sync"] }
-worker = { version = "0.5.0" }
-x509_util = { path = "../x509_util" }
+tlog_tiles.workspace = true
+tokio.workspace = true
+worker.workspace = true
 x509-verify.workspace = true
+x509_util.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }
