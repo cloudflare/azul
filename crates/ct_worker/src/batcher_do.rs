@@ -6,7 +6,7 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{ctlog, get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
+use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use static_ct_api::LogEntry;
@@ -69,11 +69,7 @@ impl DurableObject for Batcher {
             "/add_leaf" => {
                 let name = &req.query::<QueryParams>()?.name;
                 let entry: LogEntry = req.json().await?;
-                let key = ctlog::compute_cache_hash(
-                    entry.is_precert,
-                    &entry.certificate,
-                    &entry.issuer_key_hash,
-                );
+                let key = entry.lookup_key();
 
                 if self.in_flight >= MAX_IN_FLIGHT {
                     return Response::error("too many requests in flight", 429);

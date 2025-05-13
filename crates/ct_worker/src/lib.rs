@@ -18,7 +18,7 @@ use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
-use static_ct_api::{CertPool, UnixTimestamp};
+use static_ct_api::{CertPool, LookupKey, UnixTimestamp};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{LazyLock, OnceLock};
@@ -112,7 +112,6 @@ struct QueryParams {
     name: String,
 }
 
-type LookupKey = [u8; 16];
 type SequenceMetadata = (u64, UnixTimestamp);
 
 trait CacheWrite {

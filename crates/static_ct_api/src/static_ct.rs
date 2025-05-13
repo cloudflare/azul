@@ -197,6 +197,8 @@ pub struct LogEntry {
     pub timestamp: UnixTimestamp,
 }
 
+pub type LookupKey = [u8; 16];
+
 impl LogEntry {
     /// Returns a marshaled RFC 6962 `TimestampedEntry`.
     fn marshal_timestamped_entry(&self) -> Vec<u8> {
@@ -252,6 +254,36 @@ impl LogEntry {
         write_length_prefixed(&mut buffer, &self.chain_fingerprints.concat(), 2).unwrap();
 
         buffer
+    }
+
+    /// Compute the cache key for a log entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are errors writing to an internal buffer.
+    pub fn lookup_key(&self) -> LookupKey {
+        let mut buffer = Vec::new();
+        if self.is_precert {
+            // Add entry type = 1 (precert_entry)
+            buffer.write_u16::<BigEndian>(1).unwrap();
+
+            // Add issuer key hash
+            buffer.extend_from_slice(&self.issuer_key_hash);
+        } else {
+            // Add entry type = 0 (x509_entry)
+            buffer.write_u16::<BigEndian>(0).unwrap();
+        }
+        // Add certificate with a 24-bit length prefix
+        write_length_prefixed(&mut buffer, &self.certificate, 3).unwrap();
+
+        // Compute the SHA-256 hash of the buffer
+        let hash = Sha256::digest(&buffer);
+
+        // Return the first 16 bytes of the hash as the lookup key.
+        let mut cache_hash = [0u8; 16];
+        cache_hash.copy_from_slice(&hash[..16]);
+
+        cache_hash
     }
 }
 

@@ -19,13 +19,11 @@
 //! - [testlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/testlog_test.go)
 
 use crate::{
-    ctlog,
     metrics::{millis_diff_as_secs, AsF64, Metrics},
     util::now_millis,
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
 };
 use anyhow::{anyhow, bail};
-use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
@@ -342,7 +340,7 @@ pub(crate) fn add_leaf_to_pool(
     cache: &impl CacheRead,
     leaf: &LogEntry,
 ) -> (AddLeafResult, AddLeafResultSource) {
-    let hash = compute_cache_hash(leaf.is_precert, &leaf.certificate, &leaf.issuer_key_hash);
+    let hash = leaf.lookup_key();
     let pool_index: u64;
     let rx: Receiver<SequenceMetadata>;
     let source: AddLeafResultSource;
@@ -677,16 +675,7 @@ async fn sequence_pool(
         .put_entries(
             &sequenced_leaves
                 .iter()
-                .map(|entry| {
-                    (
-                        ctlog::compute_cache_hash(
-                            entry.is_precert,
-                            &entry.certificate,
-                            &entry.issuer_key_hash,
-                        ),
-                        (entry.leaf_index, entry.timestamp),
-                    )
-                })
+                .map(|entry| (entry.lookup_key(), (entry.leaf_index, entry.timestamp)))
                 .collect::<Vec<_>>(),
         )
         .await
@@ -984,46 +973,6 @@ impl Default for Pool {
             done: tx,
         }
     }
-}
-
-/// Compute the cache key for a log entry.
-pub(crate) fn compute_cache_hash(
-    is_precert: bool,
-    certificate: &[u8],
-    issuer_key_hash: &[u8; 32],
-) -> LookupKey {
-    let mut buffer = Vec::new();
-    if is_precert {
-        // Add entry type = 1 (precert_entry)
-        buffer.write_u16::<BigEndian>(1).unwrap();
-
-        // Add issuer key hash
-        buffer.extend_from_slice(issuer_key_hash);
-
-        // Add certificate with a 24-bit length prefix
-        buffer
-            .write_uint::<BigEndian>(certificate.len() as u64, 3)
-            .unwrap();
-        buffer.extend_from_slice(certificate);
-    } else {
-        // Add entry type = 0 (x509_entry)
-        buffer.write_u16::<BigEndian>(0).unwrap();
-
-        // Add certificate with a 24-bit length prefix
-        buffer
-            .write_uint::<BigEndian>(certificate.len() as u64, 3)
-            .unwrap();
-        buffer.extend_from_slice(certificate);
-    }
-
-    // Compute the SHA-256 hash of the buffer
-    let hash = Sha256::digest(&buffer);
-
-    // Return the first 16 bytes of the hash as the cacheHash
-    let mut cache_hash = [0u8; 16];
-    cache_hash.copy_from_slice(&hash[..16]);
-
-    cache_hash
 }
 
 /// A pending upload.
