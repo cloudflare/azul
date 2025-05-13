@@ -165,9 +165,9 @@ pub fn tile_path(t: &Tile) -> String {
 /// # Panics
 ///
 /// Panics if decoding the verifying key fails.
-pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> [u8; 32] {
-    let pkix = vkey.to_public_key_der().unwrap();
-    Sha256::digest(&pkix).into()
+pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTError> {
+    let pkix = vkey.to_public_key_der()?;
+    Ok(Sha256::digest(&pkix).into())
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -759,22 +759,22 @@ impl NoteVerifier for RFC6962Verifier {
 
 /// Returns a signed add-[pre-]chain response with the `LeafIndex` extension.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if there are encoding issues with the provided signing key.
+/// Errors if there are encoding issues with the provided signing key.
 pub fn signed_certificate_timestamp(
     signing_key: &EcdsaSigningKey,
     entry: &LogEntry,
-) -> AddChainResponse {
+) -> Result<AddChainResponse, StaticCTError> {
     let mut buffer = vec![
         0, // sct_version = v1 (0)
         0, // signature_type = certificate_timestamp (0)
     ];
     buffer.extend(entry.marshal_timestamped_entry());
     let signature = sign(signing_key, &buffer);
-    let id = log_id_from_key(signing_key.verifying_key()).to_vec();
+    let id = log_id_from_key(signing_key.verifying_key())?.to_vec();
 
-    AddChainResponse {
+    Ok(AddChainResponse {
         sct_version: 0, // sct_version = v1 (0)
         id,
         timestamp: entry.timestamp,
@@ -783,7 +783,7 @@ pub fn signed_certificate_timestamp(
         }
         .to_bytes(),
         signature,
-    }
+    })
 }
 
 /// Produces an encoded digitally-signed signature as defined in RFC 5246.
