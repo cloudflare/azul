@@ -94,7 +94,8 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let name = valid_log_name(&ctx)?;
             let params = &CONFIG.logs[name];
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-            let log_id = &static_ct_api::log_id_from_key(verifying_key);
+            let log_id =
+                &static_ct_api::log_id_from_key(verifying_key).map_err(|e| e.to_string())?;
             let key = verifying_key
                 .to_public_key_der()
                 .map_err(|e| e.to_string())?;
@@ -216,10 +217,9 @@ async fn add_chain_or_pre_chain(
     {
         debug!("{name}: Entry is cached");
         (entry.leaf_index, entry.timestamp) = v;
-        return Response::from_json(&static_ct_api::signed_certificate_timestamp(
-            signing_key,
-            &entry,
-        ));
+        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+            .map_err(|e| e.to_string())?;
+        return Response::from_json(&sct);
     }
 
     // Entry is not cached, so we need to sequence it.
@@ -262,10 +262,9 @@ async fn add_chain_or_pre_chain(
     let (leaf_index, timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
     entry.leaf_index = leaf_index;
     entry.timestamp = timestamp;
-    Response::from_json(&static_ct_api::signed_certificate_timestamp(
-        signing_key,
-        &entry,
-    ))
+    let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+        .map_err(|e| e.to_string())?;
+    Response::from_json(&sct)
 }
 
 fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {

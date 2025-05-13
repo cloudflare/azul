@@ -19,6 +19,8 @@ pub enum StaticCTError {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     DER(#[from] der::Error),
+    #[error(transparent)]
+    X509(#[from] x509_verify::spki::Error),
 
     #[error("missing verifier signature")]
     MissingVerifierSignature,
