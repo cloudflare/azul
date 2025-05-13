@@ -23,11 +23,12 @@ crate-type = ["rlib"]
 
 [dependencies]
 base64.workspace = true
-byteorder = "1.4"
+byteorder.workspace = true
 chrono = "0.4"
 const-oid = "0.9.6"
 der = "0.7.9"
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+length_prefixed = { path = "../length_prefixed" }
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand.workspace = true
 serde.workspace = true

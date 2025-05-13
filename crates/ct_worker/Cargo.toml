@@ -44,7 +44,7 @@ futures-executor = "0.3.31"
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
-byteorder = "1.4"
+byteorder.workspace = true
 config = { path = "./config", package = "ct_worker_config" }
 console_error_panic_hook = "0.1.1"
 console_log = { version = "1.0" }
