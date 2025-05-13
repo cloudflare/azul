@@ -458,6 +458,7 @@ dependencies = [
  "url",
  "worker",
  "x509-verify",
+ "x509_util",
 ]
 
 [[package]]
@@ -2276,6 +2277,7 @@ dependencies = [
  "thiserror",
  "tlog_tiles 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "x509-verify",
+ "x509_util",
 ]
 
 [[package]]
@@ -2950,6 +2952,14 @@ dependencies = [
  "spki",
  "x509-cert",
  "x509-ocsp",
+]
+
+[[package]]
+name = "x509_util"
+version = "0.2.0"
+dependencies = [
+ "der",
+ "x509-verify",
 ]
 
 [[package]]

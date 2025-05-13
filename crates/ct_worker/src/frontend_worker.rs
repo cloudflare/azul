@@ -81,7 +81,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get("/logs/:log/ct/v1/get-roots", |_req, ctx| {
             let _name = valid_log_name(&ctx)?;
             Response::from_json(&GetRootsResponse {
-                certificates: static_ct_api::certs_to_bytes(&ROOTS.certs).unwrap(),
+                certificates: x509_util::certs_to_bytes(&ROOTS.certs).unwrap(),
             })
         })
         .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {

@@ -20,8 +20,6 @@
 //! - [cert_checker.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker.go)
 //! - [cert_checker_test.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker_test.go)
 
-use std::collections::HashMap;
-
 use crate::{UnixTimestamp, ValidatedChain};
 use const_oid::{
     db::rfc5280::{ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_KP_SERVER_AUTH},
@@ -36,13 +34,12 @@ use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use x509_util::CertPool;
 use x509_verify::{
     x509_cert::{
         der::{Decode, Encode},
         ext::{
-            pkix::{
-                AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, SubjectKeyIdentifier,
-            },
+            pkix::{AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage},
             Extension,
         },
         impl_newtype, Certificate, TbsCertificate,
@@ -379,72 +376,6 @@ fn build_precert_tbs(
     Ok(tbs.to_der()?)
 }
 
-/// Converts a vector of certificates into an array of DER-encoded certificates.
-///
-/// # Errors
-///
-/// Returns an error if any of the certificates cannot be DER-encoded.
-pub fn certs_to_bytes(certs: &[Certificate]) -> Result<Vec<Vec<u8>>, DerError> {
-    certs
-        .iter()
-        .map(der::Encode::to_der)
-        .collect::<Result<_, _>>()
-}
-
-/// A `CertPool` is a set of certificates.
-pub struct CertPool {
-    by_name: HashMap<String, Vec<usize>>,
-    by_subject_key_id: HashMap<Vec<u8>, Vec<usize>>,
-    pub certs: Vec<Certificate>,
-}
-
-impl CertPool {
-    /// Constructs a `CertPool` from the given certificates.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there are issues DER-encoding certificate extensions.
-    pub fn new(certs: Vec<Certificate>) -> Result<Self, DerError> {
-        let mut by_name = HashMap::new();
-        let mut by_subject_key_id = HashMap::new();
-        for (idx, cert) in certs.iter().enumerate() {
-            by_name
-                .entry(cert.tbs_certificate.subject.to_string())
-                .or_insert_with(Vec::new)
-                .push(idx);
-
-            if let Some((_, ski)) = cert.tbs_certificate.get::<SubjectKeyIdentifier>()? {
-                by_subject_key_id
-                    .entry(ski.to_der()?)
-                    .or_insert_with(Vec::new)
-                    .push(idx);
-            }
-        }
-        Ok(Self {
-            by_name,
-            by_subject_key_id,
-            certs,
-        })
-    }
-
-    /// Search the certificate pool for potential parents for the provided certificates.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there are issues DER-encoding certificate extensions.
-    pub fn find_potential_parents(&self, cert: &Certificate) -> Result<&[usize], DerError> {
-        if let Some((_, aki)) = cert.tbs_certificate.get::<AuthorityKeyIdentifier>()? {
-            if let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?) {
-                return Ok(indexes);
-            }
-        }
-        if let Some(indexes) = self.by_name.get(&cert.tbs_certificate.issuer.to_string()) {
-            return Ok(indexes);
-        }
-        Ok(&[])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,7 +459,7 @@ mod tests {
                 )*
 
                 assert_eq!(validate_chain(
-                        &certs_to_bytes(&chain).unwrap(),
+                        &x509_util::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
                         $not_after_start,
                         $not_after_end,

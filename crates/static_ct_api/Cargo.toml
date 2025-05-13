@@ -26,7 +26,7 @@ base64.workspace = true
 byteorder.workspace = true
 chrono = "0.4"
 const-oid = "0.9.6"
-der = "0.7.9"
+der.workspace = true
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 length_prefixed = { path = "../length_prefixed" }
 p256 = { version = "0.13", features = ["ecdsa"] }
@@ -38,4 +38,5 @@ signature.workspace = true
 signed_note = "0.2.0"
 thiserror.workspace = true
 tlog_tiles = "0.2.0"
+x509_util = { path = "../x509_util" }
 x509-verify.workspace = true

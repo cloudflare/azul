@@ -18,13 +18,14 @@ use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
-use static_ct_api::{CertPool, LookupKey, UnixTimestamp};
+use static_ct_api::{LookupKey, UnixTimestamp};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{LazyLock, OnceLock};
 use util::now_millis;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+use x509_util::CertPool;
 use x509_verify::x509_cert::Certificate;
 
 // Application configuration.
