@@ -32,6 +32,7 @@ debug = 1
 [workspace.dependencies]
 anyhow = "1.0"
 base64 = "0.21"
+byteorder = "1.5"
 chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = "2.1.1"
 rand = "0.8.5"

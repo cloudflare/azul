@@ -93,6 +93,7 @@ use crate::AddChainResponse;
 use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey as Ed25519VerifyingKey};
+use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
@@ -108,7 +109,7 @@ use signed_note::{
     Note, NoteError as SignedNoteError, Signature as NoteSignature, Signer as NoteSigner,
     StandardVerifier, Verifier as NoteVerifier, VerifierError, VerifierList,
 };
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use thiserror::Error;
 use tlog_tiles::{Checkpoint, Error as TlogError, Hash, HashReader, Tile};
 
@@ -211,16 +212,16 @@ impl LogEntry {
         } else {
             buffer.write_u16::<BigEndian>(0).unwrap(); // entry_type = x509_entry
         }
-        write_length_prefixed(&mut buffer, &self.certificate, 3).unwrap();
-        write_length_prefixed(
-            &mut buffer,
-            &Extensions {
-                leaf_index: self.leaf_index,
-            }
-            .to_bytes(),
-            2,
-        )
-        .unwrap();
+        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
+        buffer
+            .write_length_prefixed(
+                &Extensions {
+                    leaf_index: self.leaf_index,
+                }
+                .to_bytes(),
+                2,
+            )
+            .unwrap();
 
         buffer
     }
@@ -249,9 +250,13 @@ impl LogEntry {
         let mut buffer = Vec::new();
         buffer.extend(self.marshal_timestamped_entry());
         if self.is_precert {
-            write_length_prefixed(&mut buffer, &self.pre_certificate, 3).unwrap();
+            buffer
+                .write_length_prefixed(&self.pre_certificate, 3)
+                .unwrap();
         }
-        write_length_prefixed(&mut buffer, &self.chain_fingerprints.concat(), 2).unwrap();
+        buffer
+            .write_length_prefixed(&self.chain_fingerprints.concat(), 2)
+            .unwrap();
 
         buffer
     }
@@ -274,7 +279,7 @@ impl LogEntry {
             buffer.write_u16::<BigEndian>(0).unwrap();
         }
         // Add certificate with a 24-bit length prefix
-        write_length_prefixed(&mut buffer, &self.certificate, 3).unwrap();
+        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
 
         // Compute the SHA-256 hash of the buffer
         let hash = Sha256::digest(&buffer);
@@ -361,17 +366,17 @@ impl TileIterator {
 
         match entry_type {
             0 => {
-                entry.certificate = read_length_prefixed(&mut self.s, 3)?;
-                extensions = read_length_prefixed(&mut self.s, 2)?;
-                fingerprints = read_length_prefixed(&mut self.s, 2)?;
+                entry.certificate = self.s.read_length_prefixed(3)?;
+                extensions = self.s.read_length_prefixed(2)?;
+                fingerprints = self.s.read_length_prefixed(2)?;
             }
             1 => {
                 entry.is_precert = true;
                 self.s.read_exact(&mut entry.issuer_key_hash)?;
-                entry.certificate = read_length_prefixed(&mut self.s, 3)?;
-                extensions = read_length_prefixed(&mut self.s, 2)?;
-                entry.pre_certificate = read_length_prefixed(&mut self.s, 3)?;
-                fingerprints = read_length_prefixed(&mut self.s, 2)?;
+                entry.certificate = self.s.read_length_prefixed(3)?;
+                extensions = self.s.read_length_prefixed(2)?;
+                entry.pre_certificate = self.s.read_length_prefixed(3)?;
+                fingerprints = self.s.read_length_prefixed(2)?;
             }
             _ => {
                 return Err(TileParseError::UnknownType);
@@ -382,7 +387,7 @@ impl TileIterator {
         if extensions.read_u8()? != 0 {
             return Err(TileParseError::UnexpectedExtension);
         }
-        let extension_data = read_length_prefixed(&mut extensions, 2)?;
+        let extension_data = extensions.read_length_prefixed(2)?;
         entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
         if extensions.position() != extensions.get_ref().len() as u64 {
             return Err(TileParseError::TrailingData);
@@ -777,7 +782,7 @@ impl NoteVerifier for RFC6962Verifier {
         if sig_alg != 3 {
             return false;
         }
-        let Ok(signature) = read_length_prefixed(&mut s, 2) else {
+        let Ok(signature) = s.read_length_prefixed(2) else {
             return false;
         };
         if s.position() != s.get_ref().len() as u64 {
@@ -935,27 +940,6 @@ fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Has
     buffer.extend(root_hash.0);
 
     buffer
-}
-
-/// Read a length-prefixed value from the passed in reader.
-fn read_length_prefixed<R: Read>(
-    reader: &mut R,
-    length_bytes: usize,
-) -> Result<Vec<u8>, std::io::Error> {
-    let length = reader.read_uint::<BigEndian>(length_bytes)?;
-    let mut buffer = vec![0; usize::try_from(length).unwrap()];
-    reader.read_exact(&mut buffer)?;
-    Ok(buffer)
-}
-
-/// Write length-prefixed data to the passed in writer.
-fn write_length_prefixed<W: Write>(
-    writer: &mut W,
-    data: &[u8],
-    length_bytes: usize,
-) -> Result<usize, std::io::Error> {
-    writer.write_uint::<BigEndian>(data.len() as u64, length_bytes)?;
-    writer.write(data)
 }
 
 #[cfg(test)]

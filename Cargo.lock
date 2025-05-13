@@ -1292,6 +1292,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "length_prefixed"
+version = "0.2.0"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.171"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2258,6 +2265,7 @@ dependencies = [
  "const-oid",
  "der",
  "ed25519-dalek",
+ "length_prefixed",
  "p256",
  "rand",
  "serde",
