@@ -5,7 +5,7 @@
 
 use crate::{
     ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
-    CacheKey, CacheValue, ObjectBucket, CONFIG, ROOTS,
+    LookupKey, SequenceMetadata, ObjectBucket, CONFIG, ROOTS,
 };
 use base64::prelude::*;
 use config::TemporalInterval;
@@ -213,7 +213,7 @@ async fn add_chain_or_pre_chain(
     let kv = load_cache_kv(env, name)?;
     if let Some(v) = kv
         .get(&BASE64_STANDARD.encode(hash))
-        .bytes_with_metadata::<CacheValue>()
+        .bytes_with_metadata::<SequenceMetadata>()
         .await?
         .1
     {
@@ -283,7 +283,7 @@ fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
     }
 }
 
-fn shard_id_from_cache_key(key: &CacheKey) -> u8 {
+fn shard_id_from_cache_key(key: &LookupKey) -> u8 {
     key[0] % NUM_BATCHER_PROXIES
 }
 

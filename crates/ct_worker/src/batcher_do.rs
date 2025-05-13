@@ -6,7 +6,7 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{ctlog, get_stub, load_cache_kv, CacheKey, CacheValue, QueryParams};
+use crate::{ctlog, get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use static_ct_api::LogEntry;
@@ -38,8 +38,8 @@ struct Batcher {
 // A batch of entries to be submitted to the Sequencer together.
 struct Batch {
     pending_leaves: Vec<LogEntry>,
-    by_hash: HashSet<CacheKey>,
-    done: Sender<HashMap<CacheKey, CacheValue>>,
+    by_hash: HashSet<LookupKey>,
+    done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
 
 impl Default for Batch {
@@ -164,10 +164,10 @@ impl Batcher {
                 ..Default::default()
             },
         )?;
-        let sequenced_entries: HashMap<CacheKey, CacheValue> = stub
+        let sequenced_entries: HashMap<LookupKey, SequenceMetadata> = stub
             .fetch_with_request(req)
             .await?
-            .json::<Vec<(CacheKey, CacheValue)>>()
+            .json::<Vec<(LookupKey, SequenceMetadata)>>()
             .await?
             .into_iter()
             .collect();
@@ -182,7 +182,7 @@ impl Batcher {
             .map(|(k, v)| {
                 kv.put(&BASE64_STANDARD.encode(k), "")
                     .unwrap()
-                    .metadata::<CacheValue>(v)
+                    .metadata::<SequenceMetadata>(v)
                     .unwrap()
                     .execute()
             })
