@@ -7,10 +7,8 @@ pub mod static_ct;
 pub use rfc6962::*;
 pub use static_ct::*;
 
-pub type Result<T> = core::result::Result<T, Error>;
-
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum StaticCTError {
     #[error(transparent)]
     Tlog(#[from] tlog_tiles::Error),
     #[error(transparent)]

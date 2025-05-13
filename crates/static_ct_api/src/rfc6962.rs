@@ -20,7 +20,7 @@
 //! - [cert_checker.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker.go)
 //! - [cert_checker_test.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker_test.go)
 
-use crate::{Error, Result};
+use crate::StaticCTError;
 use crate::{UnixTimestamp, ValidatedChain};
 use const_oid::{
     db::rfc5280::{ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_KP_SERVER_AUTH},
@@ -31,7 +31,6 @@ use der::asn1::{Null, OctetString};
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use std::result::Result as StdResult;
 use x509_util::CertPool;
 use x509_verify::{
     x509_cert::{
@@ -91,12 +90,12 @@ pub fn validate_chain(
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<ValidatedChain> {
+) -> Result<ValidatedChain, StaticCTError> {
     // First make sure the cert parses as X.509.
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
         Some(v) => Certificate::from_der(v)?,
-        None => return Err(Error::EmptyChain),
+        None => return Err(StaticCTError::EmptyChain),
     };
 
     // Check whether the expiry date is within the acceptable range for this log shard.
@@ -107,17 +106,17 @@ pub fn validate_chain(
             .to_unix_duration()
             .as_millis(),
     )
-    .map_err(|_| Error::InvalidLeaf)?;
+    .map_err(|_| StaticCTError::InvalidLeaf)?;
     if not_after_start.is_some_and(|start| start > not_after)
         || not_after_end.is_some_and(|end| end <= not_after)
     {
-        return Err(Error::InvalidLeaf);
+        return Err(StaticCTError::InvalidLeaf);
     }
 
     // Check if the CT poison extension is present. If present, it must be critical.
     let is_precert = is_precert(&leaf)?;
     if is_precert != expect_precert {
-        return Err(Error::EndpointMismatch { is_precert });
+        return Err(StaticCTError::EndpointMismatch { is_precert });
     }
 
     // Check that Server Auth EKU is present. Chrome's CT policy lists this as one acceptable
@@ -128,7 +127,7 @@ pub fn validate_chain(
             .get::<ExtendedKeyUsage>()?
             .is_some_and(|(_, eku)| eku.0.iter().any(|v| *v == ID_KP_SERVER_AUTH))
     {
-        return Err(Error::InvalidLeaf);
+        return Err(StaticCTError::InvalidLeaf);
     }
 
     // We can now do the verification. Use fairly lax options for verification, as
@@ -136,7 +135,7 @@ pub fn validate_chain(
 
     let mut intermediates: Vec<Certificate> = iter
         .map(|v| Certificate::from_der(v))
-        .collect::<StdResult<_, _>>()?;
+        .collect::<Result<_, _>>()?;
 
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
@@ -144,7 +143,7 @@ pub fn validate_chain(
     let mut has_precert_signing_cert = false;
     for (idx, ca) in intermediates.iter().enumerate() {
         if !is_link_valid(to_verify, ca) {
-            return Err(Error::InvalidLinkInChain);
+            return Err(StaticCTError::InvalidLinkInChain);
         }
         to_verify = ca;
 
@@ -158,7 +157,7 @@ pub fn validate_chain(
             .get::<BasicConstraints>()?
             .is_some_and(|(_, bc)| !bc.ca)
         {
-            return Err(Error::IntermediateMissingCABasicConstraint);
+            return Err(StaticCTError::IntermediateMissingCABasicConstraint);
         }
     }
 
@@ -178,14 +177,14 @@ pub fn validate_chain(
         }
     }
     if !found {
-        return Err(Error::NoPathToTrustedRoot { to_verify_issuer });
+        return Err(StaticCTError::NoPathToTrustedRoot { to_verify_issuer });
     }
 
     // Return a [ValidatedChain] constructed from the chain.
     let issuers = intermediates
         .iter()
         .map(der::Encode::to_der)
-        .collect::<StdResult<_, _>>()?;
+        .collect::<Result<_, _>>()?;
     let issuer_key_hash: [u8; 32];
     let pre_certificate: Vec<u8>;
     let certificate: Vec<u8>;
@@ -194,7 +193,7 @@ pub fn validate_chain(
         if has_precert_signing_cert {
             pre_issuer = Some(&intermediates[0].tbs_certificate);
             if intermediates.len() < 2 {
-                return Err(Error::MissingPrecertSigningCertificateIssuer);
+                return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
             }
             issuer_key_hash = Sha256::digest(
                 intermediates[1]
@@ -255,16 +254,16 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
 }
 
 /// Returns whether or not the certificate contains the precertificate poison extension.
-fn is_precert(cert: &Certificate) -> Result<bool> {
+fn is_precert(cert: &Certificate) -> Result<bool, StaticCTError> {
     match cert.tbs_certificate.get::<CTPrecertPoison>()? {
         Some((true, _)) => Ok(true),
-        Some((false, _)) => Err(Error::InvalidCTPoison),
+        Some((false, _)) => Err(StaticCTError::InvalidCTPoison),
         None => Ok(false),
     }
 }
 
 /// Returns whether or not the certificate contains the `CertificateTransparency` extended key usage.
-fn is_pre_issuer(cert: &Certificate) -> Result<bool> {
+fn is_pre_issuer(cert: &Certificate) -> Result<bool, StaticCTError> {
     match cert.tbs_certificate.get::<ExtendedKeyUsage>()? {
         Some((_, eku)) => {
             for usage in eku.0 {
@@ -293,16 +292,22 @@ fn is_pre_issuer(cert: &Certificate) -> Result<bool> {
 ///   - The precert's `Issuer` is changed to the Issuer of the intermediate
 ///   - The precert's `AuthorityKeyId` is changed to the `AuthorityKeyId` of the
 ///     intermediate.
-fn build_precert_tbs(tbs: &TbsCertificate, issuer_opt: Option<&TbsCertificate>) -> Result<Vec<u8>> {
+fn build_precert_tbs(
+    tbs: &TbsCertificate,
+    issuer_opt: Option<&TbsCertificate>,
+) -> Result<Vec<u8>, StaticCTError> {
     let mut tbs = tbs.clone();
 
-    let exts = tbs.extensions.as_mut().ok_or(Error::InvalidCTPoison)?;
+    let exts = tbs
+        .extensions
+        .as_mut()
+        .ok_or(StaticCTError::InvalidCTPoison)?;
 
     // Remove CT poison extension.
     let ct_poison_idx = exts
         .iter()
         .position(|v| v.extn_id == CT_PRECERT_POISON)
-        .ok_or(Error::InvalidCTPoison)?;
+        .ok_or(StaticCTError::InvalidCTPoison)?;
     exts.remove(ct_poison_idx);
 
     if let Some(issuer) = issuer_opt {

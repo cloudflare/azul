@@ -89,7 +89,7 @@
 //! }));
 //! ```
 
-use crate::{AddChainResponse, Error, Result};
+use crate::{AddChainResponse, StaticCTError};
 use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey as Ed25519VerifyingKey};
@@ -110,7 +110,6 @@ use signed_note::{
     Verifier as NoteVerifier, VerifierError, VerifierList,
 };
 use std::io::{Cursor, Read};
-use std::result::Result as StdResult;
 use tlog_tiles::{Checkpoint, Hash, HashReader, Tile};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
@@ -313,7 +312,7 @@ pub struct TileIterator {
 }
 
 impl std::iter::Iterator for TileIterator {
-    type Item = Result<LogEntry>;
+    type Item = Result<LogEntry, StaticCTError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == self.size {
             return None;
@@ -335,7 +334,7 @@ impl TileIterator {
     }
 
     /// Parse the next [`LogEntry`] from the internal buffer.
-    fn parse_next(&mut self) -> Result<LogEntry> {
+    fn parse_next(&mut self) -> Result<LogEntry, StaticCTError> {
         // https://c2sp.org/static-ct-api#log-entries
         // struct {
         //     TimestampedEntry timestamped_entry;
@@ -371,18 +370,18 @@ impl TileIterator {
                 fingerprints = self.s.read_length_prefixed(2)?;
             }
             _ => {
-                return Err(Error::UnknownType);
+                return Err(StaticCTError::UnknownType);
             }
         }
 
         let mut extensions = Cursor::new(extensions);
         if extensions.read_u8()? != 0 {
-            return Err(Error::UnexpectedExtension);
+            return Err(StaticCTError::UnexpectedExtension);
         }
         let extension_data = extensions.read_length_prefixed(2)?;
         entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
         if extensions.position() != extensions.get_ref().len() as u64 {
-            return Err(Error::TrailingData);
+            return Err(StaticCTError::TrailingData);
         }
 
         let mut fingerprints = Cursor::new(fingerprints);
@@ -420,7 +419,7 @@ impl TreeWithTimestamp {
         size: u64,
         r: &R,
         time: UnixTimestamp,
-    ) -> Result<TreeWithTimestamp> {
+    ) -> Result<TreeWithTimestamp, StaticCTError> {
         let hash = tlog_tiles::tree_hash(size, r)?;
         Ok(Self { size, hash, time })
     }
@@ -455,7 +454,7 @@ impl TreeWithTimestamp {
         signing_key: &EcdsaSigningKey,
         witness_key: &Ed25519SigningKey,
         rng: &mut impl Rng,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, StaticCTError> {
         let sth_bytes = serialize_sth_signature_input(self.time, self.size, &self.hash);
 
         let tree_head_signature = sign(signing_key, &sth_bytes);
@@ -480,7 +479,7 @@ impl TreeWithTimestamp {
         };
 
         let Ok(checkpoint) = Checkpoint::new(origin, self.size, self.hash, "") else {
-            return Err(Error::Malformed);
+            return Err(StaticCTError::Malformed);
         };
         let mut signed_note =
             Note::new(&checkpoint.to_bytes(), &gen_grease_signatures(origin, rng))?;
@@ -503,7 +502,7 @@ impl NoteSigner for InjectedSigner {
     fn key_id(&self) -> u32 {
         self.v.key_id()
     }
-    fn sign(&self, _msg: &[u8]) -> StdResult<Vec<u8>, signature::Error> {
+    fn sign(&self, _msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
         Ok(self.sig.clone())
     }
 }
@@ -516,7 +515,7 @@ struct Ed25519Signer<'a> {
 
 impl<'a> Ed25519Signer<'a> {
     /// Returns a new `Ed25519Signer`.
-    fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self> {
+    fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self, StaticCTError> {
         let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
         let v = StandardVerifier::new(&vk)?;
         Ok(Self { v: Box::new(v), k })
@@ -530,7 +529,7 @@ impl NoteSigner for Ed25519Signer<'_> {
     fn key_id(&self) -> u32 {
         self.v.key_id()
     }
-    fn sign(&self, msg: &[u8]) -> StdResult<Vec<u8>, signature::Error> {
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
         let sig = self.k.try_sign(msg)?;
         Ok(sig.to_vec())
     }
@@ -579,7 +578,7 @@ impl Extensions {
     ///
     /// Returns an error if the `leaf_index` extension is missing
     /// or the extension is otherwise malformed.
-    pub fn from_bytes(ext_bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(ext_bytes: &[u8]) -> Result<Self, StaticCTError> {
         let mut cursor = Cursor::new(ext_bytes);
         let mut e = Extensions::default();
 
@@ -588,7 +587,7 @@ impl Extensions {
             let length = cursor.read_u16::<BigEndian>()? as usize;
 
             if cursor.position() + length as u64 > ext_bytes.len() as u64 {
-                return Err(Error::InvalidLength);
+                return Err(StaticCTError::InvalidLength);
             }
 
             let mut extension = vec![0; length];
@@ -599,14 +598,14 @@ impl Extensions {
                 e.leaf_index = extension_cursor.read_uint::<BigEndian>(5)?;
 
                 if extension_cursor.position() != extension.len() as u64 {
-                    return Err(Error::TrailingData);
+                    return Err(StaticCTError::TrailingData);
                 }
 
                 return Ok(e);
             }
         }
 
-        Err(Error::MissingLeafIndex)
+        Err(StaticCTError::MissingLeafIndex)
     }
 }
 
@@ -621,7 +620,7 @@ pub fn open_checkpoint(
     witness_vkey: &Ed25519VerifyingKey,
     current_time: UnixTimestamp,
     b: &[u8],
-) -> Result<(Checkpoint, UnixTimestamp)> {
+) -> Result<(Checkpoint, UnixTimestamp), StaticCTError> {
     let v1 = RFC6962Verifier::new(origin, rfc6962_vkey)?;
     let vk = signed_note::new_ed25519_verifier_key(origin, witness_vkey);
     let v2 = StandardVerifier::new(&vk)?;
@@ -647,19 +646,19 @@ pub fn open_checkpoint(
         }
     }
     if !v1_found || !v2_found {
-        return Err(Error::MissingVerifierSignature);
+        return Err(StaticCTError::MissingVerifierSignature);
     }
     let Ok(checkpoint) = Checkpoint::from_bytes(n.text()) else {
-        return Err(Error::Malformed);
+        return Err(StaticCTError::Malformed);
     };
     if current_time < timestamp {
-        return Err(Error::InvalidTimestamp);
+        return Err(StaticCTError::InvalidTimestamp);
     }
     if checkpoint.origin() != origin {
-        return Err(Error::OriginMismatch);
+        return Err(StaticCTError::OriginMismatch);
     }
     if !checkpoint.extension().is_empty() {
-        return Err(Error::UnexpectedExtension);
+        return Err(StaticCTError::UnexpectedExtension);
     }
 
     Ok((checkpoint, timestamp))
@@ -681,7 +680,7 @@ impl RFC6962Verifier {
     /// # Errors
     ///
     /// Returns an error if the key name is invalid or if there are encoding issues.
-    pub fn new(name: &str, verifying_key: &EcdsaVerifyingKey) -> StdResult<Self, VerifierError> {
+    pub fn new(name: &str, verifying_key: &EcdsaVerifyingKey) -> Result<Self, VerifierError> {
         if !signed_note::is_key_name_valid(name) {
             return Err(VerifierError::Format);
         }
@@ -866,7 +865,7 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 /// # Errors
 ///
 /// Returns an error if the note signature is not at least eight bytes long.
-pub fn rfc6962_signature_timestamp(sig: &NoteSignature) -> Result<u64> {
+pub fn rfc6962_signature_timestamp(sig: &NoteSignature) -> Result<u64, StaticCTError> {
     let timestamp = sig.signature().read_u64::<BigEndian>()?;
     Ok(timestamp)
 }
