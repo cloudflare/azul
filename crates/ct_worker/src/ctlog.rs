@@ -22,7 +22,7 @@ use crate::{
     ctlog,
     metrics::{millis_diff_as_secs, AsF64, Metrics},
     util::now_millis,
-    CacheKey, CacheRead, CacheValue, CacheWrite, LockBackend, ObjectBackend,
+    CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
 };
 use anyhow::{anyhow, bail};
 use byteorder::{BigEndian, WriteBytesExt};
@@ -75,8 +75,8 @@ pub(crate) struct PoolState {
     // in_sequencing is the [Pool::by_hash] map of the pool that's currently being
     // sequenced. These entries might not be sequenced yet or might not yet be
     // committed to the deduplication cache.
-    in_sequencing: HashMap<CacheKey, u64>,
-    in_sequencing_done: Option<Receiver<CacheValue>>,
+    in_sequencing: HashMap<LookupKey, u64>,
+    in_sequencing_done: Option<Receiver<SequenceMetadata>>,
 }
 
 // State owned by the sequencing loop.
@@ -285,15 +285,15 @@ impl SequenceState {
 /// Result of an [`add_leaf_to_pool`] request containing either a cached log
 /// entry or a pending entry that must be resolved.
 pub(crate) enum AddLeafResult {
-    Cached(CacheValue),
-    Pending((u64, Receiver<CacheValue>)),
+    Cached(SequenceMetadata),
+    Pending((u64, Receiver<SequenceMetadata>)),
     RateLimited,
 }
 
 impl AddLeafResult {
     /// Resolve an `AddLeafResult` to a leaf entry, or None if the
     /// entry was not sequenced.
-    pub(crate) async fn resolve(self) -> Option<CacheValue> {
+    pub(crate) async fn resolve(self) -> Option<SequenceMetadata> {
         match self {
             AddLeafResult::Cached(entry) => Some(entry),
             AddLeafResult::Pending((pool_index, mut rx)) => {
@@ -344,7 +344,7 @@ pub(crate) fn add_leaf_to_pool(
 ) -> (AddLeafResult, AddLeafResultSource) {
     let hash = compute_cache_hash(leaf.is_precert, &leaf.certificate, &leaf.issuer_key_hash);
     let pool_index: u64;
-    let rx: Receiver<CacheValue>;
+    let rx: Receiver<SequenceMetadata>;
     let source: AddLeafResultSource;
 
     if let Some(index) = state.in_sequencing.get(&hash) {
@@ -968,10 +968,10 @@ impl HashReader for HashReaderWithOverlay<'_> {
 #[derive(Debug)]
 struct Pool {
     pending_leaves: Vec<LogEntry>,
-    by_hash: HashMap<CacheKey, u64>,
+    by_hash: HashMap<LookupKey, u64>,
     // Sends the index of the first sequenced entry in the pool,
     // and the pool's sequencing timestamp.
-    done: Sender<CacheValue>,
+    done: Sender<SequenceMetadata>,
 }
 
 impl Default for Pool {
@@ -991,7 +991,7 @@ pub(crate) fn compute_cache_hash(
     is_precert: bool,
     certificate: &[u8],
     issuer_key_hash: &[u8; 32],
-) -> CacheKey {
+) -> LookupKey {
     let mut buffer = Vec::new();
     if is_precert {
         // Add entry type = 1 (precert_entry)
@@ -1093,7 +1093,7 @@ fn staging_path(mut tree_size: u64, tree_hash: &Hash) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{util, CacheKey, CacheValue};
+    use crate::{util, LookupKey, SequenceMetadata};
     use futures_executor::block_on;
     use itertools::Itertools;
     use rand::{
@@ -1747,16 +1747,19 @@ mod tests {
         }
     }
 
-    struct TestCacheBackend(HashMap<CacheKey, CacheValue>);
+    struct TestCacheBackend(HashMap<LookupKey, SequenceMetadata>);
 
     impl CacheRead for TestCacheBackend {
-        fn get_entry(&self, key: &CacheKey) -> Option<CacheValue> {
+        fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
             self.0.get(key).copied()
         }
     }
 
     impl CacheWrite for TestCacheBackend {
-        async fn put_entries(&mut self, entries: &[(CacheKey, CacheValue)]) -> worker::Result<()> {
+        async fn put_entries(
+            &mut self,
+            entries: &[(LookupKey, SequenceMetadata)],
+        ) -> worker::Result<()> {
             for (key, value) in entries {
                 if self.0.contains_key(key) {
                     continue;

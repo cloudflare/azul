@@ -112,17 +112,17 @@ struct QueryParams {
     name: String,
 }
 
-type CacheKey = [u8; 16];
-type CacheValue = (u64, UnixTimestamp);
+type LookupKey = [u8; 16];
+type SequenceMetadata = (u64, UnixTimestamp);
 
 trait CacheWrite {
     /// Put the provided sequenced entries into the cache. This does NOT overwrite existing entries.
-    async fn put_entries(&mut self, entries: &[(CacheKey, CacheValue)]) -> Result<()>;
+    async fn put_entries(&mut self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()>;
 }
 
 trait CacheRead {
     /// Read an entry from the deduplication cache.
-    fn get_entry(&self, key: &CacheKey) -> Option<CacheValue>;
+    fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata>;
 }
 
 struct DedupCache {
@@ -132,7 +132,7 @@ struct DedupCache {
 
 impl CacheWrite for DedupCache {
     /// Write entries to both the short-term deduplication cache and its backup in DO Storage.
-    async fn put_entries(&mut self, entries: &[(CacheKey, CacheValue)]) -> Result<()> {
+    async fn put_entries(&mut self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -144,7 +144,7 @@ impl CacheWrite for DedupCache {
 impl CacheRead for DedupCache {
     /// Check the short-term deduplication cache only. The long-term deduplication
     /// cache gets checked by the Worker frontend when handling add-chain requests.
-    fn get_entry(&self, key: &CacheKey) -> Option<CacheValue> {
+    fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
         self.memory.get_entry(key)
     }
 }
@@ -185,7 +185,7 @@ impl DedupCache {
     }
 
     // Store a batch of cache entries in DO storage.
-    async fn store(&mut self, entries: &[(CacheKey, CacheValue)]) -> Result<()> {
+    async fn store(&mut self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
         let head = self
             .storage
             .get::<usize>(Self::FIFO_HEAD_KEY)
@@ -212,7 +212,7 @@ impl DedupCache {
     }
 }
 
-fn serialize_entries(entries: &[(CacheKey, CacheValue)]) -> Vec<u8> {
+fn serialize_entries(entries: &[(LookupKey, SequenceMetadata)]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32 * entries.len());
     for (k, (idx, ts)) in entries {
         buf.write_all(k).unwrap();
@@ -222,7 +222,7 @@ fn serialize_entries(entries: &[(CacheKey, CacheValue)]) -> Vec<u8> {
     buf
 }
 
-fn deserialize_entries(buf: &[u8]) -> Result<Vec<(CacheKey, CacheValue)>> {
+fn deserialize_entries(buf: &[u8]) -> Result<Vec<(LookupKey, SequenceMetadata)>> {
     if buf.len() % 32 != 0 {
         return Err("invalid buffer length".into());
     }
@@ -241,8 +241,8 @@ fn deserialize_entries(buf: &[u8]) -> Result<Vec<(CacheKey, CacheValue)>> {
 // A fixed-size in-memory FIFO cache.
 struct MemoryCache {
     max_size: usize,
-    map: HashMap<CacheKey, CacheValue>,
-    fifo: VecDeque<CacheKey>,
+    map: HashMap<LookupKey, SequenceMetadata>,
+    fifo: VecDeque<LookupKey>,
 }
 
 impl MemoryCache {
@@ -256,13 +256,13 @@ impl MemoryCache {
     }
 
     // Get an entry from the in-memory cache.
-    fn get_entry(&self, key: &CacheKey) -> Option<CacheValue> {
+    fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
         self.map.get(key).copied()
     }
 
     // Put a batch of entries into the in-memory cache,
     // evicting old entries to make room if necessary.
-    fn put_entries(&mut self, entries: &[(CacheKey, CacheValue)]) {
+    fn put_entries(&mut self, entries: &[(LookupKey, SequenceMetadata)]) {
         for (key, value) in entries {
             if self.map.contains_key(key) {
                 continue;
