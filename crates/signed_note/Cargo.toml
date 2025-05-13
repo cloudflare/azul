@@ -24,14 +24,14 @@ crate-type = ["rlib"]
 [dependencies]
 base64.workspace = true
 ed25519-dalek = { workspace = true, features=["alloc", "rand_core"] }
-rand_core = "0.6.4"
+rand_core.workspace = true
 sha2.workspace = true
 signature.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 rand.workspace = true
-criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "benchmark_verify"

@@ -8,8 +8,8 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-tlog_tiles = "0.1.0"
+libfuzzer-sys.workspace = true
+tlog_tiles.workspace = true
 
 [[bin]]
 name = "fuzz_parse_tile_path"
