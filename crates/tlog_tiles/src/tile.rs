@@ -41,18 +41,19 @@ const PATH_BASE: u64 = 1000;
 /// `Tile{H: 3, L: 4, N: 1234067, W: 8}`'s path is `tile/3/4/x001/x234/067`.  See the [`Tile::path`]
 /// method and the [`Tile::from_path`] function.
 ///
-/// The `is_data` field indicates that the tile holds raw record data instead of hashes.  In this
-/// case, the level is encoded in the tile path as the path element "data".
+/// The `data_elem` field indicates that the tile holds raw record data instead of hashes, and
+/// provides the path element ("data" for static-ct-api or "entries" for tlog-tiles) to use when
+/// encoding the level in the tile path.
 ///
 /// See also <https://golang.org/design/25530-sumdb#checksum-database> and
 /// <https://research.swtch.com/tlog#tiling_a_log>.
 #[derive(Debug, Eq, Hash, PartialEq, Default, Clone, Copy)]
 pub struct Tile {
-    h: u8,         // height of tile (1 ≤ H ≤ 30)
-    l: u8,         // level in tiling (0 ≤ L ≤ 63)
-    n: u64,        // number within level (0 ≤ N, unbounded)
-    w: u32,        // width of tile (1 ≤ W ≤ 2**H; 2**H is complete tile)
-    is_data: bool, // whether or not this is a data tile
+    h: u8,                               // height of tile (1 ≤ H ≤ 30)
+    l: u8,                               // level in tiling (0 ≤ L ≤ 63)
+    n: u64,                              // number within level (0 ≤ N, unbounded)
+    w: u32,                              // width of tile (1 ≤ W ≤ 2**H; 2**H is complete tile)
+    data_path_opt: Option<&'static str>, // whether or not this is a data tile, and the data path element to use for encoding
 }
 
 impl Tile {
@@ -61,7 +62,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if any of the tile parameters are outside the valid ranges.
-    pub fn new(h: u8, l: u8, n: u64, w: u32, is_data: bool) -> Self {
+    pub fn new(h: u8, l: u8, n: u64, w: u32, data_path_opt: Option<&'static str>) -> Self {
         assert!(
             (1..=30).contains(&h) && l < 64 && (1..=(1 << h)).contains(&w),
             "invalid tile"
@@ -71,7 +72,7 @@ impl Tile {
             l,
             n,
             w,
-            is_data,
+            data_path_opt,
         }
     }
 
@@ -97,12 +98,14 @@ impl Tile {
 
     /// Returns whether or not this is a data tile.
     pub fn is_data(&self) -> bool {
-        self.is_data
+        self.data_path_opt.is_some()
     }
 
-    /// Sets `is_data` to true.
-    pub fn set_is_data(&mut self) {
-        self.is_data = true;
+    /// Sets `data_path_opt` to convert the tile to a data tile, where `path`
+    /// determines the path element to use when encoding the tile path
+    /// (typically "entries" or "data").
+    pub fn set_data_with_path(&mut self, path: &'static str) {
+        self.data_path_opt = Some(path);
     }
 
     /// Returns the coordinates of the tiles of height `h ≥ 1` that must be published when publishing
@@ -120,12 +123,12 @@ impl Tile {
             let new_n = new_tree_size >> (h * l);
             if old_n != new_n {
                 for n in (old_n >> h)..(new_n >> h) {
-                    tiles.push(Self::new(h, l, n, 1 << h, false));
+                    tiles.push(Self::new(h, l, n, 1 << h, None));
                 }
                 let n = new_n >> h;
                 let w = u32::try_from(new_n - (n << h)).unwrap();
                 if w > 0 {
-                    tiles.push(Self::new(h, l, n, w, false));
+                    tiles.push(Self::new(h, l, n, w, None));
                 }
             }
             l += 1;
@@ -157,7 +160,7 @@ impl Tile {
         let w = u32::try_from((n + 1) << level).unwrap(); // now n within tile at level
         let start = usize::try_from(n << level).unwrap() * HASH_SIZE;
         let end = usize::try_from((n + 1) << level).unwrap() * HASH_SIZE;
-        (Self::new(h, t_l, t_n, w, false), start, end)
+        (Self::new(h, t_l, t_n, w, None), start, end)
     }
 
     /// Returns the hash at the given storage index.
@@ -167,7 +170,7 @@ impl Tile {
     /// Returns an error if `t` is not `Tile::from_index_internal(t.H,
     /// index)` or a wider version, or `data` is not `t`'s tile data (of length at least `t.W*HASH_SIZE`).
     pub fn hash_at_index(&self, data: &[u8], index: u64) -> Result<Hash, Error> {
-        if self.is_data || data.len() < self.w as usize * HASH_SIZE {
+        if self.data_path_opt.is_some() || data.len() < self.w as usize * HASH_SIZE {
             return Err(Error::InvalidTile);
         }
 
@@ -181,23 +184,33 @@ impl Tile {
 
     /// Path returns a tile coordinate path describing t.
     pub fn path(&self) -> String {
+        self.path_internal(true)
+    }
+
+    fn path_internal(&self, with_height: bool) -> String {
         let mut n = self.n;
-        let mut n_str = format!("{:03}", n % PATH_BASE);
+        let h_str = if with_height {
+            &format!("/{}", self.h)
+        } else {
+            ""
+        };
+        let mut parts = vec![format!("/{:03}", n % PATH_BASE)];
         while n >= PATH_BASE {
             n /= PATH_BASE;
-            n_str = format!("x{:03}/{}", n % PATH_BASE, n_str);
+            parts.push(format!("/x{:03}", n % PATH_BASE));
         }
+        let n_str: &str = &parts.iter().rev().map(String::as_str).collect::<String>();
         let p_str = if self.w == 1 << self.h {
-            String::new()
+            ""
         } else {
-            format!(".p/{}", self.w)
+            &format!(".p/{}", self.w)
         };
-        let l_str = if self.is_data {
-            "data".to_string()
+        let l_str = if let Some(elem) = self.data_path_opt {
+            elem
         } else {
-            format!("{}", self.l)
+            &format!("{}", self.l)
         };
-        format!("tile/{}/{}/{}{}", self.h, l_str, n_str, p_str)
+        format!("tile{h_str}/{l_str}{n_str}{p_str}")
     }
 
     /// Returns the tile's `k`'th tile parent in the tiles for a tree of size `n`.  If there is no such
@@ -221,7 +234,8 @@ impl Tile {
         Some(t)
     }
 
-    /// Parses a tile coordinate path.
+    /// Parses a tile coordinate path. This currently supports only paths with
+    /// height element and with the data path element "data".
     ///
     /// # Errors
     ///
@@ -231,7 +245,7 @@ impl Tile {
     ///
     /// Panics if there are internal math errors.
     pub fn from_path(path: &str) -> Result<Self, BadPathError> {
-        // This library bounds N to u64::MAX, which means we can limit the path size here..
+        // This library bounds N to u64::MAX, which means we can limit the path size here.
         if path.len() > 52 {
             return Err(BadPathError(path.into()));
         }
@@ -244,12 +258,12 @@ impl Tile {
         }
 
         let h = u8::from_str(components[1]).map_err(|_| BadPathError(path.into()))?;
-        let (l, is_data) = if components[2] == "data" {
-            (0, true)
+        let (l, data_path_opt) = if components[2] == "data" {
+            (0, Some("data"))
         } else {
             (
                 u8::from_str(components[2]).map_err(|_| BadPathError(path.into()))?,
-                false,
+                None,
             )
         };
 
@@ -290,7 +304,7 @@ impl Tile {
                 .ok_or(BadPathError(path.into()))?;
         }
 
-        let tile = Self::new(h, l, n, w, is_data);
+        let tile = Self::new(h, l, n, w, data_path_opt);
 
         if path != tile.path() {
             return Err(BadPathError(path.into()));
@@ -351,6 +365,73 @@ impl Tile {
             Self::subtree_hash(&data[..n]),
             Self::subtree_hash(&data[n..]),
         )
+    }
+}
+
+/// [`TlogTile`] is a wrapper around [`Tile`] for compatibility with the
+/// [tlog-tiles](c2sp.org/tlog-tiles) spec.
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
+pub struct TlogTile(Tile);
+
+impl std::ops::Deref for TlogTile {
+    type Target = Tile;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for TlogTile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl TlogTile {
+    /// The [tlog-tiles](c2sp.org/tlog-tiles) spec fixes tile height `H = 8`, such that
+    /// each full tile contains 256 entries.
+    pub const HEIGHT: u8 = 8;
+    pub const FULL_WIDTH: u32 = 1 << Self::HEIGHT;
+
+    /// Return a new tile with the given parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the tile parameters are outside the valid ranges.
+    pub fn new(l: u8, n: u64, w: u32, data_elem: Option<&'static str>) -> Self {
+        TlogTile(Tile::new(Self::HEIGHT, l, n, w, data_elem))
+    }
+
+    /// Returns the tile of fixed height `h = 8`
+    /// and least width storing the given hash storage index.
+    pub fn from_index(index: u64) -> Self {
+        TlogTile(Tile::from_index(Self::HEIGHT, index))
+    }
+
+    /// Returns the coordinates of the tiles of height `h = 8` that must be
+    /// published when publishing from a tree of size `new_tree_size` to replace
+    /// a tree of size `old_tree_size`.  (No tiles need to be published for a
+    /// tree of size zero.)
+    pub fn new_tiles(old_tree_size: u64, new_tree_size: u64) -> Vec<Self> {
+        Tile::new_tiles(Self::HEIGHT, old_tree_size, new_tree_size)
+            .into_iter()
+            .map(TlogTile)
+            .collect()
+    }
+
+    /// Path returns a tile coordinate path describing t, according to
+    /// <c2sp.org/tlog-tiles>. It differs from [`tlog_tiles::Tile::path`] in
+    /// that it doesn't include an explicit tile height. The `data_path`
+    /// parameter should be `"entries"` for tlog-tiles, and `"data"` for
+    /// static-ct-api.
+    pub fn path(&self) -> String {
+        self.0.path_internal(false)
+    }
+
+    /// Returns the tile's `k`'th tile parent in the tiles for a tree of size `n`.  If there is no such
+    /// parent, returns None.
+    pub fn parent(&self, k: u8, n: u64) -> Option<Self> {
+        self.0.parent(k, n).map(Self)
     }
 }
 
