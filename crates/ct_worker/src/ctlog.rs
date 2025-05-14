@@ -30,7 +30,7 @@ use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use static_ct_api::{LogEntry, TileIterator, TreeWithTimestamp, TILE_HEIGHT, TILE_WIDTH};
+use static_ct_api::{LogEntry, TileIterator, TreeWithTimestamp};
 use std::time::Duration;
 use std::{
     cmp::{Ord, Ordering},
@@ -38,12 +38,13 @@ use std::{
 };
 use std::{collections::HashMap, fmt::Write};
 use thiserror::Error;
-use tlog_tiles::{Error as TlogError, Hash, HashReader, Tile, HASH_SIZE};
+use tlog_tiles::{Error as TlogError, Hash, HashReader, Tile, TlogTile, HASH_SIZE};
 use tokio::sync::watch::{self, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
 const DATA_TILE_KEY: u8 = u8::MAX;
+const DATA_PATH: &str = "data";
 const CHECKPOINT_KEY: &str = "checkpoint";
 
 /// Configuration for a CT log.
@@ -89,7 +90,7 @@ pub(crate) struct SequenceState {
 /// A description of a transparency log tile along with the contained bytes.
 #[derive(Clone, Default, Debug)]
 struct TileWithBytes {
-    tile: Tile,
+    tile: TlogTile,
     b: Vec<u8>,
 }
 
@@ -234,15 +235,15 @@ impl SequenceState {
                 .get(&0)
                 .ok_or(anyhow!("no level 0 tile found"))?
                 .clone();
-            data_tile.tile.set_is_data();
+            data_tile.tile.set_data_with_path(DATA_PATH);
             data_tile.b = object
-                .fetch(&static_ct_api::tile_path(&data_tile.tile))
+                .fetch(&data_tile.tile.path())
                 .await?
                 .ok_or(anyhow!("no data tile in object storage"))?;
             edge_tiles.insert(DATA_TILE_KEY, data_tile.clone());
 
             // Verify the data tile against the level 0 tile.
-            let start = u64::from(TILE_WIDTH) * data_tile.tile.level_index();
+            let start = u64::from(TlogTile::FULL_WIDTH) * data_tile.tile.level_index();
             for (i, entry) in TileIterator::new(
                 edge_tiles.get(&DATA_TILE_KEY).unwrap().b.clone(),
                 data_tile.tile.width() as usize,
@@ -504,7 +505,7 @@ async fn sequence_pool(
     let mut edge_tiles = old.edge_tiles.clone();
     let mut data_tile: Vec<u8> = Vec::new();
     if let Some(t) = edge_tiles.get(&DATA_TILE_KEY) {
-        if t.tile.width() < TILE_WIDTH {
+        if t.tile.width() < TlogTile::FULL_WIDTH {
             data_tile.clone_from(&t.b);
         }
     }
@@ -544,7 +545,7 @@ async fn sequence_pool(
         n += 1;
 
         // If the data tile is full, stage it.
-        if n % u64::from(TILE_WIDTH) == 0 {
+        if n % u64::from(TlogTile::FULL_WIDTH) == 0 {
             stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
             metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
             data_tile.clear();
@@ -552,13 +553,13 @@ async fn sequence_pool(
     }
 
     // Stage leftover partial data tile, if any.
-    if n != old_size && n % u64::from(TILE_WIDTH) != 0 {
+    if n != old_size && n % u64::from(TlogTile::FULL_WIDTH) != 0 {
         stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
         metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
     }
 
     // Produce and stage new tree tiles.
-    let tiles = Tile::new_tiles(TILE_HEIGHT, old_size, n);
+    let tiles = TlogTile::new_tiles(old_size, n);
     for tile in tiles {
         let data = tile
             .read_data(&HashReaderWithOverlay {
@@ -587,7 +588,7 @@ async fn sequence_pool(
             );
         }
         let action = UploadAction {
-            key: static_ct_api::tile_path(&tile),
+            key: tile.path(),
             data,
             opts: OPTS_HASH_TILE.clone(),
         };
@@ -717,8 +718,8 @@ fn stage_data_tile(
     tile_uploads: &mut Vec<UploadAction>,
     data_tile: &[u8],
 ) {
-    let mut tile = Tile::from_index(TILE_HEIGHT, tlog_tiles::stored_hash_index(0, n - 1));
-    tile.set_is_data();
+    let mut tile = TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1));
+    tile.set_data_with_path(DATA_PATH);
     edge_tiles.insert(
         DATA_TILE_KEY,
         TileWithBytes {
@@ -727,7 +728,7 @@ fn stage_data_tile(
         },
     );
     let action = UploadAction {
-        key: static_ct_api::tile_path(&tile),
+        key: tile.path(),
         data: data_tile.to_owned(),
         opts: OPTS_DATA_TILE.clone(),
     };
@@ -790,7 +791,7 @@ async fn read_and_verify_tiles(
     tree_hash: &Hash,
     indexes: &[u64],
 ) -> Result<(Vec<TileWithBytes>, Vec<usize>), anyhow::Error> {
-    let mut tile_order: HashMap<Tile, usize> = HashMap::new(); // tile_order[tileKey(tiles[i])] = i
+    let mut tile_order: HashMap<TlogTile, usize> = HashMap::new(); // tile_order[tileKey(tiles[i])] = i
     let mut tiles = Vec::new();
 
     // Plan to fetch tiles necessary to recompute tree hash.
@@ -798,7 +799,7 @@ async fn read_and_verify_tiles(
     let stx = tlog_tiles::sub_tree_index(0, tree_size, vec![]);
     let mut stx_tile_order = vec![0; stx.len()];
     for (i, &x) in stx.iter().enumerate() {
-        let tile = Tile::from_index(TILE_HEIGHT, x);
+        let tile = TlogTile::from_index(x);
         let tile = tile.parent(0, tree_size).expect("missing parent");
         if let Some(&j) = tile_order.get(&tile) {
             stx_tile_order[i] = j;
@@ -816,7 +817,7 @@ async fn read_and_verify_tiles(
         if x >= tlog_tiles::stored_hash_index(0, tree_size) {
             bail!("indexes not in tree");
         }
-        let tile = Tile::from_index(TILE_HEIGHT, x);
+        let tile = TlogTile::from_index(x);
         // Walk up parent tiles until we find one we've requested.
         // That one will be authenticated.
         let mut k = 0;
@@ -854,12 +855,9 @@ async fn read_and_verify_tiles(
     let mut data = Vec::new();
     for tile in &tiles {
         let result = object
-            .fetch(&static_ct_api::tile_path(tile))
+            .fetch(&tile.path())
             .await?
-            .ok_or(anyhow!(
-                "no tile {} in object storage",
-                static_ct_api::tile_path(tile)
-            ))?;
+            .ok_or(anyhow!("no tile {} in object storage", tile.path()))?;
         data.push(result);
     }
     if data.len() != tiles.len() {
@@ -873,7 +871,7 @@ async fn read_and_verify_tiles(
         if data[i].len() != tile.width() as usize * HASH_SIZE {
             bail!(
                 "bad result slice ({} len={}, want {})",
-                static_ct_api::tile_path(tile),
+                tile.path(),
                 data[i].len(),
                 tile.width() as usize * HASH_SIZE
             );
@@ -939,10 +937,7 @@ impl HashReader for HashReaderWithOverlay<'_> {
                 list.push(*h);
                 continue;
             }
-            let Some(t) = self
-                .edge_tiles
-                .get(&Tile::from_index(TILE_HEIGHT, id).level())
-            else {
+            let Some(t) = self.edge_tiles.get(&TlogTile::from_index(id).level()) else {
                 return Err(TlogError::IndexesNotInTree);
             };
             let h = t.tile.hash_at_index(&t.b, id)?;
@@ -1050,19 +1045,19 @@ mod tests {
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::{RFC6962Verifier, TILE_HEIGHT, TILE_WIDTH};
+    use static_ct_api::RFC6962Verifier;
     use std::cell::{Cell, RefCell};
-    use tlog_tiles::Checkpoint;
+    use tlog_tiles::{Checkpoint, TlogTile};
 
     #[test]
     fn test_sequence_one_leaf_short() {
-        sequence_one_leaf(u64::from(TILE_WIDTH) + 2);
+        sequence_one_leaf(u64::from(TlogTile::FULL_WIDTH) + 2);
     }
 
     #[test]
     #[ignore] // This test is skipped as it takes a long time, but can be run with `cargo test -- --ignored`.
     fn test_sequence_one_leaf_long() {
-        sequence_one_leaf((u64::from(TILE_WIDTH) + 2) * u64::from(TILE_HEIGHT));
+        sequence_one_leaf((u64::from(TlogTile::FULL_WIDTH) + 2) * u64::from(TlogTile::HEIGHT));
     }
 
     fn sequence_one_leaf(n: u64) {
@@ -1122,19 +1117,19 @@ mod tests {
         sequence_twice(&mut log, 0);
         add_certs(&mut log, 5);
         sequence_twice(&mut log, 5);
-        add_certs(&mut log, TILE_WIDTH as usize - 5 - 1);
-        sequence_twice(&mut log, u64::from(TILE_WIDTH) - 1);
+        add_certs(&mut log, TlogTile::FULL_WIDTH as usize - 5 - 1);
+        sequence_twice(&mut log, u64::from(TlogTile::FULL_WIDTH) - 1);
         add_certs(&mut log, 1);
-        sequence_twice(&mut log, u64::from(TILE_WIDTH));
+        sequence_twice(&mut log, u64::from(TlogTile::FULL_WIDTH));
         add_certs(&mut log, 1);
-        sequence_twice(&mut log, u64::from(TILE_WIDTH) + 1);
+        sequence_twice(&mut log, u64::from(TlogTile::FULL_WIDTH) + 1);
     }
 
     #[test]
     fn sequence_upload_count() {
         let mut log = TestLog::new();
 
-        for _ in 0..=TILE_WIDTH {
+        for _ in 0..=TlogTile::FULL_WIDTH {
             log.add_certificate();
         }
         log.sequence().unwrap();
@@ -1163,7 +1158,7 @@ mod tests {
         // A tile width worth of entries should cause six uploads (the staging
         // bundle, the checkpoint, two level -1 tiles, two level 0 tiles, and one
         // level 1 tile).
-        for _ in 0..TILE_WIDTH {
+        for _ in 0..TlogTile::FULL_WIDTH {
             log.add_certificate();
         }
         log.sequence().unwrap();
@@ -1180,16 +1175,16 @@ mod tests {
 
         let mut log = TestLog::new();
 
-        for i in 0..u64::from(TILE_WIDTH) + 5 {
+        for i in 0..u64::from(TlogTile::FULL_WIDTH) + 5 {
             log.add_certificate_with_seed(i);
         }
         log.sequence().unwrap();
-        for i in 0..u64::from(TILE_WIDTH) + 10 {
+        for i in 0..u64::from(TlogTile::FULL_WIDTH) + 10 {
             log.add_certificate_with_seed(1000 + i);
         }
         log.sequence().unwrap();
 
-        log.check(u64::from(TILE_WIDTH) * 2 + 15);
+        log.check(u64::from(TlogTile::FULL_WIDTH) * 2 + 15);
 
         let keys = log
             .object
@@ -1305,7 +1300,7 @@ mod tests {
 
     fn test_reload_log(is_precert: bool) {
         let mut log = TestLog::new();
-        let n = u64::from(TILE_WIDTH) + 2;
+        let n = u64::from(TlogTile::FULL_WIDTH) + 2;
         for i in 0..n {
             log.add(is_precert);
             log.sequence().unwrap();
@@ -1462,14 +1457,14 @@ mod tests {
                 let mut broken = false;
                 let mut expected_size = 0;
 
-                for _ in 0..u64::from(TILE_WIDTH) - 2 {
+                for _ in 0..u64::from(TlogTile::FULL_WIDTH) - 2 {
                     log.add_certificate();
                 }
                 sequence(
                     &mut log,
                     &mut expected_size,
                     broken,
-                    u64::from(TILE_WIDTH) - 2,
+                    u64::from(TlogTile::FULL_WIDTH) - 2,
                 );
 
                 break_seq(&mut log, &mut broken);
@@ -1504,14 +1499,14 @@ mod tests {
 
                 log = TestLog::new();
                 expected_size = 0;
-                for _ in 0..u64::from(TILE_WIDTH) - 2 {
+                for _ in 0..u64::from(TlogTile::FULL_WIDTH) - 2 {
                     log.add_certificate();
                 }
                 sequence(
                     &mut log,
                     &mut expected_size,
                     broken,
-                    u64::from(TILE_WIDTH) - 2,
+                    u64::from(TlogTile::FULL_WIDTH) - 2,
                 );
 
                 break_seq(&mut log, &mut broken);
@@ -1950,26 +1945,23 @@ mod tests {
             // so this checks the validity of the entire Merkle tree.
             let leaf_hashes = read_tile_hashes(&self.object, c.size(), c.hash(), &indexes).unwrap();
 
-            let mut last_tile =
-                Tile::from_index(TILE_HEIGHT, tlog_tiles::stored_hash_count(c.size() - 1));
-            last_tile.set_is_data();
+            let mut last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1));
+            last_tile.set_data_with_path(DATA_PATH);
 
             for n in 0..last_tile.level_index() {
                 let tile = if n == last_tile.level_index() {
                     last_tile
                 } else {
-                    Tile::new(TILE_HEIGHT, 0, n, TILE_WIDTH, true)
+                    TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(DATA_PATH))
                 };
                 for (i, entry) in TileIterator::new(
-                    block_on(self.object.fetch(&static_ct_api::tile_path(&tile)))
-                        .unwrap()
-                        .unwrap(),
+                    block_on(self.object.fetch(&tile.path())).unwrap().unwrap(),
                     tile.width() as usize,
                 )
                 .enumerate()
                 {
                     let entry = entry.unwrap();
-                    let idx = n * u64::from(TILE_WIDTH) + i as u64;
+                    let idx = n * u64::from(TlogTile::FULL_WIDTH) + i as u64;
                     assert_eq!(entry.leaf_index, idx);
                     assert!(entry.timestamp <= sth_timestamp);
                     assert_eq!(

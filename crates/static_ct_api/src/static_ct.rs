@@ -110,51 +110,12 @@ use signed_note::{
     Verifier as NoteVerifier, VerifierError, VerifierList,
 };
 use std::io::{Cursor, Read};
-use tlog_tiles::{Checkpoint, Hash, HashReader, Tile};
+use tlog_tiles::{Checkpoint, Hash, HashReader};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
 /// This can be unsigned as we never deal with negative timestamps.
 pub type UnixTimestamp = u64;
-
-/// Fixed tile height for [static-ct-api](https://c2sp.org/static-ct-api#merkle-tree).
-pub const TILE_HEIGHT: u8 = 8;
-
-/// Fixed tile width for [static-ct-api](https://c2sp.org/static-ct-api#merkle-tree).
-pub const TILE_WIDTH: u32 = 1 << TILE_HEIGHT;
-
-const PATH_BASE: u64 = 1000;
-/// [`tile_path`] returns a tile coordinate path describing `t`, according to <c2sp.org/static-ct-api>.
-/// It differs from [`tlog_tiles::Tile::path`] in that it doesn't include an explicit tile height.
-///
-/// # Panics
-///
-/// Panics if `t.h` is not [`TILE_HEIGHT`].
-pub fn tile_path(t: &Tile) -> String {
-    assert_eq!(
-        t.height(),
-        TILE_HEIGHT,
-        "unexpected tile height {}",
-        t.height()
-    );
-    let mut n = t.level_index();
-    let mut n_str = format!("{:03}", n % PATH_BASE);
-    while n >= PATH_BASE {
-        n /= PATH_BASE;
-        n_str = format!("x{:03}/{}", n % PATH_BASE, n_str);
-    }
-    let p_str = if t.width() == 1 << t.height() {
-        String::new()
-    } else {
-        format!(".p/{}", t.width())
-    };
-    let l_str = if t.is_data() {
-        "data".to_string()
-    } else {
-        format!("{}", t.level())
-    };
-    format!("tile/{l_str}/{n_str}{p_str}")
-}
 
 /// Calculates the log ID from a verifying key.
 ///
