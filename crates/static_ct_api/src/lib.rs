@@ -10,7 +10,7 @@ pub use static_ct::*;
 #[derive(thiserror::Error, Debug)]
 pub enum StaticCTError {
     #[error(transparent)]
-    Tlog(#[from] tlog_tiles::Error),
+    Tlog(#[from] tlog_tiles::TlogError),
     #[error(transparent)]
     Signature(#[from] signature::Error),
     #[error(transparent)]

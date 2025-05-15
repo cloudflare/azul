@@ -87,10 +87,10 @@ impl Hash {
     /// # Errors
     ///
     /// Returns an error is the decoded hash size is not `HASH_SIZE`.
-    pub fn parse_hash(s: &str) -> Result<Self, Error> {
+    pub fn parse_hash(s: &str) -> Result<Self, TlogError> {
         let data = BASE64_STANDARD.decode(s)?;
 
-        Ok(Hash(data.try_into().map_err(|_| Error::MalformedHash)?))
+        Ok(Hash(data.try_into().map_err(|_| TlogError::MalformedHash)?))
     }
 }
 
@@ -207,7 +207,7 @@ pub fn stored_hash_count(n: u64) -> u64 {
 /// # Errors
 ///
 /// See `stored_hashes_for_record_hash`.
-pub fn stored_hashes<R: HashReader>(n: u64, data: &[u8], r: &R) -> Result<Vec<Hash>, Error> {
+pub fn stored_hashes<R: HashReader>(n: u64, data: &[u8], r: &R) -> Result<Vec<Hash>, TlogError> {
     stored_hashes_for_record_hash(n, record_hash(data), r)
 }
 
@@ -225,7 +225,7 @@ pub fn stored_hashes_for_record_hash<R: HashReader>(
     n: u64,
     h: Hash,
     r: &R,
-) -> Result<Vec<Hash>, Error> {
+) -> Result<Vec<Hash>, TlogError> {
     // Start with the record hash.
     let mut hashes = vec![h];
 
@@ -264,7 +264,7 @@ pub trait HashReader {
     ///
     /// Must return a slice of hashes the same length as indexes, or
     /// else it must return a non-nil error.
-    fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, Error>;
+    fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, TlogError>;
 }
 
 /// `EMPTY_HASH` is the hash of the empty tree, per RFC 6962, Section 2.1.
@@ -287,7 +287,7 @@ pub const EMPTY_HASH: Hash = Hash([
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, Error> {
+pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
     if n == 0 {
         return Ok(EMPTY_HASH);
     }
@@ -365,9 +365,9 @@ pub type RecordProof = Vec<Hash>;
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_record<R: HashReader>(t: u64, n: u64, r: &R) -> Result<RecordProof, Error> {
+pub fn prove_record<R: HashReader>(t: u64, n: u64, r: &R) -> Result<RecordProof, TlogError> {
     if n >= t {
-        return Err(Error::InvalidInput("n >= t".into()));
+        return Err(TlogError::InvalidInput("n >= t".into()));
     }
     let indexes = leaf_proof_index(0, t, n, vec![]);
     if indexes.is_empty() {
@@ -446,7 +446,7 @@ fn leaf_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (RecordProof, 
 }
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum TlogError {
     #[error("invalid transparency proof")]
     InvalidProof,
     #[error("malformed hash")]
@@ -477,15 +477,15 @@ pub enum Error {
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-pub fn check_record(p: &RecordProof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), Error> {
+pub fn check_record(p: &RecordProof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), TlogError> {
     if n >= t {
-        return Err(Error::InvalidInput("n >= t".into()));
+        return Err(TlogError::InvalidInput("n >= t".into()));
     }
     let th2 = run_record_proof(p, 0, t, n, h)?;
     if th2 == th {
         Ok(())
     } else {
-        Err(Error::InvalidProof)
+        Err(TlogError::InvalidProof)
     }
 }
 
@@ -502,7 +502,7 @@ fn run_record_proof(
     hi: u64,
     n: u64,
     leaf_hash: Hash,
-) -> Result<Hash, Error> {
+) -> Result<Hash, TlogError> {
     // We must have lo <= n < hi or else the code here has a bug.
     assert!((lo..hi).contains(&n), "bad math in run_record_proof");
 
@@ -511,13 +511,13 @@ fn run_record_proof(
         // Reached the leaf node.
         // The proof must not have any unnecessary hashes.
         if !p.is_empty() {
-            return Err(Error::InvalidProof);
+            return Err(TlogError::InvalidProof);
         }
         return Ok(leaf_hash);
     }
 
     if p.is_empty() {
-        return Err(Error::InvalidProof);
+        return Err(TlogError::InvalidProof);
     }
 
     let (k, _) = maxpow2(hi - lo);
@@ -546,9 +546,9 @@ pub type TreeProof = Vec<Hash>;
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_tree<R: HashReader>(t: u64, n: u64, h: &R) -> Result<TreeProof, Error> {
+pub fn prove_tree<R: HashReader>(t: u64, n: u64, h: &R) -> Result<TreeProof, TlogError> {
     if !(1..=t).contains(&n) {
-        return Err(Error::InvalidInput("1 <= n <= t".into()));
+        return Err(TlogError::InvalidInput("1 <= n <= t".into()));
     }
     let indexes = tree_proof_index(0, t, n, vec![]);
     if indexes.is_empty() {
@@ -641,15 +641,15 @@ fn tree_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (TreeProof, Ve
 ///# Panics
 ///
 /// Panics if there are internal math errors.
-pub fn check_tree(p: &TreeProof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), Error> {
+pub fn check_tree(p: &TreeProof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), TlogError> {
     if !(1..=t).contains(&n) {
-        return Err(Error::InvalidInput("1 <= n <= t".into()));
+        return Err(TlogError::InvalidInput("1 <= n <= t".into()));
     }
     let (h2, th2) = run_tree_proof(p, 0, t, n, h)?;
     if th2 == th && h2 == h {
         Ok(())
     } else {
-        Err(Error::InvalidProof)
+        Err(TlogError::InvalidProof)
     }
 }
 
@@ -667,25 +667,25 @@ fn run_tree_proof(
     hi: u64,
     n: u64,
     old: Hash,
-) -> Result<(Hash, Hash), Error> {
+) -> Result<(Hash, Hash), TlogError> {
     assert!((lo + 1..=hi).contains(&n), "bad math in run_tree_proof");
 
     // Reached common ground.
     if n == hi {
         if lo == 0 {
             if !p.is_empty() {
-                return Err(Error::InvalidProof);
+                return Err(TlogError::InvalidProof);
             }
             return Ok((old, old));
         }
         if p.len() != 1 {
-            return Err(Error::InvalidProof);
+            return Err(TlogError::InvalidProof);
         }
         return Ok((p[0], p[0]));
     }
 
     if p.is_empty() {
-        return Err(Error::InvalidProof);
+        return Err(TlogError::InvalidProof);
     }
 
     // Interior node for the proof.
@@ -703,20 +703,21 @@ fn run_tree_proof(
 mod tests {
     use super::*;
     use crate::tile::{Tile, TileHashReader, TileReader};
+    use crate::PathElem;
     use std::cell::Cell;
     use std::collections::HashMap;
 
     type TestHashStorage = Vec<Hash>;
 
     impl HashReader for TestHashStorage {
-        fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, Error> {
+        fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, TlogError> {
             // It's not required by HashReader that indexes be in increasing order,
             // but check that the functions we are testing only ever ask for
             // indexes in increasing order.
             let mut prev_index = 0;
             for (i, &index) in indexes.iter().enumerate() {
                 if i != 0 && index <= prev_index {
-                    return Err(Error::IndexesOutOfOrder);
+                    return Err(TlogError::IndexesOutOfOrder);
                 }
                 prev_index = index;
             }
@@ -747,7 +748,7 @@ mod tests {
             self.unsaved.set(new_size);
         }
 
-        fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, Error> {
+        fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
             let mut out = Vec::with_capacity(tiles.len());
             for tile in tiles {
                 if let Some(data) = self.m.get(tile) {
@@ -923,7 +924,7 @@ mod tests {
             ("tile/3/-1/123/456/078", None),
             (
                 "tile/1/data/x003/x057/500",
-                Some(Tile::new(1, 0, 3_057_500, 2, Some("data"))),
+                Some(Tile::new(1, 0, 3_057_500, 2, Some(PathElem::Data))),
             ),
         ];
 

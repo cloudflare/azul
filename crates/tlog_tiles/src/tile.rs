@@ -16,10 +16,11 @@
 //! - [tile_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/tile_test.go)
 
 use crate::tlog::{
-    node_hash, split_stored_hash_index, stored_hash_index, sub_tree_index, Error, Hash, HashReader,
-    HASH_SIZE,
+    node_hash, split_stored_hash_index, stored_hash_index, sub_tree_index, Hash, HashReader,
+    TlogError, HASH_SIZE,
 };
 use std::collections::HashMap;
+use std::fmt;
 use std::str::FromStr;
 
 // To limit the size of any particular directory listing, we encode the (possibly very large)
@@ -49,11 +50,32 @@ const PATH_BASE: u64 = 1000;
 /// <https://research.swtch.com/tlog#tiling_a_log>.
 #[derive(Debug, Eq, Hash, PartialEq, Default, Clone, Copy)]
 pub struct Tile {
-    h: u8,                               // height of tile (1 ≤ H ≤ 30)
-    l: u8,                               // level in tiling (0 ≤ L ≤ 63)
-    n: u64,                              // number within level (0 ≤ N, unbounded)
-    w: u32,                              // width of tile (1 ≤ W ≤ 2**H; 2**H is complete tile)
-    data_path_opt: Option<&'static str>, // whether or not this is a data tile, and the data path element to use for encoding
+    h: u8,                           // height of tile (1 ≤ H ≤ 30)
+    l: u8,                           // level in tiling (0 ≤ L ≤ 63)
+    n: u64,                          // number within level (0 ≤ N, unbounded)
+    w: u32,                          // width of tile (1 ≤ W ≤ 2**H; 2**H is complete tile)
+    data_path_opt: Option<PathElem>, // whether or not this is a data tile, and the data path element to use for encoding
+}
+
+#[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
+pub enum PathElem {
+    Data,
+    Entries,
+    Custom(&'static str),
+}
+
+impl fmt::Display for PathElem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Data => "data",
+                Self::Entries => "entries",
+                Self::Custom(p) => p,
+            }
+        )
+    }
 }
 
 impl Tile {
@@ -62,7 +84,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if any of the tile parameters are outside the valid ranges.
-    pub fn new(h: u8, l: u8, n: u64, w: u32, data_path_opt: Option<&'static str>) -> Self {
+    pub fn new(h: u8, l: u8, n: u64, w: u32, data_path_opt: Option<PathElem>) -> Self {
         assert!(
             (1..=30).contains(&h) && l < 64 && (1..=(1 << h)).contains(&w),
             "invalid tile"
@@ -102,9 +124,8 @@ impl Tile {
     }
 
     /// Sets `data_path_opt` to convert the tile to a data tile, where `path`
-    /// determines the path element to use when encoding the tile path
-    /// (typically "entries" or "data").
-    pub fn set_data_with_path(&mut self, path: &'static str) {
+    /// determines the path element to use when encoding the tile path.
+    pub fn set_data_with_path(&mut self, path: PathElem) {
         self.data_path_opt = Some(path);
     }
 
@@ -169,14 +190,14 @@ impl Tile {
     ///
     /// Returns an error if `t` is not `Tile::from_index_internal(t.H,
     /// index)` or a wider version, or `data` is not `t`'s tile data (of length at least `t.W*HASH_SIZE`).
-    pub fn hash_at_index(&self, data: &[u8], index: u64) -> Result<Hash, Error> {
+    pub fn hash_at_index(&self, data: &[u8], index: u64) -> Result<Hash, TlogError> {
         if self.data_path_opt.is_some() || data.len() < self.w as usize * HASH_SIZE {
-            return Err(Error::InvalidTile);
+            return Err(TlogError::InvalidTile);
         }
 
         let (t1, start, end) = Tile::from_index_internal(self.h, index);
         if self.l != t1.l || self.n != t1.n || self.w < t1.w {
-            return Err(Error::InvalidTile);
+            return Err(TlogError::InvalidTile);
         }
 
         Ok(Tile::subtree_hash(&data[start..end]))
@@ -206,7 +227,7 @@ impl Tile {
             &format!(".p/{}", self.w)
         };
         let l_str = if let Some(elem) = self.data_path_opt {
-            elem
+            &elem.to_string()
         } else {
             &format!("{}", self.l)
         };
@@ -259,7 +280,7 @@ impl Tile {
 
         let h = u8::from_str(components[1]).map_err(|_| BadPathError(path.into()))?;
         let (l, data_path_opt) = if components[2] == "data" {
-            (0, Some("data"))
+            (0, Some(PathElem::Data))
         } else {
             (
                 u8::from_str(components[2]).map_err(|_| BadPathError(path.into()))?,
@@ -322,7 +343,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if `read_hashes` does not return the same number of hashes as passed-in indexes.
-    pub fn read_data<R: HashReader>(&self, r: &R) -> Result<Vec<u8>, Error> {
+    pub fn read_data<R: HashReader>(&self, r: &R) -> Result<Vec<u8>, TlogError> {
         let mut size = self.w as usize;
         if size == 0 {
             size = 1 << self.h;
@@ -398,7 +419,7 @@ impl TlogTile {
     /// # Panics
     ///
     /// Panics if any of the tile parameters are outside the valid ranges.
-    pub fn new(l: u8, n: u64, w: u32, data_elem: Option<&'static str>) -> Self {
+    pub fn new(l: u8, n: u64, w: u32, data_elem: Option<PathElem>) -> Self {
         TlogTile(Tile::new(Self::HEIGHT, l, n, w, data_elem))
     }
 
@@ -439,8 +460,8 @@ impl TlogTile {
 #[derive(Debug)]
 pub struct BadPathError(String);
 
-impl std::fmt::Display for BadPathError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for BadPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "malformed tile path: {}", self.0)
     }
 }
@@ -465,7 +486,7 @@ pub trait TileReader {
     /// # Errors
     ///
     /// Returns an error if unable to read all of the requested tiles.
-    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, Error>;
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError>;
 
     /// Informs the [`TileReader`] that the tile data returned by [`TileReader::read_tiles`] has been
     /// confirmed as valid and can be saved in persistent storage (on disk).
@@ -507,7 +528,7 @@ impl HashReader for TileHashReader<'_> {
     ///
     /// Panics if any calls to `Tile::parent` fail to find a parent tile. This differs from the Go
     /// implementation which returns an empty Tile{} when it fails to find a parent.
-    fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, Error> {
+    fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, TlogError> {
         let h = self.tr.height();
 
         let mut tile_order = HashMap::new(); // tile_order[tileKey(tiles[i])] = i
@@ -536,7 +557,7 @@ impl HashReader for TileHashReader<'_> {
         let mut index_tile_order = vec![0; indexes.len()];
         for (i, &x) in indexes.iter().enumerate() {
             if x >= stored_hash_index(0, self.tree_size) {
-                return Err(Error::IndexesNotInTree);
+                return Err(TlogError::IndexesNotInTree);
             }
 
             let tile = Tile::from_index(h, x);
@@ -564,7 +585,7 @@ impl HashReader for TileHashReader<'_> {
                 if p.w != (1 << p.h) {
                     // Only full tiles have parents.
                     // This tile has a parent, so it must be full.
-                    return Err(Error::BadMath);
+                    return Err(TlogError::BadMath);
                 }
                 tile_order.insert(p, tiles.len());
                 if k == 0 {
@@ -577,11 +598,11 @@ impl HashReader for TileHashReader<'_> {
         // Fetch all the tile data.
         let data = self.tr.read_tiles(&tiles)?;
         if data.len() != tiles.len() {
-            return Err(Error::BadMath);
+            return Err(TlogError::BadMath);
         }
         for (i, tile) in tiles.iter().enumerate() {
             if data[i].len() != tile.w as usize * HASH_SIZE {
-                return Err(Error::BadMath);
+                return Err(TlogError::BadMath);
             }
         }
 
@@ -595,7 +616,7 @@ impl HashReader for TileHashReader<'_> {
             th = node_hash(h, th);
         }
         if th != self.tree_hash {
-            return Err(Error::InconsistentTile);
+            return Err(TlogError::InconsistentTile);
         }
 
         // Authenticate full tiles against their parents.
@@ -603,11 +624,11 @@ impl HashReader for TileHashReader<'_> {
             let tile = tiles[i];
             let p = tile.parent(1, self.tree_size).unwrap();
             let Some(j) = tile_order.get(&p) else {
-                return Err(Error::BadMath);
+                return Err(TlogError::BadMath);
             };
             let h = p.hash_at_index(&data[*j], stored_hash_index(p.l * p.h, tile.n))?;
             if h != Tile::subtree_hash(&data[i]) {
-                return Err(Error::InconsistentTile);
+                return Err(TlogError::InconsistentTile);
             }
         }
 

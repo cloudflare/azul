@@ -38,13 +38,12 @@ use std::{
 };
 use std::{collections::HashMap, fmt::Write};
 use thiserror::Error;
-use tlog_tiles::{Error as TlogError, Hash, HashReader, Tile, TlogTile, HASH_SIZE};
+use tlog_tiles::{Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE};
 use tokio::sync::watch::{self, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
 const DATA_TILE_KEY: u8 = u8::MAX;
-const DATA_PATH: &str = "data";
 const CHECKPOINT_KEY: &str = "checkpoint";
 
 /// Configuration for a CT log.
@@ -235,7 +234,7 @@ impl SequenceState {
                 .get(&0)
                 .ok_or(anyhow!("no level 0 tile found"))?
                 .clone();
-            data_tile.tile.set_data_with_path(DATA_PATH);
+            data_tile.tile.set_data_with_path(PathElem::Data);
             data_tile.b = object
                 .fetch(&data_tile.tile.path())
                 .await?
@@ -719,7 +718,7 @@ fn stage_data_tile(
     data_tile: &[u8],
 ) {
     let mut tile = TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1));
-    tile.set_data_with_path(DATA_PATH);
+    tile.set_data_with_path(PathElem::Data);
     edge_tiles.insert(
         DATA_TILE_KEY,
         TileWithBytes {
@@ -1946,13 +1945,13 @@ mod tests {
             let leaf_hashes = read_tile_hashes(&self.object, c.size(), c.hash(), &indexes).unwrap();
 
             let mut last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1));
-            last_tile.set_data_with_path(DATA_PATH);
+            last_tile.set_data_with_path(PathElem::Data);
 
             for n in 0..last_tile.level_index() {
                 let tile = if n == last_tile.level_index() {
                     last_tile
                 } else {
-                    TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(DATA_PATH))
+                    TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(PathElem::Data))
                 };
                 for (i, entry) in TileIterator::new(
                     block_on(self.object.fetch(&tile.path())).unwrap().unwrap(),
