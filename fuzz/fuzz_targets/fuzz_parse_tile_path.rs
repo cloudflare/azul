@@ -15,8 +15,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tlog_tiles::tile::Tile;
+use tlog_tiles::{tile::Tile, PathElem};
 
 fuzz_target!(|data: &str| {
-    let _ = Tile::from_path(data);
+    let _ = Tile::from_path(data, true, PathElem::Data);
 });
