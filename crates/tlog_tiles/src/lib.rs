@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn test_certificate_transparency() -> Result<(), Error> {
+    fn test_certificate_transparency() -> Result<(), TlogError> {
         let root: CtTree = http_get("http://ct.googleapis.com/logs/argon2020/ct/v1/get-sth");
 
         let leaf: CtEntries = http_get(
