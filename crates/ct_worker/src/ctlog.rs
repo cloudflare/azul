@@ -31,12 +31,12 @@ use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use static_ct_api::{LogEntry, TileIterator, TreeWithTimestamp};
+use std::collections::HashMap;
 use std::time::Duration;
 use std::{
     cmp::{Ord, Ordering},
     sync::LazyLock,
 };
-use std::{collections::HashMap, fmt::Write};
 use thiserror::Error;
 use tlog_tiles::{Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE};
 use tokio::sync::watch::{self, Receiver, Sender};
@@ -45,6 +45,7 @@ use tokio::sync::watch::{self, Receiver, Sender};
 /// the special level for data tiles. The Go implementation uses -1.
 const DATA_TILE_KEY: u8 = u8::MAX;
 const CHECKPOINT_KEY: &str = "checkpoint";
+const STAGING_KEY: &str = "staging";
 
 /// Configuration for a CT log.
 #[derive(Clone)]
@@ -213,11 +214,8 @@ impl SequenceState {
                 warn!(
                     "{name}: Checkpoint in object storage is older than DO storage checkpoint; old_size={}, size={}", c1.size(), c.size()
                 );
-                let staged_uploads = object
-                    .fetch(&staging_path(c.size(), c.hash()))
-                    .await?
-                    .ok_or(anyhow!("no staging uploads in object storage"))?;
-                apply_staged_uploads(object, &staged_uploads).await?;
+                let staged_uploads = lock.get(STAGING_KEY).await?;
+                apply_staged_uploads(object, &staged_uploads, c.size(), c.hash()).await?;
             }
             (Ordering::Equal, true) => {} // Normal case: the sizes are the same and the hashes match.
         }
@@ -606,14 +604,9 @@ async fn sequence_pool(
 
     // Upload tiles to staging, where they can be recovered by [SequenceState::load] if we
     // crash right after updating DO storage.
-    let staged_uploads = marshal_staged_uploads(&tile_uploads)
+    let staged_uploads = marshal_staged_uploads(&tile_uploads, tree.size(), tree.hash())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't marshal staged uploads: {e}")))?;
-    object
-        .upload(
-            &staging_path(tree.size(), tree.hash()),
-            &staged_uploads,
-            &OPTS_STAGING,
-        )
+    lock.put(STAGING_KEY, &staged_uploads)
         .await
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
@@ -636,12 +629,12 @@ async fn sequence_pool(
         })?;
 
     // At this point the pool is fully serialized: new entries were persisted to
-    // object storage (in staging) and the checkpoint was comitted to the
+    // durable storage (in staging) and the checkpoint was comitted to the
     // database. If we were to crash after this, recovery would be clean from
     // database and object storage.
     *sequence_state = Some(SequenceState {
         tree,
-        checkpoint: new_checkpoint.clone(),
+        checkpoint: new_checkpoint,
         edge_tiles,
     });
 
@@ -650,14 +643,23 @@ async fn sequence_pool(
     // An error here is fatal, since we can't continue leaving behind missing tiles. The next
     // run of sequence would not upload them again, while LoadLog will retry uploading them
     // from the staging bundle.
-    apply_staged_uploads(object, &staged_uploads)
-        .await
-        .map_err(|e| SequenceError::Fatal(format!("couldn't upload a tile: {e}")))?;
+    apply_staged_uploads(
+        object,
+        &staged_uploads,
+        sequence_state.as_ref().unwrap().tree.size(),
+        sequence_state.as_ref().unwrap().tree.hash(),
+    )
+    .await
+    .map_err(|e| SequenceError::Fatal(format!("couldn't upload a tile: {e}")))?;
 
     // If we fail to upload, return an error so that we don't produce SCTs that, although
     // safely serialized, wouldn't be part of a publicly visible tree.
     object
-        .upload(CHECKPOINT_KEY, &new_checkpoint, &OPTS_CHECKPOINT)
+        .upload(
+            CHECKPOINT_KEY,
+            &sequence_state.as_ref().unwrap().checkpoint,
+            &OPTS_CHECKPOINT,
+        )
         .await
         .map_err(|e| {
             SequenceError::NonFatal(format!("couldn't upload checkpoint to object storage: {e}"))
@@ -738,8 +740,18 @@ fn stage_data_tile(
 async fn apply_staged_uploads(
     object: &impl ObjectBackend,
     staged_uploads: &[u8],
+    size: u64,
+    hash: &Hash,
 ) -> Result<(), anyhow::Error> {
-    let uploads: Vec<UploadAction> = serde_json::from_slice(staged_uploads)?;
+    if staged_uploads.len() < 8 + HASH_SIZE {
+        bail!("malformed staging bundle");
+    }
+    let staged_size = u64::from_be_bytes(staged_uploads[..8].try_into()?);
+    let staged_hash = &Hash(staged_uploads[8..8 + HASH_SIZE].try_into()?);
+    if staged_size != size || staged_hash != hash {
+        bail!("staging bundle does not match current tree");
+    }
+    let uploads: Vec<UploadAction> = serde_json::from_slice(&staged_uploads[8 + HASH_SIZE..])?;
     let upload_futures: Vec<_> = uploads
         .iter()
         .map(|u| object.upload(&u.key, &u.data, &u.opts))
@@ -978,9 +990,17 @@ struct UploadAction {
 }
 
 /// Marshal a set of pending uploads into a staging bundle.
-fn marshal_staged_uploads(uploads: &[UploadAction]) -> Result<Vec<u8>, anyhow::Error> {
-    // TODO: Golang library uses tar
-    Ok(serde_json::to_vec(uploads)?)
+fn marshal_staged_uploads(
+    uploads: &[UploadAction],
+    size: u64,
+    hash: &Hash,
+) -> Result<Vec<u8>, anyhow::Error> {
+    Ok(size
+        .to_be_bytes()
+        .into_iter()
+        .chain(hash.0.iter().copied())
+        .chain(serde_json::to_vec(uploads)?)
+        .collect::<Vec<_>>())
 }
 
 /// [`UploadOptions`] are used as part of the [`ObjectBackend::upload`] method, and are
@@ -1000,11 +1020,6 @@ static OPTS_CHECKPOINT: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions
     content_type: Some("text/plain; charset=utf-8".to_string()),
     immutable: false,
 });
-/// Options for uploading staging bundles.
-static OPTS_STAGING: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
-    content_type: None,
-    immutable: false,
-});
 /// Options for uploading issuers.
 static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
     content_type: Some("application/pkix-cert".to_string()),
@@ -1021,18 +1036,6 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
     immutable: true,
 });
 
-/// Returns the path to which to upload staging bundles.
-fn staging_path(mut tree_size: u64, tree_hash: &Hash) -> String {
-    // Encode size in three-digit chunks like [static_ct_api::tile_path].
-    let mut n_str = format!("{:03}", tree_size % 1000);
-    while tree_size >= 1000 {
-        tree_size /= 1000;
-        write!(n_str, "/x{:03}", tree_size % 1000).unwrap();
-    }
-
-    format!("staging/{}/{}", n_str, hex::encode(tree_hash.0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1045,7 +1048,7 @@ mod tests {
     };
     use signed_note::{Note, VerifierList};
     use static_ct_api::RFC6962Verifier;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
 
     #[test]
@@ -1135,33 +1138,31 @@ mod tests {
 
         let mut old = 0;
         let uploads = |log: &mut TestLog, old: &mut usize| -> usize {
-            let new = log.object.uploads.get();
+            let new = *log.object.uploads.borrow();
             let n = new - *old;
             *old = new;
             n
         };
         uploads(&mut log, &mut old);
 
-        // Empty rounds should cause only two uploads (an empty staging bundle and
-        // the checkpoint).
+        // Empty rounds should cause only one upload (the checkpoint).
         log.sequence().unwrap();
-        assert_eq!(uploads(&mut log, &mut old), 2);
+        assert_eq!(uploads(&mut log, &mut old), 1);
 
-        // One entry in steady state (not at tile boundary) should cause four
-        // uploads (the staging bundle, the checkpoint, a level -1 tile, and a level
-        // 0 tile).
+        // One entry in steady state (not at tile boundary) should cause three
+        // uploads (the checkpoint, a level -1 tile, and a level 0 tile).
         log.add_certificate();
         log.sequence().unwrap();
-        assert_eq!(uploads(&mut log, &mut old), 4);
+        assert_eq!(uploads(&mut log, &mut old), 3);
 
-        // A tile width worth of entries should cause six uploads (the staging
-        // bundle, the checkpoint, two level -1 tiles, two level 0 tiles, and one
-        // level 1 tile).
+        // A tile width worth of entries should cause five uploads (the
+        // checkpoint, two level -1 tiles, two level 0 tiles, and one level 1
+        // tile).
         for _ in 0..TlogTile::FULL_WIDTH {
             log.add_certificate();
         }
         log.sequence().unwrap();
-        assert_eq!(uploads(&mut log, &mut old), 7);
+        assert_eq!(uploads(&mut log, &mut old), 6);
     }
 
     #[test]
@@ -1194,7 +1195,6 @@ mod tests {
             .sorted()
             .collect::<Vec<_>>();
 
-        // NOTE: the staging paths differ from the corresponding Go tests since we use a different PRNG.
         let expected = vec![
             CHECKPOINT_KEY,
             "issuer/1b48a2acbba79932d3852ccde41197f678256f3c2a280e9edf9aad272d6e9c92",
@@ -1202,8 +1202,6 @@ mod tests {
             "issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
             "issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
             "issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
-            "staging/261/c582ac633f03e2eb0164aba1ecd03492a9a604a2c439c9e8a4cb760e3203f26a",
-            "staging/527/450860e0a56d23fee7a408e2f0c6d0c740ca536b495f15b198f7e34b61c34ea9",
             "tile/0/000",
             "tile/0/001",
             "tile/0/001.p/5",
@@ -1275,12 +1273,15 @@ mod tests {
 
         // A failed sequencing immediately allows resubmission (i.e., the failed
         // entry in the inSequencing pool is not picked up).
-        log.object.mode.set(ObjectBreakMode::FailStagingButPersist);
+        *log.lock.mode.borrow_mut() = StorageMode::Break {
+            prefix: STAGING_KEY,
+            persist: true,
+        };
         let res = log.add_with_seed(is_precert, 3);
         log.sequence().unwrap();
         assert!(block_on(res.resolve()).is_none());
 
-        log.object.mode.set(ObjectBreakMode::None);
+        *log.lock.mode.borrow_mut() = StorageMode::Ok;
         let res = log.add_with_seed(is_precert, 3); // 8
         log.sequence().unwrap();
         block_on(res.resolve()).unwrap();
@@ -1351,11 +1352,14 @@ mod tests {
         log.add_certificate_with_seed('A' as u64);
         log.add_certificate_with_seed('B' as u64);
 
-        log.lock.mode.set(LockBreakMode::FailLockAndNotPersist);
+        *log.lock.mode.borrow_mut() = StorageMode::Break {
+            prefix: CHECKPOINT_KEY,
+            persist: false,
+        };
         log.sequence().unwrap_err();
         log.check(1);
 
-        log.lock.mode.set(LockBreakMode::None);
+        *log.lock.mode.borrow_mut() = StorageMode::Ok;
         log.sequence_state =
             Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
         log.check(1);
@@ -1374,11 +1378,14 @@ mod tests {
         log.add_certificate_with_seed('C' as u64);
         log.add_certificate_with_seed('D' as u64);
 
-        log.object.mode.set(ObjectBreakMode::FailStagingButPersist);
+        *log.lock.mode.borrow_mut() = StorageMode::Break {
+            prefix: STAGING_KEY,
+            persist: true,
+        };
         log.sequence().unwrap();
         log.check(3);
 
-        log.object.mode.set(ObjectBreakMode::None);
+        *log.lock.mode.borrow_mut() = StorageMode::Ok;
 
         log.add_certificate_with_seed('C' as u64);
         log.add_certificate_with_seed('D' as u64);
@@ -1397,13 +1404,16 @@ mod tests {
         log.add_certificate();
         log.sequence().unwrap();
 
-        log.lock.mode.set(LockBreakMode::FailLockAndNotPersist);
+        *log.lock.mode.borrow_mut() = StorageMode::Break {
+            prefix: CHECKPOINT_KEY,
+            persist: false,
+        };
         let res = log.add_certificate();
         log.sequence().unwrap_err();
         assert!(block_on(res.resolve()).is_none());
         log.check(2);
 
-        log.lock.mode.set(LockBreakMode::None);
+        *log.lock.mode.borrow_mut() = StorageMode::Ok;
         log.sequence_state =
             Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
         log.add_certificate();
@@ -1416,13 +1426,13 @@ mod tests {
             #[test]
             fn $name() {
                 let break_seq = |log: &mut TestLog, broken: &mut bool| {
-                    log.object.mode.set($object_mode);
-                    log.lock.mode.set($lock_mode);
+                    *log.object.mode.borrow_mut() = $object_mode;
+                    *log.lock.mode.borrow_mut() = $lock_mode;
                     *broken = true;
                 };
                 let unbreak_seq = |log: &mut TestLog, broken: &mut bool| {
-                    log.object.mode.set(ObjectBreakMode::None);
-                    log.lock.mode.set(LockBreakMode::None);
+                    *log.object.mode.borrow_mut() = StorageMode::Ok;
+                    *log.lock.mode.borrow_mut() = StorageMode::Ok;
                     *broken = false;
                 };
                 let sequence =
@@ -1439,16 +1449,16 @@ mod tests {
                         log.check(*expected_size);
                         if result.is_err() {
                             if broken {
-                                log.object.mode.set(ObjectBreakMode::None);
-                                log.lock.mode.set(LockBreakMode::None);
+                                *log.object.mode.borrow_mut() = StorageMode::Ok;
+                                *log.lock.mode.borrow_mut() = StorageMode::Ok;
                             }
                             log.sequence_state = Some(
                                 block_on(SequenceState::load(&log.config, &log.object, &log.lock))
                                     .unwrap(),
                             );
                             if broken {
-                                log.object.mode.set($object_mode);
-                                log.lock.mode.set($lock_mode);
+                                *log.object.mode.borrow_mut() = $object_mode;
+                                *log.lock.mode.borrow_mut() = $lock_mode;
                             }
                         }
                     };
@@ -1530,8 +1540,11 @@ mod tests {
     // retried, and the same tiles are generated and uploaded again.
     test_sequence_errors!(
         lock_upload,
-        ObjectBreakMode::None,
-        LockBreakMode::FailLockAndNotPersist,
+        StorageMode::Ok,
+        StorageMode::Break {
+            prefix: CHECKPOINT_KEY,
+            persist: false,
+        },
         false,
         true
     );
@@ -1539,64 +1552,91 @@ mod tests {
     // persisted anyway, such as a response timeout.
     test_sequence_errors!(
         lock_upload_persisted,
-        ObjectBreakMode::None,
-        LockBreakMode::FailLockButPersist,
+        StorageMode::Ok,
+        StorageMode::Break {
+            prefix: CHECKPOINT_KEY,
+            persist: true,
+        },
         true,
         true
     );
     test_sequence_errors!(
         checkpoint_upload,
-        ObjectBreakMode::FailCheckpointAndNotPersist,
-        LockBreakMode::None,
+        StorageMode::Break {
+            prefix: CHECKPOINT_KEY,
+            persist: false
+        },
+        StorageMode::Ok,
         true,
         false
     );
     test_sequence_errors!(
         checkpoint_upload_persisted,
-        ObjectBreakMode::FailCheckpointButPersist,
-        LockBreakMode::None,
+        StorageMode::Break {
+            prefix: CHECKPOINT_KEY,
+            persist: true
+        },
+        StorageMode::Ok,
         true,
         false
     );
     test_sequence_errors!(
         staging_upload,
-        ObjectBreakMode::FailStagingAndNotPersist,
-        LockBreakMode::None,
+        StorageMode::Ok,
+        StorageMode::Break {
+            prefix: STAGING_KEY,
+            persist: false,
+        },
         false,
         false
     );
     test_sequence_errors!(
         staging_upload_persisted,
-        ObjectBreakMode::FailStagingButPersist,
-        LockBreakMode::None,
+        StorageMode::Ok,
+        StorageMode::Break {
+            prefix: STAGING_KEY,
+            persist: true,
+        },
         false,
         false
     );
     test_sequence_errors!(
         data_tile_upload,
-        ObjectBreakMode::FailDataTileAndNotPersist,
-        LockBreakMode::None,
+        StorageMode::Break {
+            prefix: "tile/data/",
+            persist: false
+        },
+        StorageMode::Ok,
         true,
         true
     );
     test_sequence_errors!(
         data_tile_upload_persisted,
-        ObjectBreakMode::FailDataTileButPersist,
-        LockBreakMode::None,
+        StorageMode::Break {
+            prefix: "tile/data/",
+            persist: true
+        },
+        StorageMode::Ok,
         true,
         true
     );
     test_sequence_errors!(
         tile0_upload,
-        ObjectBreakMode::FailTile0AndNotPersist,
-        LockBreakMode::None,
+        StorageMode::Break {
+            prefix: "tile/0/",
+            persist: false
+        },
+        StorageMode::Ok,
         true,
         true
     );
     test_sequence_errors!(
         tile0_upload_persisted,
-        ObjectBreakMode::FailTile0ButPersist,
-        LockBreakMode::None,
+        StorageMode::Break {
+            prefix: "tile/0/",
+            persist: true
+        },
+        StorageMode::Ok,
         true,
         true
     );
@@ -1610,33 +1650,36 @@ mod tests {
         &[],
     ];
 
-    #[derive(Copy, Clone)]
-    enum ObjectBreakMode {
-        None,
-        FailCheckpointAndNotPersist,
-        FailCheckpointButPersist,
-        FailStagingAndNotPersist,
-        FailStagingButPersist,
-        FailDataTileAndNotPersist,
-        FailDataTileButPersist,
-        FailTile0AndNotPersist,
-        FailTile0ButPersist,
+    enum StorageMode {
+        Ok,
+        Break { prefix: &'static str, persist: bool },
+    }
+
+    impl StorageMode {
+        fn check(&self, key: &str) -> (bool, bool) {
+            match self {
+                StorageMode::Break { prefix, persist } if key.starts_with(prefix) => {
+                    (false, *persist)
+                }
+                _ => (true, true),
+            }
+        }
     }
 
     // Make use of interior mutability here to avoid needing to make trait mutable for tests:
     // https://ricardomartins.cc/2016/06/08/interior-mutability
     struct TestObjectBackend {
         objects: RefCell<HashMap<String, Vec<u8>>>,
-        uploads: Cell<usize>,
-        mode: Cell<ObjectBreakMode>,
+        uploads: RefCell<usize>,
+        mode: RefCell<StorageMode>,
     }
 
     impl TestObjectBackend {
         fn new() -> Self {
             Self {
                 objects: RefCell::new(HashMap::new()),
-                uploads: Cell::new(0),
-                mode: Cell::new(ObjectBreakMode::None),
+                uploads: RefCell::new(0),
+                mode: RefCell::new(StorageMode::Ok),
             }
         }
     }
@@ -1648,37 +1691,17 @@ mod tests {
             data: &[u8],
             _opts: &super::UploadOptions,
         ) -> worker::Result<()> {
-            let new_count = self.uploads.get() + 1;
-            self.uploads.set(new_count);
-            let (apply, is_err) = match self.mode.get() {
-                ObjectBreakMode::None => (true, false),
-                ObjectBreakMode::FailCheckpointAndNotPersist => {
-                    (key != CHECKPOINT_KEY, key == CHECKPOINT_KEY)
-                }
-                ObjectBreakMode::FailCheckpointButPersist => (true, key == CHECKPOINT_KEY),
-                ObjectBreakMode::FailStagingAndNotPersist => {
-                    (!key.starts_with("staging/"), key.starts_with("staging/"))
-                }
-                ObjectBreakMode::FailStagingButPersist => (true, key.starts_with("staging/")),
-                ObjectBreakMode::FailDataTileAndNotPersist => (
-                    !key.starts_with("tile/data/"),
-                    key.starts_with("tile/data/"),
-                ),
-                ObjectBreakMode::FailDataTileButPersist => (true, key.starts_with("tile/data/")),
-                ObjectBreakMode::FailTile0AndNotPersist => {
-                    (!key.starts_with("tile/0/"), key.starts_with("tile/0/"))
-                }
-                ObjectBreakMode::FailTile0ButPersist => (true, key.starts_with("tile/0/")),
-            };
-            if apply {
+            *self.uploads.borrow_mut() += 1;
+            let (ok, persist) = self.mode.borrow().check(key);
+            if persist {
                 self.objects
                     .borrow_mut()
                     .insert(key.to_string(), data.to_vec());
             }
-            if is_err {
-                Err("upload failure".into())
-            } else {
+            if ok {
                 Ok(())
+            } else {
+                Err("upload failure".into())
             }
         }
         async fn fetch(&self, key: &str) -> worker::Result<Option<Vec<u8>>> {
@@ -1713,33 +1736,33 @@ mod tests {
         }
     }
 
-    #[derive(Copy, Clone)]
-    enum LockBreakMode {
-        None,
-        FailLockAndNotPersist,
-        FailLockButPersist,
-    }
-
     struct TestLockBackend {
         lock: RefCell<HashMap<String, Vec<u8>>>,
-        mode: Cell<LockBreakMode>,
+        mode: RefCell<StorageMode>,
     }
 
     impl TestLockBackend {
         fn new() -> Self {
             Self {
                 lock: RefCell::new(HashMap::new()),
-                mode: Cell::new(LockBreakMode::None),
+                mode: RefCell::new(StorageMode::Ok),
             }
         }
     }
 
     impl LockBackend for TestLockBackend {
         async fn put(&self, key: &str, value: &[u8]) -> worker::Result<()> {
-            self.lock
-                .borrow_mut()
-                .insert(key.to_string(), value.to_vec());
-            Ok(())
+            let (ok, persist) = self.mode.borrow().check(key);
+            if persist {
+                self.lock
+                    .borrow_mut()
+                    .insert(key.to_string(), value.to_vec());
+            }
+            if ok {
+                Ok(())
+            } else {
+                Err("failed to put value".into())
+            }
         }
         async fn swap(&self, key: &str, old: &[u8], new: &[u8]) -> worker::Result<()> {
             if let Some(old_value) = self.lock.borrow().get(key) {
@@ -1749,19 +1772,7 @@ mod tests {
             } else {
                 return Err("old value not present".into());
             }
-            let (apply, is_err) = match self.mode.get() {
-                LockBreakMode::None => (true, false),
-                LockBreakMode::FailLockAndNotPersist => (false, true),
-                LockBreakMode::FailLockButPersist => (true, true),
-            };
-            if apply {
-                self.lock.borrow_mut().insert(key.to_string(), new.to_vec());
-            }
-            if is_err {
-                Err("failed to swap value".into())
-            } else {
-                Ok(())
-            }
+            self.put(key, new).await
         }
         async fn get(&self, key: &str) -> worker::Result<Vec<u8>> {
             if let Some(value) = self.lock.borrow().get(key) {
