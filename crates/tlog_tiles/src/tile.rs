@@ -19,6 +19,7 @@ use crate::tlog::{
     node_hash, split_stored_hash_index, stored_hash_index, sub_tree_index, Hash, HashReader,
     TlogError, HASH_SIZE,
 };
+use std::cmp::max;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -204,11 +205,7 @@ impl Tile {
     }
 
     /// Path returns a tile coordinate path describing t.
-    pub fn path(&self) -> String {
-        self.path_internal(true)
-    }
-
-    fn path_internal(&self, with_height: bool) -> String {
+    pub fn path(&self, with_height: bool) -> String {
         let mut n = self.n;
         let h_str = if with_height {
             &format!("/{}", self.h)
@@ -255,8 +252,7 @@ impl Tile {
         Some(t)
     }
 
-    /// Parses a tile coordinate path. This currently supports only paths with
-    /// height element and with the data path element "data".
+    /// Parses a tile coordinate path.
     ///
     /// # Errors
     ///
@@ -265,28 +261,49 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if there are internal math errors.
-    pub fn from_path(path: &str) -> Result<Self, BadPathError> {
-        // This library bounds N to u64::MAX, which means we can limit the path size here.
-        if path.len() > 52 {
+    pub fn from_path(
+        path: &str,
+        with_height: bool,
+        data_path: PathElem,
+    ) -> Result<Self, BadPathError> {
+        // Calculate based on max supported values.
+        let max_path_len = "tile/30".len()
+            + max(data_path.to_string().len() + 1, "/63".len())
+            + "/x018/x446/x744/x073/x709/x551/615.p/1073741823".len();
+        if path.len() > max_path_len {
             return Err(BadPathError(path.into()));
         }
+
+        let min_path_elems = if with_height { 3 } else { 2 };
 
         let mut components: Vec<&str> = path.split('/').collect();
         let len = components.len();
 
-        if len < 4 || components[0] != "tile" {
+        if len < min_path_elems || components[0] != "tile" {
             return Err(BadPathError(path.into()));
         }
 
-        let h = u8::from_str(components[1]).map_err(|_| BadPathError(path.into()))?;
-        let (l, data_path_opt) = if components[2] == "data" {
-            (0, Some(PathElem::Data))
+        let mut next_idx = 1;
+        let h = if with_height {
+            next_idx += 1;
+            u8::from_str(components[1]).map_err(|_| BadPathError(path.into()))?
+        } else {
+            TlogTile::HEIGHT
+        };
+
+        let (l, data_path_opt) = if components[next_idx] == data_path.to_string() {
+            (0, Some(data_path))
         } else {
             (
-                u8::from_str(components[2]).map_err(|_| BadPathError(path.into()))?,
+                u8::from_str(components[next_idx]).map_err(|_| BadPathError(path.into()))?,
                 None,
             )
         };
+        if l > 63 {
+            return Err(BadPathError(path.into()));
+        }
+
+        next_idx += 1;
 
         if !(1..=30).contains(&h) {
             return Err(BadPathError(path.into()));
@@ -294,7 +311,7 @@ impl Tile {
 
         let mut w = 1 << h;
         #[allow(clippy::case_sensitive_file_extension_comparisons)]
-        if len >= 5 && components[len - 2].ends_with(".p") {
+        if len > min_path_elems && components[len - 2].ends_with(".p") {
             let ww = u32::from_str(components[len - 1]).map_err(|_| BadPathError(path.into()))?;
             if !(0..w).contains(&ww) {
                 return Err(BadPathError(path.into()));
@@ -304,7 +321,7 @@ impl Tile {
             components.pop();
         }
 
-        components = components[3..].to_vec();
+        components = components[next_idx..].to_vec();
 
         let mut n = 0_u64;
         for s in components {
@@ -327,7 +344,7 @@ impl Tile {
 
         let tile = Self::new(h, l, n, w, data_path_opt);
 
-        if path != tile.path() {
+        if path != tile.path(with_height) {
             return Err(BadPathError(path.into()));
         }
 
@@ -446,7 +463,7 @@ impl TlogTile {
     /// parameter should be `"entries"` for tlog-tiles, and `"data"` for
     /// static-ct-api.
     pub fn path(&self) -> String {
-        self.0.path_internal(false)
+        self.0.path(false)
     }
 
     /// Returns the tile's `k`'th tile parent in the tiles for a tree of size `n`.  If there is no such
@@ -675,17 +692,126 @@ mod tests {
     }
 
     #[test]
-    fn test_tile_from_path() -> Result<(), BadPathError> {
-        // Valid tile path with all parameters at the maximum supported by this library.
-        let _ = Tile::from_path("tile/30/data/x018/x446/x744/x073/x709/x551/615.p/255")?;
-        // Valid tile path.
-        let _ = Tile::from_path("tile/3/5/x13/x4/5/x3/6/07/5");
-        // Same as above, but tile path is not in canonical form.
-        let _ = Tile::from_path("tile/3/5/x013/x004/x005/x003/x006/x007/005")?;
-        // Triggers integer overflow.
-        let _ = Tile::from_path("tile/30/data/x018/x446/x744/x073/x709/x551/616.p/255");
-        // Path too long.
-        let _ = Tile::from_path("tile/30/data/x018/x446/x744/x073/x709/x551/616.p/2555");
-        Ok(())
+    fn test_tile_from_path() {
+        let tests = [
+            // Valid: minimum params support by library, without height
+            ("tile/0/000", false, PathElem::Custom(""), true),
+            // Invalid: N not in canonical form
+            ("tile/0/00", false, PathElem::Custom(""), false),
+            // Invalid: H = 0
+            ("tile/0/0/000", true, PathElem::Custom(""), false),
+            // Valid: minimum params support by library, with height
+            ("tile/1/0/000", true, PathElem::Custom(""), true),
+            // Valid: all parameters at max supported by library
+            (
+                "tile/30/63/x018/x446/x744/x073/x709/x551/615.p/1073741823",
+                true,
+                PathElem::Data,
+                true,
+            ),
+            // Valid: same as above, with data path
+            (
+                "tile/30/data/x018/x446/x744/x073/x709/x551/615.p/1073741823",
+                true,
+                PathElem::Data,
+                true,
+            ),
+            // Invalid: total path too long (also data path element mismatch)
+            (
+                "tile/too_long/63/x018/x446/x744/x073/x709/x551/615.p/1073741823",
+                true,
+                PathElem::Data,
+                false,
+            ),
+            // Invalid: non-canonical trailing zero path elements
+            ("tile/30/63/x000/615.p/1", true, PathElem::Data, false),
+            // Invalid: N > u64::MAX
+            (
+                "tile/30/data/x018/x446/x744/x073/x709/x551/616.p/1073741823",
+                true,
+                PathElem::Data,
+                false,
+            ),
+            // Invalid: W > 2**H
+            (
+                "tile/30/data/x018/x446/x744/x073/x709/x551/615.p/1073741824",
+                true,
+                PathElem::Data,
+                false,
+            ),
+            // Invalid: H > 30
+            (
+                "tile/31/data/x018/x446/x744/x073/x709/x551/615.p/1073741824",
+                true,
+                PathElem::Data,
+                false,
+            ),
+            // Invalid: L > 63
+            (
+                "tile/30/64/x018/x446/x744/x073/x709/x551/615.p/1073741824",
+                true,
+                PathElem::Data,
+                false,
+            ),
+            // Valid
+            (
+                "tile/3/5/x013/x004/x005/x003/x006/x007/005",
+                true,
+                PathElem::Data,
+                true,
+            ),
+            // Invalid: same as above, but not in canonical form
+            ("tile/3/5/x13/x4/5/x3/6/07/5", true, PathElem::Data, false),
+            // Invalid: mismatched data path element
+            (
+                "tile/3/data/x013/x004/x005/x003/x006/x007/005",
+                true,
+                PathElem::Entries,
+                false,
+            ),
+        ];
+
+        for (path, with_height, path_elem, valid) in tests {
+            let result = Tile::from_path(path, with_height, path_elem);
+            if valid {
+                result.unwrap();
+            } else {
+                result.unwrap_err();
+            }
+        }
+    }
+
+    #[test]
+    fn test_tile_path() {
+        let tile_paths = vec![
+            ("tile/4/0/001", Some(Tile::new(4, 0, 1, 16, None))),
+            ("tile/4/0/001.p/5", Some(Tile::new(4, 0, 1, 5, None))),
+            (
+                "tile/3/5/x123/x456/078",
+                Some(Tile::new(3, 5, 123_456_078, 8, None)),
+            ),
+            (
+                "tile/3/5/x123/x456/078.p/2",
+                Some(Tile::new(3, 5, 123_456_078, 2, None)),
+            ),
+            (
+                "tile/1/0/x003/x057/500",
+                Some(Tile::new(1, 0, 3_057_500, 2, None)),
+            ),
+            ("tile/3/5/123/456/078", None),
+            ("tile/3/-1/123/456/078", None),
+            (
+                "tile/1/data/x003/x057/500",
+                Some(Tile::new(1, 0, 3_057_500, 2, Some(PathElem::Data))),
+            ),
+        ];
+
+        for (path, want) in tile_paths {
+            let got = Tile::from_path(path, true, PathElem::Data).ok();
+            assert_eq!(want, got);
+            if let Some(t) = want {
+                assert_eq!(t.path(true), path);
+            }
+        }
     }
 }

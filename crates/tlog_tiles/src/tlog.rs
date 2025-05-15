@@ -703,7 +703,6 @@ fn run_tree_proof(
 mod tests {
     use super::*;
     use crate::tile::{Tile, TileHashReader, TileReader};
-    use crate::PathElem;
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -899,40 +898,6 @@ mod tests {
                 let (l1, n1) = split_stored_hash_index(x);
                 assert_eq!(l1, l);
                 assert_eq!(n1, n);
-            }
-        }
-    }
-
-    #[test]
-    fn test_tile_path() {
-        let tile_paths = vec![
-            ("tile/4/0/001", Some(Tile::new(4, 0, 1, 16, None))),
-            ("tile/4/0/001.p/5", Some(Tile::new(4, 0, 1, 5, None))),
-            (
-                "tile/3/5/x123/x456/078",
-                Some(Tile::new(3, 5, 123_456_078, 8, None)),
-            ),
-            (
-                "tile/3/5/x123/x456/078.p/2",
-                Some(Tile::new(3, 5, 123_456_078, 2, None)),
-            ),
-            (
-                "tile/1/0/x003/x057/500",
-                Some(Tile::new(1, 0, 3_057_500, 2, None)),
-            ),
-            ("tile/3/5/123/456/078", None),
-            ("tile/3/-1/123/456/078", None),
-            (
-                "tile/1/data/x003/x057/500",
-                Some(Tile::new(1, 0, 3_057_500, 2, Some(PathElem::Data))),
-            ),
-        ];
-
-        for (path, want) in tile_paths {
-            let got = Tile::from_path(path).ok();
-            assert_eq!(want, got);
-            if let Some(t) = want {
-                assert_eq!(t.path(), path);
             }
         }
     }
