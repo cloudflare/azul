@@ -214,7 +214,7 @@ impl SequenceState {
                 warn!(
                     "{name}: Checkpoint in object storage is older than DO storage checkpoint; old_size={}, size={}", c1.size(), c.size()
                 );
-                let staged_uploads = lock.get(STAGING_KEY).await?;
+                let staged_uploads = lock.get_multipart(STAGING_KEY).await?;
                 apply_staged_uploads(object, &staged_uploads, c.size(), c.hash()).await?;
             }
             (Ordering::Equal, true) => {} // Normal case: the sizes are the same and the hashes match.
@@ -606,7 +606,7 @@ async fn sequence_pool(
     // crash right after updating DO storage.
     let staged_uploads = marshal_staged_uploads(&tile_uploads, tree.size(), tree.hash())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't marshal staged uploads: {e}")))?;
-    lock.put(STAGING_KEY, &staged_uploads)
+    lock.put_multipart(STAGING_KEY, &staged_uploads)
         .await
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
@@ -629,7 +629,7 @@ async fn sequence_pool(
         })?;
 
     // At this point the pool is fully serialized: new entries were persisted to
-    // durable storage (in staging) and the checkpoint was comitted to the
+    // durable storage (in staging) and the checkpoint was committed to the
     // database. If we were to crash after this, recovery would be clean from
     // database and object storage.
     *sequence_state = Some(SequenceState {
@@ -1751,6 +1751,14 @@ mod tests {
     }
 
     impl LockBackend for TestLockBackend {
+        const PART_SIZE: usize = 100;
+        const MAX_PARTS: usize = 10;
+        async fn put_multipart(&self, key: &str, value: &[u8]) -> worker::Result<()> {
+            self.put(key, value).await
+        }
+        async fn get_multipart(&self, key: &str) -> worker::Result<Vec<u8>> {
+            self.get(key).await
+        }
         async fn put(&self, key: &str, value: &[u8]) -> worker::Result<()> {
             let (ok, persist) = self.mode.borrow().check(key);
             if persist {
