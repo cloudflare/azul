@@ -18,6 +18,7 @@ use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
+use sha2::{Digest, Sha256};
 use static_ct_api::{LookupKey, UnixTimestamp};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -279,21 +280,99 @@ impl MemoryCache {
 
 // Compare-and-swap backend.
 trait LockBackend {
-    async fn put(&self, key: &str, checkpoint: &[u8]) -> Result<()>;
+    const MAX_PART_BYTES: usize;
+    const MAX_PARTS: usize;
+    async fn put_multipart(&self, key: &str, value: &[u8]) -> Result<()>;
+    async fn get_multipart(&self, key: &str) -> Result<Vec<u8>>;
+    async fn put(&self, key: &str, value: &[u8]) -> Result<()>;
     async fn swap(&self, key: &str, old: &[u8], new: &[u8]) -> Result<()>;
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
 }
 
 impl LockBackend for State {
+    // DO value size limit is 2MB.
+    // https://developers.cloudflare.com/durable-objects/platform/limits/
+    const MAX_PART_BYTES: usize = 1 << 21;
+    // KV API supports putting and getting up to 128 values at a time. If this
+    // is ever exceeded, the Worker has already run out of memory.
+    // https://developers.cloudflare.com/durable-objects/api/storage-api/#kv-api
+    const MAX_PARTS: usize = 128;
+
+    // Write a value to DO storage in multiple parts, each limited to
+    // `MAX_PART_BYTES` bytes. Also write a manifest file that includes the
+    // total length of the value and a checksum.
+    async fn put_multipart(&self, key: &str, value: &[u8]) -> Result<()> {
+        if value.len() > Self::MAX_PART_BYTES * Self::MAX_PARTS {
+            return Err("value too large".into());
+        }
+        let len_bytes = u32::try_from(value.len())
+            .map_err(|e| e.to_string())?
+            .to_be_bytes();
+        let manifest = len_bytes
+            .into_iter()
+            .chain(Sha256::digest(value))
+            .collect::<Vec<u8>>();
+        self.storage().put(key, manifest).await?;
+
+        // Encode keys suffixes as two hex digits so they'll be in the correct
+        // order when sorted in increasing order of UTF-8 encodings.
+        let key_iter = (0..).map(|i| format!("{key}_{i:02x}"));
+        let obj = js_sys::Object::new();
+        for (k, v) in key_iter.zip(value.chunks(Self::MAX_PART_BYTES)) {
+            let value = js_sys::Uint8Array::new_with_length(
+                u32::try_from(v.len()).map_err(|_| "u32 conversion failed")?,
+            );
+            value.copy_from(v);
+            js_sys::Reflect::set(&obj, &wasm_bindgen::JsValue::from_str(&k), &value.into())?;
+        }
+        self.storage().put_multiple_raw(obj).await
+    }
+
+    // Read a value from DO storage that is split across multiple parts.
+    // First read a manifest containing the full length and checksum, then
+    // get the values.
+    async fn get_multipart(&self, key: &str) -> Result<Vec<u8>> {
+        let manifest = self.storage().get::<Vec<u8>>(key).await?;
+        if manifest.len() != 4 + 32 {
+            return Err("invalid manifest length".into());
+        }
+        let len = u32::from_be_bytes(
+            manifest[..4]
+                .try_into()
+                .map_err(|_| "u32 conversion failed")?,
+        ) as usize;
+        let checksum: [u8; 32] = manifest[4..4 + 32]
+            .try_into()
+            .map_err(|_| "slice conversion failed")?;
+        if len > Self::MAX_PART_BYTES * Self::MAX_PARTS {
+            return Err("value too large".into());
+        }
+        let mut result = Vec::with_capacity(len);
+        let keys = (0..len.div_ceil(Self::MAX_PART_BYTES))
+            .map(|i| format!("{key}_{i:02x}"))
+            .collect::<Vec<_>>();
+        // Keys in the map are sorted in increasing order of UTF-8 encodings, so we
+        // can just append the values.
+        // https://developers.cloudflare.com/durable-objects/api/storage-api/#kv-api
+        let parts_map = self.storage().get_multiple(keys).await?;
+        for value in parts_map.values() {
+            result.extend(serde_wasm_bindgen::from_value::<Vec<u8>>(value?)?);
+        }
+
+        if checksum != *Sha256::digest(&result) {
+            return Err("checksum failed".into());
+        }
+        Ok(result)
+    }
     async fn put(&self, key: &str, value: &[u8]) -> Result<()> {
         self.storage().put(key, value).await
     }
-    async fn swap(&self, key: &str, old: &[u8], new: &[u8]) -> Result<()> {
-        let old_value = self.storage().get::<Vec<u8>>(key).await?;
-        if old_value != old {
-            return Err("checkpoints do not match".into());
+    async fn swap(&self, key: &str, expected_old: &[u8], new: &[u8]) -> Result<()> {
+        let old = self.storage().get::<Vec<u8>>(key).await?;
+        if old != expected_old {
+            return Err("old value does not match expected".into());
         }
-        self.storage().put(key, new).await
+        self.put(key, new).await
     }
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         self.storage().get::<Vec<u8>>(key).await
