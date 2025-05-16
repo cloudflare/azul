@@ -280,7 +280,7 @@ impl MemoryCache {
 
 // Compare-and-swap backend.
 trait LockBackend {
-    const PART_SIZE: usize;
+    const MAX_PART_BYTES: usize;
     const MAX_PARTS: usize;
     async fn put_multipart(&self, key: &str, value: &[u8]) -> Result<()>;
     async fn get_multipart(&self, key: &str) -> Result<Vec<u8>>;
@@ -290,20 +290,19 @@ trait LockBackend {
 }
 
 impl LockBackend for State {
-    // Stated limit is 2MB, but actual limit seems to be between 2.1 and 2.2MB.
+    // DO value size limit is 2MB.
     // https://developers.cloudflare.com/durable-objects/platform/limits/
-    const PART_SIZE: usize = 2_000_000;
+    const MAX_PART_BYTES: usize = 1 << 21;
     // KV API supports putting and getting up to 128 values at a time. If this
     // is ever exceeded, the Worker has already run out of memory.
     // https://developers.cloudflare.com/durable-objects/api/storage-api/#kv-api
     const MAX_PARTS: usize = 128;
 
     // Write a value to DO storage in multiple parts, each limited to
-    // `PART_SIZE` bytes. Also write a manifest file that includes the total
-    // length of the value and a checksum.
+    // `MAX_PART_BYTES` bytes. Also write a manifest file that includes the
+    // total length of the value and a checksum.
     async fn put_multipart(&self, key: &str, value: &[u8]) -> Result<()> {
-        log::warn!("put_multipart of size {}", value.len());
-        if value.len() > Self::PART_SIZE * Self::MAX_PARTS {
+        if value.len() > Self::MAX_PART_BYTES * Self::MAX_PARTS {
             return Err("value too large".into());
         }
         let len_bytes = u32::try_from(value.len())
@@ -315,11 +314,11 @@ impl LockBackend for State {
             .collect::<Vec<u8>>();
         self.storage().put(key, manifest).await?;
 
-        let obj = js_sys::Object::new();
         // Encode keys suffixes as two hex digits so they'll be in the correct
-        // when sorted in increasing order of UTF-8 encodings.
+        // order when sorted in increasing order of UTF-8 encodings.
         let key_iter = (0..).map(|i| format!("{key}_{i:02x}"));
-        for (k, v) in key_iter.zip(value.chunks(Self::PART_SIZE)) {
+        let obj = js_sys::Object::new();
+        for (k, v) in key_iter.zip(value.chunks(Self::MAX_PART_BYTES)) {
             let value = js_sys::Uint8Array::new_with_length(
                 u32::try_from(v.len()).map_err(|_| "u32 conversion failed")?,
             );
@@ -345,11 +344,11 @@ impl LockBackend for State {
         let checksum: [u8; 32] = manifest[4..4 + 32]
             .try_into()
             .map_err(|_| "slice conversion failed")?;
-        if len > Self::PART_SIZE * Self::MAX_PARTS {
+        if len > Self::MAX_PART_BYTES * Self::MAX_PARTS {
             return Err("value too large".into());
         }
         let mut result = Vec::with_capacity(len);
-        let keys = (0..((len - 1 + Self::PART_SIZE) / Self::PART_SIZE))
+        let keys = (0..len.div_ceil(Self::MAX_PART_BYTES))
             .map(|i| format!("{key}_{i:02x}"))
             .collect::<Vec<_>>();
         // Keys in the map are sorted in increasing order of UTF-8 encodings, so we
@@ -358,12 +357,6 @@ impl LockBackend for State {
         let parts_map = self.storage().get_multiple(keys).await?;
         for value in parts_map.values() {
             result.extend(serde_wasm_bindgen::from_value::<Vec<u8>>(value?)?);
-        }
-
-        let list = self.storage().list().await?;
-        for key in list.keys() {
-            let key = key?.as_string().ok_or("key wasn't a string")?;
-            log::warn!("keys: {key}");
         }
 
         if checksum != *Sha256::digest(&result) {

@@ -1751,7 +1751,7 @@ mod tests {
     }
 
     impl LockBackend for TestLockBackend {
-        const PART_SIZE: usize = 100;
+        const MAX_PART_BYTES: usize = 100;
         const MAX_PARTS: usize = 10;
         async fn put_multipart(&self, key: &str, value: &[u8]) -> worker::Result<()> {
             self.put(key, value).await
