@@ -161,7 +161,6 @@ impl Sequencer {
             origin: origin.to_string(),
             signing_key,
             witness_key,
-            pool_size: params.pool_size,
             sequence_interval,
         });
         self.public_bucket = Some(ObjectBucket {
@@ -223,7 +222,6 @@ impl Sequencer {
     // are omitted.
     async fn add_batch(&mut self, pending_entries: &[LogEntry]) -> Result<Response> {
         // Safe to unwrap config here as the log must be initialized.
-        let config = self.config.as_ref().unwrap();
         let mut futures = Vec::with_capacity(pending_entries.len());
         for pending_entry in pending_entries {
             let typ = if pending_entry.is_precert {
@@ -232,16 +230,15 @@ impl Sequencer {
                 "add-chain"
             };
 
-            let (add_leaf_result, source) = ctlog::add_leaf_to_pool(
+            let add_leaf_result = ctlog::add_leaf_to_pool(
                 &mut self.pool_state,
-                config.pool_size,
                 self.cache.as_ref().unwrap(),
                 pending_entry,
             );
 
             self.metrics
                 .entry_count
-                .with_label_values(&[typ, &source.to_string()])
+                .with_label_values(&[typ, add_leaf_result.source()])
                 .inc();
 
             futures.push(add_leaf_result.resolve());

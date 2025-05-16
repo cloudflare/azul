@@ -47,6 +47,12 @@ const DATA_TILE_KEY: u8 = u8::MAX;
 const CHECKPOINT_KEY: &str = "checkpoint";
 const STAGING_KEY: &str = "staging";
 
+// Limit on the number of entries per batch. Tune this parameter to avoid
+// running into various size limitations. For instance, unexpectedly large
+// leaves (e.g., with PQ signatures) could cause us to exceed the 128MB Workers
+// memory limit. Storing 4000 10KB certificates is 40MB.
+const MAX_POOL_SIZE: usize = 4000;
+
 /// Configuration for a CT log.
 #[derive(Clone)]
 pub(crate) struct LogConfig {
@@ -54,7 +60,6 @@ pub(crate) struct LogConfig {
     pub(crate) origin: String,
     pub(crate) signing_key: EcdsaSigningKey,
     pub(crate) witness_key: Ed25519SigningKey,
-    pub(crate) pool_size: usize,
     pub(crate) sequence_interval: Duration,
 }
 
@@ -76,6 +81,46 @@ pub(crate) struct PoolState {
     // committed to the deduplication cache.
     in_sequencing: HashMap<LookupKey, u64>,
     in_sequencing_done: Option<Receiver<SequenceMetadata>>,
+}
+
+impl PoolState {
+    // Check if the key is already in the pool. If so, return the index of the
+    // entry in the pool, and a Receiver from which to read the entry metadata
+    // when it is sequenced.
+    fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
+        if let Some(index) = self.in_sequencing.get(key) {
+            // Entry is being sequenced.
+            Some(AddLeafResult::Pending {
+                pool_index: *index,
+                rx: self.in_sequencing_done.clone().unwrap(),
+                source: PendingSource::InSequencing,
+            })
+        } else {
+            self.current_pool
+                .by_hash
+                .get(key)
+                .map(|index| AddLeafResult::Pending {
+                    pool_index: *index,
+                    rx: self.current_pool.done.subscribe(),
+                    source: PendingSource::Pool,
+                })
+        }
+    }
+    // Add a new entry to the pool.
+    fn add(&mut self, key: LookupKey, leaf: &LogEntry) -> AddLeafResult {
+        if self.pending_leaves.len() >= MAX_POOL_SIZE {
+            return AddLeafResult::RateLimited;
+        }
+        self.current_pool.pending_leaves.push(leaf.clone());
+        let pool_index = (self.current_pool.pending_leaves.len() as u64) - 1;
+        self.current_pool.by_hash.insert(key, pool_index);
+
+        AddLeafResult::Pending {
+            pool_index,
+            rx: self.current_pool.done.subscribe(),
+            source: PendingSource::Sequencer,
+        }
+    }
 }
 
 // State owned by the sequencing loop.
@@ -282,7 +327,11 @@ impl SequenceState {
 /// entry or a pending entry that must be resolved.
 pub(crate) enum AddLeafResult {
     Cached(SequenceMetadata),
-    Pending((u64, Receiver<SequenceMetadata>)),
+    Pending {
+        pool_index: u64,
+        rx: Receiver<SequenceMetadata>,
+        source: PendingSource,
+    },
     RateLimited,
 }
 
@@ -292,7 +341,11 @@ impl AddLeafResult {
     pub(crate) async fn resolve(self) -> Option<SequenceMetadata> {
         match self {
             AddLeafResult::Cached(entry) => Some(entry),
-            AddLeafResult::Pending((pool_index, mut rx)) => {
+            AddLeafResult::Pending {
+                pool_index,
+                mut rx,
+                source: _,
+            } => {
                 // Wait until sequencing completes for this entry's pool.
                 if rx.changed().await.is_ok() {
                     let (first_index, timestamp) = *rx.borrow();
@@ -305,70 +358,52 @@ impl AddLeafResult {
             AddLeafResult::RateLimited => None,
         }
     }
-}
-pub(crate) enum AddLeafResultSource {
-    InSequencing,
-    Pool,
-    Cache,
-    Sequencer,
-    RateLimit,
-}
 
-impl std::fmt::Display for AddLeafResultSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    pub(crate) fn source(&self) -> &'static str {
         match self {
-            AddLeafResultSource::InSequencing => write!(f, "sequencing"),
-            AddLeafResultSource::Pool => write!(f, "pool"),
-            AddLeafResultSource::Cache => write!(f, "cache"),
-            AddLeafResultSource::Sequencer => write!(f, "sequencer"),
-            AddLeafResultSource::RateLimit => write!(f, "ratelimit"),
+            AddLeafResult::Cached(_) => "cache",
+            AddLeafResult::RateLimited => "ratelimit",
+            AddLeafResult::Pending {
+                pool_index: _,
+                rx: _,
+                source,
+            } => match source {
+                PendingSource::InSequencing => "sequencing",
+                PendingSource::Pool => "pool",
+                PendingSource::Sequencer => "sequencer",
+            },
         }
     }
+}
+pub(crate) enum PendingSource {
+    InSequencing,
+    Pool,
+    Sequencer,
 }
 
 /// Add a leaf (a certificate or pre-certificate) to the pool of pending entries.
 ///
-/// If the entry is has already been sequenced and is in the cache, return immediately
+/// If the entry has already been sequenced and is in the cache, return immediately
 /// with a [`AddLeafResult::Cached`]. If the pool is full, return
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
 pub(crate) fn add_leaf_to_pool(
     state: &mut PoolState,
-    pool_size: usize,
     cache: &impl CacheRead,
     leaf: &LogEntry,
-) -> (AddLeafResult, AddLeafResultSource) {
+) -> AddLeafResult {
     let hash = leaf.lookup_key();
-    let pool_index: u64;
-    let rx: Receiver<SequenceMetadata>;
-    let source: AddLeafResultSource;
 
-    if let Some(index) = state.in_sequencing.get(&hash) {
-        // Entry is being sequenced.
-        pool_index = *index;
-        rx = state.in_sequencing_done.clone().unwrap();
-        source = AddLeafResultSource::InSequencing;
-    } else if let Some(index) = state.current_pool.by_hash.get(&hash) {
-        // Entry is already pending.
-        pool_index = *index;
-        rx = state.current_pool.done.subscribe();
-        source = AddLeafResultSource::Pool;
+    if let Some(result) = state.check(&hash) {
+        // Entry is already pending or being sequenced.
+        result
     } else if let Some(v) = cache.get_entry(&hash) {
         // Entry is cached.
-        return (AddLeafResult::Cached(v), AddLeafResultSource::Cache);
+        AddLeafResult::Cached(v)
     } else {
         // This is a new entry. Add it to the pool.
-        if pool_size > 0 && state.current_pool.pending_leaves.len() >= pool_size {
-            return (AddLeafResult::RateLimited, AddLeafResultSource::RateLimit);
-        }
-        state.current_pool.pending_leaves.push(leaf.clone());
-        pool_index = (state.current_pool.pending_leaves.len() as u64) - 1;
-        state.current_pool.by_hash.insert(hash, pool_index);
-        rx = state.current_pool.done.subscribe();
-        source = AddLeafResultSource::Sequencer;
-    };
-
-    (AddLeafResult::Pending((pool_index, rx)), source)
+        state.add(hash, leaf)
+    }
 }
 
 /// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
@@ -1093,7 +1128,7 @@ mod tests {
                     certificate,
                     ..Default::default()
                 };
-                add_leaf_to_pool(&mut log.pool_state, log.config.pool_size, &log.cache, &leaf);
+                add_leaf_to_pool(&mut log.pool_state, &log.cache, &leaf);
             }
             log.sequence().unwrap();
         }
@@ -1811,7 +1846,6 @@ mod tests {
                 origin: "example.com/TestLog".to_string(),
                 witness_key: Ed25519SigningKey::generate(&mut OsRng),
                 signing_key: EcdsaSigningKey::random(&mut OsRng),
-                pool_size: 0,
                 sequence_interval: Duration::from_secs(1),
             };
             let pool_state = PoolState::default();
@@ -1892,13 +1926,7 @@ mod tests {
 
             block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
 
-            add_leaf_to_pool(
-                &mut self.pool_state,
-                self.config.pool_size,
-                &self.cache,
-                &leaf,
-            )
-            .0
+            add_leaf_to_pool(&mut self.pool_state, &self.cache, &leaf)
         }
 
         fn check(&self, size: u64) -> u64 {
