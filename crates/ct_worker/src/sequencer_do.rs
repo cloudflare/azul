@@ -12,7 +12,7 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::LogEntry;
+use static_ct_api::PendingLogEntry;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -81,7 +81,7 @@ impl DurableObject for Sequencer {
             }
             "/add_batch" => {
                 endpoint = "add_batch";
-                let pending_entries: Vec<LogEntry> = req.json().await?;
+                let pending_entries: Vec<PendingLogEntry> = req.json().await?;
                 self.add_batch(&pending_entries).await
             }
             _ => {
@@ -220,7 +220,7 @@ impl Sequencer {
     // Add a batch of entries, returning a Response with metadata for
     // successfully sequenced entries. Entries that fail to be added (e.g., due to rate limiting)
     // are omitted.
-    async fn add_batch(&mut self, pending_entries: &[LogEntry]) -> Result<Response> {
+    async fn add_batch(&mut self, pending_entries: &[PendingLogEntry]) -> Result<Response> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         for pending_entry in pending_entries {

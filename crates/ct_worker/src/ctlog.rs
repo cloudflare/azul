@@ -30,7 +30,7 @@ use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use static_ct_api::{LogEntry, TileIterator, TreeWithTimestamp};
+use static_ct_api::{LogEntry, PendingLogEntry, TileIterator, TreeWithTimestamp};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -75,8 +75,9 @@ pub(crate) struct LogConfig {
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Default, Debug)]
 pub(crate) struct PoolState {
-    // Entries that are ready to be sequenced.
-    pending_entries: Vec<LogEntry>,
+    // Entries that are ready to be sequenced, along with the Sender that will
+    // be updated when the entry is sequenced.
+    pending_entries: Vec<PendingLogEntry>,
 
     // Deduplication cache for entries currently pending sequencing.
     pending: HashMap<LookupKey, (u64, Receiver<SequenceMetadata>)>,
@@ -112,11 +113,11 @@ impl PoolState {
         }
     }
     // Add a new entry to the pool.
-    fn add(&mut self, key: LookupKey, leaf: &LogEntry) -> AddLeafResult {
+    fn add(&mut self, key: LookupKey, entry: &PendingLogEntry) -> AddLeafResult {
         if self.pending_entries.len() >= MAX_POOL_SIZE {
             return AddLeafResult::RateLimited;
         }
-        self.pending_entries.push(leaf.clone());
+        self.pending_entries.push(entry.clone());
         let pool_index = (self.pending_entries.len() as u64) - 1;
         let rx = self.pending_done.subscribe();
         self.pending.insert(key, (pool_index, rx.clone()));
@@ -129,7 +130,7 @@ impl PoolState {
     }
     // Take the entries from the pool that are ready to be sequenced and the
     // corresponding Senders to update when the entries have been sequenced.
-    fn take(&mut self) -> (Vec<LogEntry>, Sender<SequenceMetadata>) {
+    fn take(&mut self) -> (Vec<PendingLogEntry>, Sender<SequenceMetadata>) {
         self.in_sequencing = std::mem::take(&mut self.pending);
         (
             std::mem::take(&mut self.pending_entries),
@@ -410,9 +411,9 @@ pub(crate) enum PendingSource {
 pub(crate) fn add_leaf_to_pool(
     state: &mut PoolState,
     cache: &impl CacheRead,
-    leaf: &LogEntry,
+    entry: &PendingLogEntry,
 ) -> AddLeafResult {
-    let hash = leaf.lookup_key();
+    let hash = entry.lookup_key();
 
     if let Some(result) = state.check(&hash) {
         // Entry is already pending or being sequenced.
@@ -422,7 +423,7 @@ pub(crate) fn add_leaf_to_pool(
         AddLeafResult::Cached(v)
     } else {
         // This is a new entry. Add it to the pool.
-        state.add(hash, leaf)
+        state.add(hash, entry)
     }
 }
 
@@ -543,7 +544,7 @@ async fn sequence_entries(
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &mut impl CacheWrite,
-    mut pending_entries: Vec<LogEntry>,
+    pending_entries: Vec<PendingLogEntry>,
     done: Sender<SequenceMetadata>,
     metrics: &Metrics,
 ) -> Result<(), SequenceError> {
@@ -572,13 +573,16 @@ async fn sequence_entries(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_leaves: Vec<LogEntry> = Vec::new();
+    let mut sequenced_entries: Vec<LogEntry> = Vec::new();
 
-    for leaf in &mut pending_entries {
-        leaf.leaf_index = n;
-        leaf.timestamp = timestamp;
-        sequenced_leaves.push(leaf.clone());
-        let tile_leaf = leaf.tile_leaf();
+    for entry in pending_entries {
+        let sequenced_entry = LogEntry {
+            inner: entry,
+            leaf_index: n,
+            timestamp,
+        };
+        let tile_leaf = sequenced_entry.tile_leaf();
+        let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
         data_tile.extend(tile_leaf);
 
@@ -587,7 +591,7 @@ async fn sequence_entries(
         // the new tiles).
         let hashes = tlog_tiles::stored_hashes(
             n,
-            &leaf.merkle_tree_leaf(),
+            &merkle_tree_leaf,
             &HashReaderWithOverlay {
                 edge_tiles: &edge_tiles,
                 overlay: &overlay,
@@ -595,7 +599,7 @@ async fn sequence_entries(
         )
         .map_err(|e| {
             SequenceError::NonFatal(format!(
-                "couldn't compute new hashes for leaf {leaf:?}: {e}"
+                "couldn't compute new hashes for leaf {sequenced_entry:?}: {e}",
             ))
         })?;
         for (i, h) in hashes.iter().enumerate() {
@@ -611,6 +615,8 @@ async fn sequence_entries(
             metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
             data_tile.clear();
         }
+
+        sequenced_entries.push(sequenced_entry);
     }
 
     // Stage leftover partial data tile, if any.
@@ -739,16 +745,21 @@ async fn sequence_entries(
     // duplicates.
     if let Err(e) = cache
         .put_entries(
-            &sequenced_leaves
+            &sequenced_entries
                 .iter()
-                .map(|entry| (entry.lookup_key(), (entry.leaf_index, entry.timestamp)))
+                .map(|entry| {
+                    (
+                        entry.inner.lookup_key(),
+                        (entry.leaf_index, entry.timestamp),
+                    )
+                })
                 .collect::<Vec<_>>(),
         )
         .await
     {
         warn!(
             "{name}: Cache put failed (entries={}): {e}",
-            sequenced_leaves.len()
+            sequenced_entries.len()
         );
     }
 
@@ -1130,7 +1141,7 @@ mod tests {
         for i in 0..500_u64 {
             for k in 0..3000_u64 {
                 let certificate = (i * 3000 + k).to_be_bytes().to_vec();
-                let leaf = LogEntry {
+                let leaf = PendingLogEntry {
                     certificate,
                     ..Default::default()
                 };
@@ -1880,7 +1891,7 @@ mod tests {
         }
         fn sequence_finish(
             &mut self,
-            pending_entries: Vec<LogEntry>,
+            pending_entries: Vec<PendingLogEntry>,
             pending_done: Sender<SequenceMetadata>,
         ) {
             block_on(sequence_entries(
@@ -1919,14 +1930,12 @@ mod tests {
                 pre_certificate = Vec::new();
             }
             let issuers = CHAINS[rng.gen_range(0..CHAINS.len())];
-            let leaf = LogEntry {
+            let leaf = PendingLogEntry {
                 certificate,
                 pre_certificate,
                 is_precert,
                 issuer_key_hash,
                 chain_fingerprints: issuers.iter().map(|&x| Sha256::digest(x).into()).collect(),
-                leaf_index: 0,
-                timestamp: 0,
             };
 
             block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
@@ -2020,16 +2029,16 @@ mod tests {
                         tlog_tiles::record_hash(&entry.merkle_tree_leaf())
                     );
 
-                    assert!(!entry.certificate.is_empty());
-                    if entry.is_precert {
-                        assert!(!entry.pre_certificate.is_empty());
-                        assert_ne!(entry.issuer_key_hash, [0; 32]);
+                    assert!(!entry.inner.certificate.is_empty());
+                    if entry.inner.is_precert {
+                        assert!(!entry.inner.pre_certificate.is_empty());
+                        assert_ne!(entry.inner.issuer_key_hash, [0; 32]);
                     } else {
-                        assert!(entry.pre_certificate.is_empty());
-                        assert_eq!(entry.issuer_key_hash, [0; 32]);
+                        assert!(entry.inner.pre_certificate.is_empty());
+                        assert_eq!(entry.inner.issuer_key_hash, [0; 32]);
                     }
 
-                    for fp in entry.chain_fingerprints {
+                    for fp in entry.inner.chain_fingerprints {
                         let b = block_on(self.object.fetch(&format!("issuer/{}", hex::encode(fp))))
                             .unwrap()
                             .unwrap();
