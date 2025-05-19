@@ -14,7 +14,7 @@ use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use static_ct_api::{AddChainRequest, GetRootsResponse, LogEntry, UnixTimestamp};
+use static_ct_api::{AddChainRequest, GetRootsResponse, LogEntry, PendingLogEntry, UnixTimestamp};
 use std::str::FromStr;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -191,7 +191,7 @@ async fn add_chain_or_pre_chain(
     // deduplication cache and then sending a request to the DO to sequence the entry.
 
     // Convert chain to a pending log entry.
-    let mut entry = LogEntry {
+    let pending_entry = PendingLogEntry {
         certificate: chain.certificate,
         is_precert: chain.is_precert,
         issuer_key_hash: chain.issuer_key_hash,
@@ -201,22 +201,24 @@ async fn add_chain_or_pre_chain(
             .map(|issuer| Sha256::digest(issuer).into())
             .collect(),
         pre_certificate: chain.pre_certificate,
-        leaf_index: 0,
-        timestamp: 0,
     };
-    let lookup_key = entry.lookup_key();
+    let lookup_key = pending_entry.lookup_key();
     let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if let Some(v) = kv
+    if let Some((leaf_index, timestamp)) = kv
         .get(&BASE64_STANDARD.encode(lookup_key))
         .bytes_with_metadata::<SequenceMetadata>()
         .await?
         .1
     {
         debug!("{name}: Entry is cached");
-        (entry.leaf_index, entry.timestamp) = v;
+        let entry = LogEntry {
+            inner: pending_entry,
+            leaf_index,
+            timestamp,
+        };
         let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
             .map_err(|e| e.to_string())?;
         return Response::from_json(&sct);
@@ -250,7 +252,7 @@ async fn add_chain_or_pre_chain(
             &format!("http://fake_url.com/add_leaf?name={name}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&entry)?.into()),
+                body: Some(serde_json::to_string(&pending_entry)?.into()),
                 ..Default::default()
             },
         )?)
@@ -260,8 +262,11 @@ async fn add_chain_or_pre_chain(
         return Ok(response);
     }
     let (leaf_index, timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
-    entry.leaf_index = leaf_index;
-    entry.timestamp = timestamp;
+    let entry = LogEntry {
+        inner: pending_entry,
+        leaf_index,
+        timestamp,
+    };
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
     Response::from_json(&sct)

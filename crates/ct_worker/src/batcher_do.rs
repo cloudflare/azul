@@ -9,7 +9,7 @@
 use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::LogEntry;
+use static_ct_api::PendingLogEntry;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -37,7 +37,7 @@ struct Batcher {
 
 // A batch of entries to be submitted to the Sequencer together.
 struct Batch {
-    pending_leaves: Vec<LogEntry>,
+    pending_leaves: Vec<PendingLogEntry>,
     by_hash: HashSet<LookupKey>,
     done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
@@ -68,7 +68,7 @@ impl DurableObject for Batcher {
         match req.path().as_str() {
             "/add_leaf" => {
                 let name = &req.query::<QueryParams>()?.name;
-                let entry: LogEntry = req.json().await?;
+                let entry: PendingLogEntry = req.json().await?;
                 let key = entry.lookup_key();
 
                 if self.in_flight >= MAX_IN_FLIGHT {

@@ -131,8 +131,8 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
     Ok(Sha256::digest(&pkix).into())
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct LogEntry {
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+pub struct PendingLogEntry {
     /// Either the `TimestampedEntry.signed_entry`, or the
     /// `PreCert.tbs_certificate` for Precertificates.
     /// It must be at most 2^24-1 bytes long.
@@ -153,6 +153,45 @@ pub struct LogEntry {
     /// The `PrecertChainEntry.pre_certificate`.
     /// It must be at most 2^24-1 bytes long.
     pub pre_certificate: Vec<u8>,
+}
+
+pub type LookupKey = [u8; 16];
+
+impl PendingLogEntry {
+    /// Compute the cache key for a pending log entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are errors writing to an internal buffer.
+    pub fn lookup_key(&self) -> LookupKey {
+        let mut buffer = Vec::new();
+        if self.is_precert {
+            // Add entry type = 1 (precert_entry)
+            buffer.write_u16::<BigEndian>(1).unwrap();
+
+            // Add issuer key hash
+            buffer.extend_from_slice(&self.issuer_key_hash);
+        } else {
+            // Add entry type = 0 (x509_entry)
+            buffer.write_u16::<BigEndian>(0).unwrap();
+        }
+        // Add certificate with a 24-bit length prefix
+        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
+
+        // Compute the SHA-256 hash of the buffer
+        let hash = Sha256::digest(&buffer);
+
+        // Return the first 16 bytes of the hash as the lookup key.
+        let mut cache_hash = [0u8; 16];
+        cache_hash.copy_from_slice(&hash[..16]);
+
+        cache_hash
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LogEntry {
+    pub inner: PendingLogEntry,
 
     /// The zero-based index of the leaf in the log.
     /// It must be between 0 and 2^40-1.
@@ -162,21 +201,21 @@ pub struct LogEntry {
     pub timestamp: UnixTimestamp,
 }
 
-pub type LookupKey = [u8; 16];
-
 impl LogEntry {
     /// Returns a marshaled RFC 6962 `TimestampedEntry`.
     fn marshal_timestamped_entry(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
 
         buffer.write_u64::<BigEndian>(self.timestamp).unwrap();
-        if self.is_precert {
+        if self.inner.is_precert {
             buffer.write_u16::<BigEndian>(1).unwrap(); // entry_type = precert_entry
-            buffer.extend_from_slice(&self.issuer_key_hash);
+            buffer.extend_from_slice(&self.inner.issuer_key_hash);
         } else {
             buffer.write_u16::<BigEndian>(0).unwrap(); // entry_type = x509_entry
         }
-        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
+        buffer
+            .write_length_prefixed(&self.inner.certificate, 3)
+            .unwrap();
         buffer
             .write_length_prefixed(
                 &Extensions {
@@ -213,46 +252,16 @@ impl LogEntry {
     pub fn tile_leaf(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend(self.marshal_timestamped_entry());
-        if self.is_precert {
+        if self.inner.is_precert {
             buffer
-                .write_length_prefixed(&self.pre_certificate, 3)
+                .write_length_prefixed(&self.inner.pre_certificate, 3)
                 .unwrap();
         }
         buffer
-            .write_length_prefixed(&self.chain_fingerprints.concat(), 2)
+            .write_length_prefixed(&self.inner.chain_fingerprints.concat(), 2)
             .unwrap();
 
         buffer
-    }
-
-    /// Compute the cache key for a log entry.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are errors writing to an internal buffer.
-    pub fn lookup_key(&self) -> LookupKey {
-        let mut buffer = Vec::new();
-        if self.is_precert {
-            // Add entry type = 1 (precert_entry)
-            buffer.write_u16::<BigEndian>(1).unwrap();
-
-            // Add issuer key hash
-            buffer.extend_from_slice(&self.issuer_key_hash);
-        } else {
-            // Add entry type = 0 (x509_entry)
-            buffer.write_u16::<BigEndian>(0).unwrap();
-        }
-        // Add certificate with a 24-bit length prefix
-        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
-
-        // Compute the SHA-256 hash of the buffer
-        let hash = Sha256::digest(&buffer);
-
-        // Return the first 16 bytes of the hash as the lookup key.
-        let mut cache_hash = [0u8; 16];
-        cache_hash.copy_from_slice(&hash[..16]);
-
-        cache_hash
     }
 }
 
@@ -318,16 +327,16 @@ impl TileIterator {
 
         match entry_type {
             0 => {
-                entry.certificate = self.s.read_length_prefixed(3)?;
+                entry.inner.certificate = self.s.read_length_prefixed(3)?;
                 extensions = self.s.read_length_prefixed(2)?;
                 fingerprints = self.s.read_length_prefixed(2)?;
             }
             1 => {
-                entry.is_precert = true;
-                self.s.read_exact(&mut entry.issuer_key_hash)?;
-                entry.certificate = self.s.read_length_prefixed(3)?;
+                entry.inner.is_precert = true;
+                self.s.read_exact(&mut entry.inner.issuer_key_hash)?;
+                entry.inner.certificate = self.s.read_length_prefixed(3)?;
                 extensions = self.s.read_length_prefixed(2)?;
-                entry.pre_certificate = self.s.read_length_prefixed(3)?;
+                entry.inner.pre_certificate = self.s.read_length_prefixed(3)?;
                 fingerprints = self.s.read_length_prefixed(2)?;
             }
             _ => {
@@ -349,7 +358,7 @@ impl TileIterator {
         while fingerprints.position() != fingerprints.get_ref().len() as u64 {
             let mut f = [0; 32];
             fingerprints.read_exact(&mut f)?;
-            entry.chain_fingerprints.push(f);
+            entry.inner.chain_fingerprints.push(f);
         }
 
         Ok(entry)
