@@ -39,7 +39,7 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE};
-use tokio::sync::watch::{Receiver, Sender};
+use tokio::sync::watch::{channel, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
@@ -75,41 +75,32 @@ pub(crate) struct LogConfig {
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Default, Debug)]
 pub(crate) struct PoolState {
-    // Entries that are ready to be sequenced, along with the Sender that will
-    // be updated when the entry is sequenced.
-    pending_entries: Vec<PendingLogEntry>,
+    // Entries that are ready to be sequenced, along with the Sender used to
+    // send metadata to receivers once the corresponding entry is sequenced.
+    pending_entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
 
     // Deduplication cache for entries currently pending sequencing.
-    pending: HashMap<LookupKey, (u64, Receiver<SequenceMetadata>)>,
-
-    // Channel that will be updated when the current pool of pending entries is
-    // sequenced.
-    pending_done: Sender<SequenceMetadata>,
+    pending: HashMap<LookupKey, Receiver<SequenceMetadata>>,
 
     // Deduplication cache for entries currently being sequenced.
-    in_sequencing: HashMap<LookupKey, (u64, Receiver<SequenceMetadata>)>,
+    in_sequencing: HashMap<LookupKey, Receiver<SequenceMetadata>>,
 }
 
 impl PoolState {
-    // Check if the key is already in the pool. If so, return the index of the
-    // entry in the pool, and a Receiver from which to read the entry metadata
-    // when it is sequenced.
+    // Check if the key is already in the pool. If so, return a Receiver from
+    // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
-        if let Some((index, rx)) = self.in_sequencing.get(key) {
+        if let Some(rx) = self.in_sequencing.get(key) {
             // Entry is being sequenced.
             Some(AddLeafResult::Pending {
-                pool_index: *index,
                 rx: rx.clone(),
                 source: PendingSource::InSequencing,
             })
         } else {
-            self.pending
-                .get(key)
-                .map(|(index, rx)| AddLeafResult::Pending {
-                    pool_index: *index,
-                    rx: rx.clone(),
-                    source: PendingSource::Pool,
-                })
+            self.pending.get(key).map(|rx| AddLeafResult::Pending {
+                rx: rx.clone(),
+                source: PendingSource::Pool,
+            })
         }
     }
     // Add a new entry to the pool.
@@ -117,25 +108,20 @@ impl PoolState {
         if self.pending_entries.len() >= MAX_POOL_SIZE {
             return AddLeafResult::RateLimited;
         }
-        self.pending_entries.push(entry.clone());
-        let pool_index = (self.pending_entries.len() as u64) - 1;
-        let rx = self.pending_done.subscribe();
-        self.pending.insert(key, (pool_index, rx.clone()));
+        let (tx, rx) = channel((0, 0));
+        self.pending_entries.push((entry.clone(), tx));
+        self.pending.insert(key, rx.clone());
 
         AddLeafResult::Pending {
-            pool_index,
             rx,
             source: PendingSource::Sequencer,
         }
     }
     // Take the entries from the pool that are ready to be sequenced and the
     // corresponding Senders to update when the entries have been sequenced.
-    fn take(&mut self) -> (Vec<PendingLogEntry>, Sender<SequenceMetadata>) {
+    fn take(&mut self) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
         self.in_sequencing = std::mem::take(&mut self.pending);
-        (
-            std::mem::take(&mut self.pending_entries),
-            std::mem::take(&mut self.pending_done),
-        )
+        std::mem::take(&mut self.pending_entries)
     }
     // Reset the map of in-sequencing entries. This should be called after
     // sequencing completes.
@@ -349,7 +335,6 @@ impl SequenceState {
 pub(crate) enum AddLeafResult {
     Cached(SequenceMetadata),
     Pending {
-        pool_index: u64,
         rx: Receiver<SequenceMetadata>,
         source: PendingSource,
     },
@@ -362,15 +347,10 @@ impl AddLeafResult {
     pub(crate) async fn resolve(self) -> Option<SequenceMetadata> {
         match self {
             AddLeafResult::Cached(entry) => Some(entry),
-            AddLeafResult::Pending {
-                pool_index,
-                mut rx,
-                source: _,
-            } => {
+            AddLeafResult::Pending { mut rx, source: _ } => {
                 // Wait until sequencing completes for this entry's pool.
                 if rx.changed().await.is_ok() {
-                    let (first_index, timestamp) = *rx.borrow();
-                    Some((first_index + pool_index, timestamp))
+                    Some(*rx.borrow())
                 } else {
                     warn!("sender dropped");
                     None
@@ -384,11 +364,7 @@ impl AddLeafResult {
         match self {
             AddLeafResult::Cached(_) => "cache",
             AddLeafResult::RateLimited => "ratelimit",
-            AddLeafResult::Pending {
-                pool_index: _,
-                rx: _,
-                source,
-            } => match source {
+            AddLeafResult::Pending { rx: _, source } => match source {
                 PendingSource::InSequencing => "sequencing",
                 PendingSource::Pool => "pool",
                 PendingSource::Sequencer => "sequencer",
@@ -478,11 +454,9 @@ pub(crate) async fn sequence(
     cache: &mut impl CacheWrite,
     metrics: &Metrics,
 ) -> Result<(), anyhow::Error> {
-    let (pending_entries, pending_done) = pool_state.take();
+    let entries = pool_state.take();
 
-    metrics
-        .seq_pool_size
-        .observe(pending_entries.len().as_f64());
+    metrics.seq_pool_size.observe(entries.len().as_f64());
 
     let result = match sequence_entries(
         sequence_state,
@@ -490,8 +464,7 @@ pub(crate) async fn sequence(
         object,
         lock,
         cache,
-        pending_entries,
-        pending_done,
+        entries,
         metrics,
     )
     .await
@@ -544,8 +517,7 @@ async fn sequence_entries(
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &mut impl CacheWrite,
-    pending_entries: Vec<PendingLogEntry>,
-    done: Sender<SequenceMetadata>,
+    entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
     metrics: &Metrics,
 ) -> Result<(), SequenceError> {
     let start = now_millis();
@@ -574,8 +546,9 @@ async fn sequence_entries(
     let mut overlay = HashMap::new();
     let mut n = old_size;
     let mut sequenced_entries: Vec<LogEntry> = Vec::new();
+    let mut sequenced_metadata = Vec::new();
 
-    for entry in pending_entries {
+    for (entry, sender) in entries {
         let sequenced_entry = LogEntry {
             inner: entry,
             leaf_index: n,
@@ -616,6 +589,10 @@ async fn sequence_entries(
             data_tile.clear();
         }
 
+        sequenced_metadata.push((
+            sender,
+            (sequenced_entry.leaf_index, sequenced_entry.timestamp),
+        ));
         sequenced_entries.push(sequenced_entry);
     }
 
@@ -735,9 +712,10 @@ async fn sequence_entries(
             SequenceError::NonFatal(format!("couldn't upload checkpoint to object storage: {e}"))
         })?;
 
-    // Return SCTs to clients. Clients can recover the leaf index
-    // from the old tree size and their index in the sequenced pool.
-    done.send_replace((old_size, timestamp));
+    // Return SCTs to clients.
+    for (sender, metadata) in sequenced_metadata {
+        sender.send_replace(metadata);
+    }
 
     // At this point if the cache put fails, there's no reason to return errors to users. The
     // only consequence of cache false negatives are duplicated leaves anyway. In fact, an
@@ -1316,9 +1294,9 @@ mod tests {
 
         // A pair of duplicates from the in_sequencing pool.
         let res21 = log.add_with_seed(is_precert, 2); // 7
-        let (pending_entries, pending_done) = log.pool_state.take();
+        let pending_entries = log.pool_state.take();
         let res22 = log.add_with_seed(is_precert, 2);
-        log.sequence_finish(pending_entries, pending_done);
+        log.sequence_finish(pending_entries);
         let entry21 = block_on(res21.resolve()).unwrap();
         let entry22 = block_on(res22.resolve()).unwrap();
         assert_eq!(entry21, entry22);
@@ -1889,19 +1867,14 @@ mod tests {
                 &self.metrics,
             ))
         }
-        fn sequence_finish(
-            &mut self,
-            pending_entries: Vec<PendingLogEntry>,
-            pending_done: Sender<SequenceMetadata>,
-        ) {
+        fn sequence_finish(&mut self, entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>) {
             block_on(sequence_entries(
                 &mut self.sequence_state,
                 &self.config,
                 &self.object,
                 &self.lock,
                 &mut self.cache,
-                pending_entries,
-                pending_done,
+                entries,
                 &self.metrics,
             ))
             .unwrap();
