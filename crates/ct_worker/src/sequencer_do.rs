@@ -82,7 +82,7 @@ impl DurableObject for Sequencer {
             "/add_batch" => {
                 endpoint = "add_batch";
                 let pending_entries: Vec<PendingLogEntry> = req.json().await?;
-                self.add_batch(&pending_entries).await
+                self.add_batch(pending_entries).await
             }
             _ => {
                 endpoint = "unknown";
@@ -220,15 +220,17 @@ impl Sequencer {
     // Add a batch of entries, returning a Response with metadata for
     // successfully sequenced entries. Entries that fail to be added (e.g., due to rate limiting)
     // are omitted.
-    async fn add_batch(&mut self, pending_entries: &[PendingLogEntry]) -> Result<Response> {
+    async fn add_batch(&mut self, pending_entries: Vec<PendingLogEntry>) -> Result<Response> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
+        let mut lookup_keys = Vec::with_capacity(pending_entries.len());
         for pending_entry in pending_entries {
             let typ = if pending_entry.is_precert {
                 "add-pre-chain"
             } else {
                 "add-chain"
             };
+            lookup_keys.push(pending_entry.lookup_key());
 
             let add_leaf_result = ctlog::add_leaf_to_pool(
                 &mut self.pool_state,
@@ -243,14 +245,14 @@ impl Sequencer {
 
             futures.push(add_leaf_result.resolve());
         }
-        let cache_values = join_all(futures).await;
+        let entries_metadata = join_all(futures).await;
 
         // Zip the cache keys with the cache values, filtering out entries that
         // were not sequenced (e.g., due to rate limiting).
-        let result = pending_entries
+        let result = lookup_keys
             .iter()
-            .zip(cache_values.iter())
-            .filter_map(|(entry, value)| value.as_ref().map(|v| (entry.lookup_key(), v)))
+            .zip(entries_metadata.iter())
+            .filter_map(|(key, value_opt)| value_opt.as_ref().map(|metadata| (key, metadata)))
             .collect::<Vec<_>>();
 
         Response::from_json(&result)

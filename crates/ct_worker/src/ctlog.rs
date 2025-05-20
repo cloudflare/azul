@@ -104,12 +104,12 @@ impl PoolState {
         }
     }
     // Add a new entry to the pool.
-    fn add(&mut self, key: LookupKey, entry: &PendingLogEntry) -> AddLeafResult {
+    fn add(&mut self, key: LookupKey, entry: PendingLogEntry) -> AddLeafResult {
         if self.pending_entries.len() >= MAX_POOL_SIZE {
             return AddLeafResult::RateLimited;
         }
         let (tx, rx) = channel((0, 0));
-        self.pending_entries.push((entry.clone(), tx));
+        self.pending_entries.push((entry, tx));
         self.pending.insert(key, rx.clone());
 
         AddLeafResult::Pending {
@@ -387,7 +387,7 @@ pub(crate) enum PendingSource {
 pub(crate) fn add_leaf_to_pool(
     state: &mut PoolState,
     cache: &impl CacheRead,
-    entry: &PendingLogEntry,
+    entry: PendingLogEntry,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
 
@@ -545,8 +545,8 @@ async fn sequence_entries(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_entries: Vec<LogEntry> = Vec::new();
-    let mut sequenced_metadata = Vec::new();
+    let mut sequenced_entries: Vec<LogEntry> = Vec::with_capacity(entries.len());
+    let mut sequenced_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
         let sequenced_entry = LogEntry {
@@ -916,7 +916,7 @@ async fn read_and_verify_tiles(
     }
 
     // Fetch all the tile data.
-    let mut data = Vec::new();
+    let mut data = Vec::with_capacity(tiles.len());
     for tile in &tiles {
         let result = object
             .fetch(&tile.path())
@@ -1123,7 +1123,7 @@ mod tests {
                     certificate,
                     ..Default::default()
                 };
-                add_leaf_to_pool(&mut log.pool_state, &log.cache, &leaf);
+                add_leaf_to_pool(&mut log.pool_state, &log.cache, leaf);
             }
             log.sequence().unwrap();
         }
@@ -1913,7 +1913,7 @@ mod tests {
 
             block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
 
-            add_leaf_to_pool(&mut self.pool_state, &self.cache, &leaf)
+            add_leaf_to_pool(&mut self.pool_state, &self.cache, leaf)
         }
 
         fn check(&self, size: u64) -> u64 {
@@ -2033,7 +2033,7 @@ mod tests {
         let (tiles_with_bytes, index_tile_order) =
             block_on(read_and_verify_tiles(object, tree_size, tree_hash, indexes))?;
 
-        let mut hashes = Vec::new();
+        let mut hashes = Vec::with_capacity(indexes.len());
         for (i, &x) in indexes.iter().enumerate() {
             let j = index_tile_order[i];
             let h = tiles_with_bytes[j]
