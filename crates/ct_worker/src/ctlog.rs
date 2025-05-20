@@ -61,6 +61,7 @@ pub(crate) struct LogConfig {
     pub(crate) signing_key: EcdsaSigningKey,
     pub(crate) witness_key: Ed25519SigningKey,
     pub(crate) sequence_interval: Duration,
+    pub(crate) max_pending_entry_holds: usize,
 }
 
 /// Ephemeral state for pooling entries to the CT log.
@@ -75,6 +76,9 @@ pub(crate) struct LogConfig {
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Default, Debug)]
 pub(crate) struct PoolState {
+    // How many times the oldest entry has been held back from sequencing.
+    holds: usize,
+
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
     pending_entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
@@ -119,9 +123,57 @@ impl PoolState {
     }
     // Take the entries from the pool that are ready to be sequenced and the
     // corresponding Senders to update when the entries have been sequenced.
-    fn take(&mut self) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
-        self.in_sequencing = std::mem::take(&mut self.pending);
-        std::mem::take(&mut self.pending_entries)
+    //
+    // Hold back any leftover entries that would be published as a partial tile
+    // unless they have already been held back `max_pending_entry_holds` times.
+    fn take(
+        &mut self,
+        old_size: u64,
+        max_pending_entry_holds: usize,
+    ) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
+        let new_size = old_size + self.pending_entries.len() as u64;
+        let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
+
+        let publishing_full_tile =
+            new_size / u64::from(TlogTile::FULL_WIDTH) > old_size / u64::from(TlogTile::FULL_WIDTH);
+        if publishing_full_tile {
+            // We're going to publish at least one full tile which will contain
+            // any leftover entries from the previous sequencing. Reset the
+            // count since the new leftover entries have not yet been held back.
+            self.holds = 0;
+        }
+        // Flush all of the leftover entries if the oldest is before the cutoff.
+        let flush_oldest = self.holds >= max_pending_entry_holds;
+
+        if leftover == 0 || flush_oldest {
+            // Sequence everything. Either there are no leftovers or they have
+            // already been held back the maximum number of times.
+            self.holds = 0;
+            self.in_sequencing = std::mem::take(&mut self.pending);
+            std::mem::take(&mut self.pending_entries)
+        } else {
+            // Hold back the leftovers to avoid creating a partial tile.
+            self.holds += 1;
+
+            if publishing_full_tile {
+                // Return the pending entries to be published in full tiles and
+                // retain the rest.
+                let split_index = self.pending_entries.len() - usize::try_from(leftover).unwrap();
+                let leftover_entries = self.pending_entries.split_off(split_index);
+                let leftover_pending = leftover_entries
+                    .iter()
+                    .filter_map(|(entry, _)| {
+                        let lookup_key = entry.lookup_key();
+                        self.pending.remove(&lookup_key).map(|rx| (lookup_key, rx))
+                    })
+                    .collect::<HashMap<_, _>>();
+                self.in_sequencing = std::mem::replace(&mut self.pending, leftover_pending);
+                std::mem::replace(&mut self.pending_entries, leftover_entries)
+            } else {
+                // We didn't fill up a full tile, so nothing to return.
+                Vec::new()
+            }
+        }
     }
     // Reset the map of in-sequencing entries. This should be called after
     // sequencing completes.
@@ -454,28 +506,31 @@ pub(crate) async fn sequence(
     cache: &mut impl CacheWrite,
     metrics: &Metrics,
 ) -> Result<(), anyhow::Error> {
-    let entries = pool_state.take();
+    // Retrieve old sequencing state.
+    let old = if let Some(s) = sequence_state {
+        s
+    } else {
+        match SequenceState::load(config, object, lock).await {
+            Ok(s) => sequence_state.insert(s),
+            Err(e) => {
+                metrics.seq_count.with_label_values(&["fatal"]).inc();
+                error!("{}: Fatal sequencing error {e}", config.name);
+                bail!(e);
+            }
+        }
+    };
 
+    let entries = pool_state.take(old.tree.size(), config.max_pending_entry_holds);
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
-    let result = match sequence_entries(
-        sequence_state,
-        config,
-        object,
-        lock,
-        cache,
-        entries,
-        metrics,
-    )
-    .await
-    {
+    let result = match sequence_entries(old, config, object, lock, cache, entries, metrics).await {
         Ok(()) => {
             metrics.seq_count.with_label_values(&[""]).inc();
             Ok(())
         }
         Err(SequenceError::Fatal(e)) => {
             // Clear ephemeral sequencing state, as it may no longer be valid.
-            // It will be loaded again the next time sequence_entries is called.
+            // It will be loaded again the next time sequence is called.
             metrics.seq_count.with_label_values(&["fatal"]).inc();
             error!("{}: Fatal sequencing error {e}", config.name);
             *sequence_state = None;
@@ -488,7 +543,7 @@ pub(crate) async fn sequence(
         }
     };
 
-    // Once [sequence_entries] returns, the entries are either in the deduplication
+    // Once [`sequence_entries`] returns, the entries are either in the deduplication
     // cache or finalized with an error. In the latter case, we don't want
     // a resubmit to deduplicate against the failed sequencing.
     pool_state.reset();
@@ -510,9 +565,8 @@ enum SequenceError {
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
 async fn sequence_entries(
-    sequence_state: &mut Option<SequenceState>,
+    sequence_state: &mut SequenceState,
     config: &LogConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
@@ -520,23 +574,15 @@ async fn sequence_entries(
     entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
     metrics: &Metrics,
 ) -> Result<(), SequenceError> {
-    let start = now_millis();
-    // Retrieve old sequencing state.
-    let old = match &sequence_state {
-        Some(s) => s,
-        None => &SequenceState::load(config, object, lock)
-            .await
-            .map_err(|e| SequenceError::Fatal(e.to_string()))?,
-    };
     let name = &config.name;
 
-    let old_size = old.tree.size();
-    let old_time = old.tree.time();
+    let old_size = sequence_state.tree.size();
+    let old_time = sequence_state.tree.time();
     let timestamp = now_millis();
 
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
-    let mut edge_tiles = old.edge_tiles.clone();
+    let mut edge_tiles = sequence_state.edge_tiles.clone();
     let mut data_tile: Vec<u8> = Vec::new();
     if let Some(t) = edge_tiles.get(&DATA_TILE_KEY) {
         if t.tile.width() < TlogTile::FULL_WIDTH {
@@ -669,7 +715,7 @@ async fn sequence_entries(
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, &old.checkpoint, &new_checkpoint)
+    lock.swap(CHECKPOINT_KEY, &sequence_state.checkpoint, &new_checkpoint)
         .await
         .map_err(|e| {
             SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
@@ -679,11 +725,11 @@ async fn sequence_entries(
     // durable storage (in staging) and the checkpoint was committed to the
     // database. If we were to crash after this, recovery would be clean from
     // database and object storage.
-    *sequence_state = Some(SequenceState {
+    *sequence_state = SequenceState {
         tree,
         checkpoint: new_checkpoint,
         edge_tiles,
-    });
+    };
 
     // Use apply_staged_uploads instead of going over tile_uploads directly, to exercise the same
     // code path as LoadLog.
@@ -693,8 +739,8 @@ async fn sequence_entries(
     apply_staged_uploads(
         object,
         &staged_uploads,
-        sequence_state.as_ref().unwrap().tree.size(),
-        sequence_state.as_ref().unwrap().tree.hash(),
+        sequence_state.tree.size(),
+        sequence_state.tree.hash(),
     )
     .await
     .map_err(|e| SequenceError::Fatal(format!("couldn't upload a tile: {e}")))?;
@@ -702,11 +748,7 @@ async fn sequence_entries(
     // If we fail to upload, return an error so that we don't produce SCTs that, although
     // safely serialized, wouldn't be part of a publicly visible tree.
     object
-        .upload(
-            CHECKPOINT_KEY,
-            &sequence_state.as_ref().unwrap().checkpoint,
-            &OPTS_CHECKPOINT,
-        )
+        .upload(CHECKPOINT_KEY, &sequence_state.checkpoint, &OPTS_CHECKPOINT)
         .await
         .map_err(|e| {
             SequenceError::NonFatal(format!("couldn't upload checkpoint to object storage: {e}"))
@@ -741,20 +783,20 @@ async fn sequence_entries(
         );
     }
 
-    for tile in &sequence_state.as_ref().unwrap().edge_tiles {
+    for tile in &sequence_state.edge_tiles {
         trace!("{name}: Edge tile: {tile:?}");
     }
     info!(
         "{name}: Sequenced pool; tree_size={n}, entries: {}, tiles: {}, timestamp: {timestamp}, duration: {:.2}s, since_last: {:.2}s",
         n - old_size,
         tile_uploads.len(),
-        millis_diff_as_secs(start, now_millis()),
+        millis_diff_as_secs(timestamp, now_millis()),
         millis_diff_as_secs(old_time, timestamp)
     );
 
     metrics
         .seq_duration
-        .observe(millis_diff_as_secs(start, now_millis()));
+        .observe(millis_diff_as_secs(timestamp, now_millis()));
     metrics
         .seq_delay
         .observe(millis_diff_as_secs(old_time, timestamp) - config.sequence_interval.as_secs_f64());
@@ -1294,9 +1336,9 @@ mod tests {
 
         // A pair of duplicates from the in_sequencing pool.
         let res21 = log.add_with_seed(is_precert, 2); // 7
-        let pending_entries = log.pool_state.take();
+        let entries = log.sequence_start();
         let res22 = log.add_with_seed(is_precert, 2);
-        log.sequence_finish(pending_entries);
+        log.sequence_finish(entries);
         let entry21 = block_on(res21.resolve()).unwrap();
         let entry22 = block_on(res22.resolve()).unwrap();
         assert_eq!(entry21, entry22);
@@ -1449,6 +1491,45 @@ mod tests {
         log.add_certificate();
         log.sequence().unwrap();
         log.check(3);
+    }
+
+    #[test]
+    fn test_sequence_holds() {
+        let mut log = TestLog::new();
+
+        // Hold entries at most one sequencing round.
+        log.config.max_pending_entry_holds = 1;
+        log.add_certificate();
+        log.add_certificate();
+        log.sequence().unwrap();
+        log.check(0); // 2 pending entries are held
+        for _ in 0..TlogTile::FULL_WIDTH + 3 {
+            log.add_certificate();
+        }
+        log.sequence().unwrap(); // 5 pending entries from the new batch are held
+        log.check(u64::from(TlogTile::FULL_WIDTH));
+        log.sequence().unwrap(); // all pending entries sequenced
+        log.check(u64::from(TlogTile::FULL_WIDTH) + 5);
+
+        // Hold entries at most two sequencing rounds.
+        log.config.max_pending_entry_holds = 2;
+        log.add_certificate();
+        log.add_certificate();
+        log.sequence().unwrap(); // 2 entries held
+        log.add_certificate(); // will be sequenced with the older held ones
+        log.sequence().unwrap(); // 3 entries held
+        log.check(u64::from(TlogTile::FULL_WIDTH) + 5); // still held
+        log.sequence().unwrap();
+        log.check(u64::from(TlogTile::FULL_WIDTH) + 8); // all pending entries sequenced
+
+        for _ in 0..TlogTile::FULL_WIDTH * 2 {
+            log.add_certificate();
+        }
+        log.sequence().unwrap(); // 8 pending entries are held
+        log.sequence().unwrap(); // still held
+        log.check(u64::from(TlogTile::FULL_WIDTH) * 3);
+        log.sequence().unwrap();
+        log.check(u64::from(TlogTile::FULL_WIDTH) * 3 + 8); // all pending entries sequenced
     }
 
     macro_rules! test_sequence_errors {
@@ -1842,6 +1923,7 @@ mod tests {
                 witness_key: Ed25519SigningKey::generate(&mut OsRng),
                 signing_key: EcdsaSigningKey::random(&mut OsRng),
                 sequence_interval: Duration::from_secs(1),
+                max_pending_entry_holds: 0,
             };
             let pool_state = PoolState::default();
             let metrics = Metrics::new();
@@ -1867,9 +1949,24 @@ mod tests {
                 &self.metrics,
             ))
         }
+        fn sequence_start(&mut self) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
+            let sequence_state: &mut SequenceState = if let Some(state) =
+                self.sequence_state.as_mut()
+            {
+                state
+            } else {
+                let state =
+                    block_on(SequenceState::load(&self.config, &self.object, &self.lock)).unwrap();
+                self.sequence_state.insert(state)
+            };
+            self.pool_state.take(
+                sequence_state.tree.size(),
+                self.config.max_pending_entry_holds,
+            )
+        }
         fn sequence_finish(&mut self, entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>) {
             block_on(sequence_entries(
-                &mut self.sequence_state,
+                self.sequence_state.as_mut().unwrap(),
                 &self.config,
                 &self.object,
                 &self.lock,

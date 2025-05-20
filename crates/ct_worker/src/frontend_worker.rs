@@ -228,7 +228,7 @@ async fn add_chain_or_pre_chain(
 
     // First persist issuers.
     let public_bucket = ObjectBucket {
-        sequence_interval: params.sequence_interval,
+        sequence_interval_seconds: params.sequence_interval_seconds,
         bucket: load_public_bucket(env, name)?,
         metrics: None,
     };

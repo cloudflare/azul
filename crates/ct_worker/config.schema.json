@@ -64,11 +64,16 @@
                             "type": "string",
                             "description": "Provide a hint to place the log in a specific geographic location. See https://developers.cloudflare.com/durable-objects/reference/data-location/ for supported locations. If unspecified, the Durable Object will be created in proximity to the first request."
                         },
-                        "sequence_interval": {
+                        "sequence_interval_seconds": {
                             "type": "integer",
                             "minimum": 1,
                             "default": 1,
                             "description": "The duration in between sequencing operations, in seconds."
+                        },
+                        "max_pending_entry_holds": {
+                            "type": "integer",
+                            "default": 1,
+                            "description": "The maximum number of times a pending entry can be held back from sequencing to avoid creating partial tiles. If non-zero, pending entries may be delayed by a multiple of sequence interval."
                         }
                     },
                     "required": [

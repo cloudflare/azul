@@ -28,9 +28,15 @@ pub struct LogParams {
     pub temporal_interval: TemporalInterval,
     pub location_hint: Option<String>,
     #[serde(default = "default_sequence_interval_seconds")]
-    pub sequence_interval: u64,
+    pub sequence_interval_seconds: u64,
+    #[serde(default = "default_max_pending_entry_holds")]
+    pub max_pending_entry_holds: usize,
 }
 
 fn default_sequence_interval_seconds() -> u64 {
+    1
+}
+
+fn default_max_pending_entry_holds() -> usize {
     1
 }

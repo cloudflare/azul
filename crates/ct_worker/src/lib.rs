@@ -385,7 +385,7 @@ trait ObjectBackend {
 }
 
 struct ObjectBucket {
-    sequence_interval: u64,
+    sequence_interval_seconds: u64,
     bucket: Bucket,
     metrics: Option<ObjectMetrics>,
 }
@@ -404,7 +404,7 @@ impl ObjectBackend for ObjectBucket {
         } else {
             metadata.cache_control = Some(format!(
                 "public, max-age={}, must-revalidate",
-                self.sequence_interval
+                self.sequence_interval_seconds
             ));
         }
         self.metrics
