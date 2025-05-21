@@ -2392,6 +2392,7 @@ name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "length_prefixed",
  "serde",
  "serde_json",
  "sha2",

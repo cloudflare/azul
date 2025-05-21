@@ -15,6 +15,7 @@ use log::{info, warn, Level};
 use static_ct_api::PendingLogEntry;
 use std::str::FromStr;
 use std::time::Duration;
+use tlog_tiles::PendingLogEntryTrait;
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;

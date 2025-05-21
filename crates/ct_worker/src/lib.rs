@@ -19,10 +19,11 @@ use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
-use static_ct_api::{LookupKey, UnixTimestamp};
+use static_ct_api::LookupKey;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{LazyLock, OnceLock};
+use tlog_tiles::SequenceMetadata;
 use util::now_millis;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -113,8 +114,6 @@ fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
 struct QueryParams {
     name: String,
 }
-
-type SequenceMetadata = (u64, UnixTimestamp);
 
 trait CacheWrite {
     /// Put the provided sequenced entries into the cache. This does NOT overwrite existing entries.

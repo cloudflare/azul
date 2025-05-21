@@ -30,7 +30,7 @@ use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use static_ct_api::{LogEntry, PendingLogEntry, TileIterator, TreeWithTimestamp};
+use static_ct_api::{PendingLogEntry, TileIterator, TreeWithTimestamp};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -38,7 +38,10 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
-use tlog_tiles::{Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE};
+use tlog_tiles::{
+    Hash, HashReader, LogEntryTrait, PathElem, PendingLogEntryTrait, Tile, TlogError,
+    TlogIteratorTrait, TlogTile, HASH_SIZE,
+};
 use tokio::sync::watch::{channel, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
@@ -354,6 +357,7 @@ impl SequenceState {
                 edge_tiles.get(&DATA_TILE_KEY).unwrap().b.clone(),
                 data_tile.tile.width() as usize,
             )
+            .into_entry_iter()
             .enumerate()
             {
                 let got = tlog_tiles::record_hash(&entry?.merkle_tree_leaf());
@@ -596,17 +600,18 @@ async fn sequence_entries(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_entries: Vec<LogEntry> = Vec::with_capacity(entries.len());
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
+    let mut cache_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        let sequenced_entry = LogEntry {
-            inner: entry,
-            leaf_index: n,
-            timestamp,
-        };
+        let metadata = (n, timestamp);
+        cache_metadata.push((entry.lookup_key(), metadata));
+        sequenced_metadata.push((sender, metadata));
+
+        let sequenced_entry = entry.into_log_entry(metadata);
         let tile_leaf = sequenced_entry.tile_leaf();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
+
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
         data_tile.extend(tile_leaf);
 
@@ -623,7 +628,7 @@ async fn sequence_entries(
         )
         .map_err(|e| {
             SequenceError::NonFatal(format!(
-                "couldn't compute new hashes for leaf {sequenced_entry:?}: {e}",
+                "couldn't compute new hashes for leaf at index {n}: {e}",
             ))
         })?;
         for (i, h) in hashes.iter().enumerate() {
@@ -639,12 +644,6 @@ async fn sequence_entries(
             metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
             data_tile.clear();
         }
-
-        sequenced_metadata.push((
-            sender,
-            (sequenced_entry.leaf_index, sequenced_entry.timestamp),
-        ));
-        sequenced_entries.push(sequenced_entry);
     }
 
     // Stage leftover partial data tile, if any.
@@ -768,23 +767,10 @@ async fn sequence_entries(
     // only consequence of cache false negatives are duplicated leaves anyway. In fact, an
     // error might cause the clients to resubmit, producing more cache false negatives and
     // duplicates.
-    if let Err(e) = cache
-        .put_entries(
-            &sequenced_entries
-                .iter()
-                .map(|entry| {
-                    (
-                        entry.inner.lookup_key(),
-                        (entry.leaf_index, entry.timestamp),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .await
-    {
+    if let Err(e) = cache.put_entries(&cache_metadata).await {
         warn!(
             "{name}: Cache put failed (entries={}): {e}",
-            sequenced_entries.len()
+            cache_metadata.len()
         );
     }
 
@@ -2097,23 +2083,24 @@ mod tests {
                 {
                     let entry = entry.unwrap();
                     let idx = n * u64::from(TlogTile::FULL_WIDTH) + i as u64;
-                    assert_eq!(entry.leaf_index, idx);
-                    assert!(entry.timestamp <= sth_timestamp);
+                    let (leaf_index, timestamp) = entry.metadata();
+                    assert_eq!(leaf_index, idx);
+                    assert!(timestamp <= sth_timestamp);
                     assert_eq!(
                         leaf_hashes[usize::try_from(idx).unwrap()],
                         tlog_tiles::record_hash(&entry.merkle_tree_leaf())
                     );
 
-                    assert!(!entry.inner.certificate.is_empty());
-                    if entry.inner.is_precert {
-                        assert!(!entry.inner.pre_certificate.is_empty());
-                        assert_ne!(entry.inner.issuer_key_hash, [0; 32]);
+                    assert!(!entry.as_pending_entry().certificate.is_empty());
+                    if entry.as_pending_entry().is_precert {
+                        assert!(!entry.as_pending_entry().pre_certificate.is_empty());
+                        assert_ne!(entry.as_pending_entry().issuer_key_hash, [0; 32]);
                     } else {
-                        assert!(entry.inner.pre_certificate.is_empty());
-                        assert_eq!(entry.inner.issuer_key_hash, [0; 32]);
+                        assert!(entry.as_pending_entry().pre_certificate.is_empty());
+                        assert_eq!(entry.as_pending_entry().issuer_key_hash, [0; 32]);
                     }
 
-                    for fp in entry.inner.chain_fingerprints {
+                    for fp in &entry.as_pending_entry().chain_fingerprints {
                         let b = block_on(self.object.fetch(&format!("issuer/{}", hex::encode(fp))))
                             .unwrap()
                             .unwrap();
