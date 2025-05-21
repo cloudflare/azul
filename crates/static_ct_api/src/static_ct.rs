@@ -103,7 +103,7 @@ use p256::{
     pkcs8::EncodePublicKey,
 };
 use rand::{seq::SliceRandom, Rng};
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeSeq, Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use signed_note::{
     Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
@@ -133,8 +133,14 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
 
 pub type LookupKey = [u8; 16];
 
-/// The functionality exposed by any data type that can be included in a Merkle tree
-pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize {
+pub trait JsonSerialize {
+    fn json_serialize(
+        &self,
+        serializer: &mut serde_json::Serializer<&mut Vec<u8>>,
+    ) -> Result<(), serde_json::Error>;
+}
+
+pub trait PendingLogEntryTrait: core::fmt::Debug + JsonSerialize {
     /// The lookup key belonging to this pending log entry
     fn lookup_key(&self) -> LookupKey;
 
@@ -155,6 +161,16 @@ pub trait LogEntryTrait<E: PendingLogEntryTrait>: core::fmt::Debug {
 
     /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
     fn tile_leaf(&self) -> Vec<u8>;
+}
+
+// PendingLogEntry is serde::Serializable so it's trivially JsonSerializable
+impl JsonSerialize for PendingLogEntry {
+    fn json_serialize(
+        &self,
+        serializer: &mut serde_json::Serializer<&mut Vec<u8>>,
+    ) -> Result<(), serde_json::Error> {
+        <PendingLogEntry as serde::Serialize>::serialize(&self, serializer)
+    }
 }
 
 impl PendingLogEntryTrait for PendingLogEntry {
