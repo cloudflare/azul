@@ -9,7 +9,7 @@
 use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::PendingLogEntry;
+use static_ct_api::{PendingLogEntry, PendingLogEntryTrait};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -28,21 +28,21 @@ const MAX_BATCH_SIZE: usize = 100;
 const MAX_BATCH_TIMEOUT_MILLIS: u64 = 1_000;
 
 #[durable_object]
-struct Batcher {
+struct Batcher<E: PendingLogEntryTrait> {
     env: Env,
-    batch: Batch,
+    batch: Batch<E>,
     in_flight: usize,
     processed: usize,
 }
 
 // A batch of entries to be submitted to the Sequencer together.
-struct Batch {
-    pending_leaves: Vec<PendingLogEntry>,
+struct Batch<E: PendingLogEntryTrait> {
+    pending_leaves: Vec<E>,
     by_hash: HashSet<LookupKey>,
     done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
 
-impl Default for Batch {
+impl<E: PendingLogEntryTrait> Default for Batch<E> {
     /// Returns a batch initialized with a watch channel.
     fn default() -> Self {
         let (done, _) = watch::channel(HashMap::new());
@@ -55,7 +55,7 @@ impl Default for Batch {
 }
 
 #[durable_object]
-impl DurableObject for Batcher {
+impl<E: PendingLogEntryTrait> DurableObject for Batcher<E> {
     fn new(state: State, env: Env) -> Self {
         Self {
             env,
@@ -136,7 +136,7 @@ impl DurableObject for Batcher {
     }
 }
 
-impl Batcher {
+impl<E: PendingLogEntryTrait> Batcher<E> {
     // Submit the current pending batch to be sequenced.
     async fn submit_batch(&mut self, name: &str) -> Result<()> {
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;

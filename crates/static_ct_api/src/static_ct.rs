@@ -110,7 +110,7 @@ use signed_note::{
     Verifier as NoteVerifier, VerifierError, VerifierList,
 };
 use std::io::{Cursor, Read};
-use tlog_tiles::{Checkpoint, Hash, HashReader};
+use tlog_tiles::{record_hash, Checkpoint, Hash, HashReader};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
@@ -129,6 +129,79 @@ pub type UnixTimestamp = u64;
 pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTError> {
     let pkix = vkey.to_public_key_der()?;
     Ok(Sha256::digest(&pkix).into())
+}
+
+pub type LookupKey = [u8; 16];
+
+/// The functionality exposed by any data type that can be included in a Merkle tree
+pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize {
+    /// The lookup key belonging to this pending log entry
+    fn lookup_key(&self) -> LookupKey;
+
+    /// The labels this objects wants to be used when it appears in Prometheus logging messages
+    fn logging_labels(&self) -> Vec<String>;
+
+    /// The canonical byte representation of this object. Only used by [`GenericLogEntry`].
+    fn as_bytes(&self) -> &[u8];
+}
+
+pub trait LogEntryTrait<E: PendingLogEntryTrait>: core::fmt::Debug {
+    fn new(pending: E, timestamp: UnixTimestamp, leaf_index: u64) -> Self;
+
+    fn inner(&self) -> &E;
+
+    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
+    fn merkle_tree_leaf(&self) -> Vec<u8>;
+
+    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
+    fn tile_leaf(&self) -> Vec<u8>;
+}
+
+impl PendingLogEntryTrait for PendingLogEntry {
+    /// Compute the cache key for a pending log entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are errors writing to an internal buffer.
+    fn lookup_key(&self) -> LookupKey {
+        let mut buffer = Vec::new();
+        if self.is_precert {
+            // Add entry type = 1 (precert_entry)
+            buffer.write_u16::<BigEndian>(1).unwrap();
+
+            // Add issuer key hash
+            buffer.extend_from_slice(&self.issuer_key_hash);
+        } else {
+            // Add entry type = 0 (x509_entry)
+            buffer.write_u16::<BigEndian>(0).unwrap();
+        }
+        // Add certificate with a 24-bit length prefix
+        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
+
+        // Compute the SHA-256 hash of the buffer
+        let hash = Sha256::digest(&buffer);
+
+        // Return the first 16 bytes of the hash as the lookup key.
+        let mut cache_hash = [0u8; 16];
+        cache_hash.copy_from_slice(&hash[..16]);
+
+        cache_hash
+    }
+
+    fn logging_labels(&self) -> Vec<String> {
+        if self.is_precert {
+            vec!["add-pre-chain".to_string()]
+        } else {
+            vec!["add-chain".to_string()]
+        }
+    }
+
+    /// We don't have a canonical representation. Eg the type of the length prefix depends on
+    /// whether this is a precert. This is never used with GenericLogEntry so we can just not
+    /// implement it.
+    fn as_bytes(&self) -> &[u8] {
+        unimplemented!()
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
@@ -155,42 +228,9 @@ pub struct PendingLogEntry {
     pub pre_certificate: Vec<u8>,
 }
 
-pub type LookupKey = [u8; 16];
-
-impl PendingLogEntry {
-    /// Compute the cache key for a pending log entry.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are errors writing to an internal buffer.
-    pub fn lookup_key(&self) -> LookupKey {
-        let mut buffer = Vec::new();
-        if self.is_precert {
-            // Add entry type = 1 (precert_entry)
-            buffer.write_u16::<BigEndian>(1).unwrap();
-
-            // Add issuer key hash
-            buffer.extend_from_slice(&self.issuer_key_hash);
-        } else {
-            // Add entry type = 0 (x509_entry)
-            buffer.write_u16::<BigEndian>(0).unwrap();
-        }
-        // Add certificate with a 24-bit length prefix
-        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
-
-        // Compute the SHA-256 hash of the buffer
-        let hash = Sha256::digest(&buffer);
-
-        // Return the first 16 bytes of the hash as the lookup key.
-        let mut cache_hash = [0u8; 16];
-        cache_hash.copy_from_slice(&hash[..16]);
-
-        cache_hash
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LogEntry {
+    /// The pending entry that preceded this log entry
     pub inner: PendingLogEntry,
 
     /// The zero-based index of the leaf in the log.
@@ -228,13 +268,27 @@ impl LogEntry {
 
         buffer
     }
+}
+
+impl LogEntryTrait<PendingLogEntry> for LogEntry {
+    fn new(pending: PendingLogEntry, timestamp: u64, leaf_index: u64) -> Self {
+        LogEntry {
+            inner: pending,
+            timestamp,
+            leaf_index,
+        }
+    }
+
+    fn inner(&self) -> &PendingLogEntry {
+        &self.inner
+    }
 
     /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
     ///
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
-    pub fn merkle_tree_leaf(&self) -> Vec<u8> {
+    fn merkle_tree_leaf(&self) -> Vec<u8> {
         let mut buffer = vec![
             0, // version = v1 (0)
             0, // leaf_type = timestamped_entry (0)
@@ -249,7 +303,7 @@ impl LogEntry {
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
-    pub fn tile_leaf(&self) -> Vec<u8> {
+    fn tile_leaf(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend(self.marshal_timestamped_entry());
         if self.inner.is_precert {
@@ -262,6 +316,41 @@ impl LogEntry {
             .unwrap();
 
         buffer
+    }
+}
+
+/// A generic log entry compatible with the [tlog-tiles spec](https://github.com/C2SP/C2SP/blob/main/tlog-tiles.md)
+#[derive(Debug)]
+struct GenericLogEntry<E: PendingLogEntryTrait>(E);
+
+impl<E: PendingLogEntryTrait> LogEntryTrait<E> for GenericLogEntry<E> {
+    fn new(pending: E, _: UnixTimestamp, _: u64) -> Self {
+        GenericLogEntry(pending)
+    }
+
+    fn inner(&self) -> &E {
+        &self.0
+    }
+
+    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to the internal buffer fails, which should never happen.
+    fn merkle_tree_leaf(&self) -> Vec<u8> {
+        record_hash(self.0.as_bytes()).0.to_vec()
+    }
+
+    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to the internal buffer fails, which should never happen.
+    fn tile_leaf(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.write_length_prefixed(self.0.as_bytes(), 2).unwrap();
+
+        buf
     }
 }
 

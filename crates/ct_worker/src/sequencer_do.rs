@@ -12,7 +12,7 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::PendingLogEntry;
+use static_ct_api::{PendingLogEntry, PendingLogEntryTrait};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -25,21 +25,21 @@ use worker::*;
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
 #[durable_object]
-struct Sequencer {
+struct Sequencer<E: PendingLogEntryTrait> {
     do_state: State, // implements LockBackend
     env: Env,
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
     cache: Option<DedupCache>,           // implements CacheRead, CacheWrite
     config: Option<LogConfig>,
     sequence_state: Option<SequenceState>,
-    pool_state: PoolState,
+    pool_state: PoolState<E>,
     initialized: bool,
     init_mux: Mutex<()>,
     metrics: Metrics,
 }
 
 #[durable_object]
-impl DurableObject for Sequencer {
+impl<E: PendingLogEntryTrait> DurableObject for Sequencer<E> {
     fn new(state: State, env: Env) -> Self {
         let level = CONFIG
             .logging_level
@@ -133,7 +133,7 @@ impl DurableObject for Sequencer {
     }
 }
 
-impl Sequencer {
+impl<E: PendingLogEntryTrait> Sequencer<E> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self, name: &str) -> Result<()> {
         let params = &CONFIG.logs[name];
@@ -221,16 +221,12 @@ impl Sequencer {
     // Add a batch of entries, returning a Response with metadata for
     // successfully sequenced entries. Entries that fail to be added (e.g., due to rate limiting)
     // are omitted.
-    async fn add_batch(&mut self, pending_entries: Vec<PendingLogEntry>) -> Result<Response> {
+    async fn add_batch(&mut self, pending_entries: Vec<E>) -> Result<Response> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());
         for pending_entry in pending_entries {
-            let typ = if pending_entry.is_precert {
-                "add-pre-chain"
-            } else {
-                "add-chain"
-            };
+            let mut logging_labels = pending_entry.logging_labels();
             lookup_keys.push(pending_entry.lookup_key());
 
             let add_leaf_result = ctlog::add_leaf_to_pool(
@@ -239,9 +235,10 @@ impl Sequencer {
                 pending_entry,
             );
 
+            logging_labels.push(add_leaf_result.source().to_string());
             self.metrics
                 .entry_count
-                .with_label_values(&[typ, add_leaf_result.source()])
+                .with_label_values(&logging_labels)
                 .inc();
 
             futures.push(add_leaf_result.resolve());

@@ -14,7 +14,10 @@ use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use static_ct_api::{AddChainRequest, GetRootsResponse, LogEntry, PendingLogEntry, UnixTimestamp};
+use static_ct_api::{
+    AddChainRequest, GetRootsResponse, LogEntry, PendingLogEntry, PendingLogEntryTrait,
+    UnixTimestamp,
+};
 use std::str::FromStr;
 #[allow(clippy::wildcard_imports)]
 use worker::*;

@@ -28,9 +28,13 @@ use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
+use rand::distributions::Uniform;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use static_ct_api::{LogEntry, PendingLogEntry, TileIterator, TreeWithTimestamp};
+use static_ct_api::{
+    LogEntry, LogEntryTrait, PendingLogEntry, PendingLogEntryTrait, TileIterator,
+    TreeWithTimestamp, UnixTimestamp,
+};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -75,13 +79,13 @@ pub(crate) struct LogConfig {
 /// they are rotated out of `in_sequencing`.
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Default, Debug)]
-pub(crate) struct PoolState {
+pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     // How many times the oldest entry has been held back from sequencing.
     oldest_pending_entry_holds: usize,
 
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
-    pending_entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
+    pending_entries: Vec<(P, Sender<SequenceMetadata>)>,
 
     // Deduplication cache for entries currently pending sequencing.
     pending_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
@@ -90,7 +94,7 @@ pub(crate) struct PoolState {
     in_sequencing_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
 }
 
-impl PoolState {
+impl<E: PendingLogEntryTrait> PoolState<E> {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
@@ -110,7 +114,7 @@ impl PoolState {
         }
     }
     // Add a new entry to the pool.
-    fn add(&mut self, key: LookupKey, entry: PendingLogEntry) -> AddLeafResult {
+    fn add(&mut self, key: LookupKey, entry: E) -> AddLeafResult {
         if self.pending_entries.len() >= MAX_POOL_SIZE {
             return AddLeafResult::RateLimited;
         }
@@ -132,7 +136,7 @@ impl PoolState {
         &mut self,
         old_size: u64,
         max_pending_entry_holds: usize,
-    ) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
+    ) -> Vec<(E, Sender<SequenceMetadata>)> {
         let new_size = old_size + self.pending_entries.len() as u64;
         let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
 
@@ -441,10 +445,10 @@ pub(crate) enum PendingSource {
 /// with a [`AddLeafResult::Cached`]. If the pool is full, return
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
-pub(crate) fn add_leaf_to_pool(
-    state: &mut PoolState,
+pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
+    state: &mut PoolState<E>,
     cache: &impl CacheRead,
-    entry: PendingLogEntry,
+    entry: E,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
 
@@ -502,8 +506,8 @@ pub(crate) async fn upload_issuers(
 }
 
 /// Sequences the current pool of pending entries in the ephemeral state.
-pub(crate) async fn sequence(
-    pool_state: &mut PoolState,
+pub(crate) async fn sequence<E: PendingLogEntryTrait, L: LogEntryTrait<E>>(
+    pool_state: &mut PoolState<E>,
     sequence_state: &mut Option<SequenceState>,
     config: &LogConfig,
     object: &impl ObjectBackend,
@@ -528,25 +532,26 @@ pub(crate) async fn sequence(
     let entries = pool_state.take(old.tree.size(), config.max_pending_entry_holds);
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
-    let result = match sequence_entries(old, config, object, lock, cache, entries, metrics).await {
-        Ok(()) => {
-            metrics.seq_count.with_label_values(&[""]).inc();
-            Ok(())
-        }
-        Err(SequenceError::Fatal(e)) => {
-            // Clear ephemeral sequencing state, as it may no longer be valid.
-            // It will be loaded again the next time sequence is called.
-            metrics.seq_count.with_label_values(&["fatal"]).inc();
-            error!("{}: Fatal sequencing error {e}", config.name);
-            *sequence_state = None;
-            Err(anyhow!(e))
-        }
-        Err(SequenceError::NonFatal(e)) => {
-            metrics.seq_count.with_label_values(&["non-fatal"]).inc();
-            error!("{}: Non-fatal sequencing error {e}", config.name);
-            Ok(())
-        }
-    };
+    let result =
+        match sequence_entries::<E, L>(old, config, object, lock, cache, entries, metrics).await {
+            Ok(()) => {
+                metrics.seq_count.with_label_values(&[""]).inc();
+                Ok(())
+            }
+            Err(SequenceError::Fatal(e)) => {
+                // Clear ephemeral sequencing state, as it may no longer be valid.
+                // It will be loaded again the next time sequence is called.
+                metrics.seq_count.with_label_values(&["fatal"]).inc();
+                error!("{}: Fatal sequencing error {e}", config.name);
+                *sequence_state = None;
+                Err(anyhow!(e))
+            }
+            Err(SequenceError::NonFatal(e)) => {
+                metrics.seq_count.with_label_values(&["non-fatal"]).inc();
+                error!("{}: Non-fatal sequencing error {e}", config.name);
+                Ok(())
+            }
+        };
 
     // Once [`sequence_entries`] returns, the entries are either in the deduplication
     // cache or finalized with an error. In the latter case, we don't want
@@ -570,13 +575,13 @@ enum SequenceError {
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
-async fn sequence_entries(
+async fn sequence_entries<P: PendingLogEntryTrait, L: LogEntryTrait<P>>(
     sequence_state: &mut SequenceState,
     config: &LogConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &mut impl CacheWrite,
-    entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
+    entries: Vec<(P, Sender<SequenceMetadata>)>,
     metrics: &Metrics,
 ) -> Result<(), SequenceError> {
     let name = &config.name;
@@ -596,15 +601,11 @@ async fn sequence_entries(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_entries: Vec<LogEntry> = Vec::with_capacity(entries.len());
+    let mut sequenced_entries: Vec<(L, u64, UnixTimestamp)> = Vec::with_capacity(entries.len());
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        let sequenced_entry = LogEntry {
-            inner: entry,
-            leaf_index: n,
-            timestamp,
-        };
+        let sequenced_entry = L::new(entry, timestamp, n);
         let tile_leaf = sequenced_entry.tile_leaf();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
@@ -640,11 +641,8 @@ async fn sequence_entries(
             data_tile.clear();
         }
 
-        sequenced_metadata.push((
-            sender,
-            (sequenced_entry.leaf_index, sequenced_entry.timestamp),
-        ));
-        sequenced_entries.push(sequenced_entry);
+        sequenced_metadata.push((sender, (n, timestamp)));
+        sequenced_entries.push((sequenced_entry, n, timestamp));
     }
 
     // Stage leftover partial data tile, if any.
@@ -772,12 +770,7 @@ async fn sequence_entries(
         .put_entries(
             &sequenced_entries
                 .iter()
-                .map(|entry| {
-                    (
-                        entry.inner.lookup_key(),
-                        (entry.leaf_index, entry.timestamp),
-                    )
-                })
+                .map(|entry| (entry.0.inner().lookup_key(), (entry.1, entry.2)))
                 .collect::<Vec<_>>(),
         )
         .await
@@ -1119,6 +1112,7 @@ mod tests {
     use crate::{util, LookupKey, SequenceMetadata};
     use futures_executor::block_on;
     use itertools::Itertools;
+    use log::Log;
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
@@ -1909,7 +1903,7 @@ mod tests {
 
     struct TestLog {
         config: LogConfig,
-        pool_state: PoolState,
+        pool_state: PoolState<PendingLogEntry>,
         sequence_state: Option<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
@@ -1944,7 +1938,7 @@ mod tests {
             }
         }
         fn sequence(&mut self) -> Result<(), anyhow::Error> {
-            block_on(sequence(
+            block_on(sequence::<PendingLogEntry, LogEntry>(
                 &mut self.pool_state,
                 &mut self.sequence_state,
                 &self.config,
@@ -1970,7 +1964,7 @@ mod tests {
             )
         }
         fn sequence_finish(&mut self, entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>) {
-            block_on(sequence_entries(
+            block_on(sequence_entries::<PendingLogEntry, LogEntry>(
                 self.sequence_state.as_mut().unwrap(),
                 &self.config,
                 &self.object,
