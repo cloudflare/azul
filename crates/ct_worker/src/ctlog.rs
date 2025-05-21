@@ -67,7 +67,7 @@ pub(crate) struct LogConfig {
 /// Ephemeral state for pooling entries to the CT log.
 ///
 /// The pool is written to by `add_leaf_to_pool`, and by the sequencer
-/// when rotating `pending` and `in_sequencing`.
+/// when rotating pending and in-sequencing entries.
 ///
 /// As long as the above-mentioned blocks run synchronously (no 'await's), Durable Objects'
 /// single-threaded execution guarantees that `add_leaf_to_pool` will never add to a pool that
@@ -77,34 +77,36 @@ pub(crate) struct LogConfig {
 #[derive(Default, Debug)]
 pub(crate) struct PoolState {
     // How many times the oldest entry has been held back from sequencing.
-    holds: usize,
+    oldest_pending_entry_holds: usize,
 
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
     pending_entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
 
     // Deduplication cache for entries currently pending sequencing.
-    pending: HashMap<LookupKey, Receiver<SequenceMetadata>>,
+    pending_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
 
     // Deduplication cache for entries currently being sequenced.
-    in_sequencing: HashMap<LookupKey, Receiver<SequenceMetadata>>,
+    in_sequencing_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
 }
 
 impl PoolState {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
-        if let Some(rx) = self.in_sequencing.get(key) {
+        if let Some(rx) = self.in_sequencing_dedup.get(key) {
             // Entry is being sequenced.
             Some(AddLeafResult::Pending {
                 rx: rx.clone(),
                 source: PendingSource::InSequencing,
             })
         } else {
-            self.pending.get(key).map(|rx| AddLeafResult::Pending {
-                rx: rx.clone(),
-                source: PendingSource::Pool,
-            })
+            self.pending_dedup
+                .get(key)
+                .map(|rx| AddLeafResult::Pending {
+                    rx: rx.clone(),
+                    source: PendingSource::Pool,
+                })
         }
     }
     // Add a new entry to the pool.
@@ -114,7 +116,7 @@ impl PoolState {
         }
         let (tx, rx) = channel((0, 0));
         self.pending_entries.push((entry, tx));
-        self.pending.insert(key, rx.clone());
+        self.pending_dedup.insert(key, rx.clone());
 
         AddLeafResult::Pending {
             rx,
@@ -140,20 +142,20 @@ impl PoolState {
             // We're going to publish at least one full tile which will contain
             // any leftover entries from the previous sequencing. Reset the
             // count since the new leftover entries have not yet been held back.
-            self.holds = 0;
+            self.oldest_pending_entry_holds = 0;
         }
         // Flush all of the leftover entries if the oldest is before the cutoff.
-        let flush_oldest = self.holds >= max_pending_entry_holds;
+        let flush_oldest = self.oldest_pending_entry_holds >= max_pending_entry_holds;
 
         if leftover == 0 || flush_oldest {
             // Sequence everything. Either there are no leftovers or they have
             // already been held back the maximum number of times.
-            self.holds = 0;
-            self.in_sequencing = std::mem::take(&mut self.pending);
+            self.oldest_pending_entry_holds = 0;
+            self.in_sequencing_dedup = std::mem::take(&mut self.pending_dedup);
             std::mem::take(&mut self.pending_entries)
         } else {
             // Hold back the leftovers to avoid creating a partial tile.
-            self.holds += 1;
+            self.oldest_pending_entry_holds += 1;
 
             if publishing_full_tile {
                 // Return the pending entries to be published in full tiles and
@@ -164,10 +166,13 @@ impl PoolState {
                     .iter()
                     .filter_map(|(entry, _)| {
                         let lookup_key = entry.lookup_key();
-                        self.pending.remove(&lookup_key).map(|rx| (lookup_key, rx))
+                        self.pending_dedup
+                            .remove(&lookup_key)
+                            .map(|rx| (lookup_key, rx))
                     })
                     .collect::<HashMap<_, _>>();
-                self.in_sequencing = std::mem::replace(&mut self.pending, leftover_pending);
+                self.in_sequencing_dedup =
+                    std::mem::replace(&mut self.pending_dedup, leftover_pending);
                 std::mem::replace(&mut self.pending_entries, leftover_entries)
             } else {
                 // We didn't fill up a full tile, so nothing to return.
@@ -178,7 +183,7 @@ impl PoolState {
     // Reset the map of in-sequencing entries. This should be called after
     // sequencing completes.
     fn reset(&mut self) {
-        self.in_sequencing.clear();
+        self.in_sequencing_dedup.clear();
     }
 }
 
