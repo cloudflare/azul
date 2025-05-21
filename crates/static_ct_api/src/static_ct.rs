@@ -110,12 +110,10 @@ use signed_note::{
     Verifier as NoteVerifier, VerifierError, VerifierList,
 };
 use std::io::{Cursor, Read};
-use tlog_tiles::{Checkpoint, Hash, HashReader};
-
-/// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
-/// ignoring leap seconds, in milliseconds.
-/// This can be unsigned as we never deal with negative timestamps.
-pub type UnixTimestamp = u64;
+use tlog_tiles::{
+    Checkpoint, Hash, HashReader, LogEntryTrait, PendingLogEntryTrait, SequenceMetadata, TlogError,
+    TlogIteratorTrait, UnixTimestamp,
+};
 
 /// Calculates the log ID from a verifying key.
 ///
@@ -157,13 +155,13 @@ pub struct PendingLogEntry {
 
 pub type LookupKey = [u8; 16];
 
-impl PendingLogEntry {
+impl PendingLogEntryTrait for PendingLogEntry {
     /// Compute the cache key for a pending log entry.
     ///
     /// # Panics
     ///
     /// Panics if there are errors writing to an internal buffer.
-    pub fn lookup_key(&self) -> LookupKey {
+    fn lookup_key(&self) -> LookupKey {
         let mut buffer = Vec::new();
         if self.is_precert {
             // Add entry type = 1 (precert_entry)
@@ -187,18 +185,65 @@ impl PendingLogEntry {
 
         cache_hash
     }
+    fn into_log_entry(self, metadata: SequenceMetadata) -> impl LogEntryTrait {
+        LogEntry {
+            inner: self,
+            leaf_index: metadata.0,
+            timestamp: metadata.1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LogEntry {
-    pub inner: PendingLogEntry,
+    inner: PendingLogEntry,
 
     /// The zero-based index of the leaf in the log.
     /// It must be between 0 and 2^40-1.
-    pub leaf_index: u64,
+    leaf_index: u64,
 
     /// The `TimestampedEntry.timestamp`.
-    pub timestamp: UnixTimestamp,
+    timestamp: UnixTimestamp,
+}
+
+impl LogEntryTrait for LogEntry {
+    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to the internal buffer fails, which should never happen.
+    fn merkle_tree_leaf(&self) -> Vec<u8> {
+        let mut buffer = vec![
+            0, // version = v1 (0)
+            0, // leaf_type = timestamped_entry (0)
+        ];
+        buffer.extend(self.marshal_timestamped_entry());
+
+        buffer
+    }
+
+    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to the internal buffer fails, which should never happen.
+    fn tile_leaf(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend(self.marshal_timestamped_entry());
+        if self.inner.is_precert {
+            buffer
+                .write_length_prefixed(&self.inner.pre_certificate, 3)
+                .unwrap();
+        }
+        buffer
+            .write_length_prefixed(&self.inner.chain_fingerprints.concat(), 2)
+            .unwrap();
+
+        buffer
+    }
+    fn metadata(&self) -> SequenceMetadata {
+        (self.leaf_index, self.timestamp)
+    }
 }
 
 impl LogEntry {
@@ -229,49 +274,15 @@ impl LogEntry {
         buffer
     }
 
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    pub fn merkle_tree_leaf(&self) -> Vec<u8> {
-        let mut buffer = vec![
-            0, // version = v1 (0)
-            0, // leaf_type = timestamped_entry (0)
-        ];
-        buffer.extend(self.marshal_timestamped_entry());
-
-        buffer
+    /// Return the metadata for a sequenced log entry.
+    pub fn metadata(&self) -> SequenceMetadata {
+        (self.leaf_index, self.timestamp)
     }
 
-    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    pub fn tile_leaf(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        buffer.extend(self.marshal_timestamped_entry());
-        if self.inner.is_precert {
-            buffer
-                .write_length_prefixed(&self.inner.pre_certificate, 3)
-                .unwrap();
-        }
-        buffer
-            .write_length_prefixed(&self.inner.chain_fingerprints.concat(), 2)
-            .unwrap();
-
-        buffer
+    // Return a reference to the corresponding pending entry.
+    pub fn as_pending_entry(&self) -> &PendingLogEntry {
+        &self.inner
     }
-}
-
-/// A log entry that is ready to be serialized.
-pub struct ValidatedChain {
-    pub certificate: Vec<u8>,
-    pub is_precert: bool,
-    pub issuer_key_hash: [u8; 32],
-    pub issuers: Vec<Vec<u8>>,
-    pub pre_certificate: Vec<u8>,
 }
 
 /// An iterator over the contents of a data tile.
@@ -282,13 +293,19 @@ pub struct TileIterator {
 }
 
 impl std::iter::Iterator for TileIterator {
-    type Item = Result<LogEntry, StaticCTError>;
+    type Item = Result<LogEntry, TlogError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == self.size {
             return None;
         }
         self.count += 1;
         Some(self.parse_next())
+    }
+}
+
+impl TlogIteratorTrait for TileIterator {
+    fn into_entry_iter(self) -> impl Iterator<Item = Result<impl LogEntryTrait, TlogError>> {
+        self.into_iter()
     }
 }
 
@@ -304,7 +321,7 @@ impl TileIterator {
     }
 
     /// Parse the next [`LogEntry`] from the internal buffer.
-    fn parse_next(&mut self) -> Result<LogEntry, StaticCTError> {
+    fn parse_next(&mut self) -> Result<LogEntry, TlogError> {
         // https://c2sp.org/static-ct-api#log-entries
         // struct {
         //     TimestampedEntry timestamped_entry;
@@ -340,18 +357,18 @@ impl TileIterator {
                 fingerprints = self.s.read_length_prefixed(2)?;
             }
             _ => {
-                return Err(StaticCTError::UnknownType);
+                return Err(TlogError::InvalidTile);
             }
         }
 
         let mut extensions = Cursor::new(extensions);
         if extensions.read_u8()? != 0 {
-            return Err(StaticCTError::UnexpectedExtension);
+            return Err(TlogError::InvalidTile);
         }
         let extension_data = extensions.read_length_prefixed(2)?;
         entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
         if extensions.position() != extensions.get_ref().len() as u64 {
-            return Err(StaticCTError::TrailingData);
+            return Err(TlogError::InvalidTile);
         }
 
         let mut fingerprints = Cursor::new(fingerprints);
@@ -734,24 +751,22 @@ impl NoteVerifier for RFC6962Verifier {
 /// Errors if there are encoding issues with the provided signing key.
 pub fn signed_certificate_timestamp(
     signing_key: &EcdsaSigningKey,
-    entry: &LogEntry,
+    entry: &impl LogEntryTrait,
 ) -> Result<AddChainResponse, StaticCTError> {
-    let mut buffer = vec![
-        0, // sct_version = v1 (0)
-        0, // signature_type = certificate_timestamp (0)
-    ];
-    buffer.extend(entry.marshal_timestamped_entry());
+    // NOTE: the marshaled bytes for SCT and a MerkleTreeLeaf are exactly the
+    // same, but the first two zero bytes mean 'sct_version = v1 (0)' and
+    // 'signature_type = certificate_timestamp (0)' in this case. We can use
+    // 'merkle_tree_leaf()' directly.
+    let buffer = entry.merkle_tree_leaf();
     let signature = sign(signing_key, &buffer);
     let id = log_id_from_key(signing_key.verifying_key())?.to_vec();
+    let (leaf_index, timestamp) = entry.metadata();
 
     Ok(AddChainResponse {
         sct_version: 0, // sct_version = v1 (0)
         id,
-        timestamp: entry.timestamp,
-        extensions: Extensions {
-            leaf_index: entry.leaf_index,
-        }
-        .to_bytes(),
+        timestamp,
+        extensions: Extensions { leaf_index }.to_bytes(),
         signature,
     })
 }

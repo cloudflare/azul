@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
+use tlog_tiles::PendingLogEntryTrait;
 use tokio::sync::watch::{self, Sender};
 #[allow(clippy::wildcard_imports)]
 use worker::*;

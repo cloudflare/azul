@@ -14,8 +14,9 @@ use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use static_ct_api::{AddChainRequest, GetRootsResponse, LogEntry, PendingLogEntry, UnixTimestamp};
+use static_ct_api::{AddChainRequest, GetRootsResponse, PendingLogEntry};
 use std::str::FromStr;
+use tlog_tiles::PendingLogEntryTrait;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -207,18 +208,14 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if let Some((leaf_index, timestamp)) = kv
+    if let Some(metadata) = kv
         .get(&BASE64_STANDARD.encode(lookup_key))
         .bytes_with_metadata::<SequenceMetadata>()
         .await?
         .1
     {
         debug!("{name}: Entry is cached");
-        let entry = LogEntry {
-            inner: pending_entry,
-            leaf_index,
-            timestamp,
-        };
+        let entry = pending_entry.into_log_entry(metadata);
         let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
             .map_err(|e| e.to_string())?;
         return Response::from_json(&sct);
@@ -261,12 +258,8 @@ async fn add_chain_or_pre_chain(
         // Return the response from the Batcher directly to the client.
         return Ok(response);
     }
-    let (leaf_index, timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
-    let entry = LogEntry {
-        inner: pending_entry,
-        leaf_index,
-        timestamp,
-    };
+    let metadata = response.json::<SequenceMetadata>().await?;
+    let entry = pending_entry.into_log_entry(metadata);
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
     Response::from_json(&sct)
