@@ -9,7 +9,7 @@
 use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::{JsonSerialize, PendingLogEntry, PendingLogEntryTrait};
+use static_ct_api::{PendingLogEntry, PendingLogEntryTrait};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -136,27 +136,6 @@ impl<E: PendingLogEntryTrait> DurableObject for Batcher<E> {
     }
 }
 
-/// Serializes a slice of JsonSerializable items to a vec
-fn to_json_array(items: &[impl JsonSerialize]) -> core::result::Result<String, serde_json::Error> {
-    let mut buf = vec![b'['];
-
-    for item in items {
-        let mut writer = Vec::with_capacity(128);
-        let mut ser = serde_json::Serializer::new(&mut writer);
-        item.json_serialize(&mut ser)?;
-        writer.push(b',');
-
-        buf.extend(writer);
-    }
-    buf.push(b']');
-
-    let out = unsafe {
-        // serde_json does not emit invalid UTF-8.
-        String::from_utf8_unchecked(buf)
-    };
-    Ok(out)
-}
-
 impl<E: PendingLogEntryTrait> Batcher<E> {
     // Submit the current pending batch to be sequenced.
     async fn submit_batch(&mut self, name: &str) -> Result<()> {
@@ -177,7 +156,7 @@ impl<E: PendingLogEntryTrait> Batcher<E> {
             &format!("http://fake_url.com/add_batch?name={name}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(to_json_array(&batch.pending_leaves)?.into()),
+                body: Some(serde_json::to_string(&batch.pending_leaves)?.into()),
                 ..Default::default()
             },
         )?;
