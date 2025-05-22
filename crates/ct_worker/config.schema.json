@@ -64,11 +64,11 @@
                             "type": "string",
                             "description": "Provide a hint to place the log in a specific geographic location. See https://developers.cloudflare.com/durable-objects/reference/data-location/ for supported locations. If unspecified, the Durable Object will be created in proximity to the first request."
                         },
-                        "sequence_interval_seconds": {
+                        "sequence_interval_millis": {
                             "type": "integer",
-                            "minimum": 1,
-                            "default": 1,
-                            "description": "The duration in between sequencing operations, in seconds."
+                            "minimum": 100,
+                            "default": 1000,
+                            "description": "The duration in between sequencing operations, in milliseconds."
                         },
                         "max_pending_entry_holds": {
                             "type": "integer",

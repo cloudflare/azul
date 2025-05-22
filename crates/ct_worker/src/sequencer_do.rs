@@ -199,8 +199,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             .trim_start_matches("http://")
             .trim_start_matches("https://")
             .trim_end_matches('/');
-
-        let sequence_interval = Duration::from_secs(params.sequence_interval_seconds);
+        let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
         let checkpoint_signers = (self.key_loader)(&self.env, name, origin)?;
 
         self.config = Some(LogConfig {
@@ -211,7 +210,6 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             max_pending_entry_holds: params.max_pending_entry_holds,
         });
         self.public_bucket = Some(ObjectBucket {
-            sequence_interval_seconds: params.sequence_interval_seconds,
             bucket: load_public_bucket(&self.env, name)?,
             metrics: Some(ObjectMetrics::new(&self.metrics.registry)),
         });
