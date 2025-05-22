@@ -78,6 +78,25 @@
                             "type": "integer",
                             "default": 0,
                             "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by a multiple of the sequence interval."
+                        },
+                        "num_batchers": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 8,
+                            "maximum": 255,
+                            "description": "The number of batchers to use to proxy requests to the sequencer. If zero, requests from the frontend worker go directly to the sequencer."
+                        },
+                        "batch_timeout_millis": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "default": 1000,
+                            "description": "The maximum time to wait before submitting a batch to the sequencer, in milliseconds."
+                        },
+                        "max_batch_entries": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1000,
+                            "description": "The maximum number of entries per batch."
                         }
                     },
                     "required": [

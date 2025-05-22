@@ -6,7 +6,10 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
+use crate::{
+    get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata, BATCH_ENDPOINT, CONFIG,
+    ENTRY_ENDPOINT,
+};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use static_ct_api::PendingLogEntry;
@@ -18,26 +21,17 @@ use tokio::sync::watch::{self, Sender};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-// How many in-flight requests to allow. Tune to prevent the DO from being overloaded.
-const MAX_IN_FLIGHT: usize = 900;
-
-// The maximum number of requests to submit together in a batch.
-const MAX_BATCH_SIZE: usize = 100;
-
-// The maximum amount of time to wait before submitting a batch.
-const MAX_BATCH_TIMEOUT_MILLIS: u64 = 1_000;
-
 #[durable_object]
 struct Batcher {
     env: Env,
-    batch: Batch,
+    pending_batch: Batch,
     in_flight: usize,
     processed: usize,
 }
 
 // A batch of entries to be submitted to the Sequencer together.
 struct Batch {
-    pending_leaves: Vec<PendingLogEntry>,
+    entries: Vec<PendingLogEntry>,
     by_hash: HashSet<LookupKey>,
     done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
@@ -47,7 +41,7 @@ impl Default for Batch {
     fn default() -> Self {
         let (done, _) = watch::channel(HashMap::new());
         Self {
-            pending_leaves: Vec::new(),
+            entries: Vec::new(),
             by_hash: HashSet::new(),
             done,
         }
@@ -59,41 +53,39 @@ impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
         Self {
             env,
-            batch: Batch::default(),
+            pending_batch: Batch::default(),
             in_flight: 0,
             processed: 0,
         }
     }
     async fn fetch(&mut self, mut req: Request) -> Result<Response> {
         match req.path().as_str() {
-            "/add_leaf" => {
+            ENTRY_ENDPOINT => {
                 let name = &req.query::<QueryParams>()?.name;
+                let params = &CONFIG.logs[name];
                 let entry: PendingLogEntry = req.json().await?;
                 let key = entry.lookup_key();
 
-                if self.in_flight >= MAX_IN_FLIGHT {
-                    return Response::error("too many requests in flight", 429);
-                }
                 self.in_flight += 1;
                 self.processed += 1;
 
                 // Add entry to the current pending batch if it isn't already present.
                 // Rely on the Sequencer to deduplicate entries across batches.
-                if !self.batch.by_hash.contains(&key) {
-                    self.batch.by_hash.insert(key);
-                    self.batch.pending_leaves.push(entry);
+                if !self.pending_batch.by_hash.contains(&key) {
+                    self.pending_batch.by_hash.insert(key);
+                    self.pending_batch.entries.push(entry);
                 }
 
-                let mut recv = self.batch.done.subscribe();
+                let mut recv = self.pending_batch.done.subscribe();
 
                 // Submit the current pending batch if it's full.
-                if self.batch.pending_leaves.len() >= MAX_BATCH_SIZE {
+                if self.pending_batch.entries.len() >= params.max_batch_entries {
                     if let Err(e) = self.submit_batch(name).await {
                         log::warn!("{name} failed to submit full batch: {e}");
                     }
                 } else {
                     let batch_done = recv.changed();
-                    let timeout = Delay::from(Duration::from_millis(MAX_BATCH_TIMEOUT_MILLIS));
+                    let timeout = Delay::from(Duration::from_millis(params.batch_timeout_millis));
                     futures_util::pin_mut!(batch_done);
                     match select(batch_done, timeout).await {
                         Either::Left((batch_done, _timeout)) => {
@@ -103,7 +95,7 @@ impl DurableObject for Batcher {
                         }
                         Either::Right(((), batch_done)) => {
                             // Batch timeout reached; submit this entry's batch if no-one has already.
-                            if self.batch.by_hash.contains(&key) {
+                            if self.pending_batch.by_hash.contains(&key) {
                                 if let Err(e) = self.submit_batch(name).await {
                                     log::warn!("{name} failed to submit timed-out batch: {e}");
                                 }
@@ -142,21 +134,21 @@ impl Batcher {
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;
 
         // Take the current pending batch and replace it with a new one.
-        let batch = std::mem::take(&mut self.batch);
+        let batch = std::mem::take(&mut self.pending_batch);
 
         log::debug!(
             "{name} submitting batch: leaves={} inflight={} processed={}",
-            batch.pending_leaves.len(),
+            batch.entries.len(),
             self.in_flight,
             self.processed,
         );
 
         // Submit the batch, and wait for it to be sequenced.
         let req = Request::new_with_init(
-            &format!("http://fake_url.com/add_batch?name={name}"),
+            &format!("http://fake_url.com{BATCH_ENDPOINT}?name={name}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&batch.pending_leaves)?.into()),
+                body: Some(serde_json::to_string(&batch.entries)?.into()),
                 ..Default::default()
             },
         )?;
