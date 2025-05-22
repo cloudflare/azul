@@ -5,7 +5,7 @@
 
 use crate::{
     ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
-    LookupKey, ObjectBucket, SequenceMetadata, CONFIG, ROOTS,
+    LookupKey, ObjectBucket, SequenceMetadata, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
 };
 use base64::prelude::*;
 use config::TemporalInterval;
@@ -28,13 +28,6 @@ use worker::*;
 // happens only once the entry is sequenced. However, we can leave this value
 // in the metadata as the default (1 day).
 const MAX_MERGE_DELAY: usize = 86_400;
-
-// Number of Batchers to use to proxy requests to the Sequencer.
-// Setting this too high could result in a high number of requests
-// to the Sequencer, which may slow down the sequencing loop.
-// Setting this too low could cause individual Batchers to hit the
-// Durable Objects rate limits.
-const NUM_BATCHER_PROXIES: u8 = 8;
 
 const UNKNOWN_LOG_MSG: &str = "unknown log";
 
@@ -126,8 +119,10 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/logs/:log/metrics", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
             let stub = get_stub(&ctx.env, name, None, "SEQUENCER")?;
-            stub.fetch_with_str(&format!("http://fake_url.com/metrics?name={name}"))
-                .await
+            stub.fetch_with_str(&format!(
+                "http://fake_url.com{METRICS_ENDPOINT}?name={name}"
+            ))
+            .await
         })
         .get_async("/logs/:log/*key", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
@@ -245,13 +240,17 @@ async fn add_chain_or_pre_chain(
     )
     .await?;
 
-    // Add leaf to the Batcher, which will submit the entry to the Sequencer,
-    // wait for the entry to be sequenced, and return the response.
-    let shard_id = shard_id_from_lookup_key(&lookup_key);
-    let batcher_stub = get_stub(env, name, Some(shard_id), "BATCHER")?;
-    let mut response = batcher_stub
+    // Submit entry to be sequenced, either via a batcher or directly to the
+    // sequencer.
+    let stub = if params.num_batchers > 0 {
+        let batcher_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
+        get_stub(env, name, Some(batcher_id), "BATCHER")?
+    } else {
+        get_stub(env, name, None, "SEQUENCER")?
+    };
+    let mut response = stub
         .fetch_with_request(Request::new_with_init(
-            &format!("http://fake_url.com/add_leaf?name={name}"),
+            &format!("http://fake_url.com{ENTRY_ENDPOINT}?name={name}"),
             &RequestInit {
                 method: Method::Post,
                 body: Some(serde_json::to_string(&pending_entry)?.into()),
@@ -260,10 +259,25 @@ async fn add_chain_or_pre_chain(
         )?)
         .await?;
     if response.status_code() != 200 {
-        // Return the response from the Batcher directly to the client.
+        // Return the response from the sequencing directly to the client.
         return Ok(response);
     }
     let metadata = response.json::<SequenceMetadata>().await?;
+    if params.num_batchers == 0 {
+        // Write sequenced entry to the long-term deduplication cache in Workers
+        // KV as there are no batchers configured to do it for us.
+        if kv
+            .put(&BASE64_STANDARD.encode(lookup_key), "")
+            .unwrap()
+            .metadata::<SequenceMetadata>(metadata)
+            .unwrap()
+            .execute()
+            .await
+            .is_err()
+        {
+            debug!("{name}: Failed to write entry to deduplication cache");
+        }
+    }
     let entry = StaticCTLogEntry {
         inner: pending_entry,
         leaf_index: metadata.0,
@@ -286,8 +300,8 @@ fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
     }
 }
 
-fn shard_id_from_lookup_key(key: &LookupKey) -> u8 {
-    key[0] % NUM_BATCHER_PROXIES
+fn batcher_id_from_lookup_key(key: &LookupKey, num_batchers: u8) -> u8 {
+    key[0] % num_batchers
 }
 
 fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {

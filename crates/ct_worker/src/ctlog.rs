@@ -72,7 +72,7 @@ impl LogConfig {
             origin: self.origin.clone(),
             checkpoint_signers: Vec::new(),
             sequence_interval: self.sequence_interval,
-            max_pending_entry_holds: self.max_pending_entry_holds,
+            max_sequence_skips: self.max_sequence_skips,
         }
     }
 }
