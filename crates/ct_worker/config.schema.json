@@ -1,6 +1,7 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
+    "additionalProperties": false,
     "properties": {
         "logging_level": {
             "type": "string",
@@ -15,9 +16,11 @@
         "logs": {
             "type": "object",
             "description": "Dictionary CT log shard names to configurations.",
+            "additionalProperties": false,
             "patternProperties": {
                 "^[a-zA-Z0-9_]+$": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "description": {
                             "type": "string",
@@ -43,6 +46,7 @@
                         },
                         "temporal_interval": {
                             "type": "object",
+                            "additionalProperties": false,
                             "properties": {
                                 "start_inclusive": {
                                     "type": "string",
@@ -70,10 +74,10 @@
                             "default": 1000,
                             "description": "The duration in between sequencing operations, in milliseconds."
                         },
-                        "max_pending_entry_holds": {
+                        "max_sequence_skips": {
                             "type": "integer",
-                            "default": 1,
-                            "description": "The maximum number of times a pending entry can be held back from sequencing to avoid creating partial tiles. If non-zero, pending entries may be delayed by a multiple of sequence interval."
+                            "default": 0,
+                            "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by a multiple of the sequence interval."
                         }
                     },
                     "required": [
