@@ -27,16 +27,34 @@ pub struct LogParams {
     pub submission_url: String,
     pub temporal_interval: TemporalInterval,
     pub location_hint: Option<String>,
-    #[serde(default = "default_sequence_interval_seconds")]
-    pub sequence_interval_seconds: u64,
-    #[serde(default = "default_max_pending_entry_holds")]
-    pub max_pending_entry_holds: usize,
+    #[serde(default = "default_sequence_interval_millis")]
+    pub sequence_interval_millis: u64,
+    #[serde(default = "default_max_sequence_skips")]
+    pub max_sequence_skips: usize,
+    #[serde(default = "default_num_batchers")]
+    pub num_batchers: u8,
+    #[serde(default = "default_batch_timeout_millis")]
+    pub batch_timeout_millis: u64,
+    #[serde(default = "default_max_batch_entries")]
+    pub max_batch_entries: usize,
 }
 
-fn default_sequence_interval_seconds() -> u64 {
-    1
+fn default_sequence_interval_millis() -> u64 {
+    1000
 }
 
-fn default_max_pending_entry_holds() -> usize {
-    1
+fn default_max_sequence_skips() -> usize {
+    0
+}
+
+fn default_num_batchers() -> u8 {
+    8
+}
+
+fn default_batch_timeout_millis() -> u64 {
+    1000
+}
+
+fn default_max_batch_entries() -> usize {
+    100
 }
