@@ -115,8 +115,6 @@ impl DurableObject for Batcher {
                 } else {
                     // Failed to sequence this entry, either due to an error
                     // submitting the batch or rate limiting at the Sequencer.
-                    // The entry's batch could have also been dropped before
-                    // this fetch task woke up and received the channel update.
                     Response::error("rate limited", 429)
                 };
                 self.in_flight -= 1;
