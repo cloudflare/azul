@@ -154,7 +154,7 @@ impl Sequencer {
             .trim_end_matches('/');
         let signing_key = load_signing_key(&self.env, name)?.clone();
         let witness_key = load_witness_key(&self.env, name)?.clone();
-        let sequence_interval = Duration::from_secs(params.sequence_interval_seconds);
+        let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
 
         self.config = Some(LogConfig {
             name: name.to_string(),
@@ -165,7 +165,6 @@ impl Sequencer {
             max_pending_entry_holds: params.max_pending_entry_holds,
         });
         self.public_bucket = Some(ObjectBucket {
-            sequence_interval_seconds: params.sequence_interval_seconds,
             bucket: load_public_bucket(&self.env, name)?,
             metrics: Some(ObjectMetrics::new(&self.metrics.registry)),
         });

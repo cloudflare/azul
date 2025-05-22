@@ -385,7 +385,6 @@ trait ObjectBackend {
 }
 
 struct ObjectBucket {
-    sequence_interval_seconds: u64,
     bucket: Bucket,
     metrics: Option<ObjectMetrics>,
 }
@@ -402,10 +401,7 @@ impl ObjectBackend for ObjectBucket {
         if opts.immutable {
             metadata.cache_control = Some("public, max-age=604800, immutable".into());
         } else {
-            metadata.cache_control = Some(format!(
-                "public, max-age={}, must-revalidate",
-                self.sequence_interval_seconds
-            ));
+            metadata.cache_control = Some("no-store".into());
         }
         self.metrics
             .as_ref()
