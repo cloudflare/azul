@@ -29,14 +29,14 @@ pub struct LogParams {
     pub location_hint: Option<String>,
     #[serde(default = "default_sequence_interval_millis")]
     pub sequence_interval_millis: u64,
-    #[serde(default = "default_max_pending_entry_holds")]
-    pub max_pending_entry_holds: usize,
+    #[serde(default = "default_max_sequence_skips")]
+    pub max_sequence_skips: usize,
 }
 
 fn default_sequence_interval_millis() -> u64 {
     1000
 }
 
-fn default_max_pending_entry_holds() -> usize {
-    1
+fn default_max_sequence_skips() -> usize {
+    0
 }

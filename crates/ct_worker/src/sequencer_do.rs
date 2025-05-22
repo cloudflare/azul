@@ -207,7 +207,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             origin: origin.to_string(),
             checkpoint_signers,
             sequence_interval,
-            max_pending_entry_holds: params.max_pending_entry_holds,
+            max_sequence_skips: params.max_sequence_skips,
         });
         self.public_bucket = Some(ObjectBucket {
             bucket: load_public_bucket(&self.env, name)?,

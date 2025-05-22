@@ -60,7 +60,7 @@ pub(crate) struct LogConfig {
     pub(crate) origin: String,
     pub(crate) checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     pub(crate) sequence_interval: Duration,
-    pub(crate) max_pending_entry_holds: usize,
+    pub(crate) max_sequence_skips: usize,
 }
 
 #[cfg(test)]
@@ -89,8 +89,8 @@ impl LogConfig {
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Debug)]
 pub(crate) struct PoolState<P: PendingLogEntryTrait> {
-    // How many times the oldest entry has been held back from sequencing.
-    oldest_pending_entry_holds: usize,
+    // How many times sequencing has been skipped for any entries in the pool.
+    sequence_skips: usize,
 
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
@@ -106,7 +106,7 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
 impl<P: PendingLogEntryTrait> Default for PoolState<P> {
     fn default() -> Self {
         PoolState {
-            oldest_pending_entry_holds: 0,
+            sequence_skips: 0,
             pending_entries: Vec::default(),
             pending_dedup: HashMap::default(),
             in_sequencing_dedup: HashMap::default(),
@@ -147,61 +147,57 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
             source: PendingSource::Sequencer,
         }
     }
-    // Take the entries from the pool that are ready to be sequenced and the
-    // corresponding Senders to update when the entries have been sequenced.
+    // Take the entries from the pool that are ready to be sequenced, along with
+    // the corresponding Senders to update when the entries have been sequenced.
     //
-    // Hold back any leftover entries that would be published as a partial tile
-    // unless they have already been held back `max_pending_entry_holds` times.
+    // Skip sequencing leftover entries that would be published as a partial
+    // tile unless they have already been held back `max_sequence_skips` times.
+    //
+    // The return value is an Option that indicates whether or not a new
+    // checkpoint should be produced (even if there are no new entries).
     fn take(
         &mut self,
         old_size: u64,
-        max_pending_entry_holds: usize,
-    ) -> Vec<(E, Sender<SequenceMetadata>)> {
+        max_sequence_skips: usize,
+    ) -> Option<Vec<(E, Sender<SequenceMetadata>)>> {
         let new_size = old_size + self.pending_entries.len() as u64;
-        let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
-
         let publishing_full_tile =
             new_size / u64::from(TlogTile::FULL_WIDTH) > old_size / u64::from(TlogTile::FULL_WIDTH);
-        if publishing_full_tile {
-            // We're going to publish at least one full tile which will contain
-            // any leftover entries from the previous sequencing. Reset the
-            // count since the new leftover entries have not yet been held back.
-            self.oldest_pending_entry_holds = 0;
-        }
-        // Flush all of the leftover entries if the oldest is before the cutoff.
-        let flush_oldest = self.oldest_pending_entry_holds >= max_pending_entry_holds;
 
-        if leftover == 0 || flush_oldest {
-            // Sequence everything. Either there are no leftovers or they have
-            // already been held back the maximum number of times.
-            self.oldest_pending_entry_holds = 0;
+        if publishing_full_tile && max_sequence_skips > 0 {
+            // Sequence full tiles and skip the rest.
+            let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
+
+            // If there are leftover entries, this is the first time they have
+            // been skipped. Otherwise, set skip count to zero.
+            self.sequence_skips = usize::from(leftover != 0);
+            let split_index = self.pending_entries.len() - usize::try_from(leftover).unwrap();
+            let leftover_entries = self.pending_entries.split_off(split_index);
+            let leftover_pending = leftover_entries
+                .iter()
+                .filter_map(|(entry, _)| {
+                    let lookup_key = entry.lookup_key();
+                    self.pending_dedup
+                        .remove(&lookup_key)
+                        .map(|rx| (lookup_key, rx))
+                })
+                .collect::<HashMap<_, _>>();
+            self.in_sequencing_dedup = std::mem::replace(&mut self.pending_dedup, leftover_pending);
+            Some(std::mem::replace(
+                &mut self.pending_entries,
+                leftover_entries,
+            ))
+        } else if self.sequence_skips >= max_sequence_skips {
+            // Sequence everything. We have reached the skip threshold, and even
+            // if there are no entries, we want to create a new checkpoint.
+            self.sequence_skips = 0;
             self.in_sequencing_dedup = std::mem::take(&mut self.pending_dedup);
-            std::mem::take(&mut self.pending_entries)
+            Some(std::mem::take(&mut self.pending_entries))
         } else {
-            // Hold back the leftovers to avoid creating a partial tile.
-            self.oldest_pending_entry_holds += 1;
-
-            if publishing_full_tile {
-                // Return the pending entries to be published in full tiles and
-                // retain the rest.
-                let split_index = self.pending_entries.len() - usize::try_from(leftover).unwrap();
-                let leftover_entries = self.pending_entries.split_off(split_index);
-                let leftover_pending = leftover_entries
-                    .iter()
-                    .filter_map(|(entry, _)| {
-                        let lookup_key = entry.lookup_key();
-                        self.pending_dedup
-                            .remove(&lookup_key)
-                            .map(|rx| (lookup_key, rx))
-                    })
-                    .collect::<HashMap<_, _>>();
-                self.in_sequencing_dedup =
-                    std::mem::replace(&mut self.pending_dedup, leftover_pending);
-                std::mem::replace(&mut self.pending_entries, leftover_entries)
-            } else {
-                // We didn't fill up a full tile, so nothing to return.
-                Vec::new()
-            }
+            // Skip this checkpoint. There are no full tiles to sequence, and
+            // we're below the skip threshold.
+            self.sequence_skips += 1;
+            None
         }
     }
     // Reset the map of in-sequencing entries. This should be called after
@@ -560,13 +556,18 @@ pub(crate) async fn sequence<L: LogEntryTrait>(
         }
     };
 
-    let entries = pool_state.take(old.tree.size(), config.max_pending_entry_holds);
+    let Some(entries) = pool_state.take(old.tree.size(), config.max_sequence_skips) else {
+        // Skip this checkpoint. Nothing to sequence.
+        metrics.seq_count.with_label_values(&["skip"]).inc();
+        return Ok(());
+    };
+
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
     let result =
         match sequence_entries::<L>(old, config, object, lock, cache, entries, metrics).await {
             Ok(()) => {
-                metrics.seq_count.with_label_values(&[""]).inc();
+                metrics.seq_count.with_label_values(&["ok"]).inc();
                 Ok(())
             }
             Err(SequenceError::Fatal(e)) => {
@@ -1579,7 +1580,7 @@ mod tests {
         let mut log = TestLog::new();
 
         // Hold entries at most one sequencing round.
-        log.config.max_pending_entry_holds = 1;
+        log.config.max_sequence_skips = 1;
         log.add_certificate();
         log.add_certificate();
         log.sequence().unwrap();
@@ -1593,7 +1594,7 @@ mod tests {
         log.check(u64::from(TlogTile::FULL_WIDTH) + 5);
 
         // Hold entries at most two sequencing rounds.
-        log.config.max_pending_entry_holds = 2;
+        log.config.max_sequence_skips = 2;
         log.add_certificate();
         log.add_certificate();
         log.sequence().unwrap(); // 2 entries held
@@ -2024,7 +2025,7 @@ mod tests {
                 origin,
                 checkpoint_signers,
                 sequence_interval: Duration::from_secs(1),
-                max_pending_entry_holds: 0,
+                max_sequence_skips: 0,
             };
             let pool_state = PoolState::default();
             let metrics = Metrics::new();
@@ -2063,10 +2064,9 @@ mod tests {
                     .unwrap();
                     self.sequence_state.insert(state)
                 };
-            self.pool_state.take(
-                sequence_state.tree.size(),
-                self.config.max_pending_entry_holds,
-            )
+            self.pool_state
+                .take(sequence_state.tree.size(), self.config.max_sequence_skips)
+                .unwrap_or_default()
         }
         fn sequence_finish(
             &mut self,
