@@ -38,11 +38,11 @@
                 "bindings": [
                     {
                         "name": "SEQUENCER",
-                        "class_name": "Sequencer"
+                        "class_name": "CtLogSequencer"
                     },
                     {
                         "name": "BATCHER",
-                        "class_name": "Batcher"
+                        "class_name": "CtLogBatcher"
                     }
                 ]
             },

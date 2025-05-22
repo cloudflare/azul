@@ -12,7 +12,7 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::{PendingLogEntry, PendingLogEntryTrait};
+use static_ct_api::{LogEntry, LogEntryTrait, PendingLogEntry, PendingLogEntryTrait};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -25,6 +25,23 @@ use worker::*;
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
 #[durable_object]
+struct CtLogSequencer(Sequencer<PendingLogEntry>);
+
+#[durable_object]
+impl DurableObject for CtLogSequencer {
+    fn new(state: State, env: Env) -> Self {
+        CtLogSequencer(Sequencer::new(state, env))
+    }
+
+    async fn fetch(&mut self, req: Request) -> Result<Response> {
+        self.0.fetch(req).await
+    }
+
+    async fn alarm(&mut self) -> Result<Response> {
+        self.0.alarm::<LogEntry>().await
+    }
+}
+
 struct Sequencer<E: PendingLogEntryTrait> {
     do_state: State, // implements LockBackend
     env: Env,
@@ -38,8 +55,7 @@ struct Sequencer<E: PendingLogEntryTrait> {
     metrics: Metrics,
 }
 
-#[durable_object]
-impl<E: PendingLogEntryTrait> DurableObject for Sequencer<E> {
+impl<E: PendingLogEntryTrait> Sequencer<E> {
     fn new(state: State, env: Env) -> Self {
         let level = CONFIG
             .logging_level
@@ -81,7 +97,7 @@ impl<E: PendingLogEntryTrait> DurableObject for Sequencer<E> {
             }
             "/add_batch" => {
                 endpoint = "add_batch";
-                let pending_entries: Vec<PendingLogEntry> = req.json().await?;
+                let pending_entries: Vec<E> = req.json().await?;
                 self.add_batch(pending_entries).await
             }
             _ => {
@@ -99,7 +115,7 @@ impl<E: PendingLogEntryTrait> DurableObject for Sequencer<E> {
         resp
     }
 
-    async fn alarm(&mut self) -> Result<Response> {
+    async fn alarm<L: LogEntryTrait<E>>(&mut self) -> Result<Response> {
         if !self.initialized {
             let name = &self.do_state.storage().get::<String>("name").await?;
             info!("{name}: Initializing log from sequencing loop");
@@ -115,7 +131,7 @@ impl<E: PendingLogEntryTrait> DurableObject for Sequencer<E> {
             .set_alarm(config.sequence_interval)
             .await?;
 
-        if let Err(e) = ctlog::sequence(
+        if let Err(e) = ctlog::sequence::<E, L>(
             &mut self.pool_state,
             &mut self.sequence_state,
             config,

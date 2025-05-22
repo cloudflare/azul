@@ -103,7 +103,7 @@ use p256::{
     pkcs8::EncodePublicKey,
 };
 use rand::{seq::SliceRandom, Rng};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
     Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
@@ -134,7 +134,7 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
 pub type LookupKey = [u8; 16];
 
 /// The functionality exposed by any data type that can be included in a Merkle tree
-pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize {
+pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize + DeserializeOwned {
     /// The lookup key belonging to this pending log entry
     fn lookup_key(&self) -> LookupKey;
 

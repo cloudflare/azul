@@ -28,12 +28,10 @@ use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
-use rand::distributions::Uniform;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use static_ct_api::{
-    LogEntry, LogEntryTrait, PendingLogEntry, PendingLogEntryTrait, TileIterator,
-    TreeWithTimestamp, UnixTimestamp,
+    LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp, UnixTimestamp,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -78,7 +76,7 @@ pub(crate) struct LogConfig {
 /// already started sequencing, and that cache reads will see entries from older pools before
 /// they are rotated out of `in_sequencing`.
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     // How many times the oldest entry has been held back from sequencing.
     oldest_pending_entry_holds: usize,
@@ -92,6 +90,17 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
 
     // Deduplication cache for entries currently being sequenced.
     in_sequencing_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
+}
+
+impl<P: PendingLogEntryTrait> Default for PoolState<P> {
+    fn default() -> Self {
+        PoolState {
+            holds: 0,
+            pending_entries: Default::default(),
+            pending: Default::default(),
+            in_sequencing: Default::default(),
+        }
+    }
 }
 
 impl<E: PendingLogEntryTrait> PoolState<E> {
@@ -1112,13 +1121,12 @@ mod tests {
     use crate::{util, LookupKey, SequenceMetadata};
     use futures_executor::block_on;
     use itertools::Itertools;
-    use log::Log;
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::RFC6962Verifier;
+    use static_ct_api::{LogEntry, PendingLogEntry, RFC6962Verifier};
     use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
 

@@ -27,12 +27,25 @@ const MAX_BATCH_SIZE: usize = 100;
 // The maximum amount of time to wait before submitting a batch.
 const MAX_BATCH_TIMEOUT_MILLIS: u64 = 1_000;
 
-#[durable_object]
 struct Batcher<E: PendingLogEntryTrait> {
     env: Env,
     batch: Batch<E>,
     in_flight: usize,
     processed: usize,
+}
+
+#[durable_object]
+struct CtLogBatcher(Batcher<PendingLogEntry>);
+
+#[durable_object]
+impl DurableObject for CtLogBatcher {
+    fn new(state: State, env: Env) -> Self {
+        CtLogBatcher(Batcher::new(state, env))
+    }
+
+    async fn fetch(&mut self, req: Request) -> Result<Response> {
+        self.0.fetch(req).await
+    }
 }
 
 // A batch of entries to be submitted to the Sequencer together.
@@ -54,9 +67,8 @@ impl<E: PendingLogEntryTrait> Default for Batch<E> {
     }
 }
 
-#[durable_object]
-impl<E: PendingLogEntryTrait> DurableObject for Batcher<E> {
-    fn new(state: State, env: Env) -> Self {
+impl<E: PendingLogEntryTrait> Batcher<E> {
+    fn new(_: State, env: Env) -> Self {
         Self {
             env,
             batch: Batch::default(),
@@ -68,7 +80,7 @@ impl<E: PendingLogEntryTrait> DurableObject for Batcher<E> {
         match req.path().as_str() {
             "/add_leaf" => {
                 let name = &req.query::<QueryParams>()?.name;
-                let entry: PendingLogEntry = req.json().await?;
+                let entry: E = req.json().await?;
                 let key = entry.lookup_key();
 
                 if self.in_flight >= MAX_IN_FLIGHT {
