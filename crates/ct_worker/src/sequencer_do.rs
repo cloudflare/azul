@@ -115,7 +115,7 @@ impl<E: PendingLogEntryTrait> Sequencer<E> {
         resp
     }
 
-    async fn alarm<L: LogEntryTrait<E>>(&mut self) -> Result<Response> {
+    async fn alarm<L: LogEntryTrait<Pending = E>>(&mut self) -> Result<Response> {
         if !self.initialized {
             let name = &self.do_state.storage().get::<String>("name").await?;
             info!("{name}: Initializing log from sequencing loop");
@@ -131,7 +131,7 @@ impl<E: PendingLogEntryTrait> Sequencer<E> {
             .set_alarm(config.sequence_interval)
             .await?;
 
-        if let Err(e) = ctlog::sequence::<E, L>(
+        if let Err(e) = ctlog::sequence::<L>(
             &mut self.pool_state,
             &mut self.sequence_state,
             config,

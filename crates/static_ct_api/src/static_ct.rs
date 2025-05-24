@@ -148,13 +148,17 @@ pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize + DeserializeOwned 
     fn as_bytes(&self) -> &[u8];
 }
 
-pub trait LogEntryTrait<E: PendingLogEntryTrait>: core::fmt::Debug + Sized {
+pub trait LogEntryTrait: core::fmt::Debug + Sized {
+    /// The pending version of this log entry. Usually the same thing but doesn't have a timestamp or tree index
+    type Pending: PendingLogEntryTrait;
+
     /// The error type for [`Self::parse_from_tile_entry`]
     type ParseError: std::error::Error + Send + Sync + 'static;
 
-    fn new(pending: E, timestamp: UnixTimestamp, leaf_index: u64) -> Self;
+    fn new(pending: Self::Pending, timestamp: UnixTimestamp, leaf_index: u64) -> Self;
 
-    fn inner(&self) -> &E;
+    /// Returns the underlying pending entry
+    fn inner(&self) -> &Self::Pending;
 
     /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
     fn merkle_tree_leaf(&self) -> Vec<u8>;
@@ -280,7 +284,9 @@ impl LogEntry {
     }
 }
 
-impl LogEntryTrait<PendingLogEntry> for LogEntry {
+impl LogEntryTrait for LogEntry {
+    type Pending = PendingLogEntry;
+
     // The error type for parse_from_tile_entry
     type ParseError = StaticCTError;
 
@@ -441,14 +447,14 @@ pub struct ValidatedChain {
 }
 
 /// An iterator over log entries in a data tile.
-pub struct TileIterator<E: PendingLogEntryTrait, L: LogEntryTrait<E>> {
+pub struct TileIterator<L: LogEntryTrait> {
     s: Cursor<Vec<u8>>,
     size: usize,
     count: usize,
-    _marker: PhantomData<(E, L)>,
+    _marker: PhantomData<L>,
 }
 
-impl<E: PendingLogEntryTrait, L: LogEntryTrait<E>> std::iter::Iterator for TileIterator<E, L> {
+impl<L: LogEntryTrait> std::iter::Iterator for TileIterator<L> {
     type Item = Result<L, L::ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -460,7 +466,7 @@ impl<E: PendingLogEntryTrait, L: LogEntryTrait<E>> std::iter::Iterator for TileI
     }
 }
 
-impl<E: PendingLogEntryTrait, L: LogEntryTrait<E>> TileIterator<E, L> {
+impl<L: LogEntryTrait> TileIterator<L> {
     /// Returns a new [`TileIterator`], which always attempts to parse exactly
     /// 'size' entries before terminating.
     pub fn new(tile: Vec<u8>, size: usize) -> Self {
