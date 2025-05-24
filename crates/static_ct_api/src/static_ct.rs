@@ -109,8 +109,11 @@ use signed_note::{
     Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
     Verifier as NoteVerifier, VerifierError, VerifierList,
 };
-use std::io::{Cursor, Read};
-use tlog_tiles::{record_hash, Checkpoint, Hash, HashReader};
+use std::{
+    io::{Cursor, Read},
+    marker::PhantomData,
+};
+use tlog_tiles::{Checkpoint, Hash, HashReader};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
@@ -145,7 +148,10 @@ pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize + DeserializeOwned 
     fn as_bytes(&self) -> &[u8];
 }
 
-pub trait LogEntryTrait<E: PendingLogEntryTrait>: core::fmt::Debug {
+pub trait LogEntryTrait<E: PendingLogEntryTrait>: core::fmt::Debug + Sized {
+    /// The error type for [`Self::parse_from_tile_entry`]
+    type ParseError: std::error::Error + Send + Sync + 'static;
+
     fn new(pending: E, timestamp: UnixTimestamp, leaf_index: u64) -> Self;
 
     fn inner(&self) -> &E;
@@ -155,6 +161,10 @@ pub trait LogEntryTrait<E: PendingLogEntryTrait>: core::fmt::Debug {
 
     /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
     fn tile_leaf(&self) -> Vec<u8>;
+
+    /// Attempts to parse a LogEntry from a cursor into a tile. The position of the cursor is
+    /// expected to be the beginning of an entry. On success, returns a log entry
+    fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, Self::ParseError>;
 }
 
 impl PendingLogEntryTrait for PendingLogEntry {
@@ -271,6 +281,9 @@ impl LogEntry {
 }
 
 impl LogEntryTrait<PendingLogEntry> for LogEntry {
+    // The error type for parse_from_tile_entry
+    type ParseError = StaticCTError;
+
     fn new(pending: PendingLogEntry, timestamp: u64, leaf_index: u64) -> Self {
         LogEntry {
             inner: pending,
@@ -317,8 +330,71 @@ impl LogEntryTrait<PendingLogEntry> for LogEntry {
 
         buffer
     }
+
+    /// Attempts to parse a LogEntry from a cursor into a tile. The position of the cursor is
+    /// expected to be the beginning of an entry. On success, returns a log entry
+    fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, StaticCTError> {
+        // https://c2sp.org/static-ct-api#log-entries
+        // struct {
+        //     TimestampedEntry timestamped_entry;
+        //     select (entry_type) {
+        //         case x509_entry: Empty;
+        //         case precert_entry: ASN.1Cert pre_certificate;
+        //     };
+        //     Fingerprint certificate_chain<0..2^16-1>;
+        // } TileLeaf;
+        //
+        // opaque Fingerprint[32];
+
+        let mut entry = LogEntry {
+            timestamp: cur.read_u64::<BigEndian>()?,
+            ..Default::default()
+        };
+        let entry_type = cur.read_u16::<BigEndian>()?;
+        let extensions: Vec<u8>;
+        let fingerprints: Vec<u8>;
+
+        match entry_type {
+            0 => {
+                entry.inner.certificate = cur.read_length_prefixed(3)?;
+                extensions = cur.read_length_prefixed(2)?;
+                fingerprints = cur.read_length_prefixed(2)?;
+            }
+            1 => {
+                entry.inner.is_precert = true;
+                cur.read_exact(&mut entry.inner.issuer_key_hash)?;
+                entry.inner.certificate = cur.read_length_prefixed(3)?;
+                extensions = cur.read_length_prefixed(2)?;
+                entry.inner.pre_certificate = cur.read_length_prefixed(3)?;
+                fingerprints = cur.read_length_prefixed(2)?;
+            }
+            _ => {
+                return Err(StaticCTError::UnknownType);
+            }
+        }
+
+        let mut extensions = Cursor::new(extensions);
+        if extensions.read_u8()? != 0 {
+            return Err(StaticCTError::UnexpectedExtension);
+        }
+        let extension_data = extensions.read_length_prefixed(2)?;
+        entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
+        if extensions.position() != extensions.get_ref().len() as u64 {
+            return Err(StaticCTError::TrailingData);
+        }
+
+        let mut fingerprints = Cursor::new(fingerprints);
+        while fingerprints.position() != fingerprints.get_ref().len() as u64 {
+            let mut f = [0; 32];
+            fingerprints.read_exact(&mut f)?;
+            entry.inner.chain_fingerprints.push(f);
+        }
+
+        Ok(entry)
+    }
 }
 
+/* TODO: Uncomment this once the static CT types are implemented
 /// A generic log entry compatible with the [tlog-tiles spec](https://github.com/C2SP/C2SP/blob/main/tlog-tiles.md)
 #[derive(Debug)]
 struct GenericLogEntry<E: PendingLogEntryTrait>(E);
@@ -353,6 +429,7 @@ impl<E: PendingLogEntryTrait> LogEntryTrait<E> for GenericLogEntry<E> {
         buf
     }
 }
+*/
 
 /// A log entry that is ready to be serialized.
 pub struct ValidatedChain {
@@ -363,15 +440,17 @@ pub struct ValidatedChain {
     pub pre_certificate: Vec<u8>,
 }
 
-/// An iterator over the contents of a data tile.
-pub struct TileIterator {
+/// An iterator over log entries in a data tile.
+pub struct TileIterator<E: PendingLogEntryTrait, L: LogEntryTrait<E>> {
     s: Cursor<Vec<u8>>,
     size: usize,
     count: usize,
+    _marker: PhantomData<(E, L)>,
 }
 
-impl std::iter::Iterator for TileIterator {
-    type Item = Result<LogEntry, StaticCTError>;
+impl<E: PendingLogEntryTrait, L: LogEntryTrait<E>> std::iter::Iterator for TileIterator<E, L> {
+    type Item = Result<L, L::ParseError>;
+
     fn next(&mut self) -> Option<Self::Item> {
         if self.count == self.size {
             return None;
@@ -381,7 +460,7 @@ impl std::iter::Iterator for TileIterator {
     }
 }
 
-impl TileIterator {
+impl<E: PendingLogEntryTrait, L: LogEntryTrait<E>> TileIterator<E, L> {
     /// Returns a new [`TileIterator`], which always attempts to parse exactly
     /// 'size' entries before terminating.
     pub fn new(tile: Vec<u8>, size: usize) -> Self {
@@ -389,68 +468,13 @@ impl TileIterator {
             s: Cursor::new(tile),
             size,
             count: 0,
+            _marker: PhantomData,
         }
     }
 
     /// Parse the next [`LogEntry`] from the internal buffer.
-    fn parse_next(&mut self) -> Result<LogEntry, StaticCTError> {
-        // https://c2sp.org/static-ct-api#log-entries
-        // struct {
-        //     TimestampedEntry timestamped_entry;
-        //     select (entry_type) {
-        //         case x509_entry: Empty;
-        //         case precert_entry: ASN.1Cert pre_certificate;
-        //     };
-        //     Fingerprint certificate_chain<0..2^16-1>;
-        // } TileLeaf;
-        //
-        // opaque Fingerprint[32];
-
-        let mut entry = LogEntry {
-            timestamp: self.s.read_u64::<BigEndian>()?,
-            ..Default::default()
-        };
-        let entry_type = self.s.read_u16::<BigEndian>()?;
-        let extensions: Vec<u8>;
-        let fingerprints: Vec<u8>;
-
-        match entry_type {
-            0 => {
-                entry.inner.certificate = self.s.read_length_prefixed(3)?;
-                extensions = self.s.read_length_prefixed(2)?;
-                fingerprints = self.s.read_length_prefixed(2)?;
-            }
-            1 => {
-                entry.inner.is_precert = true;
-                self.s.read_exact(&mut entry.inner.issuer_key_hash)?;
-                entry.inner.certificate = self.s.read_length_prefixed(3)?;
-                extensions = self.s.read_length_prefixed(2)?;
-                entry.inner.pre_certificate = self.s.read_length_prefixed(3)?;
-                fingerprints = self.s.read_length_prefixed(2)?;
-            }
-            _ => {
-                return Err(StaticCTError::UnknownType);
-            }
-        }
-
-        let mut extensions = Cursor::new(extensions);
-        if extensions.read_u8()? != 0 {
-            return Err(StaticCTError::UnexpectedExtension);
-        }
-        let extension_data = extensions.read_length_prefixed(2)?;
-        entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
-        if extensions.position() != extensions.get_ref().len() as u64 {
-            return Err(StaticCTError::TrailingData);
-        }
-
-        let mut fingerprints = Cursor::new(fingerprints);
-        while fingerprints.position() != fingerprints.get_ref().len() as u64 {
-            let mut f = [0; 32];
-            fingerprints.read_exact(&mut f)?;
-            entry.inner.chain_fingerprints.push(f);
-        }
-
-        Ok(entry)
+    fn parse_next(&mut self) -> Result<L, L::ParseError> {
+        L::parse_from_tile_entry(&mut self.s)
     }
 }
 

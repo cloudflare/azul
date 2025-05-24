@@ -278,7 +278,7 @@ impl SequenceState {
     /// and when reloading (e.g., to recover after a fatal sequencing error).
     ///
     /// This will return an error if the log has not been created, or if recovery fails.
-    pub(crate) async fn load(
+    pub(crate) async fn load<E: PendingLogEntryTrait, L: LogEntryTrait<E>>(
         config: &LogConfig,
         object: &impl ObjectBackend,
         lock: &impl LockBackend,
@@ -363,7 +363,7 @@ impl SequenceState {
 
             // Verify the data tile against the level 0 tile.
             let start = u64::from(TlogTile::FULL_WIDTH) * data_tile.tile.level_index();
-            for (i, entry) in TileIterator::new(
+            for (i, entry) in TileIterator::<E, L>::new(
                 edge_tiles.get(&DATA_TILE_KEY).unwrap().b.clone(),
                 data_tile.tile.width() as usize,
             )
@@ -528,7 +528,7 @@ pub(crate) async fn sequence<E: PendingLogEntryTrait, L: LogEntryTrait<E>>(
     let old = if let Some(s) = sequence_state {
         s
     } else {
-        match SequenceState::load(config, object, lock).await {
+        match SequenceState::load::<E, L>(config, object, lock).await {
             Ok(s) => sequence_state.insert(s),
             Err(e) => {
                 metrics.seq_count.with_label_values(&["fatal"]).inc();
@@ -1385,8 +1385,14 @@ mod tests {
             log.sequence().unwrap();
             log.check(i + 1);
 
-            log.sequence_state =
-                Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+            log.sequence_state = Some(
+                block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                    &log.config,
+                    &log.object,
+                    &log.lock,
+                ))
+                .unwrap(),
+            );
             log.sequence().unwrap();
             log.check(i + 1);
         }
@@ -1395,27 +1401,54 @@ mod tests {
     #[test]
     fn test_reload_wrong_origin() {
         let mut log = TestLog::new();
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
 
         let mut c = log.config.clone();
         c.origin = "wrong".to_string();
-        block_on(SequenceState::load(&c, &log.object, &log.lock)).unwrap_err();
+        block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
     }
 
     #[test]
     fn test_reload_wrong_key() {
         let mut log = TestLog::new();
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
 
         let mut c = log.config.clone();
         c.signing_key = EcdsaSigningKey::random(&mut OsRng);
-        block_on(SequenceState::load(&c, &log.object, &log.lock)).unwrap_err();
+        block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
 
         c = log.config.clone();
         c.witness_key = Ed25519SigningKey::generate(&mut OsRng);
-        block_on(SequenceState::load(&c, &log.object, &log.lock)).unwrap_err();
+        block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
     }
 
     #[test]
@@ -1439,8 +1472,14 @@ mod tests {
         log.check(1);
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
         log.check(1);
 
         // First, cause the exact same staging bundle to be uploaded.
@@ -1493,8 +1532,14 @@ mod tests {
         log.check(2);
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
         log.add_certificate();
         log.sequence().unwrap();
         log.check(3);
@@ -1571,8 +1616,12 @@ mod tests {
                                 *log.lock.mode.borrow_mut() = StorageMode::Ok;
                             }
                             log.sequence_state = Some(
-                                block_on(SequenceState::load(&log.config, &log.object, &log.lock))
-                                    .unwrap(),
+                                block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                                    &log.config,
+                                    &log.object,
+                                    &log.lock,
+                                ))
+                                .unwrap(),
                             );
                             if broken {
                                 *log.object.mode.borrow_mut() = $object_mode;
@@ -1957,15 +2006,18 @@ mod tests {
             ))
         }
         fn sequence_start(&mut self) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
-            let sequence_state: &mut SequenceState = if let Some(state) =
-                self.sequence_state.as_mut()
-            {
-                state
-            } else {
-                let state =
-                    block_on(SequenceState::load(&self.config, &self.object, &self.lock)).unwrap();
-                self.sequence_state.insert(state)
-            };
+            let sequence_state: &mut SequenceState =
+                if let Some(state) = self.sequence_state.as_mut() {
+                    state
+                } else {
+                    let state = block_on(SequenceState::load::<PendingLogEntry, LogEntry>(
+                        &self.config,
+                        &self.object,
+                        &self.lock,
+                    ))
+                    .unwrap();
+                    self.sequence_state.insert(state)
+                };
             self.pool_state.take(
                 sequence_state.tree.size(),
                 self.config.max_pending_entry_holds,
@@ -2091,7 +2143,7 @@ mod tests {
                 } else {
                     TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(PathElem::Data))
                 };
-                for (i, entry) in TileIterator::new(
+                for (i, entry) in TileIterator::<PendingLogEntry, LogEntry>::new(
                     block_on(self.object.fetch(&tile.path())).unwrap().unwrap(),
                     tile.width() as usize,
                 )
