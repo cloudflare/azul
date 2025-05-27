@@ -61,6 +61,7 @@ pub(crate) struct LogConfig {
     pub(crate) checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     pub(crate) sequence_interval: Duration,
     pub(crate) max_sequence_skips: usize,
+    pub(crate) disable_dedup: bool,
 }
 
 #[cfg(test)]
@@ -73,6 +74,7 @@ impl LogConfig {
             checkpoint_signers: Vec::new(),
             sequence_interval: self.sequence_interval,
             max_sequence_skips: self.max_sequence_skips,
+            disable_dedup: false,
         }
     }
 }
@@ -475,11 +477,15 @@ pub(crate) enum PendingSource {
 pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
     state: &mut PoolState<E>,
     cache: &impl CacheRead,
+    config: &LogConfig,
     entry: E,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
 
-    if let Some(result) = state.check(&hash) {
+    if config.disable_dedup {
+        // Bypass deduplication and rate limit checks.
+        state.add(hash, entry)
+    } else if let Some(result) = state.check(&hash) {
         // Entry is already pending or being sequenced.
         result
     } else if let Some(v) = cache.get_entry(&hash) {
@@ -1194,7 +1200,7 @@ mod tests {
                     certificate,
                     ..Default::default()
                 };
-                add_leaf_to_pool(&mut log.pool_state, &log.cache, leaf);
+                add_leaf_to_pool(&mut log.pool_state, &log.cache, &log.config, leaf);
             }
             log.sequence().unwrap();
         }
@@ -2026,6 +2032,7 @@ mod tests {
                 checkpoint_signers,
                 sequence_interval: Duration::from_secs(1),
                 max_sequence_skips: 0,
+                disable_dedup: false,
             };
             let pool_state = PoolState::default();
             let metrics = Metrics::new();
@@ -2117,7 +2124,7 @@ mod tests {
 
             block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
 
-            add_leaf_to_pool(&mut self.pool_state, &self.cache, leaf)
+            add_leaf_to_pool(&mut self.pool_state, &self.cache, &self.config, leaf)
         }
 
         fn check(&self, size: u64) -> u64 {

@@ -205,21 +205,23 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if let Some(metadata) = kv
-        .get(&BASE64_STANDARD.encode(lookup_key))
-        .bytes_with_metadata::<SequenceMetadata>()
-        .await?
-        .1
-    {
-        debug!("{name}: Entry is cached");
-        let entry = StaticCTLogEntry {
-            inner: pending_entry,
-            leaf_index: metadata.0,
-            timestamp: metadata.1,
-        };
-        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-            .map_err(|e| e.to_string())?;
-        return Response::from_json(&sct);
+    if !params.disable_dedup {
+        if let Some(metadata) = kv
+            .get(&BASE64_STANDARD.encode(lookup_key))
+            .bytes_with_metadata::<SequenceMetadata>()
+            .await?
+            .1
+        {
+            debug!("{name}: Entry is cached");
+            let entry = StaticCTLogEntry {
+                inner: pending_entry,
+                leaf_index: metadata.0,
+                timestamp: metadata.1,
+            };
+            let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+                .map_err(|e| e.to_string())?;
+            return Response::from_json(&sct);
+        }
     }
 
     // Entry is not cached, so we need to sequence it.

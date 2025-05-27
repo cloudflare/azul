@@ -97,6 +97,11 @@
                             "minimum": 1,
                             "default": 1000,
                             "description": "The maximum number of entries per batch."
+                        },
+                        "disable_dedup": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Disable checking the deduplication cache for add-(pre-)chain requests (e.g., for tests or benchmarks)."
                         }
                     },
                     "required": [

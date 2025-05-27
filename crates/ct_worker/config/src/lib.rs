@@ -37,6 +37,8 @@ pub struct LogParams {
     pub batch_timeout_millis: u64,
     #[serde(default = "default_max_batch_entries")]
     pub max_batch_entries: usize,
+    #[serde(default)]
+    pub disable_dedup: bool,
 }
 
 fn default_sequence_interval_millis() -> u64 {

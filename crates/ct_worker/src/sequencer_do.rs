@@ -215,6 +215,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             checkpoint_signers,
             sequence_interval,
             max_sequence_skips: params.max_sequence_skips,
+            disable_dedup: params.disable_dedup,
         });
         self.public_bucket = Some(ObjectBucket {
             bucket: load_public_bucket(&self.env, name)?,
@@ -283,6 +284,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             let add_leaf_result = ctlog::add_leaf_to_pool(
                 &mut self.pool_state,
                 self.cache.as_ref().unwrap(),
+                self.config.as_ref().unwrap(),
                 pending_entry,
             );
 
