@@ -102,12 +102,12 @@ use p256::{
     },
     pkcs8::EncodePublicKey,
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::{distributions::Standard, seq::SliceRandom, Rng};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
-    Verifier as NoteVerifier, VerifierError, VerifierList,
+    key_id, Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
+    Verifier as NoteVerifier, VerifierError, VerifierList, Verifiers,
 };
 use std::{
     io::{Cursor, Read},
@@ -698,49 +698,53 @@ impl Extensions {
     }
 }
 
-/// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a [Checkpoint] and its timestamp.
+/// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
+/// [Checkpoint] and the latest timestamp of any of its cosignatures (if defined).
 ///
 /// # Errors
 ///
 /// Returns an error if the checkpoint cannot be successfully opened and verified.
 pub fn open_checkpoint(
     origin: &str,
-    rfc6962_vkey: &EcdsaVerifyingKey,
-    witness_vkey: &Ed25519VerifyingKey,
+    verifiers: &VerifierList,
     current_time: UnixTimestamp,
     b: &[u8],
-) -> Result<(Checkpoint, UnixTimestamp), StaticCTError> {
-    let v1 = RFC6962Verifier::new(origin, rfc6962_vkey)?;
-    let vk = signed_note::new_ed25519_verifier_key(origin, witness_vkey);
-    let v2 = StandardVerifier::new(&vk)?;
+) -> Result<(Checkpoint, Option<UnixTimestamp>), StaticCTError> {
     let n = Note::from_bytes(b)?;
-    let (verified_sigs, _) = n.verify(&VerifierList::new(vec![
-        Box::new(v1.clone()),
-        Box::new(v2.clone()),
-    ]))?;
+    let (verified_sigs, _) = n.verify(verifiers)?;
 
-    let mut timestamp: UnixTimestamp = 0;
-    let mut v1_found = false;
-    let mut v2_found = false;
+    // Go through the signatures and make sure we find all the key IDs in our verifiers list
+    let mut key_ids_to_observe = verifiers.key_ids();
+    // The latest timestamp of the signatures in the note. We use this to check that nothing was signed in the future
+    let mut latest_timestamp: Option<UnixTimestamp> = None;
     for sig in &verified_sigs {
-        match sig.id() {
-            h if h == v1.key_id() => {
-                v1_found = true;
-                timestamp = rfc6962_signature_timestamp(sig)?;
+        // Fetch the verifier for this signature, if it's here
+        let verif = match verifiers.verifier(sig.name(), sig.id()) {
+            Ok(v) => {
+                // We've now observed this key ID. Remove it from the list
+                key_ids_to_observe.remove(&sig.id());
+                v
             }
-            h if h == v2.key_id() => {
-                v2_found = true;
-            }
-            _ => {}
-        }
+            Err(_) => continue,
+        };
+
+        // Extract the timestamp if it's in the sig, and update the latest running timestamp
+        let sig_timestamp = verif
+            .extract_timestamp_millis(&sig.signature())
+            .map_err(|_| StaticCTError::Malformed)?; // TODO: is this the right error?
+        sig_timestamp.map(|t| {
+            latest_timestamp = Some(core::cmp::max(latest_timestamp.unwrap_or(0), t));
+        });
     }
-    if !v1_found || !v2_found {
+
+    // If we didn't see all the verifiers we wanted to see, error
+    if !key_ids_to_observe.is_empty() {
         return Err(StaticCTError::MissingVerifierSignature);
     }
     let Ok(checkpoint) = Checkpoint::from_bytes(n.text()) else {
         return Err(StaticCTError::Malformed);
     };
-    if current_time < timestamp {
+    if current_time < latest_timestamp.unwrap_or(0) {
         return Err(StaticCTError::InvalidTimestamp);
     }
     if checkpoint.origin() != origin {
@@ -750,7 +754,7 @@ pub fn open_checkpoint(
         return Err(StaticCTError::UnexpectedExtension);
     }
 
-    Ok((checkpoint, timestamp))
+    Ok((checkpoint, latest_timestamp))
 }
 
 /// [`RFC6962Verifier`] is a [`NoteVerifier`] implementation
@@ -801,9 +805,11 @@ impl NoteVerifier for RFC6962Verifier {
     fn name(&self) -> &str {
         &self.name
     }
+
     fn key_id(&self) -> u32 {
         self.id
     }
+
     fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
         let Ok(checkpoint) = Checkpoint::from_bytes(msg) else {
             return false;
@@ -843,6 +849,15 @@ impl NoteVerifier for RFC6962Verifier {
         };
 
         self.verifying_key.verify(&sth_bytes, &sig).is_ok()
+    }
+
+    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<u64>, ()> {
+        // In a static-ct signed tree head, the timestamp is the first 8 bytes of the sig
+        //   https://github.com/C2SP/C2SP/blob/efb68c16664309a68120e37528fa1c046dd1ac09/static-ct-api.md#checkpoints
+        // and it's in milliseconds
+        //   https://www.rfc-editor.org/rfc/rfc6962.html#section-3.2
+        let ts = sig.read_u64::<BigEndian>().map_err(|_| ())?;
+        Ok(Some(ts))
     }
 }
 
@@ -940,23 +955,6 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
     signatures.shuffle(rng);
 
     signatures
-}
-
-/// Reads the timestamp from a `RFC6962NoteSignature`.
-/// A `RFC6962NoteSignature` (<https://c2sp.org/static-ct-api#checkpoints>) is structured as follows:
-/// ```text
-/// struct {
-///     uint64 timestamp;
-///     TreeHeadSignature signature;
-/// } RFC6962NoteSignature;
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if the note signature is not at least eight bytes long.
-pub fn rfc6962_signature_timestamp(sig: &NoteSignature) -> Result<u64, StaticCTError> {
-    let timestamp = sig.signature().read_u64::<BigEndian>()?;
-    Ok(timestamp)
 }
 
 /// Serializes the passed in STH parameters into the correct format for signing

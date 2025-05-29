@@ -225,6 +225,7 @@
 //! ```
 
 use base64::prelude::*;
+use byteorder::{BigEndian, ReadBytesExt};
 use ed25519_dalek::{
     Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
     VerifyingKey as Ed25519VerifyingKey,
@@ -248,6 +249,10 @@ pub trait Verifier {
 
     /// Reports whether sig is a valid signature of msg.
     fn verify(&self, msg: &[u8], sig: &[u8]) -> bool;
+
+    /// Extracts a Unix timestamp in milliseconds from the given signature bytes, if defined. Errors if
+    /// the signature is malformed.
+    fn extract_timestamp_millis(&self, sig: &[u8]) -> Result<Option<u64>, ()>;
 }
 
 /// A Signer signs messages using a specific key.
@@ -269,10 +274,6 @@ pub trait Signer {
 
 /// Computes the key ID for the given server name and encoded public key
 /// as RECOMMENDED at <https://c2sp.org/signed-note#signatures>.
-///
-/// # Panics
-///
-/// Panics if slice conversion fails, which should never happen.
 pub fn key_id(name: &str, key: &[u8]) -> u32 {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
@@ -303,7 +304,7 @@ pub fn is_key_name_valid(name: &str) -> bool {
     !(name.is_empty() || name.chars().any(char::is_whitespace) || name.contains('+'))
 }
 
-/// [`StandardVerifier`] is a trivial Verifier implementation.
+/// [`StandardVerifier`] is the verifier for the ordinary (non-timestamped) Ed25519 signature type
 #[derive(Clone)]
 pub struct StandardVerifier {
     name: String,
@@ -315,9 +316,11 @@ impl Verifier for StandardVerifier {
     fn name(&self) -> &str {
         &self.name
     }
+
     fn key_id(&self) -> u32 {
         self.id
     }
+
     fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
         let sig_bytes: [u8; ed25519_dalek::SIGNATURE_LENGTH] = match sig.try_into() {
             Ok(ok) => ok,
@@ -326,6 +329,11 @@ impl Verifier for StandardVerifier {
         self.verifying_key
             .verify(msg, &ed25519_dalek::Signature::from_bytes(&sig_bytes))
             .is_ok()
+    }
+
+    fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, ()> {
+        // StandardVerifier (alg type 0x01) has no timestamp in the signature
+        Ok(None)
     }
 }
 
@@ -560,6 +568,11 @@ impl VerifierList {
                 .push(verifier);
         }
         VerifierList { map }
+    }
+
+    /// The set of all key IDs in this verifier list
+    pub fn key_ids(&self) -> BTreeSet<u32> {
+        self.map.keys().map(|(_name, id)| *id).collect()
     }
 }
 

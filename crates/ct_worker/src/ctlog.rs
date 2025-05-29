@@ -30,8 +30,10 @@ use log::{debug, error, info, trace, warn};
 use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use signed_note::{StandardVerifier, VerifierList};
 use static_ct_api::{
-    LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp, UnixTimestamp,
+    LogEntryTrait, PendingLogEntryTrait, RFC6962Verifier, TileIterator, TreeWithTimestamp,
+    UnixTimestamp,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -292,13 +294,26 @@ impl SequenceState {
             "{name}: Loaded checkpoint; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
+
+        // Construct the VerifierList containing the signing and witness pubkeys
+        let verifiers = {
+            let origin = &config.origin;
+            let v1 = RFC6962Verifier::new(origin, config.signing_key.verifying_key())?;
+            let vk =
+                signed_note::new_ed25519_verifier_key(origin, &config.witness_key.verifying_key());
+            let v2 = StandardVerifier::new(&vk)?;
+            VerifierList::new(vec![Box::new(v1.clone()), Box::new(v2.clone())])
+        };
+
         let (c, timestamp) = static_ct_api::open_checkpoint(
             &config.origin,
-            config.signing_key.verifying_key(),
-            &config.witness_key.verifying_key(),
+            &verifiers,
             now_millis(),
             &stored_checkpoint,
         )?;
+        // TODO: This is guaranteed to succeed right now bc we've hardcoded the verifier types. But
+        // this won't in general. Make an error type for this
+        let timestamp = timestamp.expect("no verifiers with timestamped signatures were used");
 
         // Load the checkpoint from the object storage backend, verify it, and compare it to the
         // DO storage checkpoint.
@@ -310,13 +325,8 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) = static_ct_api::open_checkpoint(
-            &config.origin,
-            config.signing_key.verifying_key(),
-            &config.witness_key.verifying_key(),
-            now_millis(),
-            &sth,
-        )?;
+        let (c1, _) =
+            static_ct_api::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
@@ -1127,7 +1137,7 @@ mod tests {
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
     };
-    use signed_note::{Note, VerifierList};
+    use signed_note::{Note, Verifier, VerifierList};
     use static_ct_api::{LogEntry, PendingLogEntry, RFC6962Verifier};
     use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
@@ -2074,8 +2084,10 @@ mod tests {
                 .verify(&VerifierList::new(vec![Box::new(v.clone())]))
                 .unwrap();
             assert_eq!(verified_sigs.len(), 1);
-            let sth_timestamp =
-                static_ct_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
+            let sth_timestamp = v
+                .extract_timestamp_millis(verified_sigs[0].signature())
+                .unwrap()
+                .unwrap();
 
             let c = Checkpoint::from_bytes(n.text()).unwrap();
 
@@ -2094,8 +2106,10 @@ mod tests {
                     .verify(&VerifierList::new(vec![Box::new(v.clone())]))
                     .unwrap();
                 assert_eq!(verified_sigs.len(), 1);
-                let sth_timestamp1 =
-                    static_ct_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
+                let sth_timestamp1 = v
+                    .extract_timestamp_millis(verified_sigs[0].signature())
+                    .unwrap()
+                    .unwrap();
                 let c1 = Checkpoint::from_bytes(n.text()).unwrap();
 
                 assert_eq!(c1.origin(), c.origin());
