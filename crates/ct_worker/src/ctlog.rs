@@ -148,7 +148,7 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
         old_size: u64,
         max_pending_entry_holds: usize,
     ) -> Vec<(E, Sender<SequenceMetadata>)> {
-        let new_size = dbg!(old_size + self.pending_entries.len() as u64);
+        let new_size = old_size + self.pending_entries.len() as u64;
         let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
 
         let publishing_full_tile =
@@ -163,7 +163,6 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
         let flush_oldest = self.oldest_pending_entry_holds >= max_pending_entry_holds;
 
         if leftover == 0 || flush_oldest {
-            println!("HERE");
             // Sequence everything. Either there are no leftovers or they have
             // already been held back the maximum number of times.
             self.oldest_pending_entry_holds = 0;
@@ -549,7 +548,7 @@ pub(crate) async fn sequence<L: LogEntryTrait>(
         }
     };
 
-    let entries = pool_state.take(dbg!(old.tree.size()), config.max_pending_entry_holds);
+    let entries = pool_state.take(old.tree.size(), config.max_pending_entry_holds);
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
     let result =
@@ -625,7 +624,7 @@ async fn sequence_entries<L: LogEntryTrait>(
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        let sequenced_entry = L::new(entry, timestamp, dbg!(n));
+        let sequenced_entry = L::new(entry, timestamp, n);
         let tile_leaf = sequenced_entry.tile_leaf();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
