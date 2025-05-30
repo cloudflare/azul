@@ -32,8 +32,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{StandardVerifier, VerifierList};
 use static_ct_api::{
-    LogEntryTrait, PendingLogEntryTrait, RFC6962Verifier, TileIterator, TreeWithTimestamp,
-    UnixTimestamp,
+    LogEntryTrait, PendingLogEntryTrait, RFC6962Verifier, StandardEd25519CheckpointSigner,
+    StaticCTCheckpointSigner, TileIterator, TreeWithTimestamp, UnixTimestamp,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -42,7 +42,9 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
-use tlog_tiles::{Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE};
+use tlog_tiles::{
+    CheckpointSigner, Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE,
+};
 use tokio::sync::watch::{channel, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
@@ -254,13 +256,16 @@ pub(crate) async fn create_log(
 
     let timestamp = now_millis();
     let tree = TreeWithTimestamp::new(0, tlog_tiles::EMPTY_HASH, timestamp);
+
+    // Construct the checkpoint signers
+    let signer = StaticCTCheckpointSigner::new(&config.origin, &config.signing_key)
+        .map_err(anyhow::Error::from)?;
+    let witness = StandardEd25519CheckpointSigner::new(&config.origin, &config.witness_key)
+        .map_err(anyhow::Error::from)?;
+    let dyn_signers: &[&dyn CheckpointSigner] = &[&signer, &witness];
+
     let sth = tree
-        .sign(
-            &config.origin,
-            &config.signing_key,
-            &config.witness_key,
-            &mut rand::thread_rng(),
-        )
+        .sign(&config.origin, dyn_signers, &mut rand::thread_rng())
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
@@ -726,13 +731,19 @@ async fn sequence_entries<L: LogEntryTrait>(
         .await
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
+    // Construct the checkpoint signers
+    let signer =
+        StaticCTCheckpointSigner::new(&config.origin, &config.signing_key).map_err(|e| {
+            SequenceError::NonFatal(format!(
+                "couldn't construct static-ct checkpoint signer: {e}"
+            ))
+        })?;
+    let witness = StandardEd25519CheckpointSigner::new(&config.origin, &config.witness_key)
+        .map_err(|e| SequenceError::NonFatal(format!("coudln't construct ed25519 signer: {e}")))?;
+    let dyn_signers: &[&dyn CheckpointSigner] = &[&signer, &witness];
+
     let new_checkpoint = tree
-        .sign(
-            &config.origin,
-            &config.signing_key,
-            &config.witness_key,
-            &mut rand::thread_rng(),
-        )
+        .sign(&config.origin, dyn_signers, &mut rand::thread_rng())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
 
     // This is a critical error, since we don't know the state of the

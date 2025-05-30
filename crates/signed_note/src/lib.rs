@@ -264,7 +264,7 @@ pub trait Signer {
     /// Returns the key ID.
     fn key_id(&self) -> u32;
 
-    /// Returns a signature for the given message.
+    /// Returns a signature for the Note. Uses the origin returns by `self.name()`.
     ///
     /// # Errors
     ///
@@ -391,7 +391,7 @@ pub enum SignerError {
     Id,
 }
 
-/// [`StandardSigner`] is a trivial Signer implementation.
+/// [`StandardSigner`] is the signer for the ordinary (non-timestamped) Ed25519 signature type
 #[derive(Clone)]
 pub struct StandardSigner {
     name: String,

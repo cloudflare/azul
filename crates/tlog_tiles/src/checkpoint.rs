@@ -30,6 +30,7 @@
 //! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
 
 use crate::tlog::Hash;
+use signed_note::{Signature as NoteSignature, SignerError};
 use std::{
     fmt,
     io::{BufRead, Read},
@@ -269,6 +270,23 @@ impl Checkpoint {
         )
         .into()
     }
+}
+
+/// An object that can produce a [note signature](https://github.com/C2SP/C2SP/blob/main/signed-note.md) for a given checkpoint
+pub trait CheckpointSigner {
+    /// Returns the server name associated with the key.
+    /// The name must be non-empty and not have any Unicode spaces or pluses.
+    fn name(&self) -> &str;
+
+    /// Returns the key ID.
+    fn key_id(&self) -> u32;
+
+    /// Signs a checkpoint using the given timestamp
+    fn sign(
+        &self,
+        timestamp_unix_millis: u64,
+        checkpoint: &Checkpoint,
+    ) -> Result<NoteSignature, SignerError>;
 }
 
 #[cfg(test)]

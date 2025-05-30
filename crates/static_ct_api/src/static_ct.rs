@@ -92,7 +92,7 @@
 use crate::{AddChainResponse, StaticCTError};
 use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey as Ed25519VerifyingKey};
+use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
     ecdsa::{
@@ -102,18 +102,18 @@ use p256::{
     },
     pkcs8::EncodePublicKey,
 };
-use rand::{distributions::Standard, seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    key_id, Note, Signature as NoteSignature, Signer as NoteSigner, StandardVerifier,
-    Verifier as NoteVerifier, VerifierError, VerifierList, Verifiers,
+    Note, Signature as NoteSignature, SignerError, StandardVerifier, Verifier as NoteVerifier,
+    VerifierError, VerifierList, Verifiers,
 };
 use std::{
     io::{Cursor, Read},
     marker::PhantomData,
 };
-use tlog_tiles::{Checkpoint, Hash, HashReader};
+use tlog_tiles::{Checkpoint, CheckpointSigner, Hash, HashReader};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
@@ -540,87 +540,68 @@ impl TreeWithTimestamp {
     pub fn sign(
         &self,
         origin: &str,
-        signing_key: &EcdsaSigningKey,
-        witness_key: &Ed25519SigningKey,
+        signers: &[&dyn CheckpointSigner],
         rng: &mut impl Rng,
     ) -> Result<Vec<u8>, StaticCTError> {
-        let sth_bytes = serialize_sth_signature_input(self.time, self.size, &self.hash);
+        // Shuffle the signer order
+        let mut signers = signers.to_vec();
+        signers.shuffle(rng);
 
-        let tree_head_signature = sign(signing_key, &sth_bytes);
-
-        // struct {
-        //     uint64 timestamp;
-        //     TreeHeadSignature signature;
-        // } RFC6962NoteSignature;
-        let mut sig = Vec::new();
-        sig.write_u64::<BigEndian>(self.time).unwrap();
-        sig.extend_from_slice(&tree_head_signature);
-
-        let v = RFC6962Verifier::new(origin, signing_key.verifying_key())?;
-        let rs = InjectedSigner { v, sig };
-        let ws = Ed25519Signer::new(origin, witness_key)?;
-
-        // Randomize the order to enforce forward-compatible client behavior.
-        let signers: &[&dyn NoteSigner] = if rng.gen_bool(0.5) {
-            &[&rs, &ws]
-        } else {
-            &[&ws, &rs]
-        };
-
+        // Construct the checkpoint with no extension lines
         let Ok(checkpoint) = Checkpoint::new(origin, self.size, self.hash, "") else {
             return Err(StaticCTError::Malformed);
         };
-        let mut signed_note =
-            Note::new(&checkpoint.to_bytes(), &gen_grease_signatures(origin, rng))?;
-        signed_note.add_sigs(signers)?;
+        // Sign the checkpoint with the given signers
+        let sigs = signers
+            .iter()
+            .map(|s| s.sign(self.time, &checkpoint))
+            .collect::<Result<Vec<_>, SignerError>>()?;
+        // Generate some fake signatures as grease
+        let grease_sigs = gen_grease_signatures(origin, rng);
 
+        // Make a new signed note from the checkpoint and serialize it
+        let signed_note = Note::new(&checkpoint.to_bytes(), &[grease_sigs, sigs].concat())?;
         Ok(signed_note.to_bytes())
     }
 }
 
-/// Implementation of [`NoteSigner`] that uses a precomputed signature.
-struct InjectedSigner {
-    v: RFC6962Verifier,
-    sig: Vec<u8>,
-}
-
-impl NoteSigner for InjectedSigner {
-    fn name(&self) -> &str {
-        self.v.name()
-    }
-    fn key_id(&self) -> u32 {
-        self.v.key_id()
-    }
-    fn sign(&self, _msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
-        Ok(self.sig.clone())
-    }
-}
-
 /// Implementation of [`NoteSigner`] that signs with a Ed25519 key.
-struct Ed25519Signer<'a> {
+pub struct StandardEd25519CheckpointSigner<'a> {
     v: Box<dyn NoteVerifier>,
     k: &'a Ed25519SigningKey,
 }
 
-impl<'a> Ed25519Signer<'a> {
+impl<'a> StandardEd25519CheckpointSigner<'a> {
     /// Returns a new `Ed25519Signer`.
-    fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self, StaticCTError> {
+    pub fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self, StaticCTError> {
         let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
+        // Checks if the key name is valid
         let v = StandardVerifier::new(&vk)?;
         Ok(Self { v: Box::new(v), k })
     }
 }
 
-impl NoteSigner for Ed25519Signer<'_> {
+impl CheckpointSigner for StandardEd25519CheckpointSigner<'_> {
     fn name(&self) -> &str {
         self.v.name()
     }
+
     fn key_id(&self) -> u32 {
         self.v.key_id()
     }
-    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
-        let sig = self.k.try_sign(msg)?;
-        Ok(sig.to_vec())
+
+    fn sign(
+        &self,
+        _timestamp_unix_millis: u64,
+        checkpoint: &Checkpoint,
+    ) -> Result<NoteSignature, SignerError> {
+        let msg = checkpoint.to_bytes();
+        // Ed25519 signing cannot fail
+        let sig = self.k.try_sign(&msg).unwrap();
+
+        // Return the note signature. We can unwrap() here because the only cause for error is if
+        // the name is invalid, which is checked in the constructor
+        Ok(NoteSignature::new(self.name().to_string(), self.key_id(), sig.to_vec()).unwrap())
     }
 }
 
@@ -895,16 +876,12 @@ pub fn signed_certificate_timestamp(
 /// We use deterministic RFC 6979 ECDSA signatures so that when fetching a
 /// previous SCT's timestamp and index from the deduplication cache, the new SCT
 /// we produce is identical.
-///
-/// # Panics
-///
-/// Panics if writing to an internal buffer fails, which should never happen.
 pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     let sig: EcdsaSignature = signing_key.sign(msg);
     let sig_der = sig.to_der();
     let sig_bytes = sig_der.as_bytes();
 
-    // https://datatracker.ietf.org/doc/html/rfc5246#section-4.7
+    // Format the tree head signature per https://datatracker.ietf.org/doc/html/rfc5246#section-4.7
     let mut digitally_signed = Vec::new();
     digitally_signed.push(4); // hash = sha256
     digitally_signed.push(3); // signature = ecdsa
@@ -982,6 +959,90 @@ fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Has
     buffer.extend(root_hash.0);
 
     buffer
+}
+
+/// A static-ct-style checkpoint signer. This is different from, e.g., a tlog-cosignature signer.
+/// This produces an encoded digitally-signed signature as defined in RFC 5246.
+///
+/// We use deterministic RFC 6979 ECDSA signatures so that when fetching a previous SCT's timestamp
+/// and index from the deduplication cache, the new SCT we produce is identical.
+pub struct StaticCTCheckpointSigner<'a> {
+    name: String,
+    id: u32,
+    signing_key: &'a EcdsaSigningKey,
+}
+
+impl<'a> StaticCTCheckpointSigner<'a> {
+    pub fn new(name: &str, signing_key: &'a EcdsaSigningKey) -> Result<Self, SignerError> {
+        // Reuse the verifier code. This compute the correct key ID
+        let vk = signing_key.verifying_key();
+        // This checks if the name is invalid. If it is, it returns VerifierError::Format. That's
+        // actually all it returns on error, so the map_err isn't losing any info
+        let verifier = RFC6962Verifier::new(&name, &vk).map_err(|_| SignerError::Format)?;
+
+        Ok(Self {
+            name: name.to_owned(),
+            id: verifier.id,
+            signing_key,
+        })
+    }
+}
+
+impl<'a> CheckpointSigner for StaticCTCheckpointSigner<'a> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn key_id(&self) -> u32 {
+        self.id
+    }
+
+    /// Produces a signature over the given checkpoint using the method described in static-ct.
+    /// Namely, compute the RFC 6962 [signed tree head](https://www.rfc-editor.org/rfc/rfc6962.html#section-3.5),
+    /// then prepend the timestamp.
+    fn sign(
+        &self,
+        timestamp_unix_millis: u64,
+        checkpoint: &Checkpoint,
+    ) -> Result<NoteSignature, SignerError> {
+        // RFC 6962-type signatures do not sign extension lines. If this checkpoint has extension lines, this is an error
+        if !checkpoint.extension().is_empty() {
+            return Err(SignerError::Format);
+        }
+
+        // Produce the bytestring that will be signed
+        let tree_head_bytes = {
+            let mut buffer = Vec::new();
+
+            buffer.write_u8(0).unwrap(); // version = 0 (v1)
+            buffer.write_u8(1).unwrap(); // signature_type = 1 (tree_hash)
+            buffer
+                .write_u64::<BigEndian>(timestamp_unix_millis)
+                .unwrap();
+            buffer.write_u64::<BigEndian>(checkpoint.size()).unwrap();
+            buffer.extend(checkpoint.hash().0);
+
+            buffer
+        };
+
+        // Sign the string
+        let tree_head_sig = sign(&self.signing_key, &tree_head_bytes);
+
+        // Now format the final signature
+        // struct {
+        //     uint64 timestamp;
+        //     TreeHeadSignature signature;
+        // } RFC6962NoteSignature;
+        let mut note_sig = Vec::new();
+        note_sig
+            .write_u64::<BigEndian>(timestamp_unix_millis)
+            .unwrap();
+        note_sig.extend_from_slice(&tree_head_sig);
+
+        // Return the note signature. We can unwrap() here because the only cause for error is if
+        // the name is invalid, which is checked in the constructor
+        Ok(NoteSignature::new(self.name.clone(), self.id, note_sig).unwrap())
+    }
 }
 
 #[cfg(test)]
