@@ -23,7 +23,10 @@
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
 //! use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
+//! use signed_note::{StandardVerifier, VerifierList};
+//! use static_ct_api::RFC6962Verifier;
 //!
+//! let origin: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b";
 //! let checkpoint: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b
 //! 5
 //! YsndMEZccH1fI4kviHLu/Z1Ye3MgKkDwUHluUAOYuoY=
@@ -35,20 +38,32 @@
 //! ";
 //!
 //! // Log verification key from `curl <submission_url>/metadata | jq -r ".key"`
-//! let rfc6962_vkey = &BASE64_STANDARD.decode("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAES4yrL7jarwxEdSWrJp35uef789UYLma/F0x7bfBpW2KWnN5yuDE5XgeOAKeWM3RpycCZF2xRGAp2iHFCa4PtqA==").unwrap();
-//! let rfc6962_vkey = &EcdsaVerifyingKey::from_public_key_der(rfc6962_vkey).unwrap();
+//! let rfc6962_verifier = {
+//!     let vkey_bytes = &BASE64_STANDARD.decode(
+//!         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAES4yrL7jarwxEdSWrJp35uef789UYLma/F0x7bfBpW2KWnN5yuDE5XgeOAKeWM3RpycCZF2xRGAp2iHFCa4PtqA=="
+//!     ).unwrap();
+//!     let ecdsa_vkey = EcdsaVerifyingKey::from_public_key_der(vkey_bytes).unwrap();
+//!     RFC6962Verifier::new(origin, &ecdsa_vkey).unwrap()
+//! };
 //!
 //! // Witness verification key from `curl <submission_url>/metadata | jq -r ".witness_key"`.
-//! let witness_vkey = &BASE64_STANDARD.decode("MCowBQYDK2VwAyEARN4KXLGKQrfUUGU1zwbFvEN1AckVY76d4CnuNRc20vI=").unwrap();
-//! let witness_vkey = &Ed25519VerifyingKey::from_public_key_der(witness_vkey).unwrap();
+//! let witness_verifier = {
+//!     let vkey_bytes = &BASE64_STANDARD.decode(
+//!         "MCowBQYDK2VwAyEARN4KXLGKQrfUUGU1zwbFvEN1AckVY76d4CnuNRc20vI="
+//!     ).unwrap();
+//!     let ed25519_vkey = Ed25519VerifyingKey::from_public_key_der(vkey_bytes).unwrap();
+//!     let ed25519_verifier = signed_note::new_ed25519_verifier_key(origin, &ed25519_vkey);
+//!     StandardVerifier::new(&ed25519_verifier).unwrap()
+//! };
 //!
 //! // Timestamp to use for verification, which must be at least as recent as the timestamp of the checkpoint.
 //! let now: u64 = 1_737_664_860_920;
 //!
+//! // Make a list of the verifiers that MUST apear on the checkpoint, and load the checkpoint
+//! let verifiers = VerifierList::new(vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]);
 //! let (_checkpoint, _timestamp) = static_ct_api::open_checkpoint(
 //!   "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b",
-//!   rfc6962_vkey,
-//!   witness_vkey,
+//!   &verifiers,
 //!   now,
 //!   checkpoint.as_bytes(),
 //! ).unwrap();
