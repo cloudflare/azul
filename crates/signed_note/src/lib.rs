@@ -225,7 +225,6 @@
 //! ```
 
 use base64::prelude::*;
-use byteorder::{BigEndian, ReadBytesExt};
 use ed25519_dalek::{
     Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
     VerifyingKey as Ed25519VerifyingKey,

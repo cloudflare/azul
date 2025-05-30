@@ -24,16 +24,13 @@ use crate::{
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
 };
 use anyhow::{anyhow, bail};
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
-use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use signed_note::{StandardVerifier, VerifierList};
+use signed_note::{Verifier as NoteVerifier, VerifierList};
 use static_ct_api::{
-    LogEntryTrait, PendingLogEntryTrait, RFC6962Verifier, StandardEd25519CheckpointSigner,
-    StaticCTCheckpointSigner, TileIterator, TreeWithTimestamp, UnixTimestamp,
+    LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp, UnixTimestamp,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -60,14 +57,26 @@ const STAGING_KEY: &str = "staging";
 const MAX_POOL_SIZE: usize = 4000;
 
 /// Configuration for a CT log.
-#[derive(Clone)]
 pub(crate) struct LogConfig {
     pub(crate) name: String,
     pub(crate) origin: String,
-    pub(crate) signing_key: EcdsaSigningKey,
-    pub(crate) witness_key: Ed25519SigningKey,
+    pub(crate) checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     pub(crate) sequence_interval: Duration,
     pub(crate) max_pending_entry_holds: usize,
+}
+
+#[cfg(test)]
+impl LogConfig {
+    /// Clones all the elements of this config, except `self.checkpoint_signers`. Useful for testing
+    fn clone_without_signers(&self) -> Self {
+        LogConfig {
+            name: self.name.clone(),
+            origin: self.origin.clone(),
+            checkpoint_signers: Vec::new(),
+            sequence_interval: self.sequence_interval.clone(),
+            max_pending_entry_holds: self.max_pending_entry_holds.clone(),
+        }
+    }
 }
 
 /// Ephemeral state for pooling entries to the CT log.
@@ -258,14 +267,14 @@ pub(crate) async fn create_log(
     let tree = TreeWithTimestamp::new(0, tlog_tiles::EMPTY_HASH, timestamp);
 
     // Construct the checkpoint signers
-    let signer = StaticCTCheckpointSigner::new(&config.origin, &config.signing_key)
-        .map_err(anyhow::Error::from)?;
-    let witness = StandardEd25519CheckpointSigner::new(&config.origin, &config.witness_key)
-        .map_err(anyhow::Error::from)?;
-    let dyn_signers: &[&dyn CheckpointSigner] = &[&signer, &witness];
+    let dyn_signers = config
+        .checkpoint_signers
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>();
 
     let sth = tree
-        .sign(&config.origin, dyn_signers, &mut rand::thread_rng())
+        .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
@@ -301,12 +310,12 @@ impl SequenceState {
 
         // Construct the VerifierList containing the signing and witness pubkeys
         let verifiers = {
-            let origin = &config.origin;
-            let v1 = RFC6962Verifier::new(origin, config.signing_key.verifying_key())?;
-            let vk =
-                signed_note::new_ed25519_verifier_key(origin, &config.witness_key.verifying_key());
-            let v2 = StandardVerifier::new(&vk)?;
-            VerifierList::new(vec![Box::new(v1.clone()), Box::new(v2.clone())])
+            let vs: Vec<Box<dyn NoteVerifier>> = config
+                .checkpoint_signers
+                .iter()
+                .map(|s| s.verifier())
+                .collect();
+            VerifierList::new(vs)
         };
 
         let (c, timestamp) = static_ct_api::open_checkpoint(
@@ -731,19 +740,15 @@ async fn sequence_entries<L: LogEntryTrait>(
         .await
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
-    // Construct the checkpoint signers
-    let signer =
-        StaticCTCheckpointSigner::new(&config.origin, &config.signing_key).map_err(|e| {
-            SequenceError::NonFatal(format!(
-                "couldn't construct static-ct checkpoint signer: {e}"
-            ))
-        })?;
-    let witness = StandardEd25519CheckpointSigner::new(&config.origin, &config.witness_key)
-        .map_err(|e| SequenceError::NonFatal(format!("coudln't construct ed25519 signer: {e}")))?;
-    let dyn_signers: &[&dyn CheckpointSigner] = &[&signer, &witness];
+    // Make references to all the signer objects
+    let dyn_signers: Vec<&dyn CheckpointSigner> = config
+        .checkpoint_signers
+        .iter()
+        .map(AsRef::as_ref)
+        .collect();
 
     let new_checkpoint = tree
-        .sign(&config.origin, dyn_signers, &mut rand::thread_rng())
+        .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
 
     // This is a critical error, since we don't know the state of the
@@ -1141,14 +1146,17 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
 mod tests {
     use super::*;
     use crate::{util, LookupKey, SequenceMetadata};
+    use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use futures_executor::block_on;
     use itertools::Itertools;
+    use p256::ecdsa::SigningKey as EcdsaSigningKey;
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
     };
-    use signed_note::{Note, Verifier, VerifierList};
-    use static_ct_api::{LogEntry, PendingLogEntry, RFC6962Verifier};
+    use signed_note::{Note, VerifierList};
+    use static_ct_api::{LogEntry, PendingLogEntry};
+    use static_ct_api::{StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
     use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
 
@@ -1432,13 +1440,18 @@ mod tests {
             .unwrap(),
         );
 
-        let mut c = log.config.clone();
-        c.origin = "wrong".to_string();
-        block_on(SequenceState::load::<LogEntry>(&c, &log.object, &log.lock)).unwrap_err();
+        log.config.origin = "wrong".to_string();
+        block_on(SequenceState::load::<LogEntry>(
+            &log.config,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
     }
 
     #[test]
     fn test_reload_wrong_key() {
+        // Need to use a seed because we can't clone a log config
         let mut log = TestLog::new();
         log.sequence_state = Some(
             block_on(SequenceState::load::<LogEntry>(
@@ -1449,12 +1462,21 @@ mod tests {
             .unwrap(),
         );
 
-        let mut c = log.config.clone();
-        c.signing_key = EcdsaSigningKey::random(&mut OsRng);
+        // Try to load the checkpoint with two randomly generated checkpoint signers. These should fail
+
+        let mut c = log.config.clone_without_signers();
+        let checkpoint_signer =
+            StaticCTCheckpointSigner::new(&c.origin, EcdsaSigningKey::random(&mut OsRng)).unwrap();
+        c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<LogEntry>(&c, &log.object, &log.lock)).unwrap_err();
 
-        c = log.config.clone();
-        c.witness_key = Ed25519SigningKey::generate(&mut OsRng);
+        let mut c = log.config.clone_without_signers();
+        let checkpoint_signer = StandardEd25519CheckpointSigner::new(
+            &c.origin,
+            Ed25519SigningKey::generate(&mut OsRng),
+        )
+        .unwrap();
+        c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<LogEntry>(&c, &log.object, &log.lock)).unwrap_err();
     }
 
@@ -1977,14 +1999,30 @@ mod tests {
 
     impl TestLog {
         fn new() -> Self {
+            let mut rng = OsRng;
+
             let cache = TestCacheBackend(HashMap::new());
             let object = TestObjectBackend::new();
             let lock = TestLockBackend::new();
+            let origin = "example.com/TestLog".to_string();
+
+            // Generate two signing keys
+            let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
+                let signer =
+                    StaticCTCheckpointSigner::new(&origin, EcdsaSigningKey::random(&mut rng))
+                        .unwrap();
+                let witness = StandardEd25519CheckpointSigner::new(
+                    &origin,
+                    Ed25519SigningKey::generate(&mut rng),
+                )
+                .unwrap();
+                vec![Box::new(signer), Box::new(witness)]
+            };
+
             let config = LogConfig {
                 name: "TestLog".to_string(),
-                origin: "example.com/TestLog".to_string(),
-                witness_key: Ed25519SigningKey::generate(&mut OsRng),
-                signing_key: EcdsaSigningKey::random(&mut OsRng),
+                origin,
+                checkpoint_signers,
                 sequence_interval: Duration::from_secs(1),
                 max_pending_entry_holds: 0,
             };
@@ -2084,17 +2122,14 @@ mod tests {
                 .unwrap()
                 .ok_or(anyhow!("no checkpoint in object storage"))
                 .unwrap();
-            let v = RFC6962Verifier::new(
-                "example.com/TestLog",
-                self.config.signing_key.verifying_key(),
-            )
-            .unwrap();
+            let first_signer = &self.config.checkpoint_signers[0];
             let n = Note::from_bytes(&sth).unwrap();
             let (verified_sigs, _) = n
-                .verify(&VerifierList::new(vec![Box::new(v.clone())]))
+                .verify(&VerifierList::new(vec![first_signer.verifier()]))
                 .unwrap();
             assert_eq!(verified_sigs.len(), 1);
-            let sth_timestamp = v
+            let sth_timestamp = first_signer
+                .verifier()
                 .extract_timestamp_millis(verified_sigs[0].signature())
                 .unwrap()
                 .unwrap();
@@ -2106,17 +2141,14 @@ mod tests {
 
             {
                 let sth: Vec<u8> = block_on(self.lock.get(CHECKPOINT_KEY)).unwrap();
-                let v = RFC6962Verifier::new(
-                    "example.com/TestLog",
-                    self.config.signing_key.verifying_key(),
-                )
-                .unwrap();
+                let first_signer = &self.config.checkpoint_signers[0];
                 let n = Note::from_bytes(&sth).unwrap();
                 let (verified_sigs, _) = n
-                    .verify(&VerifierList::new(vec![Box::new(v.clone())]))
+                    .verify(&VerifierList::new(vec![first_signer.verifier()]))
                     .unwrap();
                 assert_eq!(verified_sigs.len(), 1);
-                let sth_timestamp1 = v
+                let sth_timestamp1 = first_signer
+                    .verifier()
                     .extract_timestamp_millis(verified_sigs[0].signature())
                     .unwrap()
                     .unwrap();

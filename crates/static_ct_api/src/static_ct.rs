@@ -581,22 +581,23 @@ impl TreeWithTimestamp {
 }
 
 /// Implementation of [`NoteSigner`] that signs with a Ed25519 key.
-pub struct StandardEd25519CheckpointSigner<'a> {
-    v: Box<dyn NoteVerifier>,
-    k: &'a Ed25519SigningKey,
+#[cfg_attr(test, derive(Clone))]
+pub struct StandardEd25519CheckpointSigner {
+    v: StandardVerifier,
+    k: Ed25519SigningKey,
 }
 
-impl<'a> StandardEd25519CheckpointSigner<'a> {
+impl StandardEd25519CheckpointSigner {
     /// Returns a new `Ed25519Signer`.
-    pub fn new(name: &str, k: &'a Ed25519SigningKey) -> Result<Self, StaticCTError> {
+    pub fn new(name: &str, k: Ed25519SigningKey) -> Result<Self, StaticCTError> {
         let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
         // Checks if the key name is valid
         let v = StandardVerifier::new(&vk)?;
-        Ok(Self { v: Box::new(v), k })
+        Ok(Self { v, k })
     }
 }
 
-impl CheckpointSigner for StandardEd25519CheckpointSigner<'_> {
+impl CheckpointSigner for StandardEd25519CheckpointSigner {
     fn name(&self) -> &str {
         self.v.name()
     }
@@ -617,6 +618,12 @@ impl CheckpointSigner for StandardEd25519CheckpointSigner<'_> {
         // Return the note signature. We can unwrap() here because the only cause for error is if
         // the name is invalid, which is checked in the constructor
         Ok(NoteSignature::new(self.name().to_string(), self.key_id(), sig.to_vec()).unwrap())
+    }
+
+    fn verifier(&self) -> Box<dyn NoteVerifier> {
+        let vk = signed_note::new_ed25519_verifier_key(self.name(), &self.k.verifying_key());
+        // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor
+        Box::new(StandardVerifier::new(&vk).unwrap())
     }
 }
 
@@ -981,14 +988,15 @@ fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Has
 ///
 /// We use deterministic RFC 6979 ECDSA signatures so that when fetching a previous SCT's timestamp
 /// and index from the deduplication cache, the new SCT we produce is identical.
-pub struct StaticCTCheckpointSigner<'a> {
+#[cfg_attr(test, derive(Clone))]
+pub struct StaticCTCheckpointSigner {
     name: String,
     id: u32,
-    signing_key: &'a EcdsaSigningKey,
+    signing_key: EcdsaSigningKey,
 }
 
-impl<'a> StaticCTCheckpointSigner<'a> {
-    pub fn new(name: &str, signing_key: &'a EcdsaSigningKey) -> Result<Self, SignerError> {
+impl StaticCTCheckpointSigner {
+    pub fn new(name: &str, signing_key: EcdsaSigningKey) -> Result<Self, SignerError> {
         // Reuse the verifier code. This compute the correct key ID
         let vk = signing_key.verifying_key();
         // This checks if the name is invalid. If it is, it returns VerifierError::Format. That's
@@ -1003,7 +1011,7 @@ impl<'a> StaticCTCheckpointSigner<'a> {
     }
 }
 
-impl<'a> CheckpointSigner for StaticCTCheckpointSigner<'a> {
+impl CheckpointSigner for StaticCTCheckpointSigner {
     fn name(&self) -> &str {
         &self.name
     }
@@ -1057,6 +1065,11 @@ impl<'a> CheckpointSigner for StaticCTCheckpointSigner<'a> {
         // Return the note signature. We can unwrap() here because the only cause for error is if
         // the name is invalid, which is checked in the constructor
         Ok(NoteSignature::new(self.name.clone(), self.id, note_sig).unwrap())
+    }
+
+    fn verifier(&self) -> Box<dyn NoteVerifier> {
+        // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor
+        Box::new(RFC6962Verifier::new(&self.name, self.signing_key.verifying_key()).unwrap())
     }
 }
 

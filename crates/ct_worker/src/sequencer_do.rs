@@ -12,9 +12,13 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::{LogEntry, LogEntryTrait, PendingLogEntry, PendingLogEntryTrait};
+use static_ct_api::{
+    LogEntry, LogEntryTrait, PendingLogEntry, PendingLogEntryTrait,
+    StandardEd25519CheckpointSigner, StaticCTCheckpointSigner,
+};
 use std::str::FromStr;
 use std::time::Duration;
+use tlog_tiles::CheckpointSigner;
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -172,11 +176,22 @@ impl<E: PendingLogEntryTrait> Sequencer<E> {
         let witness_key = load_witness_key(&self.env, name)?.clone();
         let sequence_interval = Duration::from_secs(params.sequence_interval_seconds);
 
+        // Make the checkpoint signers from the secret keys and put them in a vec
+        let dyn_signers: Vec<Box<dyn CheckpointSigner>> = {
+            let signer = StaticCTCheckpointSigner::new(&origin, signing_key).map_err(|e| {
+                Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
+            })?;
+            let witness =
+                StandardEd25519CheckpointSigner::new(&origin, witness_key).map_err(|e| {
+                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
+                })?;
+            vec![Box::new(signer), Box::new(witness)]
+        };
+
         self.config = Some(LogConfig {
             name: name.to_string(),
             origin: origin.to_string(),
-            signing_key,
-            witness_key,
+            checkpoint_signers: dyn_signers,
             sequence_interval,
             max_pending_entry_holds: params.max_pending_entry_holds,
         });
