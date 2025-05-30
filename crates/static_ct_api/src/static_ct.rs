@@ -186,7 +186,7 @@ pub trait LogEntryTrait: core::fmt::Debug + Sized {
     fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, Self::ParseError>;
 }
 
-impl PendingLogEntryTrait for PendingLogEntry {
+impl PendingLogEntryTrait for StaticCTPendingLogEntry {
     /// Compute the cache key for a pending log entry.
     ///
     /// # Panics
@@ -234,7 +234,7 @@ impl PendingLogEntryTrait for PendingLogEntry {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
-pub struct PendingLogEntry {
+pub struct StaticCTPendingLogEntry {
     /// Either the `TimestampedEntry.signed_entry`, or the
     /// `PreCert.tbs_certificate` for Precertificates.
     /// It must be at most 2^24-1 bytes long.
@@ -258,9 +258,9 @@ pub struct PendingLogEntry {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct LogEntry {
+pub struct StaticCTLogEntry {
     /// The pending entry that preceded this log entry
-    pub inner: PendingLogEntry,
+    pub inner: StaticCTPendingLogEntry,
 
     /// The zero-based index of the leaf in the log.
     /// It must be between 0 and 2^40-1.
@@ -270,7 +270,7 @@ pub struct LogEntry {
     pub timestamp: UnixTimestamp,
 }
 
-impl LogEntry {
+impl StaticCTLogEntry {
     /// Returns a marshaled RFC 6962 `TimestampedEntry`.
     fn marshal_timestamped_entry(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -299,21 +299,21 @@ impl LogEntry {
     }
 }
 
-impl LogEntryTrait for LogEntry {
-    type Pending = PendingLogEntry;
+impl LogEntryTrait for StaticCTLogEntry {
+    type Pending = StaticCTPendingLogEntry;
 
     // The error type for parse_from_tile_entry
     type ParseError = StaticCTError;
 
-    fn new(pending: PendingLogEntry, timestamp: u64, leaf_index: u64) -> Self {
-        LogEntry {
+    fn new(pending: StaticCTPendingLogEntry, timestamp: u64, leaf_index: u64) -> Self {
+        StaticCTLogEntry {
             inner: pending,
             timestamp,
             leaf_index,
         }
     }
 
-    fn inner(&self) -> &PendingLogEntry {
+    fn inner(&self) -> &StaticCTPendingLogEntry {
         &self.inner
     }
 
@@ -367,7 +367,7 @@ impl LogEntryTrait for LogEntry {
         //
         // opaque Fingerprint[32];
 
-        let mut entry = LogEntry {
+        let mut entry = StaticCTLogEntry {
             timestamp: cur.read_u64::<BigEndian>()?,
             ..Default::default()
         };
@@ -871,7 +871,7 @@ impl NoteVerifier for RFC6962Verifier {
 /// Errors if there are encoding issues with the provided signing key.
 pub fn signed_certificate_timestamp(
     signing_key: &EcdsaSigningKey,
-    entry: &LogEntry,
+    entry: &StaticCTLogEntry,
 ) -> Result<AddChainResponse, StaticCTError> {
     let mut buffer = vec![
         0, // sct_version = v1 (0)

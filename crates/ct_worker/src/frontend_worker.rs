@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use static_ct_api::{
-    AddChainRequest, GetRootsResponse, LogEntry, PendingLogEntry, PendingLogEntryTrait,
+    AddChainRequest, GetRootsResponse, StaticCTLogEntry, StaticCTPendingLogEntry, PendingLogEntryTrait,
     UnixTimestamp,
 };
 use std::str::FromStr;
@@ -194,7 +194,7 @@ async fn add_chain_or_pre_chain(
     // deduplication cache and then sending a request to the DO to sequence the entry.
 
     // Convert chain to a pending log entry.
-    let pending_entry = PendingLogEntry {
+    let pending_entry = StaticCTPendingLogEntry {
         certificate: chain.certificate,
         is_precert: chain.is_precert,
         issuer_key_hash: chain.issuer_key_hash,
@@ -217,7 +217,7 @@ async fn add_chain_or_pre_chain(
         .1
     {
         debug!("{name}: Entry is cached");
-        let entry = LogEntry {
+        let entry = StaticCTLogEntry {
             inner: pending_entry,
             leaf_index,
             timestamp,
@@ -265,7 +265,7 @@ async fn add_chain_or_pre_chain(
         return Ok(response);
     }
     let (leaf_index, timestamp) = response.json::<(u64, UnixTimestamp)>().await?;
-    let entry = LogEntry {
+    let entry = StaticCTLogEntry {
         inner: pending_entry,
         leaf_index,
         timestamp,

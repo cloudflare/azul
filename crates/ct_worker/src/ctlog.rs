@@ -1155,8 +1155,8 @@ mod tests {
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::{LogEntry, PendingLogEntry};
     use static_ct_api::{StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
+    use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
 
@@ -1198,7 +1198,7 @@ mod tests {
         for i in 0..500_u64 {
             for k in 0..3000_u64 {
                 let certificate = (i * 3000 + k).to_be_bytes().to_vec();
-                let leaf = PendingLogEntry {
+                let leaf = StaticCTPendingLogEntry {
                     certificate,
                     ..Default::default()
                 };
@@ -1416,7 +1416,7 @@ mod tests {
             log.check(i + 1);
 
             log.sequence_state = Some(
-                block_on(SequenceState::load::<LogEntry>(
+                block_on(SequenceState::load::<StaticCTLogEntry>(
                     &log.config,
                     &log.object,
                     &log.lock,
@@ -1432,7 +1432,7 @@ mod tests {
     fn test_reload_wrong_origin() {
         let mut log = TestLog::new();
         log.sequence_state = Some(
-            block_on(SequenceState::load::<LogEntry>(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
                 &log.config,
                 &log.object,
                 &log.lock,
@@ -1441,7 +1441,7 @@ mod tests {
         );
 
         log.config.origin = "wrong".to_string();
-        block_on(SequenceState::load::<LogEntry>(
+        block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
             &log.object,
             &log.lock,
@@ -1454,7 +1454,7 @@ mod tests {
         // Need to use a seed because we can't clone a log config
         let mut log = TestLog::new();
         log.sequence_state = Some(
-            block_on(SequenceState::load::<LogEntry>(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
                 &log.config,
                 &log.object,
                 &log.lock,
@@ -1468,7 +1468,12 @@ mod tests {
         let checkpoint_signer =
             StaticCTCheckpointSigner::new(&c.origin, EcdsaSigningKey::random(&mut OsRng)).unwrap();
         c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
-        block_on(SequenceState::load::<LogEntry>(&c, &log.object, &log.lock)).unwrap_err();
+        block_on(SequenceState::load::<StaticCTLogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
 
         let mut c = log.config.clone_without_signers();
         let checkpoint_signer = StandardEd25519CheckpointSigner::new(
@@ -1477,7 +1482,12 @@ mod tests {
         )
         .unwrap();
         c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
-        block_on(SequenceState::load::<LogEntry>(&c, &log.object, &log.lock)).unwrap_err();
+        block_on(SequenceState::load::<StaticCTLogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
     }
 
     #[test]
@@ -1502,7 +1512,7 @@ mod tests {
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
         log.sequence_state = Some(
-            block_on(SequenceState::load::<LogEntry>(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
                 &log.config,
                 &log.object,
                 &log.lock,
@@ -1562,7 +1572,7 @@ mod tests {
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
         log.sequence_state = Some(
-            block_on(SequenceState::load::<LogEntry>(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
                 &log.config,
                 &log.object,
                 &log.lock,
@@ -1645,7 +1655,7 @@ mod tests {
                                 *log.lock.mode.borrow_mut() = StorageMode::Ok;
                             }
                             log.sequence_state = Some(
-                                block_on(SequenceState::load::<LogEntry>(
+                                block_on(SequenceState::load::<StaticCTLogEntry>(
                                     &log.config,
                                     &log.object,
                                     &log.lock,
@@ -1989,7 +1999,7 @@ mod tests {
 
     struct TestLog {
         config: LogConfig,
-        pool_state: PoolState<PendingLogEntry>,
+        pool_state: PoolState<StaticCTPendingLogEntry>,
         sequence_state: Option<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
@@ -2040,7 +2050,7 @@ mod tests {
             }
         }
         fn sequence(&mut self) -> Result<(), anyhow::Error> {
-            block_on(sequence::<LogEntry>(
+            block_on(sequence::<StaticCTLogEntry>(
                 &mut self.pool_state,
                 &mut self.sequence_state,
                 &self.config,
@@ -2050,12 +2060,12 @@ mod tests {
                 &self.metrics,
             ))
         }
-        fn sequence_start(&mut self) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
+        fn sequence_start(&mut self) -> Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)> {
             let sequence_state: &mut SequenceState =
                 if let Some(state) = self.sequence_state.as_mut() {
                     state
                 } else {
-                    let state = block_on(SequenceState::load::<LogEntry>(
+                    let state = block_on(SequenceState::load::<StaticCTLogEntry>(
                         &self.config,
                         &self.object,
                         &self.lock,
@@ -2068,8 +2078,11 @@ mod tests {
                 self.config.max_pending_entry_holds,
             )
         }
-        fn sequence_finish(&mut self, entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>) {
-            block_on(sequence_entries::<LogEntry>(
+        fn sequence_finish(
+            &mut self,
+            entries: Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)>,
+        ) {
+            block_on(sequence_entries::<StaticCTLogEntry>(
                 self.sequence_state.as_mut().unwrap(),
                 &self.config,
                 &self.object,
@@ -2104,7 +2117,7 @@ mod tests {
                 pre_certificate = Vec::new();
             }
             let issuers = CHAINS[rng.gen_range(0..CHAINS.len())];
-            let leaf = PendingLogEntry {
+            let leaf = StaticCTPendingLogEntry {
                 certificate,
                 pre_certificate,
                 is_precert,
@@ -2186,7 +2199,7 @@ mod tests {
                 } else {
                     TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(PathElem::Data))
                 };
-                for (i, entry) in TileIterator::<LogEntry>::new(
+                for (i, entry) in TileIterator::<StaticCTLogEntry>::new(
                     block_on(self.object.fetch(&tile.path())).unwrap().unwrap(),
                     tile.width() as usize,
                 )

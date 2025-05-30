@@ -9,7 +9,7 @@
 use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::{PendingLogEntry, PendingLogEntryTrait};
+use static_ct_api::{StaticCTPendingLogEntry, PendingLogEntryTrait};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -35,7 +35,7 @@ struct Batcher<E: PendingLogEntryTrait> {
 }
 
 #[durable_object]
-struct CtLogBatcher(Batcher<PendingLogEntry>);
+struct CtLogBatcher(Batcher<StaticCTPendingLogEntry>);
 
 #[durable_object]
 impl DurableObject for CtLogBatcher {

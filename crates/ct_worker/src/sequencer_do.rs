@@ -13,8 +13,8 @@ use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
 use static_ct_api::{
-    LogEntry, LogEntryTrait, PendingLogEntry, PendingLogEntryTrait,
-    StandardEd25519CheckpointSigner, StaticCTCheckpointSigner,
+    LogEntryTrait, PendingLogEntryTrait, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner,
+    StaticCTLogEntry, StaticCTPendingLogEntry,
 };
 use std::str::FromStr;
 use std::time::Duration;
@@ -29,7 +29,7 @@ use worker::*;
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
 #[durable_object]
-struct CtLogSequencer(Sequencer<PendingLogEntry>);
+struct CtLogSequencer(Sequencer<StaticCTPendingLogEntry>);
 
 #[durable_object]
 impl DurableObject for CtLogSequencer {
@@ -42,7 +42,7 @@ impl DurableObject for CtLogSequencer {
     }
 
     async fn alarm(&mut self) -> Result<Response> {
-        self.0.alarm::<LogEntry>().await
+        self.0.alarm::<StaticCTLogEntry>().await
     }
 }
 
