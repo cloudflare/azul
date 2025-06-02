@@ -31,6 +31,7 @@ pub struct LogParams {
     pub sequence_interval_millis: u64,
     #[serde(default = "default_max_sequence_skips")]
     pub max_sequence_skips: usize,
+    pub sequence_skip_threshold_millis: Option<u64>,
     #[serde(default = "default_num_batchers")]
     pub num_batchers: u8,
     #[serde(default = "default_batch_timeout_millis")]

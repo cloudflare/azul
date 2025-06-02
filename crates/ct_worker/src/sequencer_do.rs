@@ -216,6 +216,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             sequence_interval,
             max_sequence_skips: params.max_sequence_skips,
             disable_dedup: params.disable_dedup,
+            sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
         });
         self.public_bucket = Some(ObjectBucket {
             bucket: load_public_bucket(&self.env, name)?,

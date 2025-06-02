@@ -77,7 +77,12 @@
                         "max_sequence_skips": {
                             "type": "integer",
                             "default": 0,
-                            "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by a multiple of the sequence interval."
+                            "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by either a multiple of the sequence interval or sequence_skip_threshold_millis if set."
+                        },
+                        "sequence_skip_threshold_millis": {
+                            "type": "integer",
+                            "default": 0,
+                            "description": "If non-zero, entries will only be skipped by sequencing (when max_sequenced_skips is non-zero) if they have been in the pool for less than this timeout."
                         },
                         "num_batchers": {
                             "type": "integer",
@@ -90,7 +95,7 @@
                             "type": "integer",
                             "minimum": 100,
                             "default": 1000,
-                            "description": "The maximum time to wait before submitting a batch to the sequencer, in milliseconds."
+                            "description": "The maximum duration to wait before submitting a batch to the sequencer, in milliseconds."
                         },
                         "max_batch_entries": {
                             "type": "integer",
