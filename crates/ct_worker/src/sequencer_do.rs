@@ -28,13 +28,38 @@ use worker::*;
 // It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
+/// Function that takes env, name, origin, and loads the checkpoint signing objects
+// We have to use Box dyn because we need to be able to monomorphize Sequencer, and making it
+// generic over a function type doesn't let us write down the type
+pub type CheckpointSignerLoader =
+    Box<dyn Fn(&Env, &str, &str) -> Result<Vec<Box<dyn CheckpointSigner>>>>;
+
 #[durable_object]
 struct CtLogSequencer(Sequencer<StaticCTPendingLogEntry>);
 
 #[durable_object]
 impl DurableObject for CtLogSequencer {
     fn new(state: State, env: Env) -> Self {
-        CtLogSequencer(Sequencer::new(state, env))
+        // Need to define how we load our signing keys from the environment. This closure has type
+        // CheckpointSignerLoader
+        let load_signers = |e: &Env, name: &str, origin: &str| {
+            let signing_key = load_signing_key(e, name)?.clone();
+            let witness_key = load_witness_key(e, name)?.clone();
+
+            // Make the checkpoint signers from the secret keys and put them in a vec
+            let signer = StaticCTCheckpointSigner::new(&origin, signing_key).map_err(|e| {
+                Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
+            })?;
+            let witness =
+                StandardEd25519CheckpointSigner::new(&origin, witness_key).map_err(|e| {
+                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
+                })?;
+
+            let out: Vec<Box<dyn CheckpointSigner>> = vec![Box::new(signer), Box::new(witness)];
+            Ok(out)
+        };
+
+        CtLogSequencer(Sequencer::new(state, env, Box::new(load_signers)))
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {
@@ -52,6 +77,7 @@ struct Sequencer<E: PendingLogEntryTrait> {
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
     cache: Option<DedupCache>,           // implements CacheRead, CacheWrite
     config: Option<LogConfig>,
+    key_loader: CheckpointSignerLoader,
     sequence_state: Option<SequenceState>,
     pool_state: PoolState<E>,
     initialized: bool,
@@ -60,7 +86,7 @@ struct Sequencer<E: PendingLogEntryTrait> {
 }
 
 impl<E: PendingLogEntryTrait> Sequencer<E> {
-    fn new(state: State, env: Env) -> Self {
+    fn new(state: State, env: Env, key_loader: CheckpointSignerLoader) -> Self {
         let level = CONFIG
             .logging_level
             .as_ref()
@@ -74,6 +100,7 @@ impl<E: PendingLogEntryTrait> Sequencer<E> {
             public_bucket: None,
             cache: None,
             config: None,
+            key_loader,
             sequence_state: None,
             pool_state: PoolState::default(),
             initialized: false,
@@ -172,26 +199,14 @@ impl<E: PendingLogEntryTrait> Sequencer<E> {
             .trim_start_matches("http://")
             .trim_start_matches("https://")
             .trim_end_matches('/');
-        let signing_key = load_signing_key(&self.env, name)?.clone();
-        let witness_key = load_witness_key(&self.env, name)?.clone();
-        let sequence_interval = Duration::from_secs(params.sequence_interval_seconds);
 
-        // Make the checkpoint signers from the secret keys and put them in a vec
-        let dyn_signers: Vec<Box<dyn CheckpointSigner>> = {
-            let signer = StaticCTCheckpointSigner::new(&origin, signing_key).map_err(|e| {
-                Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
-            })?;
-            let witness =
-                StandardEd25519CheckpointSigner::new(&origin, witness_key).map_err(|e| {
-                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
-                })?;
-            vec![Box::new(signer), Box::new(witness)]
-        };
+        let sequence_interval = Duration::from_secs(params.sequence_interval_seconds);
+        let checkpoint_signers = (self.key_loader)(&self.env, name, origin)?;
 
         self.config = Some(LogConfig {
             name: name.to_string(),
             origin: origin.to_string(),
-            checkpoint_signers: dyn_signers,
+            checkpoint_signers,
             sequence_interval,
             max_pending_entry_holds: params.max_pending_entry_holds,
         });
