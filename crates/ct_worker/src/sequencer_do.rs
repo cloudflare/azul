@@ -35,10 +35,10 @@ pub type CheckpointSignerLoader =
     Box<dyn Fn(&Env, &str, &str) -> Result<Vec<Box<dyn CheckpointSigner>>>>;
 
 #[durable_object]
-struct CtLogSequencer(Sequencer<StaticCTPendingLogEntry>);
+struct StaticCTSequencer(Sequencer<StaticCTPendingLogEntry>);
 
 #[durable_object]
-impl DurableObject for CtLogSequencer {
+impl DurableObject for StaticCTSequencer {
     fn new(state: State, env: Env) -> Self {
         // Need to define how we load our signing keys from the environment. This closure has type
         // CheckpointSignerLoader
@@ -59,7 +59,7 @@ impl DurableObject for CtLogSequencer {
             Ok(out)
         };
 
-        CtLogSequencer(Sequencer::new(state, env, Box::new(load_signers)))
+        StaticCTSequencer(Sequencer::new(state, env, Box::new(load_signers)))
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {
