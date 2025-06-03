@@ -707,7 +707,10 @@ async fn sequence_entries<L: LogEntryTrait>(
         // If the data tile is full, stage it.
         if n % u64::from(TlogTile::FULL_WIDTH) == 0 {
             stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
-            metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
+            metrics
+                .seq_data_tile_size
+                .with_label_values(&["full"])
+                .observe(data_tile.len().as_f64());
             data_tile.clear();
         }
     }
@@ -715,7 +718,10 @@ async fn sequence_entries<L: LogEntryTrait>(
     // Stage leftover partial data tile, if any.
     if n != old_size && n % u64::from(TlogTile::FULL_WIDTH) != 0 {
         stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
-        metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
+        metrics
+            .seq_data_tile_size
+            .with_label_values(&["partial"])
+            .observe(data_tile.len().as_f64());
     }
 
     // Produce and stage new tree tiles.
