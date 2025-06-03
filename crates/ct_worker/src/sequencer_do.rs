@@ -35,10 +35,10 @@ pub type CheckpointSignerLoader =
     Box<dyn Fn(&Env, &str, &str) -> Result<Vec<Box<dyn CheckpointSigner>>>>;
 
 #[durable_object]
-struct StaticCTSequencer(Sequencer<StaticCTPendingLogEntry>);
+struct Sequencer(GenericSequencer<StaticCTPendingLogEntry>);
 
 #[durable_object]
-impl DurableObject for StaticCTSequencer {
+impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
         // Need to define how we load our signing keys from the environment. This closure has type
         // CheckpointSignerLoader
@@ -59,7 +59,7 @@ impl DurableObject for StaticCTSequencer {
             Ok(out)
         };
 
-        StaticCTSequencer(Sequencer::new(state, env, Box::new(load_signers)))
+        Sequencer(GenericSequencer::new(state, env, Box::new(load_signers)))
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {
@@ -71,7 +71,7 @@ impl DurableObject for StaticCTSequencer {
     }
 }
 
-struct Sequencer<E: PendingLogEntryTrait> {
+struct GenericSequencer<E: PendingLogEntryTrait> {
     do_state: State, // implements LockBackend
     env: Env,
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
@@ -85,7 +85,7 @@ struct Sequencer<E: PendingLogEntryTrait> {
     metrics: Metrics,
 }
 
-impl<E: PendingLogEntryTrait> Sequencer<E> {
+impl<E: PendingLogEntryTrait> GenericSequencer<E> {
     fn new(state: State, env: Env, key_loader: CheckpointSignerLoader) -> Self {
         let level = CONFIG
             .logging_level
@@ -180,7 +180,7 @@ impl<E: PendingLogEntryTrait> Sequencer<E> {
     }
 }
 
-impl<E: PendingLogEntryTrait> Sequencer<E> {
+impl<E: PendingLogEntryTrait> GenericSequencer<E> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self, name: &str) -> Result<()> {
         let params = &CONFIG.logs[name];

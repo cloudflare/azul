@@ -9,7 +9,7 @@
 use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::{StaticCTPendingLogEntry, PendingLogEntryTrait};
+use static_ct_api::{PendingLogEntryTrait, StaticCTPendingLogEntry};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -27,7 +27,7 @@ const MAX_BATCH_SIZE: usize = 100;
 // The maximum amount of time to wait before submitting a batch.
 const MAX_BATCH_TIMEOUT_MILLIS: u64 = 1_000;
 
-struct Batcher<E: PendingLogEntryTrait> {
+struct GenericBatcher<E: PendingLogEntryTrait> {
     env: Env,
     batch: Batch<E>,
     in_flight: usize,
@@ -35,12 +35,12 @@ struct Batcher<E: PendingLogEntryTrait> {
 }
 
 #[durable_object]
-struct CtLogBatcher(Batcher<StaticCTPendingLogEntry>);
+struct Batcher(GenericBatcher<StaticCTPendingLogEntry>);
 
 #[durable_object]
-impl DurableObject for CtLogBatcher {
+impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
-        CtLogBatcher(Batcher::new(state, env))
+        Batcher(GenericBatcher::new(state, env))
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {
@@ -67,7 +67,7 @@ impl<E: PendingLogEntryTrait> Default for Batch<E> {
     }
 }
 
-impl<E: PendingLogEntryTrait> Batcher<E> {
+impl<E: PendingLogEntryTrait> GenericBatcher<E> {
     fn new(_: State, env: Env) -> Self {
         Self {
             env,
@@ -148,7 +148,7 @@ impl<E: PendingLogEntryTrait> Batcher<E> {
     }
 }
 
-impl<E: PendingLogEntryTrait> Batcher<E> {
+impl<E: PendingLogEntryTrait> GenericBatcher<E> {
     // Submit the current pending batch to be sequenced.
     async fn submit_batch(&mut self, name: &str) -> Result<()> {
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;
