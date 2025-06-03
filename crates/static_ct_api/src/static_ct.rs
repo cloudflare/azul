@@ -128,7 +128,7 @@ use std::{
     io::{Cursor, Read},
     marker::PhantomData,
 };
-use tlog_tiles::{Checkpoint, CheckpointSigner, Hash, HashReader};
+use tlog_tiles::{Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, SequenceMetadata};
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
@@ -170,7 +170,7 @@ pub trait LogEntryTrait: core::fmt::Debug + Sized {
     /// The error type for [`Self::parse_from_tile_entry`]
     type ParseError: std::error::Error + Send + Sync + 'static;
 
-    fn new(pending: Self::Pending, timestamp: UnixTimestamp, leaf_index: u64) -> Self;
+    fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self;
 
     /// Returns the underlying pending entry
     fn inner(&self) -> &Self::Pending;
@@ -268,7 +268,7 @@ pub struct StaticCTLogEntry {
 
     /// The zero-based index of the leaf in the log.
     /// It must be between 0 and 2^40-1.
-    pub leaf_index: u64,
+    pub leaf_index: LeafIndex,
 
     /// The `TimestampedEntry.timestamp`.
     pub timestamp: UnixTimestamp,
@@ -309,11 +309,11 @@ impl LogEntryTrait for StaticCTLogEntry {
     // The error type for parse_from_tile_entry
     type ParseError = StaticCTError;
 
-    fn new(pending: StaticCTPendingLogEntry, timestamp: u64, leaf_index: u64) -> Self {
+    fn new(pending: StaticCTPendingLogEntry, metadata: SequenceMetadata) -> Self {
         StaticCTLogEntry {
             inner: pending,
-            timestamp,
-            leaf_index,
+            leaf_index: metadata.0,
+            timestamp: metadata.1,
         }
     }
 
@@ -425,7 +425,7 @@ impl LogEntryTrait for StaticCTLogEntry {
 struct GenericLogEntry<E: PendingLogEntryTrait>(E);
 
 impl<E: PendingLogEntryTrait> LogEntryTrait<E> for GenericLogEntry<E> {
-    fn new(pending: E, _: UnixTimestamp, _: u64) -> Self {
+    fn new(pending: E, _: SequenceMetadata) -> Self {
         GenericLogEntry(pending)
     }
 
@@ -614,11 +614,7 @@ impl CheckpointSigner for StandardEd25519CheckpointSigner {
         self.v.key_id()
     }
 
-    fn sign(
-        &self,
-        _timestamp_unix_millis: u64,
-        checkpoint: &Checkpoint,
-    ) -> Result<NoteSignature, NoteError> {
+    fn sign(&self, _: UnixTimestamp, checkpoint: &Checkpoint) -> Result<NoteSignature, NoteError> {
         let msg = checkpoint.to_bytes();
         // Ed25519 signing cannot fail
         let sig = self.k.try_sign(&msg).unwrap();
@@ -860,7 +856,10 @@ impl NoteVerifier for RFC6962Verifier {
         self.verifying_key.verify(&sth_bytes, &sig).is_ok()
     }
 
-    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<u64>, VerificationError> {
+    fn extract_timestamp_millis(
+        &self,
+        mut sig: &[u8],
+    ) -> Result<Option<UnixTimestamp>, VerificationError> {
         // In a static-ct signed tree head, the timestamp is the first 8 bytes of the sig
         //   https://github.com/C2SP/C2SP/blob/efb68c16664309a68120e37528fa1c046dd1ac09/static-ct-api.md#checkpoints
         // and it's in milliseconds
@@ -1042,7 +1041,7 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
     /// then prepend the timestamp.
     fn sign(
         &self,
-        timestamp_unix_millis: u64,
+        timestamp_unix_millis: UnixTimestamp,
         checkpoint: &Checkpoint,
     ) -> Result<NoteSignature, NoteError> {
         // RFC 6962-type signatures do not sign extension lines. If this checkpoint has extension lines, this is an error.
@@ -1051,19 +1050,11 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
         }
 
         // Produce the bytestring that will be signed
-        let tree_head_bytes = {
-            let mut buffer = Vec::new();
-
-            buffer.write_u8(0).unwrap(); // version = 0 (v1)
-            buffer.write_u8(1).unwrap(); // signature_type = 1 (tree_hash)
-            buffer
-                .write_u64::<BigEndian>(timestamp_unix_millis)
-                .unwrap();
-            buffer.write_u64::<BigEndian>(checkpoint.size()).unwrap();
-            buffer.extend(checkpoint.hash().0);
-
-            buffer
-        };
+        let tree_head_bytes = serialize_sth_signature_input(
+            timestamp_unix_millis,
+            checkpoint.size(),
+            checkpoint.hash(),
+        );
 
         // Sign the string
         let tree_head_sig = sign(&self.signing_key, &tree_head_bytes);

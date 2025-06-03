@@ -29,9 +29,7 @@ use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{Verifier as NoteVerifier, VerifierList};
-use static_ct_api::{
-    LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp, UnixTimestamp,
-};
+use static_ct_api::{LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -634,11 +632,16 @@ async fn sequence_entries<L: LogEntryTrait>(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_entries: Vec<(L, u64, UnixTimestamp)> = Vec::with_capacity(entries.len());
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
+    let mut cache_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        let sequenced_entry = L::new(entry, timestamp, n);
+        // Add the entry and metadata to our lists of things sequenced
+        let metadata = (n, timestamp);
+        cache_metadata.push((entry.lookup_key(), metadata));
+        sequenced_metadata.push((sender, metadata));
+
+        let sequenced_entry = L::new(entry, metadata);
         let tile_leaf = sequenced_entry.tile_leaf();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
@@ -664,10 +667,6 @@ async fn sequence_entries<L: LogEntryTrait>(
             let id = tlog_tiles::stored_hash_index(0, n) + i as u64;
             overlay.insert(id, *h);
         }
-
-        // Add the entry and metadata to our lists of things sequenced
-        sequenced_metadata.push((sender, (n, timestamp)));
-        sequenced_entries.push((sequenced_entry, n, timestamp));
 
         n += 1;
 
@@ -802,18 +801,10 @@ async fn sequence_entries<L: LogEntryTrait>(
     // only consequence of cache false negatives are duplicated leaves anyway. In fact, an
     // error might cause the clients to resubmit, producing more cache false negatives and
     // duplicates.
-    if let Err(e) = cache
-        .put_entries(
-            &sequenced_entries
-                .iter()
-                .map(|entry| (entry.0.inner().lookup_key(), (entry.1, entry.2)))
-                .collect::<Vec<_>>(),
-        )
-        .await
-    {
+    if let Err(e) = cache.put_entries(&cache_metadata).await {
         warn!(
             "{name}: Cache put failed (entries={}): {e}",
-            sequenced_entries.len()
+            cache_metadata.len()
         );
     }
 

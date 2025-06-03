@@ -17,10 +17,12 @@
 //! - [ct_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/ct_test.go)
 
 pub mod checkpoint;
+pub mod entries;
 pub mod tile;
 pub mod tlog;
 
 pub use checkpoint::*;
+pub use entries::*;
 pub use tile::*;
 pub use tlog::*;
 
