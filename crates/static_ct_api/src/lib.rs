@@ -16,6 +16,8 @@ pub enum StaticCTError {
     #[error(transparent)]
     Note(#[from] signed_note::NoteError),
     #[error(transparent)]
+    Verification(#[from] signed_note::VerificationError),
+    #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
     DER(#[from] der::Error),

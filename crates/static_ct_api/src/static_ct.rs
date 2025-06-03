@@ -740,9 +740,7 @@ pub fn open_checkpoint(
         };
 
         // Extract the timestamp if it's in the sig, and update the latest running timestamp
-        let sig_timestamp = verif
-            .extract_timestamp_millis(sig.signature())
-            .map_err(|_| StaticCTError::Malformed)?; // TODO: is this the right error?
+        let sig_timestamp = verif.extract_timestamp_millis(sig.signature())?;
         if let Some(t) = sig_timestamp {
             latest_timestamp = Some(core::cmp::max(latest_timestamp.unwrap_or(0), t));
         }
