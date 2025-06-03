@@ -266,7 +266,7 @@ pub trait Signer {
     /// Returns the key ID.
     fn key_id(&self) -> u32;
 
-    /// Returns a signature for the Note. Uses the origin returns by `self.name()`.
+    /// Returns a signature for the Note. Uses the origin returned by `self.name()`.
     ///
     /// # Errors
     ///

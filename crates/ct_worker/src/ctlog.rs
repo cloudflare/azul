@@ -740,11 +740,11 @@ async fn sequence_entries<L: LogEntryTrait>(
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
     // Make references to all the signer objects
-    let dyn_signers: Vec<&dyn CheckpointSigner> = config
+    let dyn_signers = config
         .checkpoint_signers
         .iter()
         .map(AsRef::as_ref)
-        .collect();
+        .collect::<Vec<_>>();
 
     let new_checkpoint = tree
         .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
@@ -1442,7 +1442,6 @@ mod tests {
 
     #[test]
     fn test_reload_wrong_key() {
-        // Need to use a seed because we can't clone a log config
         let mut log = TestLog::new();
         log.sequence_state = Some(
             block_on(SequenceState::load::<StaticCTLogEntry>(
