@@ -128,12 +128,9 @@ use std::{
     io::{Cursor, Read},
     marker::PhantomData,
 };
-use tlog_tiles::{Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, SequenceMetadata};
-
-/// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
-/// ignoring leap seconds, in milliseconds.
-/// This can be unsigned as we never deal with negative timestamps.
-pub type UnixTimestamp = u64;
+use tlog_tiles::{
+    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, SequenceMetadata, UnixTimestamp,
+};
 
 /// Calculates the log ID from a verifying key.
 ///

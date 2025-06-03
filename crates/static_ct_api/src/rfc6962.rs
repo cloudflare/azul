@@ -21,7 +21,7 @@
 //! - [cert_checker_test.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker_test.go)
 
 use crate::StaticCTError;
-use crate::{UnixTimestamp, ValidatedChain};
+use crate::ValidatedChain;
 use der::{
     asn1::{Null, OctetString},
     oid::{
@@ -33,6 +33,7 @@ use der::{
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
+use tlog_tiles::UnixTimestamp;
 use x509_util::CertPool;
 use x509_verify::{
     x509_cert::{
