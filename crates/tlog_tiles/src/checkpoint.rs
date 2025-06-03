@@ -30,7 +30,7 @@
 //! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
 
 use crate::tlog::Hash;
-use signed_note::{Signature as NoteSignature, SignerError, Verifier as NoteVerifier};
+use signed_note::{NoteError, Signature as NoteSignature, Verifier as NoteVerifier};
 use std::{
     fmt,
     io::{BufRead, Read},
@@ -282,11 +282,15 @@ pub trait CheckpointSigner {
     fn key_id(&self) -> u32;
 
     /// Signs a checkpoint using the given timestamp
+    ///
+    /// # Errors
+    ///
+    /// Errors if the signing fails.
     fn sign(
         &self,
         timestamp_unix_millis: u64,
         checkpoint: &Checkpoint,
-    ) -> Result<NoteSignature, SignerError>;
+    ) -> Result<NoteSignature, NoteError>;
 
     /// Returns the verifier for this signing object.
     // We unfortuantely need the return value to be a trait object because CheckpointSigner needs to

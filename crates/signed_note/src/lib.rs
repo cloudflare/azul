@@ -249,9 +249,12 @@ pub trait Verifier {
     /// Reports whether sig is a valid signature of msg.
     fn verify(&self, msg: &[u8], sig: &[u8]) -> bool;
 
-    /// Extracts a Unix timestamp in milliseconds from the given signature bytes, if defined. Errors if
-    /// the signature is malformed.
-    fn extract_timestamp_millis(&self, sig: &[u8]) -> Result<Option<u64>, ()>;
+    /// Extracts a Unix timestamp in milliseconds from the given signature bytes, if defined.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the signature is malformed.
+    fn extract_timestamp_millis(&self, sig: &[u8]) -> Result<Option<u64>, VerificationError>;
 }
 
 /// A Signer signs messages using a specific key.
@@ -279,8 +282,10 @@ pub fn key_id(name: &str, key: &[u8]) -> u32 {
     hasher.update(b"\n");
     hasher.update(key);
     let result = hasher.finalize();
+    let mut u32_bytes = [0u8; 4];
+    u32_bytes.copy_from_slice(&result[0..4]);
 
-    u32::from_be_bytes(result[0..4].try_into().unwrap())
+    u32::from_be_bytes(u32_bytes)
 }
 
 /// An error returned from the [`StandardVerifier::new`] function when
@@ -330,7 +335,7 @@ impl Verifier for StandardVerifier {
             .is_ok()
     }
 
-    fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, ()> {
+    fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, VerificationError> {
         // StandardVerifier (alg type 0x01) has no timestamp in the signature
         Ok(None)
     }
@@ -535,6 +540,8 @@ pub enum VerificationError {
     UnknownKey { name: String, id: u32 },
     #[error("ambiguous key {name}+{id:08x}")]
     AmbiguousKey { name: String, id: u32 },
+    #[error("malformed timestamp")]
+    Timestamp,
 }
 
 impl Verifiers for VerifierList {

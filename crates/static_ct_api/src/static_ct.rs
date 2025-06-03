@@ -121,8 +121,8 @@ use rand::{seq::SliceRandom, Rng};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, Signature as NoteSignature, SignerError, StandardVerifier, Verifier as NoteVerifier,
-    VerifierError, VerifierList, Verifiers,
+    Note, NoteError, Signature as NoteSignature, SignerError, StandardVerifier, VerificationError,
+    Verifier as NoteVerifier, VerifierError, VerifierList, Verifiers,
 };
 use std::{
     io::{Cursor, Read},
@@ -181,8 +181,12 @@ pub trait LogEntryTrait: core::fmt::Debug + Sized {
     /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
     fn tile_leaf(&self) -> Vec<u8>;
 
-    /// Attempts to parse a LogEntry from a cursor into a tile. The position of the cursor is
-    /// expected to be the beginning of an entry. On success, returns a log entry
+    /// Attempts to parse a `LogEntry` from a cursor into a tile. The position of the cursor is
+    /// expected to be the beginning of an entry. On success, returns a log entry.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the log entry cannot be parsed from the cursor.
     fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, Self::ParseError>;
 }
 
@@ -191,7 +195,7 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
     ///
     /// # Panics
     ///
-    /// Panics if there are errors writing to an internal buffer.
+    /// Panics if writing to an internal buffer fails, which should never happen.
     fn lookup_key(&self) -> LookupKey {
         let mut buffer = Vec::new();
         if self.is_precert {
@@ -226,7 +230,7 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
     }
 
     /// We don't have a canonical representation. Eg the type of the length prefix depends on
-    /// whether this is a precert. This is never used with GenericLogEntry so we can just not
+    /// whether this is a precert. This is never used with `GenericLogEntry` so we can just not
     /// implement it.
     fn as_bytes(&self) -> &[u8] {
         unimplemented!()
@@ -352,7 +356,7 @@ impl LogEntryTrait for StaticCTLogEntry {
         buffer
     }
 
-    /// Attempts to parse a LogEntry from a cursor into a tile. The position of the cursor is
+    /// Attempts to parse a `LogEntry` from a cursor into a tile. The position of the cursor is
     /// expected to be the beginning of an entry. On success, returns a log entry
     fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, StaticCTError> {
         // https://c2sp.org/static-ct-api#log-entries
@@ -570,7 +574,7 @@ impl TreeWithTimestamp {
         let sigs = signers
             .iter()
             .map(|s| s.sign(self.time, &checkpoint))
-            .collect::<Result<Vec<_>, SignerError>>()?;
+            .collect::<Result<Vec<_>, NoteError>>()?;
         // Generate some fake signatures as grease
         let grease_sigs = gen_grease_signatures(origin, rng);
 
@@ -589,6 +593,10 @@ pub struct StandardEd25519CheckpointSigner {
 
 impl StandardEd25519CheckpointSigner {
     /// Returns a new `Ed25519Signer`.
+    ///
+    /// # Errors
+    ///
+    /// Errors if a verifier cannot be created from the provided signing key.
     pub fn new(name: &str, k: Ed25519SigningKey) -> Result<Self, StaticCTError> {
         let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
         // Checks if the key name is valid
@@ -610,7 +618,7 @@ impl CheckpointSigner for StandardEd25519CheckpointSigner {
         &self,
         _timestamp_unix_millis: u64,
         checkpoint: &Checkpoint,
-    ) -> Result<NoteSignature, SignerError> {
+    ) -> Result<NoteSignature, NoteError> {
         let msg = checkpoint.to_bytes();
         // Ed25519 signing cannot fail
         let sig = self.k.try_sign(&msg).unwrap();
@@ -733,11 +741,11 @@ pub fn open_checkpoint(
 
         // Extract the timestamp if it's in the sig, and update the latest running timestamp
         let sig_timestamp = verif
-            .extract_timestamp_millis(&sig.signature())
+            .extract_timestamp_millis(sig.signature())
             .map_err(|_| StaticCTError::Malformed)?; // TODO: is this the right error?
-        sig_timestamp.map(|t| {
+        if let Some(t) = sig_timestamp {
             latest_timestamp = Some(core::cmp::max(latest_timestamp.unwrap_or(0), t));
-        });
+        }
     }
 
     // If we didn't see all the verifiers we wanted to see, error
@@ -854,12 +862,14 @@ impl NoteVerifier for RFC6962Verifier {
         self.verifying_key.verify(&sth_bytes, &sig).is_ok()
     }
 
-    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<u64>, ()> {
+    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<u64>, VerificationError> {
         // In a static-ct signed tree head, the timestamp is the first 8 bytes of the sig
         //   https://github.com/C2SP/C2SP/blob/efb68c16664309a68120e37528fa1c046dd1ac09/static-ct-api.md#checkpoints
         // and it's in milliseconds
         //   https://www.rfc-editor.org/rfc/rfc6962.html#section-3.2
-        let ts = sig.read_u64::<BigEndian>().map_err(|_| ())?;
+        let ts = sig
+            .read_u64::<BigEndian>()
+            .map_err(|_| VerificationError::Timestamp)?;
         Ok(Some(ts))
     }
 }
@@ -898,6 +908,10 @@ pub fn signed_certificate_timestamp(
 /// We use deterministic RFC 6979 ECDSA signatures so that when fetching a
 /// previous SCT's timestamp and index from the deduplication cache, the new SCT
 /// we produce is identical.
+///
+/// # Panics
+///
+/// Panics if writing to an internal buffer fails, which should never happen.
 pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     let sig: EcdsaSignature = signing_key.sign(msg);
     let sig_der = sig.to_der();
@@ -970,7 +984,7 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 ///
 /// # Panics
 ///
-/// Panics if writing to the internal buffer fails, which should never happen.
+/// Panics if writing to an internal buffer fails, which should never happen.
 fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Hash) -> Vec<u8> {
     let mut buffer = Vec::new();
 
@@ -996,12 +1010,17 @@ pub struct StaticCTCheckpointSigner {
 }
 
 impl StaticCTCheckpointSigner {
+    /// Returns a new signer for signing static-ct-api checkpoints.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the provided name is invalid.
     pub fn new(name: &str, signing_key: EcdsaSigningKey) -> Result<Self, SignerError> {
         // Reuse the verifier code. This compute the correct key ID
         let vk = signing_key.verifying_key();
         // This checks if the name is invalid. If it is, it returns VerifierError::Format. That's
-        // actually all it returns on error, so the map_err isn't losing any info
-        let verifier = RFC6962Verifier::new(&name, &vk).map_err(|_| SignerError::Format)?;
+        // actually all it returns on error, so the map_err isn't losing any info.
+        let verifier = RFC6962Verifier::new(name, vk).map_err(|_| SignerError::Format)?;
 
         Ok(Self {
             name: name.to_owned(),
@@ -1027,10 +1046,10 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
         &self,
         timestamp_unix_millis: u64,
         checkpoint: &Checkpoint,
-    ) -> Result<NoteSignature, SignerError> {
-        // RFC 6962-type signatures do not sign extension lines. If this checkpoint has extension lines, this is an error
+    ) -> Result<NoteSignature, NoteError> {
+        // RFC 6962-type signatures do not sign extension lines. If this checkpoint has extension lines, this is an error.
         if !checkpoint.extension().is_empty() {
-            return Err(SignerError::Format);
+            return Err(NoteError::MalformedNote);
         }
 
         // Produce the bytestring that will be signed
