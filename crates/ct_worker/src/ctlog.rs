@@ -73,8 +73,8 @@ impl LogConfig {
             name: self.name.clone(),
             origin: self.origin.clone(),
             checkpoint_signers: Vec::new(),
-            sequence_interval: self.sequence_interval.clone(),
-            max_pending_entry_holds: self.max_pending_entry_holds.clone(),
+            sequence_interval: self.sequence_interval,
+            max_pending_entry_holds: self.max_pending_entry_holds,
         }
     }
 }
@@ -108,10 +108,10 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
 impl<P: PendingLogEntryTrait> Default for PoolState<P> {
     fn default() -> Self {
         PoolState {
-            holds: 0,
-            pending_entries: Default::default(),
-            pending: Default::default(),
-            in_sequencing: Default::default(),
+            oldest_pending_entry_holds: 0,
+            pending_entries: Vec::default(),
+            pending_dedup: HashMap::default(),
+            in_sequencing_dedup: HashMap::default(),
         }
     }
 }
