@@ -9,7 +9,7 @@
 use crate::{get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::PendingLogEntry;
+use static_ct_api::{PendingLogEntryTrait, StaticCTPendingLogEntry};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -27,22 +27,35 @@ const MAX_BATCH_SIZE: usize = 100;
 // The maximum amount of time to wait before submitting a batch.
 const MAX_BATCH_TIMEOUT_MILLIS: u64 = 1_000;
 
-#[durable_object]
-struct Batcher {
+struct GenericBatcher<E: PendingLogEntryTrait> {
     env: Env,
-    batch: Batch,
+    batch: Batch<E>,
     in_flight: usize,
     processed: usize,
 }
 
+#[durable_object]
+struct Batcher(GenericBatcher<StaticCTPendingLogEntry>);
+
+#[durable_object]
+impl DurableObject for Batcher {
+    fn new(state: State, env: Env) -> Self {
+        Batcher(GenericBatcher::new(state, env))
+    }
+
+    async fn fetch(&mut self, req: Request) -> Result<Response> {
+        self.0.fetch(req).await
+    }
+}
+
 // A batch of entries to be submitted to the Sequencer together.
-struct Batch {
-    pending_leaves: Vec<PendingLogEntry>,
+struct Batch<E: PendingLogEntryTrait> {
+    pending_leaves: Vec<E>,
     by_hash: HashSet<LookupKey>,
     done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
 
-impl Default for Batch {
+impl<E: PendingLogEntryTrait> Default for Batch<E> {
     /// Returns a batch initialized with a watch channel.
     fn default() -> Self {
         let (done, _) = watch::channel(HashMap::new());
@@ -54,9 +67,8 @@ impl Default for Batch {
     }
 }
 
-#[durable_object]
-impl DurableObject for Batcher {
-    fn new(state: State, env: Env) -> Self {
+impl<E: PendingLogEntryTrait> GenericBatcher<E> {
+    fn new(_: State, env: Env) -> Self {
         Self {
             env,
             batch: Batch::default(),
@@ -68,7 +80,7 @@ impl DurableObject for Batcher {
         match req.path().as_str() {
             "/add_leaf" => {
                 let name = &req.query::<QueryParams>()?.name;
-                let entry: PendingLogEntry = req.json().await?;
+                let entry: E = req.json().await?;
                 let key = entry.lookup_key();
 
                 if self.in_flight >= MAX_IN_FLIGHT {
@@ -136,7 +148,7 @@ impl DurableObject for Batcher {
     }
 }
 
-impl Batcher {
+impl<E: PendingLogEntryTrait> GenericBatcher<E> {
     // Submit the current pending batch to be sequenced.
     async fn submit_batch(&mut self, name: &str) -> Result<()> {
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;

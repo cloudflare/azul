@@ -2166,6 +2166,7 @@ name = "signed_note"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "byteorder",
  "criterion",
  "ed25519-dalek",
  "rand",
@@ -2395,6 +2396,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "signed_note",
  "thiserror 2.0.12",
  "url",
 ]

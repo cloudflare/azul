@@ -30,6 +30,7 @@
 //! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
 
 use crate::tlog::Hash;
+use signed_note::{NoteError, Signature as NoteSignature, Verifier as NoteVerifier};
 use std::{
     fmt,
     io::{BufRead, Read},
@@ -269,6 +270,33 @@ impl Checkpoint {
         )
         .into()
     }
+}
+
+/// An object that can produce a [note signature](https://github.com/C2SP/C2SP/blob/main/signed-note.md) for a given checkpoint
+pub trait CheckpointSigner {
+    /// Returns the server name associated with the key.
+    /// The name must be non-empty and not have any Unicode spaces or pluses.
+    fn name(&self) -> &str;
+
+    /// Returns the key ID.
+    fn key_id(&self) -> u32;
+
+    /// Signs a checkpoint using the given timestamp
+    ///
+    /// # Errors
+    ///
+    /// Errors if the signing fails.
+    fn sign(
+        &self,
+        timestamp_unix_millis: u64,
+        checkpoint: &Checkpoint,
+    ) -> Result<NoteSignature, NoteError>;
+
+    /// Returns the verifier for this signing object.
+    // We unfortuantely need the return value to be a trait object because CheckpointSigner needs to
+    // be dyn-compatible, because we must be able to pass in a list of CheckpointSigners into
+    // log configs
+    fn verifier(&self) -> Box<dyn NoteVerifier>;
 }
 
 #[cfg(test)]

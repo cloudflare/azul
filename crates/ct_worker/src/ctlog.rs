@@ -24,13 +24,12 @@ use crate::{
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
 };
 use anyhow::{anyhow, bail};
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
-use p256::ecdsa::SigningKey as EcdsaSigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use static_ct_api::{LogEntry, PendingLogEntry, TileIterator, TreeWithTimestamp};
+use signed_note::{Verifier as NoteVerifier, VerifierList};
+use static_ct_api::{LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp};
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -38,7 +37,9 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
-use tlog_tiles::{Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE};
+use tlog_tiles::{
+    CheckpointSigner, Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE,
+};
 use tokio::sync::watch::{channel, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
@@ -54,14 +55,26 @@ const STAGING_KEY: &str = "staging";
 const MAX_POOL_SIZE: usize = 4000;
 
 /// Configuration for a CT log.
-#[derive(Clone)]
 pub(crate) struct LogConfig {
     pub(crate) name: String,
     pub(crate) origin: String,
-    pub(crate) signing_key: EcdsaSigningKey,
-    pub(crate) witness_key: Ed25519SigningKey,
+    pub(crate) checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     pub(crate) sequence_interval: Duration,
     pub(crate) max_pending_entry_holds: usize,
+}
+
+#[cfg(test)]
+impl LogConfig {
+    /// Clones all the elements of this config, except `self.checkpoint_signers`. Useful for testing
+    fn clone_without_signers(&self) -> Self {
+        LogConfig {
+            name: self.name.clone(),
+            origin: self.origin.clone(),
+            checkpoint_signers: Vec::new(),
+            sequence_interval: self.sequence_interval,
+            max_pending_entry_holds: self.max_pending_entry_holds,
+        }
+    }
 }
 
 /// Ephemeral state for pooling entries to the CT log.
@@ -74,14 +87,14 @@ pub(crate) struct LogConfig {
 /// already started sequencing, and that cache reads will see entries from older pools before
 /// they are rotated out of `in_sequencing`.
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
-#[derive(Default, Debug)]
-pub(crate) struct PoolState {
+#[derive(Debug)]
+pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     // How many times the oldest entry has been held back from sequencing.
     oldest_pending_entry_holds: usize,
 
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
-    pending_entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
+    pending_entries: Vec<(P, Sender<SequenceMetadata>)>,
 
     // Deduplication cache for entries currently pending sequencing.
     pending_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
@@ -90,7 +103,18 @@ pub(crate) struct PoolState {
     in_sequencing_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
 }
 
-impl PoolState {
+impl<P: PendingLogEntryTrait> Default for PoolState<P> {
+    fn default() -> Self {
+        PoolState {
+            oldest_pending_entry_holds: 0,
+            pending_entries: Vec::default(),
+            pending_dedup: HashMap::default(),
+            in_sequencing_dedup: HashMap::default(),
+        }
+    }
+}
+
+impl<E: PendingLogEntryTrait> PoolState<E> {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
@@ -110,7 +134,7 @@ impl PoolState {
         }
     }
     // Add a new entry to the pool.
-    fn add(&mut self, key: LookupKey, entry: PendingLogEntry) -> AddLeafResult {
+    fn add(&mut self, key: LookupKey, entry: E) -> AddLeafResult {
         if self.pending_entries.len() >= MAX_POOL_SIZE {
             return AddLeafResult::RateLimited;
         }
@@ -132,7 +156,7 @@ impl PoolState {
         &mut self,
         old_size: u64,
         max_pending_entry_holds: usize,
-    ) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
+    ) -> Vec<(E, Sender<SequenceMetadata>)> {
         let new_size = old_size + self.pending_entries.len() as u64;
         let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
 
@@ -239,13 +263,16 @@ pub(crate) async fn create_log(
 
     let timestamp = now_millis();
     let tree = TreeWithTimestamp::new(0, tlog_tiles::EMPTY_HASH, timestamp);
+
+    // Construct the checkpoint signers
+    let dyn_signers = config
+        .checkpoint_signers
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>();
+
     let sth = tree
-        .sign(
-            &config.origin,
-            &config.signing_key,
-            &config.witness_key,
-            &mut rand::thread_rng(),
-        )
+        .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
@@ -265,7 +292,7 @@ impl SequenceState {
     /// and when reloading (e.g., to recover after a fatal sequencing error).
     ///
     /// This will return an error if the log has not been created, or if recovery fails.
-    pub(crate) async fn load(
+    pub(crate) async fn load<L: LogEntryTrait>(
         config: &LogConfig,
         object: &impl ObjectBackend,
         lock: &impl LockBackend,
@@ -278,13 +305,26 @@ impl SequenceState {
             "{name}: Loaded checkpoint; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
+
+        // Construct the VerifierList containing the signing and witness pubkeys
+        let verifiers = {
+            let vs: Vec<Box<dyn NoteVerifier>> = config
+                .checkpoint_signers
+                .iter()
+                .map(|s| s.verifier())
+                .collect();
+            VerifierList::new(vs)
+        };
+
         let (c, timestamp) = static_ct_api::open_checkpoint(
             &config.origin,
-            config.signing_key.verifying_key(),
-            &config.witness_key.verifying_key(),
+            &verifiers,
             now_millis(),
             &stored_checkpoint,
         )?;
+        // TODO: This is guaranteed to succeed right now bc we've hardcoded the verifier types. But
+        // this won't in general. Make an error type for this
+        let timestamp = timestamp.expect("no verifiers with timestamped signatures were used");
 
         // Load the checkpoint from the object storage backend, verify it, and compare it to the
         // DO storage checkpoint.
@@ -296,13 +336,8 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) = static_ct_api::open_checkpoint(
-            &config.origin,
-            config.signing_key.verifying_key(),
-            &config.witness_key.verifying_key(),
-            now_millis(),
-            &sth,
-        )?;
+        let (c1, _) =
+            static_ct_api::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
@@ -350,7 +385,7 @@ impl SequenceState {
 
             // Verify the data tile against the level 0 tile.
             let start = u64::from(TlogTile::FULL_WIDTH) * data_tile.tile.level_index();
-            for (i, entry) in TileIterator::new(
+            for (i, entry) in TileIterator::<L>::new(
                 edge_tiles.get(&DATA_TILE_KEY).unwrap().b.clone(),
                 data_tile.tile.width() as usize,
             )
@@ -441,10 +476,10 @@ pub(crate) enum PendingSource {
 /// with a [`AddLeafResult::Cached`]. If the pool is full, return
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
-pub(crate) fn add_leaf_to_pool(
-    state: &mut PoolState,
+pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
+    state: &mut PoolState<E>,
     cache: &impl CacheRead,
-    entry: PendingLogEntry,
+    entry: E,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
 
@@ -502,8 +537,8 @@ pub(crate) async fn upload_issuers(
 }
 
 /// Sequences the current pool of pending entries in the ephemeral state.
-pub(crate) async fn sequence(
-    pool_state: &mut PoolState,
+pub(crate) async fn sequence<L: LogEntryTrait>(
+    pool_state: &mut PoolState<L::Pending>,
     sequence_state: &mut Option<SequenceState>,
     config: &LogConfig,
     object: &impl ObjectBackend,
@@ -515,7 +550,7 @@ pub(crate) async fn sequence(
     let old = if let Some(s) = sequence_state {
         s
     } else {
-        match SequenceState::load(config, object, lock).await {
+        match SequenceState::load::<L>(config, object, lock).await {
             Ok(s) => sequence_state.insert(s),
             Err(e) => {
                 metrics.seq_count.with_label_values(&["fatal"]).inc();
@@ -528,25 +563,26 @@ pub(crate) async fn sequence(
     let entries = pool_state.take(old.tree.size(), config.max_pending_entry_holds);
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
-    let result = match sequence_entries(old, config, object, lock, cache, entries, metrics).await {
-        Ok(()) => {
-            metrics.seq_count.with_label_values(&[""]).inc();
-            Ok(())
-        }
-        Err(SequenceError::Fatal(e)) => {
-            // Clear ephemeral sequencing state, as it may no longer be valid.
-            // It will be loaded again the next time sequence is called.
-            metrics.seq_count.with_label_values(&["fatal"]).inc();
-            error!("{}: Fatal sequencing error {e}", config.name);
-            *sequence_state = None;
-            Err(anyhow!(e))
-        }
-        Err(SequenceError::NonFatal(e)) => {
-            metrics.seq_count.with_label_values(&["non-fatal"]).inc();
-            error!("{}: Non-fatal sequencing error {e}", config.name);
-            Ok(())
-        }
-    };
+    let result =
+        match sequence_entries::<L>(old, config, object, lock, cache, entries, metrics).await {
+            Ok(()) => {
+                metrics.seq_count.with_label_values(&[""]).inc();
+                Ok(())
+            }
+            Err(SequenceError::Fatal(e)) => {
+                // Clear ephemeral sequencing state, as it may no longer be valid.
+                // It will be loaded again the next time sequence is called.
+                metrics.seq_count.with_label_values(&["fatal"]).inc();
+                error!("{}: Fatal sequencing error {e}", config.name);
+                *sequence_state = None;
+                Err(anyhow!(e))
+            }
+            Err(SequenceError::NonFatal(e)) => {
+                metrics.seq_count.with_label_values(&["non-fatal"]).inc();
+                error!("{}: Non-fatal sequencing error {e}", config.name);
+                Ok(())
+            }
+        };
 
     // Once [`sequence_entries`] returns, the entries are either in the deduplication
     // cache or finalized with an error. In the latter case, we don't want
@@ -570,13 +606,13 @@ enum SequenceError {
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
-async fn sequence_entries(
+async fn sequence_entries<L: LogEntryTrait>(
     sequence_state: &mut SequenceState,
     config: &LogConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &mut impl CacheWrite,
-    entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>,
+    entries: Vec<(L::Pending, Sender<SequenceMetadata>)>,
     metrics: &Metrics,
 ) -> Result<(), SequenceError> {
     let name = &config.name;
@@ -596,15 +632,16 @@ async fn sequence_entries(
     }
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let mut sequenced_entries: Vec<LogEntry> = Vec::with_capacity(entries.len());
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
+    let mut cache_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        let sequenced_entry = LogEntry {
-            inner: entry,
-            leaf_index: n,
-            timestamp,
-        };
+        // Add the entry and metadata to our lists of things sequenced
+        let metadata = (n, timestamp);
+        cache_metadata.push((entry.lookup_key(), metadata));
+        sequenced_metadata.push((sender, metadata));
+
+        let sequenced_entry = L::new(entry, metadata);
         let tile_leaf = sequenced_entry.tile_leaf();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
@@ -639,12 +676,6 @@ async fn sequence_entries(
             metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
             data_tile.clear();
         }
-
-        sequenced_metadata.push((
-            sender,
-            (sequenced_entry.leaf_index, sequenced_entry.timestamp),
-        ));
-        sequenced_entries.push(sequenced_entry);
     }
 
     // Stage leftover partial data tile, if any.
@@ -708,13 +739,15 @@ async fn sequence_entries(
         .await
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
+    // Make references to all the signer objects
+    let dyn_signers = config
+        .checkpoint_signers
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>();
+
     let new_checkpoint = tree
-        .sign(
-            &config.origin,
-            &config.signing_key,
-            &config.witness_key,
-            &mut rand::thread_rng(),
-        )
+        .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
 
     // This is a critical error, since we don't know the state of the
@@ -768,23 +801,10 @@ async fn sequence_entries(
     // only consequence of cache false negatives are duplicated leaves anyway. In fact, an
     // error might cause the clients to resubmit, producing more cache false negatives and
     // duplicates.
-    if let Err(e) = cache
-        .put_entries(
-            &sequenced_entries
-                .iter()
-                .map(|entry| {
-                    (
-                        entry.inner.lookup_key(),
-                        (entry.leaf_index, entry.timestamp),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .await
-    {
+    if let Err(e) = cache.put_entries(&cache_metadata).await {
         warn!(
             "{name}: Cache put failed (entries={}): {e}",
-            sequenced_entries.len()
+            cache_metadata.len()
         );
     }
 
@@ -1117,14 +1137,17 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
 mod tests {
     use super::*;
     use crate::{util, LookupKey, SequenceMetadata};
+    use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use futures_executor::block_on;
     use itertools::Itertools;
+    use p256::ecdsa::SigningKey as EcdsaSigningKey;
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::RFC6962Verifier;
+    use static_ct_api::{StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
+    use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
 
@@ -1166,7 +1189,7 @@ mod tests {
         for i in 0..500_u64 {
             for k in 0..3000_u64 {
                 let certificate = (i * 3000 + k).to_be_bytes().to_vec();
-                let leaf = PendingLogEntry {
+                let leaf = StaticCTPendingLogEntry {
                     certificate,
                     ..Default::default()
                 };
@@ -1383,8 +1406,14 @@ mod tests {
             log.sequence().unwrap();
             log.check(i + 1);
 
-            log.sequence_state =
-                Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+            log.sequence_state = Some(
+                block_on(SequenceState::load::<StaticCTLogEntry>(
+                    &log.config,
+                    &log.object,
+                    &log.lock,
+                ))
+                .unwrap(),
+            );
             log.sequence().unwrap();
             log.check(i + 1);
         }
@@ -1393,27 +1422,62 @@ mod tests {
     #[test]
     fn test_reload_wrong_origin() {
         let mut log = TestLog::new();
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
 
-        let mut c = log.config.clone();
-        c.origin = "wrong".to_string();
-        block_on(SequenceState::load(&c, &log.object, &log.lock)).unwrap_err();
+        log.config.origin = "wrong".to_string();
+        block_on(SequenceState::load::<StaticCTLogEntry>(
+            &log.config,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
     }
 
     #[test]
     fn test_reload_wrong_key() {
         let mut log = TestLog::new();
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
 
-        let mut c = log.config.clone();
-        c.signing_key = EcdsaSigningKey::random(&mut OsRng);
-        block_on(SequenceState::load(&c, &log.object, &log.lock)).unwrap_err();
+        // Try to load the checkpoint with two randomly generated checkpoint signers. These should fail
 
-        c = log.config.clone();
-        c.witness_key = Ed25519SigningKey::generate(&mut OsRng);
-        block_on(SequenceState::load(&c, &log.object, &log.lock)).unwrap_err();
+        let mut c = log.config.clone_without_signers();
+        let checkpoint_signer =
+            StaticCTCheckpointSigner::new(&c.origin, EcdsaSigningKey::random(&mut OsRng)).unwrap();
+        c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
+        block_on(SequenceState::load::<StaticCTLogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
+
+        let mut c = log.config.clone_without_signers();
+        let checkpoint_signer = StandardEd25519CheckpointSigner::new(
+            &c.origin,
+            Ed25519SigningKey::generate(&mut OsRng),
+        )
+        .unwrap();
+        c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
+        block_on(SequenceState::load::<StaticCTLogEntry>(
+            &c,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap_err();
     }
 
     #[test]
@@ -1437,8 +1501,14 @@ mod tests {
         log.check(1);
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
         log.check(1);
 
         // First, cause the exact same staging bundle to be uploaded.
@@ -1491,8 +1561,14 @@ mod tests {
         log.check(2);
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
-        log.sequence_state =
-            Some(block_on(SequenceState::load(&log.config, &log.object, &log.lock)).unwrap());
+        log.sequence_state = Some(
+            block_on(SequenceState::load::<StaticCTLogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap(),
+        );
         log.add_certificate();
         log.sequence().unwrap();
         log.check(3);
@@ -1569,8 +1645,12 @@ mod tests {
                                 *log.lock.mode.borrow_mut() = StorageMode::Ok;
                             }
                             log.sequence_state = Some(
-                                block_on(SequenceState::load(&log.config, &log.object, &log.lock))
-                                    .unwrap(),
+                                block_on(SequenceState::load::<StaticCTLogEntry>(
+                                    &log.config,
+                                    &log.object,
+                                    &log.lock,
+                                ))
+                                .unwrap(),
                             );
                             if broken {
                                 *log.object.mode.borrow_mut() = $object_mode;
@@ -1909,7 +1989,7 @@ mod tests {
 
     struct TestLog {
         config: LogConfig,
-        pool_state: PoolState,
+        pool_state: PoolState<StaticCTPendingLogEntry>,
         sequence_state: Option<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
@@ -1919,14 +1999,30 @@ mod tests {
 
     impl TestLog {
         fn new() -> Self {
+            let mut rng = OsRng;
+
             let cache = TestCacheBackend(HashMap::new());
             let object = TestObjectBackend::new();
             let lock = TestLockBackend::new();
+            let origin = "example.com/TestLog".to_string();
+
+            // Generate two signing keys
+            let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
+                let signer =
+                    StaticCTCheckpointSigner::new(&origin, EcdsaSigningKey::random(&mut rng))
+                        .unwrap();
+                let witness = StandardEd25519CheckpointSigner::new(
+                    &origin,
+                    Ed25519SigningKey::generate(&mut rng),
+                )
+                .unwrap();
+                vec![Box::new(signer), Box::new(witness)]
+            };
+
             let config = LogConfig {
                 name: "TestLog".to_string(),
-                origin: "example.com/TestLog".to_string(),
-                witness_key: Ed25519SigningKey::generate(&mut OsRng),
-                signing_key: EcdsaSigningKey::random(&mut OsRng),
+                origin,
+                checkpoint_signers,
                 sequence_interval: Duration::from_secs(1),
                 max_pending_entry_holds: 0,
             };
@@ -1944,7 +2040,7 @@ mod tests {
             }
         }
         fn sequence(&mut self) -> Result<(), anyhow::Error> {
-            block_on(sequence(
+            block_on(sequence::<StaticCTLogEntry>(
                 &mut self.pool_state,
                 &mut self.sequence_state,
                 &self.config,
@@ -1954,23 +2050,29 @@ mod tests {
                 &self.metrics,
             ))
         }
-        fn sequence_start(&mut self) -> Vec<(PendingLogEntry, Sender<SequenceMetadata>)> {
-            let sequence_state: &mut SequenceState = if let Some(state) =
-                self.sequence_state.as_mut()
-            {
-                state
-            } else {
-                let state =
-                    block_on(SequenceState::load(&self.config, &self.object, &self.lock)).unwrap();
-                self.sequence_state.insert(state)
-            };
+        fn sequence_start(&mut self) -> Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)> {
+            let sequence_state: &mut SequenceState =
+                if let Some(state) = self.sequence_state.as_mut() {
+                    state
+                } else {
+                    let state = block_on(SequenceState::load::<StaticCTLogEntry>(
+                        &self.config,
+                        &self.object,
+                        &self.lock,
+                    ))
+                    .unwrap();
+                    self.sequence_state.insert(state)
+                };
             self.pool_state.take(
                 sequence_state.tree.size(),
                 self.config.max_pending_entry_holds,
             )
         }
-        fn sequence_finish(&mut self, entries: Vec<(PendingLogEntry, Sender<SequenceMetadata>)>) {
-            block_on(sequence_entries(
+        fn sequence_finish(
+            &mut self,
+            entries: Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)>,
+        ) {
+            block_on(sequence_entries::<StaticCTLogEntry>(
                 self.sequence_state.as_mut().unwrap(),
                 &self.config,
                 &self.object,
@@ -2005,7 +2107,7 @@ mod tests {
                 pre_certificate = Vec::new();
             }
             let issuers = CHAINS[rng.gen_range(0..CHAINS.len())];
-            let leaf = PendingLogEntry {
+            let leaf = StaticCTPendingLogEntry {
                 certificate,
                 pre_certificate,
                 is_precert,
@@ -2023,18 +2125,17 @@ mod tests {
                 .unwrap()
                 .ok_or(anyhow!("no checkpoint in object storage"))
                 .unwrap();
-            let v = RFC6962Verifier::new(
-                "example.com/TestLog",
-                self.config.signing_key.verifying_key(),
-            )
-            .unwrap();
+            let first_signer = &self.config.checkpoint_signers[0];
             let n = Note::from_bytes(&sth).unwrap();
             let (verified_sigs, _) = n
-                .verify(&VerifierList::new(vec![Box::new(v.clone())]))
+                .verify(&VerifierList::new(vec![first_signer.verifier()]))
                 .unwrap();
             assert_eq!(verified_sigs.len(), 1);
-            let sth_timestamp =
-                static_ct_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
+            let sth_timestamp = first_signer
+                .verifier()
+                .extract_timestamp_millis(verified_sigs[0].signature())
+                .unwrap()
+                .unwrap();
 
             let c = Checkpoint::from_bytes(n.text()).unwrap();
 
@@ -2043,18 +2144,17 @@ mod tests {
 
             {
                 let sth: Vec<u8> = block_on(self.lock.get(CHECKPOINT_KEY)).unwrap();
-                let v = RFC6962Verifier::new(
-                    "example.com/TestLog",
-                    self.config.signing_key.verifying_key(),
-                )
-                .unwrap();
+                let first_signer = &self.config.checkpoint_signers[0];
                 let n = Note::from_bytes(&sth).unwrap();
                 let (verified_sigs, _) = n
-                    .verify(&VerifierList::new(vec![Box::new(v.clone())]))
+                    .verify(&VerifierList::new(vec![first_signer.verifier()]))
                     .unwrap();
                 assert_eq!(verified_sigs.len(), 1);
-                let sth_timestamp1 =
-                    static_ct_api::rfc6962_signature_timestamp(&verified_sigs[0]).unwrap();
+                let sth_timestamp1 = first_signer
+                    .verifier()
+                    .extract_timestamp_millis(verified_sigs[0].signature())
+                    .unwrap()
+                    .unwrap();
                 let c1 = Checkpoint::from_bytes(n.text()).unwrap();
 
                 assert_eq!(c1.origin(), c.origin());
@@ -2089,7 +2189,7 @@ mod tests {
                 } else {
                     TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(PathElem::Data))
                 };
-                for (i, entry) in TileIterator::new(
+                for (i, entry) in TileIterator::<StaticCTLogEntry>::new(
                     block_on(self.object.fetch(&tile.path())).unwrap().unwrap(),
                     tile.width() as usize,
                 )
