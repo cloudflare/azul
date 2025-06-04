@@ -124,12 +124,6 @@ impl Tile {
         self.data_path_opt.is_some()
     }
 
-    /// Sets `data_path_opt` to convert the tile to a data tile, where `path`
-    /// determines the path element to use when encoding the tile path.
-    pub fn set_data_with_path(&mut self, path: PathElem) {
-        self.data_path_opt = Some(path);
-    }
-
     /// Returns the coordinates of the tiles of height `h ≥ 1` that must be published when publishing
     /// from a tree of size `new_tree_size` to replace a tree of size `old_tree_size`.  (No tiles need
     /// to be published for a tree of size zero.)
@@ -470,6 +464,17 @@ impl TlogTile {
     /// parent, returns None.
     pub fn parent(&self, k: u8, n: u64) -> Option<Self> {
         self.0.parent(k, n).map(Self)
+    }
+
+    #[must_use]
+    pub fn with_data_path(&self, path: PathElem) -> Self {
+        Self(Tile {
+            l: self.0.l,
+            h: self.0.h,
+            n: self.0.n,
+            w: self.0.w,
+            data_path_opt: Some(path),
+        })
     }
 }
 
