@@ -8,7 +8,7 @@ pub mod batcher_do;
 pub mod ctlog;
 mod metrics;
 pub mod sequencer_do;
-mod util;
+pub mod util;
 
 pub use batcher_do::*;
 pub use sequencer_do::*;
@@ -123,13 +123,13 @@ pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
     env.kv(&format!("cache_{name}"))
 }
 
-/// Given a pending entry, returns the corresponding log entry from the dedup
+/// Given a pending entry, returns the corresponding metadata from the dedup
 /// cache, if it exists
-pub async fn get_cached_entry<L: LogEntry>(
+pub async fn get_cached_metadata<L: LogEntry>(
     kv: &KvStore,
     pending: &L::Pending,
     enable_dedup: bool,
-) -> Result<Option<L>> {
+) -> Result<Option<SequenceMetadata>> {
     if enable_dedup {
         let lookup_key = pending.lookup_key();
 
@@ -139,7 +139,7 @@ pub async fn get_cached_entry<L: LogEntry>(
             .bytes_with_metadata::<SequenceMetadata>()
             .await?
             .1;
-        Ok(value_opt.map(|e| L::new(pending.clone(), e)))
+        Ok(value_opt)
     } else {
         Ok(None)
     }

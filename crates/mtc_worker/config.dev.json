@@ -1,0 +1,17 @@
+{
+    "logging_level": "info",
+    "logs": {
+        "dev1": {
+            "description": "MTCA Dev1",
+            "issuer_rdn": "CN=dev1",
+            "submission_url": "http://localhost:8787/logs/dev1/",
+            "location_hint": "enam"
+        },
+        "dev2": {
+            "description": "MTCA Dev2",
+            "issuer_rdn": "CN=dev2",
+            "submission_url": "http://localhost:8787/logs/dev2/",
+            "location_hint": "enam"
+        }
+    }
+}

@@ -123,7 +123,7 @@ use signed_note::{
 };
 use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PendingLogEntry,
+    Checkpoint, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PathElem, PendingLogEntry,
     SequenceMetadata, UnixTimestamp,
 };
 
@@ -160,6 +160,18 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
 }
 
 impl PendingLogEntry for StaticCTPendingLogEntry {
+    /// The data tile path in static-ct-api is 'data'.
+    const DATA_TILE_PATH: PathElem = PathElem::Data;
+
+    /// No unhashed data published in static-ct-api. (Rather, the unhashed
+    /// `chain_fingerprints` is included in the data tile directly.)
+    const UNHASHED_TILE_PATH: Option<PathElem> = None;
+
+    /// Unused in static-ct-api.
+    fn unhashed_entry(&self) -> &[u8] {
+        unimplemented!()
+    }
+
     /// Compute the cache key for a pending log entry.
     ///
     /// # Panics
@@ -192,14 +204,6 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
         cache_hash.copy_from_slice(&hash[..16]);
 
         cache_hash
-    }
-
-    fn logging_labels(&self) -> Vec<String> {
-        if self.precert_opt.is_some() {
-            vec!["add-pre-chain".to_string()]
-        } else {
-            vec!["add-chain".to_string()]
-        }
     }
 }
 
@@ -276,6 +280,7 @@ impl StaticCTLogEntry {
 }
 
 impl LogEntry for StaticCTLogEntry {
+    const REQUIRE_CHECKPOINT_TIMESTAMP: bool = true;
     type Pending = StaticCTPendingLogEntry;
 
     // The error type for parse_from_tile_entry
@@ -287,10 +292,6 @@ impl LogEntry for StaticCTLogEntry {
             leaf_index: metadata.0,
             timestamp: metadata.1,
         }
-    }
-
-    fn inner(&self) -> &StaticCTPendingLogEntry {
-        &self.inner
     }
 
     /// Returns the Merkle tree leaf hash of a [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).

@@ -10,8 +10,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Returns the current Unix timestamp at millisecond precision.
 #[cfg(not(test))]
-pub(crate) fn now_millis() -> u64 {
+pub fn now_millis() -> u64 {
     worker::Date::now().as_millis()
+}
+#[cfg(test)]
+pub fn now_millis() -> u64 {
+    let _lock = TIME_MUX.lock();
+    if FREEZE_TIME.load(Ordering::Relaxed) {
+        GLOBAL_TIME.load(Ordering::Relaxed)
+    } else {
+        GLOBAL_TIME.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -31,14 +40,4 @@ pub(crate) fn set_freeze_time(b: bool) {
 #[cfg(test)]
 pub(crate) fn set_global_time(time: u64) {
     GLOBAL_TIME.store(time, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn now_millis() -> u64 {
-    let _lock = TIME_MUX.lock();
-    if FREEZE_TIME.load(Ordering::Relaxed) {
-        GLOBAL_TIME.load(Ordering::Relaxed)
-    } else {
-        GLOBAL_TIME.fetch_add(1, Ordering::Relaxed)
-    }
 }

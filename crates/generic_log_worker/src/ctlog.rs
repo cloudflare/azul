@@ -36,14 +36,16 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator, TlogError, TlogTile,
+    Hash, HashReader, LogEntry, PendingLogEntry, Tile, TileIterator, TlogError, TlogTile,
     TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
-const DATA_TILE_KEY: u8 = u8::MAX;
+const DATA_TILE_LEVEL_KEY: u8 = u8::MAX;
+/// Same as above, anything above 63 is fine to use as the level key.
+const UNHASHED_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
 const CHECKPOINT_KEY: &str = "checkpoint";
 const STAGING_KEY: &str = "staging";
 
@@ -323,9 +325,13 @@ impl SequenceState {
             "unexpected extension in DO checkpoint"
         );
 
-        // TODO: This is guaranteed to succeed right now bc we've hardcoded the verifier types. But
-        // this won't in general. Make an error type for this
-        let timestamp = timestamp.expect("no verifiers with timestamped signatures were used");
+        let timestamp = match timestamp {
+            Some(timestamp) => timestamp,
+            None if L::REQUIRE_CHECKPOINT_TIMESTAMP => {
+                bail!("no verifiers with timestamped signatures were used")
+            }
+            _ => 0,
+        };
 
         // Load the checkpoint from the object storage backend, verify it, and compare it to the
         // DO storage checkpoint.
@@ -372,33 +378,29 @@ impl SequenceState {
         // Fetch the tiles on the right edge, and verify them against the checkpoint.
         let mut edge_tiles = HashMap::new();
         if c.size() > 0 {
-            // Fetch the right-most edge tiles by reading the last leaf. TileHashReader will fetch
+            // Fetch the right-most tree tiles by reading the last leaf. TileHashReader will fetch
             // and verify the right tiles as a side-effect.
             edge_tiles = read_edge_tiles(object, c.size(), c.hash()).await?;
 
             // Fetch the right-most data tile.
-            let mut data_tile = edge_tiles
-                .get(&0)
-                .ok_or(anyhow!("no level 0 tile found"))?
-                .clone();
-            data_tile.tile.set_data_with_path(PathElem::Data);
-            data_tile.b = object
-                .fetch(&data_tile.tile.path())
+            let (level0_tile, level0_tile_bytes) = {
+                let x = edge_tiles.get(&0).ok_or(anyhow!("no level 0 tile found"))?;
+                (x.tile, &x.b)
+            };
+            let data_tile = level0_tile.with_data_path(L::Pending::DATA_TILE_PATH);
+            let data_tile_bytes = object
+                .fetch(&data_tile.path())
                 .await?
                 .ok_or(anyhow!("no data tile in object storage"))?;
-            edge_tiles.insert(DATA_TILE_KEY, data_tile.clone());
 
             // Verify the data tile against the level 0 tile.
-            let start = u64::from(TlogTile::FULL_WIDTH) * data_tile.tile.level_index();
-            for (i, entry) in TileIterator::<L>::new(
-                edge_tiles.get(&DATA_TILE_KEY).unwrap().b.clone(),
-                data_tile.tile.width() as usize,
-            )
-            .enumerate()
+            let start = u64::from(TlogTile::FULL_WIDTH) * data_tile.level_index();
+            for (i, entry) in
+                TileIterator::<L>::new(&data_tile_bytes, data_tile.width() as usize).enumerate()
             {
                 let got = entry?.merkle_tree_leaf();
-                let exp = edge_tiles.get(&0).unwrap().tile.hash_at_index(
-                    &edge_tiles.get(&0).unwrap().b,
+                let exp = level0_tile.hash_at_index(
+                    level0_tile_bytes,
                     tlog_tiles::stored_hash_index(0, start + i as u64),
                 )?;
                 if got != exp {
@@ -407,6 +409,32 @@ impl SequenceState {
                         start + i as u64,
                     );
                 }
+            }
+
+            // Store the data tile.
+            edge_tiles.insert(
+                DATA_TILE_LEVEL_KEY,
+                TileWithBytes {
+                    tile: data_tile,
+                    b: data_tile_bytes,
+                },
+            );
+
+            // Fetch and store the right-most unhashed tile, if configured.
+            if let Some(path_elem) = L::Pending::UNHASHED_TILE_PATH {
+                let unhashed_tile = level0_tile.with_data_path(path_elem);
+                let unhashed_tile_bytes = object
+                    .fetch(&unhashed_tile.path())
+                    .await?
+                    .ok_or(anyhow!("no unhashed tile in object storage"))?;
+
+                edge_tiles.insert(
+                    UNHASHED_TILE_LEVEL_KEY,
+                    TileWithBytes {
+                        tile: unhashed_tile,
+                        b: unhashed_tile_bytes,
+                    },
+                );
             }
         }
 
@@ -601,12 +629,23 @@ async fn sequence_entries<L: LogEntry>(
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
     let mut edge_tiles = sequence_state.edge_tiles.clone();
-    let mut data_tile: Vec<u8> = Vec::new();
-    if let Some(t) = edge_tiles.get(&DATA_TILE_KEY) {
+    let mut data_tile = Vec::new();
+    if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY) {
         if t.tile.width() < TlogTile::FULL_WIDTH {
             data_tile.clone_from(&t.b);
         }
     }
+
+    // Load the current partial unhashed tile, if configured.
+    let mut unhashed_tile = Vec::new();
+    if L::Pending::UNHASHED_TILE_PATH.is_some() {
+        if let Some(t) = edge_tiles.get(&UNHASHED_TILE_LEVEL_KEY) {
+            if t.tile.width() < TlogTile::FULL_WIDTH {
+                unhashed_tile.clone_from(&t.b);
+            }
+        }
+    }
+
     let mut overlay = HashMap::new();
     let mut n = old_size;
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
@@ -617,6 +656,11 @@ async fn sequence_entries<L: LogEntry>(
         let metadata = (n, timestamp);
         cache_metadata.push((entry.lookup_key(), metadata));
         sequenced_metadata.push((sender, metadata));
+
+        // Write to the unhashed tile, if configured.
+        if L::Pending::UNHASHED_TILE_PATH.is_some() {
+            unhashed_tile.extend(entry.unhashed_entry());
+        }
 
         let sequenced_entry = L::new(entry, metadata);
         let tile_leaf = sequenced_entry.to_data_tile_entry();
@@ -649,22 +693,33 @@ async fn sequence_entries<L: LogEntry>(
 
         // If the data tile is full, stage it.
         if n % u64::from(TlogTile::FULL_WIDTH) == 0 {
-            stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
             metrics
                 .seq_data_tile_size
                 .with_label_values(&["full"])
                 .observe(data_tile.len().as_f64());
-            data_tile.clear();
+            stage_data_tile::<L>(
+                n,
+                &mut edge_tiles,
+                &mut tile_uploads,
+                std::mem::take(&mut data_tile),
+                std::mem::take(&mut unhashed_tile),
+            );
         }
     }
 
     // Stage leftover partial data tile, if any.
     if n != old_size && n % u64::from(TlogTile::FULL_WIDTH) != 0 {
-        stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
         metrics
             .seq_data_tile_size
             .with_label_values(&["partial"])
             .observe(data_tile.len().as_f64());
+        stage_data_tile::<L>(
+            n,
+            &mut edge_tiles,
+            &mut tile_uploads,
+            std::mem::take(&mut data_tile),
+            std::mem::take(&mut unhashed_tile),
+        );
     }
 
     // Produce and stage new tree tiles.
@@ -815,28 +870,45 @@ async fn sequence_entries<L: LogEntry>(
     Ok(())
 }
 
-// Stage a data tile. This is used as a helper function for [`sequence_entries`].
-fn stage_data_tile(
+// Stage a data tile, and if configured an unhashed tile.
+// This is used as a helper function for [`sequence_entries`].
+fn stage_data_tile<L: LogEntry>(
     n: u64,
     edge_tiles: &mut HashMap<u8, TileWithBytes>,
     tile_uploads: &mut Vec<UploadAction>,
-    data_tile: &[u8],
+    data_tile: Vec<u8>,
+    unhashed_tile: Vec<u8>,
 ) {
-    let mut tile = TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1));
-    tile.set_data_with_path(PathElem::Data);
+    let tile = TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1))
+        .with_data_path(L::Pending::DATA_TILE_PATH);
     edge_tiles.insert(
-        DATA_TILE_KEY,
+        DATA_TILE_LEVEL_KEY,
         TileWithBytes {
             tile,
-            b: data_tile.to_owned(),
+            b: data_tile.clone(),
         },
     );
-    let action = UploadAction {
+    tile_uploads.push(UploadAction {
         key: tile.path(),
-        data: data_tile.to_owned(),
+        data: data_tile,
         opts: OPTS_DATA_TILE.clone(),
-    };
-    tile_uploads.push(action);
+    });
+    if let Some(path_elem) = L::Pending::UNHASHED_TILE_PATH {
+        let tile =
+            TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1)).with_data_path(path_elem);
+        edge_tiles.insert(
+            UNHASHED_TILE_LEVEL_KEY,
+            TileWithBytes {
+                tile,
+                b: unhashed_tile.clone(),
+            },
+        );
+        tile_uploads.push(UploadAction {
+            key: tile.path(),
+            data: unhashed_tile,
+            opts: OPTS_DATA_TILE.clone(),
+        });
+    }
 }
 
 /// Applies previously-staged uploads to the object backend where contents can be retrieved by log clients.
@@ -2224,17 +2296,22 @@ mod tests {
             let leaf_hashes = read_tile_hashes(&self.object, c.size(), c.hash(), &indexes)
                 .map_err(|e| anyhow!(e))?;
 
-            let mut last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1));
-            last_tile.set_data_with_path(PathElem::Data);
+            let last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1))
+                .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
 
             for n in 0..last_tile.level_index() {
                 let tile = if n == last_tile.level_index() {
                     last_tile
                 } else {
-                    TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(PathElem::Data))
+                    TlogTile::new(
+                        0,
+                        n,
+                        TlogTile::FULL_WIDTH,
+                        Some(StaticCTPendingLogEntry::DATA_TILE_PATH),
+                    )
                 };
                 for (i, entry) in TileIterator::<StaticCTLogEntry>::new(
-                    block_on(self.object.fetch(&tile.path()))
+                    &block_on(self.object.fetch(&tile.path()))
                         .map_err(|e| anyhow!(e))?
                         .unwrap(),
                     tile.width() as usize,

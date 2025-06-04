@@ -201,7 +201,6 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());
         for pending_entry in pending_entries {
-            let mut logging_labels = pending_entry.logging_labels();
             lookup_keys.push(pending_entry.lookup_key());
 
             let add_leaf_result = ctlog::add_leaf_to_pool(
@@ -211,10 +210,9 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
                 pending_entry,
             );
 
-            logging_labels.push(add_leaf_result.source().to_string());
             self.metrics
                 .entry_count
-                .with_label_values(&logging_labels)
+                .with_label_values(&[add_leaf_result.source()])
                 .inc();
 
             futures.push(add_leaf_result.resolve());

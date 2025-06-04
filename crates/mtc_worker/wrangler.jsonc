@@ -1,0 +1,61 @@
+{
+    "name": "mtc",
+    "main": "build/worker/shim.mjs",
+    "compatibility_date": "2025-04-01",
+    "workers_dev": false,
+    "build": {
+        "command": "echo 'Default environment not configured. Please specify an environment with the \"-e\" flag.' && exit 1"
+    },
+    "env": {
+        "dev": {
+            "build": {
+                // Change '--release' to '--dev' to compile with debug symbols.
+                // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
+                "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
+            },
+            "workers_dev": true,
+            "kv_namespaces": [
+                {
+                    "id": "3a23691917c844d59aea47fdf964850f", // REPLACE ME
+                    "binding": "cache_dev1"
+                },
+                {
+                    "id": "38045c90369140b091b3b68451dc6c29", // REPLACE ME
+                    "binding": "cache_dev2"
+                }
+            ],
+            "r2_buckets": [
+                {
+                    "bucket_name": "static-ct-public-dev1",
+                    "binding": "public_dev1"
+                },
+                {
+                    "bucket_name": "static-ct-public-dev2",
+                    "binding": "public_dev2"
+                }
+            ],
+            "durable_objects": {
+                "bindings": [
+                    {
+                        "name": "SEQUENCER",
+                        "class_name": "Sequencer"
+                    },
+                    {
+                        "name": "BATCHER",
+                        "class_name": "Batcher"
+                    }
+                ]
+            },
+            "migrations": [
+                {
+                    // tag should be unique for each entry
+                    "tag": "v1",
+                    "new_sqlite_classes": [
+                        "Sequencer",
+                        "Batcher"
+                    ]
+                }
+            ]
+        }
+    }
+}

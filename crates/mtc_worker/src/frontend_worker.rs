@@ -3,32 +3,31 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use std::sync::LazyLock;
+use std::{str::FromStr, sync::LazyLock, time::Duration};
 
 use crate::{load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CONFIG, ROOTS};
-use config::TemporalInterval;
 use futures_util::future::try_join_all;
 use generic_log_worker::{
-    ctlog::UploadOptions, get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv,
-    load_public_bucket, put_cache_entry_metadata, ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
-    METRICS_ENDPOINT,
+    ctlog::UploadOptions, get_cached_metadata, get_durable_object_stub, init_logging,
+    load_cache_kv, load_public_bucket, put_cache_entry_metadata, util::now_millis, ObjectBackend,
+    ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
+use mtc_api::{AddEntryRequest, AddEntryResponse, MtcLogEntry};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
-use tlog_tiles::{LogEntry, PendingLogEntry};
+use tlog_tiles::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
-
-// The Maximum Merge Delay (MMD) of a log indicates the maximum period of time
-// between when a SCT is issued and the corresponding entry is sequenced
-// in the log. For static CT logs, this is effectively zero since SCT issuance
-// happens only once the entry is sequenced. However, we can leave this value
-// in the metadata as the default (1 day).
-const MAX_MERGE_DELAY: usize = 86_400;
+use x509_verify::{
+    der::asn1::UtcTime,
+    x509_cert::{
+        name::RdnSequence,
+        time::{Time, Validity},
+    },
+};
 
 const UNKNOWN_LOG_MSG: &str = "unknown log";
 
@@ -37,18 +36,12 @@ const UNKNOWN_LOG_MSG: &str = "unknown log";
 struct MetadataResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    log_type: &'a Option<String>,
-    #[serde_as(as = "Base64")]
-    log_id: &'a [u8],
     #[serde_as(as = "Base64")]
     key: &'a [u8],
     #[serde_as(as = "Base64")]
     witness_key: &'a [u8],
-    mmd: usize,
     submission_url: &'a str,
     monitoring_url: &'a str,
-    temporal_interval: &'a TemporalInterval,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -70,24 +63,13 @@ fn start() {
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let router = Router::new();
     router
-        .get("/logs/:log/ct/v1/get-roots", |_req, ctx| {
-            let _name = valid_log_name(&ctx)?;
-            Response::from_json(&GetRootsResponse {
-                certificates: x509_util::certs_to_bytes(&ROOTS.certs).unwrap(),
-            })
-        })
-        .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {
-            add_chain_or_pre_chain(req, &ctx.env, valid_log_name(&ctx)?, false).await
-        })
-        .post_async("/logs/:log/ct/v1/add-pre-chain", |req, ctx| async move {
-            add_chain_or_pre_chain(req, &ctx.env, valid_log_name(&ctx)?, true).await
+        .post_async("/logs/:log/add-entry", |req, ctx| async move {
+            add_entry(req, &ctx.env, valid_log_name(&ctx)?).await
         })
         .get("/logs/:log/metadata", |_req, ctx| {
             let name = valid_log_name(&ctx)?;
             let params = &CONFIG.logs[name];
             let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-            let log_id =
-                &static_ct_api::log_id_from_key(verifying_key).map_err(|e| e.to_string())?;
             let key = verifying_key
                 .to_public_key_der()
                 .map_err(|e| e.to_string())?;
@@ -98,8 +80,6 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .map_err(|e| e.to_string())?;
             Response::from_json(&MetadataResponse {
                 description: &params.description,
-                log_type: &params.log_type,
-                log_id,
                 key: key.as_bytes(),
                 witness_key: witness_key.as_bytes(),
                 submission_url: &params.submission_url,
@@ -108,8 +88,6 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 } else {
                     &params.monitoring_url
                 },
-                mmd: MAX_MERGE_DELAY,
-                temporal_interval: &params.temporal_interval,
             })
         })
         .get_async("/logs/:log/metrics", |_req, ctx| async move {
@@ -153,31 +131,24 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
 }
 
-#[allow(clippy::too_many_lines)]
-async fn add_chain_or_pre_chain(
-    mut req: Request,
-    env: &Env,
-    name: &str,
-    expect_precert: bool,
-) -> Result<Response> {
+async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> {
     let params = &CONFIG.logs[name];
-    let req: AddChainRequest = req.json().await?;
+    let req: AddEntryRequest = req.json().await?;
 
-    // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
-    let pending_entry = match static_ct_api::validate_chain(
-        &req.chain,
-        &ROOTS,
-        Some(
-            u64::try_from(params.temporal_interval.start_inclusive.timestamp_millis())
-                .unwrap_or_default(),
+    let issuer = RdnSequence::from_str(&params.issuer_rdn).map_err(|e| e.to_string())?;
+
+    let now = Duration::from_millis(now_millis());
+    let validity = Validity {
+        not_before: Time::UtcTime(UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?),
+        not_after: Time::UtcTime(
+            UtcTime::from_unix_duration(
+                now + Duration::from_secs(params.validity_interval_seconds),
+            )
+            .map_err(|e| e.to_string())?,
         ),
-        Some(
-            u64::try_from(params.temporal_interval.end_exclusive.timestamp_millis())
-                .unwrap_or_default(),
-        ),
-        expect_precert,
-        true,
-    ) {
+    };
+
+    let pending_entry = match mtc_api::validate_chain(&req.chain, &ROOTS, issuer, validity) {
         Ok(v) => v,
         Err(e) => {
             debug!("{name}: Bad request: {e}");
@@ -188,18 +159,18 @@ async fn add_chain_or_pre_chain(
     // Retrieve the sequenced entry for this pending log entry by first checking the
     // deduplication cache and then sending a request to the DO to sequence the entry.
     let lookup_key = pending_entry.lookup_key();
-    let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
     if let Some(metadata) =
-        get_cached_metadata::<StaticCTLogEntry>(&kv, &pending_entry, params.enable_dedup).await?
+        get_cached_metadata::<MtcLogEntry>(&kv, &pending_entry, params.enable_dedup).await?
     {
         debug!("{name}: Entry is cached");
-        let entry = StaticCTLogEntry::new(pending_entry, metadata);
-        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-            .map_err(|e| e.to_string())?;
-        return Response::from_json(&sct);
+        let resp = AddEntryResponse {
+            leaf_index: metadata.0,
+            timestamp: metadata.1,
+        };
+        return Response::from_json(&resp);
     }
 
     // Entry is not cached, so we need to sequence it.
@@ -261,14 +232,11 @@ async fn add_chain_or_pre_chain(
             warn!("{name}: Failed to write entry to deduplication cache");
         }
     }
-    let entry = StaticCTLogEntry {
-        inner: pending_entry,
+    let resp = AddEntryResponse {
         leaf_index: metadata.0,
         timestamp: metadata.1,
     };
-    let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-        .map_err(|e| e.to_string())?;
-    Response::from_json(&sct)
+    Response::from_json(&resp)
 }
 
 fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
