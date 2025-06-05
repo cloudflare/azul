@@ -81,6 +81,7 @@
                         },
                         "sequence_skip_threshold_millis": {
                             "type": "integer",
+                            "minimum": 0,
                             "description": "If provided, entries will only be skipped by sequencing (when max_sequenced_skips is non-zero) if they have been in the pool for less than this timeout."
                         },
                         "num_batchers": {
