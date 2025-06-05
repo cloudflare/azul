@@ -19,11 +19,10 @@ use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
-use static_ct_api::LookupKey;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::SequenceMetadata;
+use tlog_tiles::{LookupKey, SequenceMetadata};
 use util::now_millis;
 #[allow(clippy::wildcard_imports)]
 use worker::*;

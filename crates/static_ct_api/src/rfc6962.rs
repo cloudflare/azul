@@ -20,8 +20,7 @@
 //! - [cert_checker.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker.go)
 //! - [cert_checker_test.go](https://github.com/google/certificate-transparency-go/blob/74d106d3a25205b16d571354c64147c5f1f7dbc1/trillian/ctfe/cert_checker_test.go)
 
-use crate::StaticCTError;
-use crate::ValidatedChain;
+use crate::{PrecertData, StaticCTError, StaticCTPendingLogEntry};
 use der::{
     asn1::{Null, OctetString},
     oid::{
@@ -80,7 +79,7 @@ pub struct GetRootsResponse {
     pub certificates: Vec<Vec<u8>>,
 }
 
-/// Validates a certificate chain and returns a [`ValidatedChain`].
+/// Validates a certificate chain and returns a pending log entry.
 ///
 /// # Errors
 ///
@@ -93,7 +92,7 @@ pub fn validate_chain(
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<ValidatedChain, StaticCTError> {
+) -> Result<StaticCTPendingLogEntry, StaticCTError> {
     // First make sure the cert parses as X.509.
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
@@ -183,16 +182,12 @@ pub fn validate_chain(
         return Err(StaticCTError::NoPathToTrustedRoot { to_verify_issuer });
     }
 
-    // Return a [ValidatedChain] constructed from the chain.
-    let issuers = intermediates
-        .iter()
-        .map(der::Encode::to_der)
-        .collect::<Result<_, _>>()?;
-    let issuer_key_hash: [u8; 32];
-    let pre_certificate: Vec<u8>;
+    // Construct a pending log entry.
+    let precert_opt: Option<PrecertData>;
     let certificate: Vec<u8>;
     if is_precert {
         let mut pre_issuer: Option<&TbsCertificate> = None;
+        let issuer_key_hash: [u8; 32];
         if has_precert_signing_cert {
             pre_issuer = Some(&intermediates[0].tbs_certificate);
             if intermediates.len() < 2 {
@@ -214,20 +209,26 @@ pub fn validate_chain(
             )
             .into();
         }
-        pre_certificate = leaf.to_der()?;
+        let pre_certificate = leaf.to_der()?;
+        precert_opt = Some(PrecertData {
+            issuer_key_hash,
+            pre_certificate,
+        });
         certificate = build_precert_tbs(&leaf.tbs_certificate, pre_issuer)?;
     } else {
-        pre_certificate = Vec::new();
+        precert_opt = None;
         certificate = leaf.to_der()?;
-        issuer_key_hash = [0; 32];
     }
 
-    Ok(ValidatedChain {
+    let chain_fingerprints = raw_chain[1..]
+        .iter()
+        .map(|issuer| Sha256::digest(issuer).into())
+        .collect();
+
+    Ok(StaticCTPendingLogEntry {
         certificate,
-        is_precert,
-        issuer_key_hash,
-        issuers,
-        pre_certificate,
+        precert_opt,
+        chain_fingerprints,
     })
 }
 

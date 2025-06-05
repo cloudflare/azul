@@ -13,11 +13,7 @@ use log::{debug, warn, Level};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
-use sha2::{Digest, Sha256};
-use static_ct_api::{
-    AddChainRequest, GetRootsResponse, PendingLogEntryTrait, StaticCTLogEntry,
-    StaticCTPendingLogEntry,
-};
+use static_ct_api::{AddChainRequest, GetRootsResponse, PendingLogEntryTrait, StaticCTLogEntry};
 use std::str::FromStr;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -164,7 +160,7 @@ async fn add_chain_or_pre_chain(
     let req: AddChainRequest = req.json().await?;
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
-    let chain = match static_ct_api::validate_chain(
+    let pending_entry = match static_ct_api::validate_chain(
         &req.chain,
         &ROOTS,
         Some(
@@ -187,19 +183,6 @@ async fn add_chain_or_pre_chain(
 
     // Retrieve the sequenced entry for this pending log entry by first checking the
     // deduplication cache and then sending a request to the DO to sequence the entry.
-
-    // Convert chain to a pending log entry.
-    let pending_entry = StaticCTPendingLogEntry {
-        certificate: chain.certificate,
-        is_precert: chain.is_precert,
-        issuer_key_hash: chain.issuer_key_hash,
-        chain_fingerprints: chain
-            .issuers
-            .iter()
-            .map(|issuer| Sha256::digest(issuer).into())
-            .collect(),
-        pre_certificate: chain.pre_certificate,
-    };
     let lookup_key = pending_entry.lookup_key();
     let signing_key = load_signing_key(env, name)?;
 
@@ -233,8 +216,7 @@ async fn add_chain_or_pre_chain(
     };
     ctlog::upload_issuers(
         &public_bucket,
-        &chain
-            .issuers
+        &req.chain[1..]
             .iter()
             .map(Vec::as_slice)
             .collect::<Vec<&[u8]>>(),
