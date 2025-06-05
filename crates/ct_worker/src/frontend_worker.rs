@@ -277,7 +277,7 @@ async fn add_chain_or_pre_chain(
             .await
             .is_err()
         {
-            debug!("{name}: Failed to write entry to deduplication cache");
+            warn!("{name}: Failed to write entry to deduplication cache");
         }
     }
     let entry = StaticCTLogEntry {

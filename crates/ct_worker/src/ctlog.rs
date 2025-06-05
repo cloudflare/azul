@@ -111,7 +111,7 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     // that are potentially skippable.
     leftover_timestamps_millis: [UnixTimestamp; TlogTile::FULL_WIDTH as usize],
 
-    // The next slot to insert a entry timestamp.
+    // The next slot to insert an entry timestamp.
     leftover_timestamps_next_slot: usize,
 }
 
@@ -168,7 +168,8 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
     // the corresponding Senders to update when the entries have been sequenced.
     //
     // Skip sequencing leftover entries that would be published as a partial
-    // tile unless they have already been held back `max_sequence_skips` times.
+    // tile unless they have already been held back `max_sequence_skips` times
+    // or have been in the pool longer than `sequence_skip_threshold_millis`.
     //
     // The return value is an Option that indicates whether or not a new
     // checkpoint should be produced (even if there are no new entries).

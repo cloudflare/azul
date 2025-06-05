@@ -116,7 +116,7 @@ impl Metrics {
         .unwrap();
         let seq_data_tile_size = register_histogram_vec_with_registry!(
             "sequencing_data_tiles_bytes",
-            "Size of uploaded data tiles, including partials.",
+            "Size of uploaded data tiles, with 'type' indicating whether the tile is full or partial.",
             &["type"],
             vec![10_000.0, 100_000.0, 1_000_000.0],
             r
