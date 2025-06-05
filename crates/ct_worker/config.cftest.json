@@ -10,6 +10,9 @@
                 "start_inclusive": "2025-01-01T00:00:00Z",
                 "end_exclusive": "2025-07-01T00:00:00Z"
             },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
             "location_hint": "enam"
         },
         "cftest2025h2a": {
@@ -21,6 +24,9 @@
                 "start_inclusive": "2025-07-01T00:00:00Z",
                 "end_exclusive": "2026-01-01T00:00:00Z"
             },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
             "location_hint": "enam"
         }
     }
