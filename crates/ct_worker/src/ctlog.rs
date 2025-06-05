@@ -111,7 +111,8 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     // that are potentially skippable.
     leftover_timestamps_millis: [UnixTimestamp; TlogTile::FULL_WIDTH as usize],
 
-    // The next slot to insert an entry timestamp.
+    // The next slot to insert an entry timestamp, when reduced modulo
+    // `TlogTile::FULL_WIDTH`.
     leftover_timestamps_next_slot: usize,
 }
 
