@@ -27,37 +27,30 @@ pub struct LogParams {
     pub submission_url: String,
     pub temporal_interval: TemporalInterval,
     pub location_hint: Option<String>,
-    #[serde(default = "default_sequence_interval_millis")]
+    #[serde(default = "default_u64::<1000>")]
     pub sequence_interval_millis: u64,
-    #[serde(default = "default_max_sequence_skips")]
+    #[serde(default = "default_usize::<0>")]
     pub max_sequence_skips: usize,
     pub sequence_skip_threshold_millis: Option<u64>,
-    #[serde(default = "default_num_batchers")]
+    #[serde(default = "default_u8::<8>")]
     pub num_batchers: u8,
-    #[serde(default = "default_batch_timeout_millis")]
+    #[serde(default = "default_u64::<1000>")]
     pub batch_timeout_millis: u64,
-    #[serde(default = "default_max_batch_entries")]
+    #[serde(default = "default_usize::<100>")]
     pub max_batch_entries: usize,
-    #[serde(default)]
-    pub disable_dedup: bool,
+    #[serde(default = "default_bool::<true>")]
+    pub enable_dedup: bool,
 }
 
-fn default_sequence_interval_millis() -> u64 {
-    1000
+fn default_bool<const V: bool>() -> bool {
+    V
 }
-
-fn default_max_sequence_skips() -> usize {
-    0
+fn default_u8<const V: u8>() -> u8 {
+    V
 }
-
-fn default_num_batchers() -> u8 {
-    8
+fn default_u64<const V: u64>() -> u64 {
+    V
 }
-
-fn default_batch_timeout_millis() -> u64 {
-    1000
-}
-
-fn default_max_batch_entries() -> usize {
-    100
+fn default_usize<const V: usize>() -> usize {
+    V
 }

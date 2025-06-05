@@ -205,7 +205,7 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if !params.disable_dedup {
+    if params.enable_dedup {
         if let Some(metadata) = kv
             .get(&BASE64_STANDARD.encode(lookup_key))
             .bytes_with_metadata::<SequenceMetadata>()

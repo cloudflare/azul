@@ -63,7 +63,7 @@ pub(crate) struct LogConfig {
     pub(crate) sequence_interval: Duration,
     pub(crate) max_sequence_skips: usize,
     pub(crate) sequence_skip_threshold_millis: Option<u64>,
-    pub(crate) disable_dedup: bool,
+    pub(crate) enable_dedup: bool,
 }
 
 #[cfg(test)]
@@ -77,7 +77,7 @@ impl LogConfig {
             sequence_interval: self.sequence_interval,
             max_sequence_skips: self.max_sequence_skips,
             sequence_skip_threshold_millis: None,
-            disable_dedup: false,
+            enable_dedup: true,
         }
     }
 }
@@ -506,7 +506,7 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
 
-    if config.disable_dedup {
+    if !config.enable_dedup {
         // Bypass deduplication and rate limit checks.
         state.add(hash, entry)
     } else if let Some(result) = state.check(&hash) {
@@ -2126,7 +2126,7 @@ mod tests {
                 checkpoint_signers,
                 sequence_interval: Duration::from_secs(1),
                 max_sequence_skips: 0,
-                disable_dedup: false,
+                enable_dedup: true,
                 sequence_skip_threshold_millis: None,
             };
             let pool_state = PoolState::default();

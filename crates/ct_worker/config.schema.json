@@ -81,8 +81,7 @@
                         },
                         "sequence_skip_threshold_millis": {
                             "type": "integer",
-                            "default": 0,
-                            "description": "If non-zero, entries will only be skipped by sequencing (when max_sequenced_skips is non-zero) if they have been in the pool for less than this timeout."
+                            "description": "If provided, entries will only be skipped by sequencing (when max_sequenced_skips is non-zero) if they have been in the pool for less than this timeout."
                         },
                         "num_batchers": {
                             "type": "integer",
@@ -103,10 +102,10 @@
                             "default": 1000,
                             "description": "The maximum number of entries per batch."
                         },
-                        "disable_dedup": {
+                        "enable_dedup": {
                             "type": "boolean",
-                            "default": false,
-                            "description": "Disable checking the deduplication cache for add-(pre-)chain requests (e.g., for tests or benchmarks)."
+                            "default": true,
+                            "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disable for tests and benchmarks."
                         }
                     },
                     "required": [
