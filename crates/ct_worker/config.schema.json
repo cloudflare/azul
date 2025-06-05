@@ -76,6 +76,7 @@
                         },
                         "max_sequence_skips": {
                             "type": "integer",
+                            "minimum": 0,
                             "default": 0,
                             "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by either a multiple of the sequence interval or sequence_skip_threshold_millis if set."
                         },
