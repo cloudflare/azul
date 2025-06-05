@@ -199,7 +199,7 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
             self.sequence_skips = usize::from(num_leftover_entries != 0);
             let split_index = self.pending_entries.len() - num_leftover_entries;
             let leftover_entries = self.pending_entries.split_off(split_index);
-            let leftover_pending = leftover_entries
+            let leftover_dedup = leftover_entries
                 .iter()
                 .filter_map(|(entry, _)| {
                     let lookup_key = entry.lookup_key();
@@ -208,7 +208,7 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
                         .map(|rx| (lookup_key, rx))
                 })
                 .collect::<HashMap<_, _>>();
-            self.in_sequencing_dedup = std::mem::replace(&mut self.pending_dedup, leftover_pending);
+            self.in_sequencing_dedup = std::mem::replace(&mut self.pending_dedup, leftover_dedup);
             Some(std::mem::replace(
                 &mut self.pending_entries,
                 leftover_entries,
