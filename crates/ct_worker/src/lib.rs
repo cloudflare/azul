@@ -30,6 +30,10 @@ use worker::*;
 use x509_util::CertPool;
 use x509_verify::x509_cert::Certificate;
 
+const BATCH_ENDPOINT: &str = "/add_batch";
+const ENTRY_ENDPOINT: &str = "/add_entry";
+const METRICS_ENDPOINT: &str = "/metrics";
+
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
     serde_json::from_str::<AppConfig>(include_str!(concat!(env!("OUT_DIR"), "/config.json")))
@@ -384,7 +388,6 @@ trait ObjectBackend {
 }
 
 struct ObjectBucket {
-    sequence_interval_seconds: u64,
     bucket: Bucket,
     metrics: Option<ObjectMetrics>,
 }
@@ -401,10 +404,7 @@ impl ObjectBackend for ObjectBucket {
         if opts.immutable {
             metadata.cache_control = Some("public, max-age=604800, immutable".into());
         } else {
-            metadata.cache_control = Some(format!(
-                "public, max-age={}, must-revalidate",
-                self.sequence_interval_seconds
-            ));
+            metadata.cache_control = Some("no-store".into());
         }
         self.metrics
             .as_ref()

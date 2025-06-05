@@ -27,16 +27,30 @@ pub struct LogParams {
     pub submission_url: String,
     pub temporal_interval: TemporalInterval,
     pub location_hint: Option<String>,
-    #[serde(default = "default_sequence_interval_seconds")]
-    pub sequence_interval_seconds: u64,
-    #[serde(default = "default_max_pending_entry_holds")]
-    pub max_pending_entry_holds: usize,
+    #[serde(default = "default_u64::<1000>")]
+    pub sequence_interval_millis: u64,
+    #[serde(default = "default_usize::<0>")]
+    pub max_sequence_skips: usize,
+    pub sequence_skip_threshold_millis: Option<u64>,
+    #[serde(default = "default_u8::<8>")]
+    pub num_batchers: u8,
+    #[serde(default = "default_u64::<1000>")]
+    pub batch_timeout_millis: u64,
+    #[serde(default = "default_usize::<100>")]
+    pub max_batch_entries: usize,
+    #[serde(default = "default_bool::<true>")]
+    pub enable_dedup: bool,
 }
 
-fn default_sequence_interval_seconds() -> u64 {
-    1
+fn default_bool<const V: bool>() -> bool {
+    V
 }
-
-fn default_max_pending_entry_holds() -> usize {
-    1
+fn default_u8<const V: u8>() -> u8 {
+    V
+}
+fn default_u64<const V: u64>() -> u64 {
+    V
+}
+fn default_usize<const V: usize>() -> usize {
+    V
 }

@@ -38,7 +38,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    CheckpointSigner, Hash, HashReader, PathElem, Tile, TlogError, TlogTile, HASH_SIZE,
+    CheckpointSigner, Hash, HashReader, PathElem, Tile, TlogError, TlogTile, UnixTimestamp,
+    HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -60,7 +61,9 @@ pub(crate) struct LogConfig {
     pub(crate) origin: String,
     pub(crate) checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     pub(crate) sequence_interval: Duration,
-    pub(crate) max_pending_entry_holds: usize,
+    pub(crate) max_sequence_skips: usize,
+    pub(crate) sequence_skip_threshold_millis: Option<u64>,
+    pub(crate) enable_dedup: bool,
 }
 
 #[cfg(test)]
@@ -72,7 +75,9 @@ impl LogConfig {
             origin: self.origin.clone(),
             checkpoint_signers: Vec::new(),
             sequence_interval: self.sequence_interval,
-            max_pending_entry_holds: self.max_pending_entry_holds,
+            max_sequence_skips: self.max_sequence_skips,
+            sequence_skip_threshold_millis: None,
+            enable_dedup: true,
         }
     }
 }
@@ -89,8 +94,8 @@ impl LogConfig {
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Debug)]
 pub(crate) struct PoolState<P: PendingLogEntryTrait> {
-    // How many times the oldest entry has been held back from sequencing.
-    oldest_pending_entry_holds: usize,
+    // How many times sequencing has been skipped for any entries in the pool.
+    sequence_skips: usize,
 
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
@@ -101,15 +106,25 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
 
     // Deduplication cache for entries currently being sequenced.
     in_sequencing_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
+
+    // Ring buffer tracking insertion timestamps for the most recent entries
+    // that are potentially skippable.
+    leftover_timestamps_millis: [UnixTimestamp; TlogTile::FULL_WIDTH as usize],
+
+    // The next slot to insert an entry timestamp, when reduced modulo
+    // `TlogTile::FULL_WIDTH`.
+    leftover_timestamps_next_slot: usize,
 }
 
 impl<P: PendingLogEntryTrait> Default for PoolState<P> {
     fn default() -> Self {
         PoolState {
-            oldest_pending_entry_holds: 0,
+            sequence_skips: 0,
             pending_entries: Vec::default(),
             pending_dedup: HashMap::default(),
             in_sequencing_dedup: HashMap::default(),
+            leftover_timestamps_millis: [0; TlogTile::FULL_WIDTH as usize],
+            leftover_timestamps_next_slot: 0,
         }
     }
 }
@@ -141,67 +156,75 @@ impl<E: PendingLogEntryTrait> PoolState<E> {
         let (tx, rx) = channel((0, 0));
         self.pending_entries.push((entry, tx));
         self.pending_dedup.insert(key, rx.clone());
+        self.leftover_timestamps_millis
+            [self.leftover_timestamps_next_slot % TlogTile::FULL_WIDTH as usize] = now_millis();
+        self.leftover_timestamps_next_slot += 1;
 
         AddLeafResult::Pending {
             rx,
             source: PendingSource::Sequencer,
         }
     }
-    // Take the entries from the pool that are ready to be sequenced and the
-    // corresponding Senders to update when the entries have been sequenced.
+    // Take the entries from the pool that are ready to be sequenced, along with
+    // the corresponding Senders to update when the entries have been sequenced.
     //
-    // Hold back any leftover entries that would be published as a partial tile
-    // unless they have already been held back `max_pending_entry_holds` times.
+    // Skip sequencing leftover entries that would be published as a partial
+    // tile unless they have already been held back `max_sequence_skips` times
+    // or have been in the pool longer than `sequence_skip_threshold_millis`.
+    //
+    // The return value is an Option that indicates whether or not a new
+    // checkpoint should be produced (even if there are no new entries).
     fn take(
         &mut self,
         old_size: u64,
-        max_pending_entry_holds: usize,
-    ) -> Vec<(E, Sender<SequenceMetadata>)> {
+        max_sequence_skips: usize,
+        sequence_skip_threshold_millis: Option<u64>,
+    ) -> Option<Vec<(E, Sender<SequenceMetadata>)>> {
         let new_size = old_size + self.pending_entries.len() as u64;
-        let leftover = new_size % u64::from(TlogTile::FULL_WIDTH);
-
         let publishing_full_tile =
             new_size / u64::from(TlogTile::FULL_WIDTH) > old_size / u64::from(TlogTile::FULL_WIDTH);
-        if publishing_full_tile {
-            // We're going to publish at least one full tile which will contain
-            // any leftover entries from the previous sequencing. Reset the
-            // count since the new leftover entries have not yet been held back.
-            self.oldest_pending_entry_holds = 0;
-        }
-        // Flush all of the leftover entries if the oldest is before the cutoff.
-        let flush_oldest = self.oldest_pending_entry_holds >= max_pending_entry_holds;
+        let num_leftover_entries =
+            usize::try_from(new_size % u64::from(TlogTile::FULL_WIDTH)).unwrap();
+        let oldest_leftover_timestamp_millis: UnixTimestamp = self.leftover_timestamps_millis[(self
+            .leftover_timestamps_next_slot
+            - num_leftover_entries)
+            % TlogTile::FULL_WIDTH as usize];
+        let oldest_leftover_is_expired = sequence_skip_threshold_millis
+            .is_some_and(|threshold| now_millis() > oldest_leftover_timestamp_millis + threshold);
 
-        if leftover == 0 || flush_oldest {
-            // Sequence everything. Either there are no leftovers or they have
-            // already been held back the maximum number of times.
-            self.oldest_pending_entry_holds = 0;
+        if publishing_full_tile && max_sequence_skips > 0 && !oldest_leftover_is_expired {
+            // Sequence full tiles and skip the rest.
+
+            // If there are leftover entries, this is the first time they have
+            // been skipped. Otherwise, set skip count to zero.
+            self.sequence_skips = usize::from(num_leftover_entries != 0);
+            let split_index = self.pending_entries.len() - num_leftover_entries;
+            let leftover_entries = self.pending_entries.split_off(split_index);
+            let leftover_dedup = leftover_entries
+                .iter()
+                .filter_map(|(entry, _)| {
+                    let lookup_key = entry.lookup_key();
+                    self.pending_dedup
+                        .remove(&lookup_key)
+                        .map(|rx| (lookup_key, rx))
+                })
+                .collect::<HashMap<_, _>>();
+            self.in_sequencing_dedup = std::mem::replace(&mut self.pending_dedup, leftover_dedup);
+            Some(std::mem::replace(
+                &mut self.pending_entries,
+                leftover_entries,
+            ))
+        } else if self.sequence_skips >= max_sequence_skips || oldest_leftover_is_expired {
+            // Sequence everything. We have reached the skip threshold, and even
+            // if there are no entries, we want to create a new checkpoint.
+            self.sequence_skips = 0;
             self.in_sequencing_dedup = std::mem::take(&mut self.pending_dedup);
-            std::mem::take(&mut self.pending_entries)
+            Some(std::mem::take(&mut self.pending_entries))
         } else {
-            // Hold back the leftovers to avoid creating a partial tile.
-            self.oldest_pending_entry_holds += 1;
-
-            if publishing_full_tile {
-                // Return the pending entries to be published in full tiles and
-                // retain the rest.
-                let split_index = self.pending_entries.len() - usize::try_from(leftover).unwrap();
-                let leftover_entries = self.pending_entries.split_off(split_index);
-                let leftover_pending = leftover_entries
-                    .iter()
-                    .filter_map(|(entry, _)| {
-                        let lookup_key = entry.lookup_key();
-                        self.pending_dedup
-                            .remove(&lookup_key)
-                            .map(|rx| (lookup_key, rx))
-                    })
-                    .collect::<HashMap<_, _>>();
-                self.in_sequencing_dedup =
-                    std::mem::replace(&mut self.pending_dedup, leftover_pending);
-                std::mem::replace(&mut self.pending_entries, leftover_entries)
-            } else {
-                // We didn't fill up a full tile, so nothing to return.
-                Vec::new()
-            }
+            // Skip this checkpoint. There are no full tiles to sequence, and
+            // we're below the thresholds to skip the leftover entries.
+            self.sequence_skips += 1;
+            None
         }
     }
     // Reset the map of in-sequencing entries. This should be called after
@@ -479,11 +502,15 @@ pub(crate) enum PendingSource {
 pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
     state: &mut PoolState<E>,
     cache: &impl CacheRead,
+    config: &LogConfig,
     entry: E,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
 
-    if let Some(result) = state.check(&hash) {
+    if !config.enable_dedup {
+        // Bypass deduplication and rate limit checks.
+        state.add(hash, entry)
+    } else if let Some(result) = state.check(&hash) {
         // Entry is already pending or being sequenced.
         result
     } else if let Some(v) = cache.get_entry(&hash) {
@@ -560,13 +587,22 @@ pub(crate) async fn sequence<L: LogEntryTrait>(
         }
     };
 
-    let entries = pool_state.take(old.tree.size(), config.max_pending_entry_holds);
+    let Some(entries) = pool_state.take(
+        old.tree.size(),
+        config.max_sequence_skips,
+        config.sequence_skip_threshold_millis,
+    ) else {
+        // Skip this checkpoint. Nothing to sequence.
+        metrics.seq_count.with_label_values(&["skip"]).inc();
+        return Ok(());
+    };
+
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
     let result =
         match sequence_entries::<L>(old, config, object, lock, cache, entries, metrics).await {
             Ok(()) => {
-                metrics.seq_count.with_label_values(&[""]).inc();
+                metrics.seq_count.with_label_values(&["ok"]).inc();
                 Ok(())
             }
             Err(SequenceError::Fatal(e)) => {
@@ -673,7 +709,10 @@ async fn sequence_entries<L: LogEntryTrait>(
         // If the data tile is full, stage it.
         if n % u64::from(TlogTile::FULL_WIDTH) == 0 {
             stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
-            metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
+            metrics
+                .seq_data_tile_size
+                .with_label_values(&["full"])
+                .observe(data_tile.len().as_f64());
             data_tile.clear();
         }
     }
@@ -681,7 +720,10 @@ async fn sequence_entries<L: LogEntryTrait>(
     // Stage leftover partial data tile, if any.
     if n != old_size && n % u64::from(TlogTile::FULL_WIDTH) != 0 {
         stage_data_tile(n, &mut edge_tiles, &mut tile_uploads, &data_tile);
-        metrics.seq_data_tile_size.observe(data_tile.len().as_f64());
+        metrics
+            .seq_data_tile_size
+            .with_label_values(&["partial"])
+            .observe(data_tile.len().as_f64());
     }
 
     // Produce and stage new tree tiles.
@@ -1137,6 +1179,7 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
 mod tests {
     use super::*;
     use crate::{util, LookupKey, SequenceMetadata};
+    use anyhow::ensure;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use futures_executor::block_on;
     use itertools::Itertools;
@@ -1170,9 +1213,9 @@ mod tests {
             // Wait until sequencing completes for this entry's pool.
             let (leaf_index, _) = block_on(res.resolve()).unwrap();
             assert_eq!(leaf_index, i);
-            log.check(i + 1);
+            log.check(i + 1).unwrap();
         }
-        log.check(n);
+        log.check(n).unwrap();
     }
 
     #[test]
@@ -1184,7 +1227,7 @@ mod tests {
             log.add_certificate();
         }
         log.sequence().unwrap();
-        log.check(5);
+        log.check(5).unwrap();
 
         for i in 0..500_u64 {
             for k in 0..3000_u64 {
@@ -1193,11 +1236,11 @@ mod tests {
                     certificate,
                     ..Default::default()
                 };
-                add_leaf_to_pool(&mut log.pool_state, &log.cache, leaf);
+                add_leaf_to_pool(&mut log.pool_state, &log.cache, &log.config, leaf);
             }
             log.sequence().unwrap();
         }
-        log.check(5 + 500 * 3000);
+        log.check(5 + 500 * 3000).unwrap();
     }
 
     #[test]
@@ -1205,9 +1248,9 @@ mod tests {
         let mut log = TestLog::new();
         let sequence_twice = |log: &mut TestLog, size: u64| {
             log.sequence().unwrap();
-            let t1 = log.check(size);
+            let t1 = log.check(size).unwrap();
             log.sequence().unwrap();
-            let t2 = log.check(size);
+            let t2 = log.check(size).unwrap();
             assert!(t2 > t1);
         };
         let add_certs = |log: &mut TestLog, n: usize| {
@@ -1284,7 +1327,7 @@ mod tests {
         }
         log.sequence().unwrap();
 
-        log.check(u64::from(TlogTile::FULL_WIDTH) * 2 + 15);
+        log.check(u64::from(TlogTile::FULL_WIDTH) * 2 + 15).unwrap();
 
         let keys = log
             .object
@@ -1346,7 +1389,7 @@ mod tests {
         let res12 = log.add_with_seed(is_precert, 1);
         log.sequence().unwrap();
         log.sequence().unwrap();
-        log.check(6);
+        log.check(6).unwrap();
 
         let entry01 = block_on(res01.resolve()).unwrap();
         let entry02 = block_on(res02.resolve()).unwrap();
@@ -1385,7 +1428,7 @@ mod tests {
         let res = log.add_with_seed(is_precert, 3); // 8
         log.sequence().unwrap();
         block_on(res.resolve()).unwrap();
-        log.check(8);
+        log.check(8).unwrap();
     }
 
     #[test]
@@ -1404,7 +1447,7 @@ mod tests {
         for i in 0..n {
             log.add(is_precert);
             log.sequence().unwrap();
-            log.check(i + 1);
+            log.check(i + 1).unwrap();
 
             log.sequence_state = Some(
                 block_on(SequenceState::load::<StaticCTLogEntry>(
@@ -1415,7 +1458,7 @@ mod tests {
                 .unwrap(),
             );
             log.sequence().unwrap();
-            log.check(i + 1);
+            log.check(i + 1).unwrap();
         }
     }
 
@@ -1498,7 +1541,7 @@ mod tests {
             persist: false,
         };
         log.sequence().unwrap_err();
-        log.check(1);
+        log.check(1).unwrap();
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
         log.sequence_state = Some(
@@ -1509,14 +1552,14 @@ mod tests {
             ))
             .unwrap(),
         );
-        log.check(1);
+        log.check(1).unwrap();
 
         // First, cause the exact same staging bundle to be uploaded.
 
         log.add_certificate_with_seed('A' as u64);
         log.add_certificate_with_seed('B' as u64);
         log.sequence().unwrap();
-        log.check(3);
+        log.check(3).unwrap();
 
         // Again, but now due to a staging bundle upload error.
 
@@ -1530,14 +1573,14 @@ mod tests {
             persist: true,
         };
         log.sequence().unwrap();
-        log.check(3);
+        log.check(3).unwrap();
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
 
         log.add_certificate_with_seed('C' as u64);
         log.add_certificate_with_seed('D' as u64);
         log.sequence().unwrap();
-        log.check(5);
+        log.check(5).unwrap();
 
         // Reset time
         util::set_freeze_time(false);
@@ -1558,7 +1601,7 @@ mod tests {
         let res = log.add_certificate();
         log.sequence().unwrap_err();
         assert!(block_on(res.resolve()).is_none());
-        log.check(2);
+        log.check(2).unwrap();
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
         log.sequence_state = Some(
@@ -1571,46 +1614,105 @@ mod tests {
         );
         log.add_certificate();
         log.sequence().unwrap();
-        log.check(3);
+        log.check(3).unwrap();
     }
 
     #[test]
     fn test_sequence_holds() {
         let mut log = TestLog::new();
 
+        let mut tree_size = 0;
+        let mut pending = 0;
+
         // Hold entries at most one sequencing round.
-        log.config.max_pending_entry_holds = 1;
+        log.config.max_sequence_skips = 1;
         log.add_certificate();
         log.add_certificate();
+        pending += 2;
         log.sequence().unwrap();
-        log.check(0); // 2 pending entries are held
+        // 2 pending entries are held
+        log.check(0).unwrap();
         for _ in 0..TlogTile::FULL_WIDTH + 3 {
             log.add_certificate();
+            pending += 1;
         }
-        log.sequence().unwrap(); // 5 pending entries from the new batch are held
-        log.check(u64::from(TlogTile::FULL_WIDTH));
-        log.sequence().unwrap(); // all pending entries sequenced
-        log.check(u64::from(TlogTile::FULL_WIDTH) + 5);
+        log.sequence().unwrap();
+        // one full tile sequenced, and 5 pending entries held
+        (tree_size, pending) = sequence_only_full_tiles(tree_size, pending);
+        log.check(tree_size).unwrap();
+        log.sequence().unwrap();
+        // all pending entries sequenced
+        (tree_size, pending) = sequence_everything(tree_size, pending);
+        log.check(tree_size).unwrap();
 
         // Hold entries at most two sequencing rounds.
-        log.config.max_pending_entry_holds = 2;
+        log.config.max_sequence_skips = 2;
         log.add_certificate();
         log.add_certificate();
-        log.sequence().unwrap(); // 2 entries held
-        log.add_certificate(); // will be sequenced with the older held ones
-        log.sequence().unwrap(); // 3 entries held
-        log.check(u64::from(TlogTile::FULL_WIDTH) + 5); // still held
+        pending += 2;
         log.sequence().unwrap();
-        log.check(u64::from(TlogTile::FULL_WIDTH) + 8); // all pending entries sequenced
+        // 2 entries held
+        log.check(tree_size).unwrap();
+        log.add_certificate();
+        pending += 1;
+        log.sequence().unwrap();
+        // 3 entries held
+        log.check(tree_size).unwrap();
+        log.sequence().unwrap();
+        // all pending entries sequenced
+        (tree_size, pending) = sequence_everything(tree_size, pending);
+        log.check(tree_size).unwrap();
 
         for _ in 0..TlogTile::FULL_WIDTH * 2 {
             log.add_certificate();
+            pending += 1;
         }
-        log.sequence().unwrap(); // 8 pending entries are held
-        log.sequence().unwrap(); // still held
-        log.check(u64::from(TlogTile::FULL_WIDTH) * 3);
         log.sequence().unwrap();
-        log.check(u64::from(TlogTile::FULL_WIDTH) * 3 + 8); // all pending entries sequenced
+        // two full tiles added, and 8 pending entries held
+        (tree_size, pending) = sequence_only_full_tiles(tree_size, pending);
+        log.sequence().unwrap(); // still held
+        log.check(tree_size).unwrap();
+        log.sequence().unwrap();
+        // all pending entries sequenced
+        tree_size += pending;
+        pending = 0;
+        (tree_size, pending) = sequence_everything(tree_size, pending);
+        log.check(tree_size).unwrap();
+
+        // Test holding entries only when under the sequence skip threshold.
+        // For these tests, we need to control time.
+        let _lock = util::TIME_MUX.lock();
+        util::set_freeze_time(true);
+        let old_time = now_millis();
+
+        log.config.max_sequence_skips = 1;
+        log.config.sequence_skip_threshold_millis = Some(250);
+        log.add_certificate();
+        pending += 1;
+        util::set_global_time(now_millis() + 250);
+        log.sequence().unwrap();
+        // Entry is sequenced as it was pending longer than the sequence skip
+        // threshold.
+        (tree_size, pending) = sequence_everything(tree_size, pending);
+        log.check(tree_size).unwrap();
+
+        for _ in 0..TlogTile::FULL_WIDTH + 10 {
+            log.add_certificate();
+            pending += 1;
+        }
+        util::set_global_time(now_millis() + 100);
+        log.sequence().unwrap();
+        // Some entries held as they haven't yet expired.
+        (tree_size, pending) = sequence_only_full_tiles(tree_size, pending);
+        log.check(tree_size).unwrap();
+
+        log.sequence().unwrap();
+        (tree_size, _) = sequence_everything(tree_size, pending);
+        log.check(tree_size).unwrap();
+
+        // Reset time
+        util::set_freeze_time(false);
+        util::set_global_time(old_time);
     }
 
     macro_rules! test_sequence_errors {
@@ -1638,7 +1740,7 @@ mod tests {
                         if !broken || $expect_progress {
                             *expected_size += added;
                         }
-                        log.check(*expected_size);
+                        log.check(*expected_size).unwrap();
                         if result.is_err() {
                             if broken {
                                 *log.object.mode.borrow_mut() = StorageMode::Ok;
@@ -2024,7 +2126,9 @@ mod tests {
                 origin,
                 checkpoint_signers,
                 sequence_interval: Duration::from_secs(1),
-                max_pending_entry_holds: 0,
+                max_sequence_skips: 0,
+                enable_dedup: true,
+                sequence_skip_threshold_millis: None,
             };
             let pool_state = PoolState::default();
             let metrics = Metrics::new();
@@ -2063,10 +2167,13 @@ mod tests {
                     .unwrap();
                     self.sequence_state.insert(state)
                 };
-            self.pool_state.take(
-                sequence_state.tree.size(),
-                self.config.max_pending_entry_holds,
-            )
+            self.pool_state
+                .take(
+                    sequence_state.tree.size(),
+                    self.config.max_sequence_skips,
+                    self.config.sequence_skip_threshold_millis,
+                )
+                .unwrap_or_default()
         }
         fn sequence_finish(
             &mut self,
@@ -2117,60 +2224,59 @@ mod tests {
 
             block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
 
-            add_leaf_to_pool(&mut self.pool_state, &self.cache, leaf)
+            add_leaf_to_pool(&mut self.pool_state, &self.cache, &self.config, leaf)
         }
 
-        fn check(&self, size: u64) -> u64 {
-            let sth = block_on(self.object.fetch(CHECKPOINT_KEY))
-                .unwrap()
-                .ok_or(anyhow!("no checkpoint in object storage"))
-                .unwrap();
+        fn check(&self, size: u64) -> anyhow::Result<u64> {
+            let sth = block_on(self.object.fetch(CHECKPOINT_KEY))?
+                .ok_or(anyhow!("no checkpoint in object storage"))?;
             let first_signer = &self.config.checkpoint_signers[0];
-            let n = Note::from_bytes(&sth).unwrap();
+            let n = Note::from_bytes(&sth).map_err(|e| anyhow!(e))?;
             let (verified_sigs, _) = n
                 .verify(&VerifierList::new(vec![first_signer.verifier()]))
-                .unwrap();
+                .map_err(|e| anyhow!(e))?;
             assert_eq!(verified_sigs.len(), 1);
             let sth_timestamp = first_signer
                 .verifier()
                 .extract_timestamp_millis(verified_sigs[0].signature())
-                .unwrap()
+                .map_err(|e| anyhow!(e))?
                 .unwrap();
 
-            let c = Checkpoint::from_bytes(n.text()).unwrap();
+            let c = Checkpoint::from_bytes(n.text()).map_err(|e| anyhow!(e))?;
 
             assert_eq!(c.origin(), "example.com/TestLog");
             assert_eq!(c.extension(), "");
 
             {
-                let sth: Vec<u8> = block_on(self.lock.get(CHECKPOINT_KEY)).unwrap();
+                let sth: Vec<u8> =
+                    block_on(self.lock.get(CHECKPOINT_KEY)).map_err(|e| anyhow!(e))?;
                 let first_signer = &self.config.checkpoint_signers[0];
-                let n = Note::from_bytes(&sth).unwrap();
+                let n = Note::from_bytes(&sth).map_err(|e| anyhow!(e))?;
                 let (verified_sigs, _) = n
                     .verify(&VerifierList::new(vec![first_signer.verifier()]))
-                    .unwrap();
+                    .map_err(|e| anyhow!(e))?;
                 assert_eq!(verified_sigs.len(), 1);
                 let sth_timestamp1 = first_signer
                     .verifier()
                     .extract_timestamp_millis(verified_sigs[0].signature())
-                    .unwrap()
+                    .map_err(|e| anyhow!(e))?
                     .unwrap();
-                let c1 = Checkpoint::from_bytes(n.text()).unwrap();
+                let c1 = Checkpoint::from_bytes(n.text()).map_err(|e| anyhow!(e))?;
 
-                assert_eq!(c1.origin(), c.origin());
-                assert_eq!(c1.extension(), c.extension());
+                ensure!(c1.origin() == c.origin());
+                ensure!(c1.extension() == c.extension());
                 if c1.size() == c.size() {
-                    assert_eq!(c1.hash(), c.hash());
+                    ensure!(c1.hash() == c.hash());
                 }
-                assert!(sth_timestamp1 >= sth_timestamp);
-                assert!(c1.size() >= c.size());
-                assert_eq!(c1.size(), size);
+                ensure!(sth_timestamp1 >= sth_timestamp);
+                ensure!(c1.size() >= c.size());
+                ensure!(c1.size() == size);
             }
 
             if c.size() == 0 {
                 let expected = Sha256::digest([]);
-                assert_eq!(c.hash(), &Hash(expected.into()));
-                return sth_timestamp;
+                ensure!(c.hash() == &Hash(expected.into()));
+                return Ok(sth_timestamp);
             }
 
             let indexes: Vec<u64> = (0..c.size())
@@ -2178,7 +2284,8 @@ mod tests {
                 .collect();
             // [read_tile_hashes] checks the inclusion of every hash in the provided tree,
             // so this checks the validity of the entire Merkle tree.
-            let leaf_hashes = read_tile_hashes(&self.object, c.size(), c.hash(), &indexes).unwrap();
+            let leaf_hashes = read_tile_hashes(&self.object, c.size(), c.hash(), &indexes)
+                .map_err(|e| anyhow!(e))?;
 
             let mut last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1));
             last_tile.set_data_with_path(PathElem::Data);
@@ -2190,39 +2297,41 @@ mod tests {
                     TlogTile::new(0, n, TlogTile::FULL_WIDTH, Some(PathElem::Data))
                 };
                 for (i, entry) in TileIterator::<StaticCTLogEntry>::new(
-                    block_on(self.object.fetch(&tile.path())).unwrap().unwrap(),
+                    block_on(self.object.fetch(&tile.path()))
+                        .map_err(|e| anyhow!(e))?
+                        .unwrap(),
                     tile.width() as usize,
                 )
                 .enumerate()
                 {
-                    let entry = entry.unwrap();
+                    let entry = entry.map_err(|e| anyhow!(e))?;
                     let idx = n * u64::from(TlogTile::FULL_WIDTH) + i as u64;
-                    assert_eq!(entry.leaf_index, idx);
-                    assert!(entry.timestamp <= sth_timestamp);
-                    assert_eq!(
-                        leaf_hashes[usize::try_from(idx).unwrap()],
-                        tlog_tiles::record_hash(&entry.merkle_tree_leaf())
+                    ensure!(entry.leaf_index == idx);
+                    ensure!(entry.timestamp <= sth_timestamp);
+                    ensure!(
+                        leaf_hashes[usize::try_from(idx).map_err(|e| anyhow!(e))?]
+                            == tlog_tiles::record_hash(&entry.merkle_tree_leaf())
                     );
 
-                    assert!(!entry.inner.certificate.is_empty());
+                    ensure!(!entry.inner.certificate.is_empty());
                     if entry.inner.is_precert {
-                        assert!(!entry.inner.pre_certificate.is_empty());
-                        assert_ne!(entry.inner.issuer_key_hash, [0; 32]);
+                        ensure!(!entry.inner.pre_certificate.is_empty());
+                        ensure!(entry.inner.issuer_key_hash != [0; 32]);
                     } else {
-                        assert!(entry.inner.pre_certificate.is_empty());
-                        assert_eq!(entry.inner.issuer_key_hash, [0; 32]);
+                        ensure!(entry.inner.pre_certificate.is_empty());
+                        ensure!(entry.inner.issuer_key_hash == [0; 32]);
                     }
 
                     for fp in entry.inner.chain_fingerprints {
                         let b = block_on(self.object.fetch(&format!("issuer/{}", hex::encode(fp))))
-                            .unwrap()
+                            .map_err(|e| anyhow!(e))?
                             .unwrap();
-                        assert_eq!(Sha256::digest(b).to_vec(), fp);
+                        ensure!(Sha256::digest(b).to_vec() == fp);
                     }
                 }
             }
 
-            sth_timestamp
+            Ok(sth_timestamp)
         }
     }
 
@@ -2245,5 +2354,14 @@ mod tests {
         }
 
         Ok(hashes)
+    }
+
+    fn sequence_only_full_tiles(old_size: u64, pending: u64) -> (u64, u64) {
+        let new_size = ((old_size + pending) / u64::from(TlogTile::FULL_WIDTH))
+            * u64::from(TlogTile::FULL_WIDTH);
+        (new_size, old_size + pending - new_size)
+    }
+    fn sequence_everything(old_size: u64, pending: u64) -> (u64, u64) {
+        (old_size + pending, 0)
     }
 }

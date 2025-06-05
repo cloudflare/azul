@@ -29,7 +29,7 @@ pub(crate) struct Metrics {
     pub(crate) seq_delay: Histogram,
     pub(crate) seq_leaf_size: Histogram,
     pub(crate) seq_tiles: Counter,
-    pub(crate) seq_data_tile_size: Histogram,
+    pub(crate) seq_data_tile_size: HistogramVec,
 
     pub(crate) tree_time: Gauge,
     pub(crate) tree_size: Gauge,
@@ -114,9 +114,10 @@ impl Metrics {
             r
         )
         .unwrap();
-        let seq_data_tile_size = register_histogram_with_registry!(
+        let seq_data_tile_size = register_histogram_vec_with_registry!(
             "sequencing_data_tiles_bytes",
-            "Size of uploaded data tiles, including partials.",
+            "Size of uploaded data tiles, with 'type' indicating whether the tile is full or partial.",
+            &["type"],
             vec![10_000.0, 100_000.0, 1_000_000.0],
             r
         )

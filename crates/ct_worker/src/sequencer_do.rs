@@ -7,14 +7,15 @@ use crate::{
     ctlog, load_public_bucket, load_signing_key, load_witness_key,
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
     util::{self, now_millis},
-    DedupCache, MemoryCache, ObjectBucket, QueryParams, CONFIG, ROOTS,
+    DedupCache, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata, BATCH_ENDPOINT, CONFIG,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
 };
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
 use static_ct_api::{
-    LogEntryTrait, PendingLogEntryTrait, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner,
-    StaticCTLogEntry, StaticCTPendingLogEntry,
+    LogEntryTrait, LookupKey, PendingLogEntryTrait, StandardEd25519CheckpointSigner,
+    StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
 };
 use std::str::FromStr;
 use std::time::Duration;
@@ -119,21 +120,27 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
         let start = now_millis();
         self.metrics.req_in_flight.inc();
 
-        let endpoint: &str;
-        let resp = match req.path().as_str() {
-            "/metrics" => {
-                endpoint = "metrics";
-                self.metrics.req_count.with_label_values(&["metrics"]).inc();
-                self.fetch_metrics()
+        let path = req.path();
+        let mut endpoint = path.trim_start_matches('/');
+        let resp = match path.as_str() {
+            METRICS_ENDPOINT => self.fetch_metrics(),
+            ENTRY_ENDPOINT => {
+                let pending_entry: E = req.json().await?;
+                let lookup_key = pending_entry.lookup_key();
+                let result = self.add_batch(vec![pending_entry]).await;
+                if result.is_empty() || result[0].0 != lookup_key {
+                    Response::error("rate limited", 429)
+                } else {
+                    Response::from_json(&result[0].1)
+                }
             }
-            "/add_batch" => {
-                endpoint = "add_batch";
+            BATCH_ENDPOINT => {
                 let pending_entries: Vec<E> = req.json().await?;
-                self.add_batch(pending_entries).await
+                Response::from_json(&self.add_batch(pending_entries).await)
             }
             _ => {
                 endpoint = "unknown";
-                Response::error("Unknown endpoint", 404)
+                Response::error("unknown endpoint", 404)
             }
         };
         self.metrics.req_count.with_label_values(&[endpoint]).inc();
@@ -199,8 +206,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             .trim_start_matches("http://")
             .trim_start_matches("https://")
             .trim_end_matches('/');
-
-        let sequence_interval = Duration::from_secs(params.sequence_interval_seconds);
+        let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
         let checkpoint_signers = (self.key_loader)(&self.env, name, origin)?;
 
         self.config = Some(LogConfig {
@@ -208,10 +214,11 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             origin: origin.to_string(),
             checkpoint_signers,
             sequence_interval,
-            max_pending_entry_holds: params.max_pending_entry_holds,
+            max_sequence_skips: params.max_sequence_skips,
+            enable_dedup: params.enable_dedup,
+            sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
         });
         self.public_bucket = Some(ObjectBucket {
-            sequence_interval_seconds: params.sequence_interval_seconds,
             bucket: load_public_bucket(&self.env, name)?,
             metrics: Some(ObjectMetrics::new(&self.metrics.registry)),
         });
@@ -264,10 +271,10 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
         Ok(())
     }
 
-    // Add a batch of entries, returning a Response with metadata for
-    // successfully sequenced entries. Entries that fail to be added (e.g., due to rate limiting)
-    // are omitted.
-    async fn add_batch(&mut self, pending_entries: Vec<E>) -> Result<Response> {
+    // Add a batch of entries, returning metadata for successfully sequenced
+    // entries. Entries that fail to be added (e.g., due to rate limiting) are
+    // omitted.
+    async fn add_batch(&mut self, pending_entries: Vec<E>) -> Vec<(LookupKey, SequenceMetadata)> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());
@@ -278,6 +285,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
             let add_leaf_result = ctlog::add_leaf_to_pool(
                 &mut self.pool_state,
                 self.cache.as_ref().unwrap(),
+                self.config.as_ref().unwrap(),
                 pending_entry,
             );
 
@@ -293,13 +301,11 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
 
         // Zip the cache keys with the cache values, filtering out entries that
         // were not sequenced (e.g., due to rate limiting).
-        let result = lookup_keys
-            .iter()
+        lookup_keys
+            .into_iter()
             .zip(entries_metadata.iter())
-            .filter_map(|(key, value_opt)| value_opt.as_ref().map(|metadata| (key, metadata)))
-            .collect::<Vec<_>>();
-
-        Response::from_json(&result)
+            .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
+            .collect::<Vec<_>>()
     }
 
     fn fetch_metrics(&self) -> Result<Response> {
