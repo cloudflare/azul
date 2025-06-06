@@ -1189,7 +1189,7 @@ mod tests {
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::{StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
+    use static_ct_api::{PrecertData, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::cell::RefCell;
     use tlog_tiles::{Checkpoint, TlogTile};
@@ -1234,7 +1234,8 @@ mod tests {
                 let certificate = (i * 3000 + k).to_be_bytes().to_vec();
                 let leaf = StaticCTPendingLogEntry {
                     certificate,
-                    ..Default::default()
+                    precert_opt: None,
+                    chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
                 };
                 add_leaf_to_pool(&mut log.pool_state, &log.cache, &log.config, leaf);
             }
@@ -2204,21 +2205,22 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(seed);
             let mut certificate = vec![0; rng.gen_range(8..12)];
             rng.fill(&mut certificate[..]);
-            let mut pre_certificate: Vec<u8>;
-            let mut issuer_key_hash = [0; 32];
-            if is_precert {
-                pre_certificate = vec![0; rng.gen_range(1..5)];
-                rng.fill(&mut pre_certificate[..]);
+            let precert_opt: Option<PrecertData> = if is_precert {
+                let mut issuer_key_hash = [0; 32];
                 rng.fill(&mut issuer_key_hash);
+                let mut pre_certificate = vec![0; rng.gen_range(1..5)];
+                rng.fill(&mut pre_certificate[..]);
+                Some(PrecertData {
+                    issuer_key_hash,
+                    pre_certificate,
+                })
             } else {
-                pre_certificate = Vec::new();
-            }
+                None
+            };
             let issuers = CHAINS[rng.gen_range(0..CHAINS.len())];
             let leaf = StaticCTPendingLogEntry {
                 certificate,
-                pre_certificate,
-                is_precert,
-                issuer_key_hash,
+                precert_opt,
                 chain_fingerprints: issuers.iter().map(|&x| Sha256::digest(x).into()).collect(),
             };
 
@@ -2314,12 +2316,9 @@ mod tests {
                     );
 
                     ensure!(!entry.inner.certificate.is_empty());
-                    if entry.inner.is_precert {
-                        ensure!(!entry.inner.pre_certificate.is_empty());
-                        ensure!(entry.inner.issuer_key_hash != [0; 32]);
-                    } else {
-                        ensure!(entry.inner.pre_certificate.is_empty());
-                        ensure!(entry.inner.issuer_key_hash == [0; 32]);
+                    if let Some(precert_data) = entry.inner.precert_opt {
+                        ensure!(!precert_data.pre_certificate.is_empty());
+                        ensure!(precert_data.issuer_key_hash != [0; 32]);
                     }
 
                     for fp in entry.inner.chain_fingerprints {

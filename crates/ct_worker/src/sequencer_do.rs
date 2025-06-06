@@ -7,15 +7,15 @@ use crate::{
     ctlog, load_public_bucket, load_signing_key, load_witness_key,
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
     util::{self, now_millis},
-    DedupCache, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata, BATCH_ENDPOINT, CONFIG,
-    ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
+    DedupCache, LookupKey, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata,
+    BATCH_ENDPOINT, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
 };
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
 use static_ct_api::{
-    LogEntryTrait, LookupKey, PendingLogEntryTrait, StandardEd25519CheckpointSigner,
-    StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
+    LogEntryTrait, PendingLogEntryTrait, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner,
+    StaticCTLogEntry, StaticCTPendingLogEntry,
 };
 use std::str::FromStr;
 use std::time::Duration;

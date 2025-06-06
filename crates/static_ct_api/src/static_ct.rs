@@ -129,8 +129,27 @@ use std::{
     marker::PhantomData,
 };
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, SequenceMetadata, UnixTimestamp,
+    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LookupKey, SequenceMetadata,
+    UnixTimestamp,
 };
+
+#[repr(u16)]
+enum EntryType {
+    X509Entry = 0,
+    PrecertEntry = 1,
+}
+
+impl TryFrom<u16> for EntryType {
+    type Error = ();
+
+    fn try_from(v: u16) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(EntryType::X509Entry),
+            1 => Ok(EntryType::PrecertEntry),
+            _ => Err(()),
+        }
+    }
+}
 
 /// Calculates the log ID from a verifying key.
 ///
@@ -145,8 +164,6 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
     let pkix = vkey.to_public_key_der()?;
     Ok(Sha256::digest(&pkix).into())
 }
-
-pub type LookupKey = [u8; 16];
 
 /// The functionality exposed by any data type that can be included in a Merkle tree
 pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize + DeserializeOwned {
@@ -184,7 +201,7 @@ pub trait LogEntryTrait: core::fmt::Debug + Sized {
     /// # Errors
     ///
     /// Errors if the log entry cannot be parsed from the cursor.
-    fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, Self::ParseError>;
+    fn parse_from_tile_entry<R: Read>(input: &mut R) -> Result<Self, Self::ParseError>;
 }
 
 impl PendingLogEntryTrait for StaticCTPendingLogEntry {
@@ -195,15 +212,19 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
     /// Panics if writing to an internal buffer fails, which should never happen.
     fn lookup_key(&self) -> LookupKey {
         let mut buffer = Vec::new();
-        if self.is_precert {
-            // Add entry type = 1 (precert_entry)
-            buffer.write_u16::<BigEndian>(1).unwrap();
+        if let Some(precert_data) = &self.precert_opt {
+            // Add entry type
+            buffer
+                .write_u16::<BigEndian>(EntryType::PrecertEntry as u16)
+                .unwrap();
 
             // Add issuer key hash
-            buffer.extend_from_slice(&self.issuer_key_hash);
+            buffer.extend_from_slice(&precert_data.issuer_key_hash);
         } else {
-            // Add entry type = 0 (x509_entry)
-            buffer.write_u16::<BigEndian>(0).unwrap();
+            // Add entry type
+            buffer
+                .write_u16::<BigEndian>(EntryType::X509Entry as u16)
+                .unwrap();
         }
         // Add certificate with a 24-bit length prefix
         buffer.write_length_prefixed(&self.certificate, 3).unwrap();
@@ -219,7 +240,7 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
     }
 
     fn logging_labels(&self) -> Vec<String> {
-        if self.is_precert {
+        if self.precert_opt.is_some() {
             vec!["add-pre-chain".to_string()]
         } else {
             vec!["add-chain".to_string()]
@@ -234,31 +255,33 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
-pub struct StaticCTPendingLogEntry {
-    /// Either the `TimestampedEntry.signed_entry`, or the
-    /// `PreCert.tbs_certificate` for Precertificates.
-    /// It must be at most 2^24-1 bytes long.
-    pub certificate: Vec<u8>,
-
-    /// True if `LogEntryType` is `precert_entry`. Otherwise, the
-    /// following three fields are zero and ignored.
-    pub is_precert: bool,
-
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct PrecertData {
     /// The `PreCert.issuer_key_hash`.
     pub issuer_key_hash: [u8; 32],
-
-    /// The SHA-256 hashes of the certificates in the
-    /// `X509ChainEntry.certificate_chain` or
-    /// `PrecertChainEntry.precertificate_chain`.
-    pub chain_fingerprints: Vec<[u8; 32]>,
 
     /// The `PrecertChainEntry.pre_certificate`.
     /// It must be at most 2^24-1 bytes long.
     pub pre_certificate: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct StaticCTPendingLogEntry {
+    /// Either the `TimestampedEntry.signed_entry`, or the
+    /// `PreCert.tbs_certificate` for Precertificates.
+    /// It must be at most 2^24-1 bytes long.
+    pub certificate: Vec<u8>,
+
+    /// If populated, this entry is a precertificate.
+    pub precert_opt: Option<PrecertData>,
+
+    /// The SHA-256 hashes of the certificates in the
+    /// `X509ChainEntry.certificate_chain` or
+    /// `PrecertChainEntry.precertificate_chain`.
+    pub chain_fingerprints: Vec<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StaticCTLogEntry {
     /// The pending entry that preceded this log entry
     pub inner: StaticCTPendingLogEntry,
@@ -277,11 +300,15 @@ impl StaticCTLogEntry {
         let mut buffer = Vec::new();
 
         buffer.write_u64::<BigEndian>(self.timestamp).unwrap();
-        if self.inner.is_precert {
-            buffer.write_u16::<BigEndian>(1).unwrap(); // entry_type = precert_entry
-            buffer.extend_from_slice(&self.inner.issuer_key_hash);
+        if let Some(precert_data) = &self.inner.precert_opt {
+            buffer
+                .write_u16::<BigEndian>(EntryType::PrecertEntry as u16)
+                .unwrap();
+            buffer.extend_from_slice(&precert_data.issuer_key_hash);
         } else {
-            buffer.write_u16::<BigEndian>(0).unwrap(); // entry_type = x509_entry
+            buffer
+                .write_u16::<BigEndian>(EntryType::X509Entry as u16)
+                .unwrap();
         }
         buffer
             .write_length_prefixed(&self.inner.certificate, 3)
@@ -341,9 +368,9 @@ impl LogEntryTrait for StaticCTLogEntry {
     fn tile_leaf(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend(self.marshal_timestamped_entry());
-        if self.inner.is_precert {
+        if let Some(precert_data) = &self.inner.precert_opt {
             buffer
-                .write_length_prefixed(&self.inner.pre_certificate, 3)
+                .write_length_prefixed(&precert_data.pre_certificate, 3)
                 .unwrap();
         }
         buffer
@@ -353,10 +380,13 @@ impl LogEntryTrait for StaticCTLogEntry {
         buffer
     }
 
-    /// Attempts to parse a `LogEntry` from a cursor into a tile. The position of the cursor is
-    /// expected to be the beginning of an entry. On success, returns a log entry
-    fn parse_from_tile_entry(cur: &mut Cursor<impl AsRef<[u8]>>) -> Result<Self, StaticCTError> {
-        // https://c2sp.org/static-ct-api#log-entries
+    /// Attempts to parse a `LogEntry` from a reader into a tile. The position
+    /// of the reader is expected to be the beginning of an entry. On success,
+    /// returns a log entry.
+    fn parse_from_tile_entry<R: Read>(input: &mut R) -> Result<Self, StaticCTError> {
+        // Parse a TileLeaf from the input, defined at
+        // https://c2sp.org/static-ct-api#log-entries:
+        //
         // struct {
         //     TimestampedEntry timestamped_entry;
         //     select (entry_type) {
@@ -367,52 +397,76 @@ impl LogEntryTrait for StaticCTLogEntry {
         // } TileLeaf;
         //
         // opaque Fingerprint[32];
+        //
+        // We also need these definitions from
+        // https://datatracker.ietf.org/doc/html/rfc6962#section-3.4:
+        //
+        // struct {
+        //     uint64 timestamp;
+        //     LogEntryType entry_type;
+        //     select(entry_type) {
+        //         case x509_entry: ASN.1Cert;
+        //         case precert_entry: PreCert;
+        //     } signed_entry;
+        //     CtExtensions extensions;
+        // } TimestampedEntry;
+        //
+        // opaque ASN.1Cert<1..2^24-1>;
+        //
+        // struct {
+        //   opaque issuer_key_hash[32];
+        //   TBSCertificate tbs_certificate;
+        // } PreCert;
+        //
+        // opaque TBSCertificate<1..2^24-1>
+        //
+        // enum {
+        // 	 leaf_index(0), (255)
+        // } ExtensionType;
+        //
+        // struct {
+        // 	 ExtensionType extension_type;
+        // 	 opaque extension_data<0..2^16-1>;
+        // } Extension;
+        //
+        // Extension CtExtensions<0..2^16-1>;
 
-        let mut entry = StaticCTLogEntry {
-            timestamp: cur.read_u64::<BigEndian>()?,
-            ..Default::default()
-        };
-        let entry_type = cur.read_u16::<BigEndian>()?;
-        let extensions: Vec<u8>;
-        let fingerprints: Vec<u8>;
-
-        match entry_type {
-            0 => {
-                entry.inner.certificate = cur.read_length_prefixed(3)?;
-                extensions = cur.read_length_prefixed(2)?;
-                fingerprints = cur.read_length_prefixed(2)?;
-            }
-            1 => {
-                entry.inner.is_precert = true;
-                cur.read_exact(&mut entry.inner.issuer_key_hash)?;
-                entry.inner.certificate = cur.read_length_prefixed(3)?;
-                extensions = cur.read_length_prefixed(2)?;
-                entry.inner.pre_certificate = cur.read_length_prefixed(3)?;
-                fingerprints = cur.read_length_prefixed(2)?;
-            }
-            _ => {
+        let timestamp = input.read_u64::<BigEndian>()?;
+        let entry_type = input.read_u16::<BigEndian>()?;
+        let mut precert_opt = match EntryType::try_from(entry_type) {
+            Ok(EntryType::X509Entry) => None,
+            Ok(EntryType::PrecertEntry) => Some(PrecertData {
+                issuer_key_hash: [0; 32],
+                pre_certificate: Vec::new(),
+            }),
+            Err(()) => {
                 return Err(StaticCTError::UnknownType);
             }
+        };
+        if let Some(precert_data) = precert_opt.as_mut() {
+            input.read_exact(&mut precert_data.issuer_key_hash)?;
         }
+        let certificate = input.read_length_prefixed(3)?;
+        let leaf_index = Extensions::from_bytes(&input.read_length_prefixed(2)?)?.leaf_index;
+        if let Some(precert_data) = precert_opt.as_mut() {
+            precert_data.pre_certificate = input.read_length_prefixed(3)?;
+        }
+        let chain_fingerprints = input
+            .read_length_prefixed(2)?
+            .chunks(32)
+            .map(<[u8; 32]>::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|_| StaticCTError::TrailingData)?;
 
-        let mut extensions = Cursor::new(extensions);
-        if extensions.read_u8()? != 0 {
-            return Err(StaticCTError::UnexpectedExtension);
-        }
-        let extension_data = extensions.read_length_prefixed(2)?;
-        entry.leaf_index = Cursor::new(&extension_data).read_uint::<BigEndian>(5)?;
-        if extensions.position() != extensions.get_ref().len() as u64 {
-            return Err(StaticCTError::TrailingData);
-        }
-
-        let mut fingerprints = Cursor::new(fingerprints);
-        while fingerprints.position() != fingerprints.get_ref().len() as u64 {
-            let mut f = [0; 32];
-            fingerprints.read_exact(&mut f)?;
-            entry.inner.chain_fingerprints.push(f);
-        }
-
-        Ok(entry)
+        Ok(StaticCTLogEntry {
+            inner: StaticCTPendingLogEntry {
+                certificate,
+                precert_opt,
+                chain_fingerprints,
+            },
+            leaf_index,
+            timestamp,
+        })
     }
 }
 
@@ -452,15 +506,6 @@ impl<E: PendingLogEntryTrait> LogEntryTrait<E> for GenericLogEntry<E> {
     }
 }
 */
-
-/// A log entry that is ready to be serialized.
-pub struct ValidatedChain {
-    pub certificate: Vec<u8>,
-    pub is_precert: bool,
-    pub issuer_key_hash: [u8; 32],
-    pub issuers: Vec<Vec<u8>>,
-    pub pre_certificate: Vec<u8>,
-}
 
 /// An iterator over log entries in a data tile.
 pub struct TileIterator<L: LogEntryTrait> {
@@ -630,12 +675,12 @@ impl CheckpointSigner for StandardEd25519CheckpointSigner {
 
 /// The `CTExtensions` field of `SignedCertificateTimestamp` and
 /// `TimestampedEntry`, according to c2sp.org/static-ct-api.
-#[derive(Default)]
 pub struct Extensions {
     pub leaf_index: u64,
 }
 
 impl Extensions {
+    const EXT_TYPE_LEAF_INDEX: u8 = 0;
     /// Marshals extensions for inclusion in an add-(pre-)chain response.
     ///
     /// # Panics
@@ -658,47 +703,38 @@ impl Extensions {
         // uint40 leaf_index;
 
         let mut buffer = Vec::new();
-        buffer.write_u8(0).unwrap(); // extension_type = leaf_index
+        buffer.write_u8(Self::EXT_TYPE_LEAF_INDEX).unwrap();
         buffer.write_u16::<BigEndian>(5).unwrap();
         buffer.write_uint::<BigEndian>(self.leaf_index, 5).unwrap();
 
         buffer
     }
 
-    /// Parse a `CTExtensions` field, ignoring unknown extensions.
+    /// Parse a `CTExtensions` field from the input buffer.
     ///
     /// # Errors
     ///
-    /// Returns an error if the `leaf_index` extension is missing
-    /// or the extension is otherwise malformed.
-    pub fn from_bytes(ext_bytes: &[u8]) -> Result<Self, StaticCTError> {
-        let mut cursor = Cursor::new(ext_bytes);
-        let mut e = Extensions::default();
-
-        while cursor.position() < ext_bytes.len() as u64 {
-            let extension_type = cursor.read_u8()?;
-            let length = cursor.read_u16::<BigEndian>()? as usize;
-
-            if cursor.position() + length as u64 > ext_bytes.len() as u64 {
-                return Err(StaticCTError::InvalidLength);
-            }
-
-            let mut extension = vec![0; length];
-            cursor.read_exact(&mut extension)?;
-
-            if extension_type == 0 {
-                let mut extension_cursor = Cursor::new(&extension);
-                e.leaf_index = extension_cursor.read_uint::<BigEndian>(5)?;
-
-                if extension_cursor.position() != extension.len() as u64 {
-                    return Err(StaticCTError::TrailingData);
+    /// Returns an error if the `leaf_index` extension is missing, if there are
+    /// unexpected extensions or the extension is otherwise malformed.
+    pub fn from_bytes(mut input: &[u8]) -> Result<Self, StaticCTError> {
+        let mut leaf_index_opt = None;
+        while !input.is_empty() {
+            let extension_type = input.read_u8()?;
+            let extension_data = input.read_length_prefixed(2)?;
+            if extension_type == Self::EXT_TYPE_LEAF_INDEX {
+                if leaf_index_opt.is_some() || extension_data.len() != 5 {
+                    return Err(StaticCTError::Malformed);
                 }
-
-                return Ok(e);
+                leaf_index_opt = Some((&extension_data[..]).read_uint::<BigEndian>(5)?);
+            } else {
+                return Err(StaticCTError::UnexpectedExtension);
             }
         }
-
-        Err(StaticCTError::MissingLeafIndex)
+        if let Some(leaf_index) = leaf_index_opt {
+            Ok(Extensions { leaf_index })
+        } else {
+            Err(StaticCTError::MissingLeafIndex)
+        }
     }
 }
 
@@ -812,45 +848,44 @@ impl NoteVerifier for RFC6962Verifier {
         self.id
     }
 
-    fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
+    fn verify(&self, msg: &[u8], mut sig: &[u8]) -> bool {
         let Ok(checkpoint) = Checkpoint::from_bytes(msg) else {
             return false;
         };
         if !checkpoint.extension().is_empty() {
             return false;
         }
-        let mut s = Cursor::new(sig);
-        let Ok(timestamp) = s.read_u64::<BigEndian>() else {
+        let Ok(timestamp) = sig.read_u64::<BigEndian>() else {
             return false;
         };
-        let Ok(hash_alg) = s.read_u8() else {
+        let Ok(hash_alg) = sig.read_u8() else {
             return false;
         };
         if hash_alg != 4 {
             return false;
         }
-        let Ok(sig_alg) = s.read_u8() else {
+        let Ok(sig_alg) = sig.read_u8() else {
             return false;
         };
         // Only support ECDSA
         if sig_alg != 3 {
             return false;
         }
-        let Ok(signature) = s.read_length_prefixed(2) else {
+        let Ok(signature_der) = sig.read_length_prefixed(2) else {
             return false;
         };
-        if s.position() != s.get_ref().len() as u64 {
+        if !sig.is_empty() {
             return false;
         }
 
         let sth_bytes =
             serialize_sth_signature_input(timestamp, checkpoint.size(), checkpoint.hash());
 
-        let Ok(sig) = EcdsaSignature::from_der(&signature) else {
+        let Ok(signature) = EcdsaSignature::from_der(&signature_der) else {
             return false;
         };
 
-        self.verifying_key.verify(&sth_bytes, &sig).is_ok()
+        self.verifying_key.verify(&sth_bytes, &signature).is_ok()
     }
 
     fn extract_timestamp_millis(
@@ -1082,6 +1117,23 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_parse_tile_entry() {
+        let inner = StaticCTPendingLogEntry {
+            certificate: vec![1; 100],
+            precert_opt: None,
+            chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
+        };
+        let entry = StaticCTLogEntry::new(inner, (123, 456));
+        let tile: Vec<u8> = (0..5).flat_map(|_| entry.tile_leaf()).collect();
+        let mut tile_reader: &[u8] = tile.as_ref();
+
+        for _ in 0..5 {
+            let parsed_entry = StaticCTLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
+            assert_eq!(entry, parsed_entry);
+        }
+    }
 
     #[test]
     fn test_parse_extensions() {
