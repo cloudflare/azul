@@ -118,19 +118,16 @@ use p256::{
     pkcs8::EncodePublicKey,
 };
 use rand::{seq::SliceRandom, Rng};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
     Note, NoteError, Signature as NoteSignature, SignerError, StandardVerifier, VerificationError,
     Verifier as NoteVerifier, VerifierError, VerifierList, Verifiers,
 };
-use std::{
-    io::{Cursor, Read},
-    marker::PhantomData,
-};
+use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LookupKey, SequenceMetadata,
-    UnixTimestamp,
+    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LookupKey, PendingLogEntry,
+    SequenceMetadata, LogEntry, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -165,46 +162,7 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
     Ok(Sha256::digest(&pkix).into())
 }
 
-/// The functionality exposed by any data type that can be included in a Merkle tree
-pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize + DeserializeOwned {
-    /// The lookup key belonging to this pending log entry
-    fn lookup_key(&self) -> LookupKey;
-
-    /// The labels this objects wants to be used when it appears in Prometheus logging messages
-    fn logging_labels(&self) -> Vec<String>;
-
-    /// The canonical byte representation of this object. Only used by [`GenericLogEntry`].
-    fn as_bytes(&self) -> &[u8];
-}
-
-pub trait LogEntryTrait: core::fmt::Debug + Sized {
-    /// The pending version of this log entry. Usually the same thing but doesn't have a timestamp or tree index
-    type Pending: PendingLogEntryTrait;
-
-    /// The error type for [`Self::parse_from_tile_entry`]
-    type ParseError: std::error::Error + Send + Sync + 'static;
-
-    fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self;
-
-    /// Returns the underlying pending entry
-    fn inner(&self) -> &Self::Pending;
-
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
-    fn merkle_tree_leaf(&self) -> Vec<u8>;
-
-    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
-    fn tile_leaf(&self) -> Vec<u8>;
-
-    /// Attempts to parse a `LogEntry` from a cursor into a tile. The position of the cursor is
-    /// expected to be the beginning of an entry. On success, returns a log entry.
-    ///
-    /// # Errors
-    ///
-    /// Errors if the log entry cannot be parsed from the cursor.
-    fn parse_from_tile_entry<R: Read>(input: &mut R) -> Result<Self, Self::ParseError>;
-}
-
-impl PendingLogEntryTrait for StaticCTPendingLogEntry {
+impl PendingLogEntry for StaticCTPendingLogEntry {
     /// Compute the cache key for a pending log entry.
     ///
     /// # Panics
@@ -245,13 +203,6 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
         } else {
             vec!["add-chain".to_string()]
         }
-    }
-
-    /// We don't have a canonical representation. Eg the type of the length prefix depends on
-    /// whether this is a precert. This is never used with `GenericLogEntry` so we can just not
-    /// implement it.
-    fn as_bytes(&self) -> &[u8] {
-        unimplemented!()
     }
 }
 
@@ -327,7 +278,7 @@ impl StaticCTLogEntry {
     }
 }
 
-impl LogEntryTrait for StaticCTLogEntry {
+impl LogEntry for StaticCTLogEntry {
     type Pending = StaticCTPendingLogEntry;
 
     // The error type for parse_from_tile_entry
@@ -467,81 +418,6 @@ impl LogEntryTrait for StaticCTLogEntry {
             leaf_index,
             timestamp,
         })
-    }
-}
-
-/* TODO: Uncomment this once the static CT types are implemented
-/// A generic log entry compatible with the [tlog-tiles spec](https://github.com/C2SP/C2SP/blob/main/tlog-tiles.md)
-#[derive(Debug)]
-struct GenericLogEntry<E: PendingLogEntryTrait>(E);
-
-impl<E: PendingLogEntryTrait> LogEntryTrait<E> for GenericLogEntry<E> {
-    fn new(pending: E, _: SequenceMetadata) -> Self {
-        GenericLogEntry(pending)
-    }
-
-    fn inner(&self) -> &E {
-        &self.0
-    }
-
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    fn merkle_tree_leaf(&self) -> Vec<u8> {
-        record_hash(self.0.as_bytes()).0.to_vec()
-    }
-
-    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    fn tile_leaf(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.write_length_prefixed(self.0.as_bytes(), 2).unwrap();
-
-        buf
-    }
-}
-*/
-
-/// An iterator over log entries in a data tile.
-pub struct TileIterator<L: LogEntryTrait> {
-    s: Cursor<Vec<u8>>,
-    size: usize,
-    count: usize,
-    _marker: PhantomData<L>,
-}
-
-impl<L: LogEntryTrait> std::iter::Iterator for TileIterator<L> {
-    type Item = Result<L, L::ParseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.count == self.size {
-            return None;
-        }
-        self.count += 1;
-        Some(self.parse_next())
-    }
-}
-
-impl<L: LogEntryTrait> TileIterator<L> {
-    /// Returns a new [`TileIterator`], which always attempts to parse exactly
-    /// 'size' entries before terminating.
-    pub fn new(tile: Vec<u8>, size: usize) -> Self {
-        Self {
-            s: Cursor::new(tile),
-            size,
-            count: 0,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Parse the next [`LogEntry`] from the internal buffer.
-    fn parse_next(&mut self) -> Result<L, L::ParseError> {
-        L::parse_from_tile_entry(&mut self.s)
     }
 }
 
@@ -715,7 +591,7 @@ impl Extensions {
     /// # Errors
     ///
     /// Returns an error if the `leaf_index` extension is missing, if there are
-    /// unexpected extensions or the extension is otherwise malformed.
+    /// unexpected extensions, or the extension is otherwise malformed.
     pub fn from_bytes(mut input: &[u8]) -> Result<Self, StaticCTError> {
         let mut leaf_index_opt = None;
         while !input.is_empty() {
@@ -1130,7 +1006,8 @@ mod tests {
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {
-            let parsed_entry = StaticCTLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
+            let parsed_entry =
+                StaticCTLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
             assert_eq!(entry, parsed_entry);
         }
     }

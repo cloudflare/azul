@@ -29,7 +29,7 @@ use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{Verifier as NoteVerifier, VerifierList};
-use static_ct_api::{LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp};
+use static_ct_api::TreeWithTimestamp;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -38,8 +38,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    CheckpointSigner, Hash, HashReader, PathElem, Tile, TlogError, TlogTile, UnixTimestamp,
-    HASH_SIZE,
+    CheckpointSigner, Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator,
+    TlogError, TlogTile, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -93,7 +93,7 @@ impl LogConfig {
 /// they are rotated out of `in_sequencing`.
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Debug)]
-pub(crate) struct PoolState<P: PendingLogEntryTrait> {
+pub(crate) struct PoolState<P: PendingLogEntry> {
     // How many times sequencing has been skipped for any entries in the pool.
     sequence_skips: usize,
 
@@ -116,7 +116,7 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     leftover_timestamps_next_slot: usize,
 }
 
-impl<P: PendingLogEntryTrait> Default for PoolState<P> {
+impl<P: PendingLogEntry> Default for PoolState<P> {
     fn default() -> Self {
         PoolState {
             sequence_skips: 0,
@@ -129,7 +129,7 @@ impl<P: PendingLogEntryTrait> Default for PoolState<P> {
     }
 }
 
-impl<E: PendingLogEntryTrait> PoolState<E> {
+impl<E: PendingLogEntry> PoolState<E> {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
@@ -315,7 +315,7 @@ impl SequenceState {
     /// and when reloading (e.g., to recover after a fatal sequencing error).
     ///
     /// This will return an error if the log has not been created, or if recovery fails.
-    pub(crate) async fn load<L: LogEntryTrait>(
+    pub(crate) async fn load<L: LogEntry>(
         config: &LogConfig,
         object: &impl ObjectBackend,
         lock: &impl LockBackend,
@@ -499,7 +499,7 @@ pub(crate) enum PendingSource {
 /// with a [`AddLeafResult::Cached`]. If the pool is full, return
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
-pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
+pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     state: &mut PoolState<E>,
     cache: &impl CacheRead,
     config: &LogConfig,
@@ -564,7 +564,7 @@ pub(crate) async fn upload_issuers(
 }
 
 /// Sequences the current pool of pending entries in the ephemeral state.
-pub(crate) async fn sequence<L: LogEntryTrait>(
+pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &mut PoolState<L::Pending>,
     sequence_state: &mut Option<SequenceState>,
     config: &LogConfig,
@@ -642,7 +642,7 @@ enum SequenceError {
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
-async fn sequence_entries<L: LogEntryTrait>(
+async fn sequence_entries<L: LogEntry>(
     sequence_state: &mut SequenceState,
     config: &LogConfig,
     object: &impl ObjectBackend,
