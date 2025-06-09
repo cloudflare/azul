@@ -295,19 +295,22 @@ impl LogEntry for StaticCTLogEntry {
         &self.inner
     }
 
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
+    /// Returns the Merkle tree leaf hash of a [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
     ///
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
-    fn merkle_tree_leaf(&self) -> Vec<u8> {
-        let mut buffer = vec![
-            0, // version = v1 (0)
-            0, // leaf_type = timestamped_entry (0)
-        ];
-        buffer.extend(self.marshal_timestamped_entry());
-
-        buffer
+    fn merkle_tree_leaf(&self) -> Hash {
+        tlog_tiles::record_hash(
+            &[
+                &[
+                    0, // version = v1 (0)
+                    0, // leaf_type = timestamped_entry (0)
+                ],
+                self.marshal_timestamped_entry().as_slice(),
+            ]
+            .concat(),
+        )
     }
 
     /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
@@ -315,7 +318,7 @@ impl LogEntry for StaticCTLogEntry {
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
-    fn tile_leaf(&self) -> Vec<u8> {
+    fn to_data_tile_entry(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend(self.marshal_timestamped_entry());
         if let Some(precert_data) = &self.inner.precert_opt {
@@ -954,7 +957,7 @@ mod tests {
             chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
         };
         let entry = StaticCTLogEntry::new(inner, (123, 456));
-        let tile: Vec<u8> = (0..5).flat_map(|_| entry.tile_leaf()).collect();
+        let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {

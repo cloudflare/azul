@@ -6,7 +6,7 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::TlogError;
+use crate::{Hash, TlogError};
 
 pub const LOOKUP_KEY_LEN: usize = 16;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];
@@ -45,11 +45,14 @@ pub trait LogEntry: core::fmt::Debug + Sized {
     /// Returns the underlying pending entry
     fn inner(&self) -> &Self::Pending;
 
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
-    fn merkle_tree_leaf(&self) -> Vec<u8>;
+    /// Returns the Merkle tree leaf hash for this entry. For tlog-tiles, this is the Merkle Tree Hash
+    /// (according to <https://datatracker.ietf.org/doc/html/rfc6962#section-2.1>)
+    /// of the log entry bytes.
+    fn merkle_tree_leaf(&self) -> Hash;
 
-    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
-    fn tile_leaf(&self) -> Vec<u8>;
+    /// Returns the serialized form of this log entry to be included in the data
+    /// tile. For tlog-tiles, this is the big-endian uint16 length-prefixed log entry.
+    fn to_data_tile_entry(&self) -> Vec<u8>;
 
     /// Attempts to parse a `LogEntry` from a reader into a tile. The position of the reader is
     /// expected to be the beginning of an entry. On success, returns a log entry.
@@ -135,11 +138,11 @@ impl LogEntry for TlogTilesLogEntry {
         &self.inner
     }
 
-    fn merkle_tree_leaf(&self) -> Vec<u8> {
-        self.inner.data.clone()
+    fn merkle_tree_leaf(&self) -> Hash {
+        crate::tlog::record_hash(&self.inner.data)
     }
 
-    fn tile_leaf(&self) -> Vec<u8> {
+    fn to_data_tile_entry(&self) -> Vec<u8> {
         let mut buffer = Vec::with_capacity(2 + self.inner.data.len());
         buffer.write_length_prefixed(&self.inner.data, 2).unwrap();
         buffer
@@ -166,7 +169,7 @@ mod tests {
     fn test_parse_tile_entry() {
         let inner = TlogTilesPendingLogEntry { data: vec![1; 100] };
         let entry = TlogTilesLogEntry::new(inner, (123, 456));
-        let tile: Vec<u8> = (0..5).flat_map(|_| entry.tile_leaf()).collect();
+        let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {

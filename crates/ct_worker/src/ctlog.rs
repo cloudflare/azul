@@ -414,7 +414,7 @@ impl SequenceState {
             )
             .enumerate()
             {
-                let got = tlog_tiles::record_hash(&entry?.merkle_tree_leaf());
+                let got = entry?.merkle_tree_leaf();
                 let exp = edge_tiles.get(&0).unwrap().tile.hash_at_index(
                     &edge_tiles.get(&0).unwrap().b,
                     tlog_tiles::stored_hash_index(0, start + i as u64),
@@ -678,7 +678,7 @@ async fn sequence_entries<L: LogEntry>(
         sequenced_metadata.push((sender, metadata));
 
         let sequenced_entry = L::new(entry, metadata);
-        let tile_leaf = sequenced_entry.tile_leaf();
+        let tile_leaf = sequenced_entry.to_data_tile_entry();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
         data_tile.extend(tile_leaf);
@@ -686,9 +686,9 @@ async fn sequence_entries<L: LogEntry>(
         // Compute the new tree hashes and add them to the hashReader overlay
         // (we will use them later to insert more leaves and finally to produce
         // the new tiles).
-        let hashes = tlog_tiles::stored_hashes(
+        let hashes = tlog_tiles::stored_hashes_for_record_hash(
             n,
-            &merkle_tree_leaf,
+            merkle_tree_leaf,
             &HashReaderWithOverlay {
                 edge_tiles: &edge_tiles,
                 overlay: &overlay,
@@ -2308,7 +2308,7 @@ mod tests {
                     ensure!(entry.timestamp <= sth_timestamp);
                     ensure!(
                         leaf_hashes[usize::try_from(idx).map_err(|e| anyhow!(e))?]
-                            == tlog_tiles::record_hash(&entry.merkle_tree_leaf())
+                            == entry.merkle_tree_leaf()
                     );
 
                     ensure!(!entry.inner.certificate.is_empty());
