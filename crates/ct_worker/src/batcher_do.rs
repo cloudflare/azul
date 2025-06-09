@@ -12,16 +12,17 @@ use crate::{
 };
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::{PendingLogEntryTrait, StaticCTPendingLogEntry};
+use static_ct_api::StaticCTPendingLogEntry;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
+use tlog_tiles::PendingLogEntry;
 use tokio::sync::watch::{self, Sender};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-struct GenericBatcher<E: PendingLogEntryTrait> {
+struct GenericBatcher<E: PendingLogEntry> {
     env: Env,
     batch: Batch<E>,
     in_flight: usize,
@@ -43,13 +44,13 @@ impl DurableObject for Batcher {
 }
 
 // A batch of entries to be submitted to the Sequencer together.
-struct Batch<E: PendingLogEntryTrait> {
+struct Batch<E: PendingLogEntry> {
     entries: Vec<E>,
     by_hash: HashSet<LookupKey>,
     done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
 
-impl<E: PendingLogEntryTrait> Default for Batch<E> {
+impl<E: PendingLogEntry> Default for Batch<E> {
     /// Returns a batch initialized with a watch channel.
     fn default() -> Self {
         let (done, _) = watch::channel(HashMap::new());
@@ -61,7 +62,7 @@ impl<E: PendingLogEntryTrait> Default for Batch<E> {
     }
 }
 
-impl<E: PendingLogEntryTrait> GenericBatcher<E> {
+impl<E: PendingLogEntry> GenericBatcher<E> {
     fn new(_: State, env: Env) -> Self {
         Self {
             env,
@@ -138,7 +139,7 @@ impl<E: PendingLogEntryTrait> GenericBatcher<E> {
     }
 }
 
-impl<E: PendingLogEntryTrait> GenericBatcher<E> {
+impl<E: PendingLogEntry> GenericBatcher<E> {
     // Submit the current pending batch to be sequenced.
     async fn submit_batch(&mut self, name: &str) -> Result<()> {
         let stub = get_stub(&self.env, name, None, "SEQUENCER")?;

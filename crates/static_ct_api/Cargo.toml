@@ -21,12 +21,14 @@ wasm-opt = false
 [lib]
 crate-type = ["rlib"]
 
+[dev-dependencies]
+ed25519-dalek.workspace = true
+
 [dependencies]
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
 der.workspace = true
-ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 length_prefixed.workspace = true
 p256.workspace = true
 rand.workspace = true

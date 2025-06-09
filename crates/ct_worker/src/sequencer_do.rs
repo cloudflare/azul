@@ -13,13 +13,10 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::{
-    LogEntryTrait, PendingLogEntryTrait, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner,
-    StaticCTLogEntry, StaticCTPendingLogEntry,
-};
+use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
 use std::str::FromStr;
 use std::time::Duration;
-use tlog_tiles::CheckpointSigner;
+use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, LogEntry, PendingLogEntry};
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -51,10 +48,9 @@ impl DurableObject for Sequencer {
             let signer = StaticCTCheckpointSigner::new(origin, signing_key).map_err(|e| {
                 Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
             })?;
-            let witness =
-                StandardEd25519CheckpointSigner::new(origin, witness_key).map_err(|e| {
-                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
-                })?;
+            let witness = Ed25519CheckpointSigner::new(origin, witness_key).map_err(|e| {
+                Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
+            })?;
 
             let out: Vec<Box<dyn CheckpointSigner>> = vec![Box::new(signer), Box::new(witness)];
             Ok(out)
@@ -72,7 +68,7 @@ impl DurableObject for Sequencer {
     }
 }
 
-struct GenericSequencer<E: PendingLogEntryTrait> {
+struct GenericSequencer<E: PendingLogEntry> {
     do_state: State, // implements LockBackend
     env: Env,
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
@@ -86,7 +82,7 @@ struct GenericSequencer<E: PendingLogEntryTrait> {
     metrics: Metrics,
 }
 
-impl<E: PendingLogEntryTrait> GenericSequencer<E> {
+impl<E: PendingLogEntry> GenericSequencer<E> {
     fn new(state: State, env: Env, key_loader: CheckpointSignerLoader) -> Self {
         let level = CONFIG
             .logging_level
@@ -153,7 +149,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
         resp
     }
 
-    async fn alarm<L: LogEntryTrait<Pending = E>>(&mut self) -> Result<Response> {
+    async fn alarm<L: LogEntry<Pending = E>>(&mut self) -> Result<Response> {
         if !self.initialized {
             let name = &self.do_state.storage().get::<String>("name").await?;
             info!("{name}: Initializing log from sequencing loop");
@@ -187,7 +183,7 @@ impl<E: PendingLogEntryTrait> GenericSequencer<E> {
     }
 }
 
-impl<E: PendingLogEntryTrait> GenericSequencer<E> {
+impl<E: PendingLogEntry> GenericSequencer<E> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self, name: &str) -> Result<()> {
         let params = &CONFIG.logs[name];

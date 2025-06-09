@@ -23,6 +23,8 @@ crate-type = ["rlib"]
 
 [dependencies]
 base64.workspace = true
+ed25519-dalek.workspace = true
+length_prefixed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

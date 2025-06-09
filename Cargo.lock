@@ -2166,7 +2166,6 @@ name = "signed_note"
 version = "0.2.0"
 dependencies = [
  "base64",
- "byteorder",
  "criterion",
  "ed25519-dalek",
  "rand",
@@ -2393,6 +2392,8 @@ name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "ed25519-dalek",
+ "length_prefixed",
  "serde",
  "serde_json",
  "sha2",

@@ -28,8 +28,8 @@ use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use signed_note::{Verifier as NoteVerifier, VerifierList};
-use static_ct_api::{LogEntryTrait, PendingLogEntryTrait, TileIterator, TreeWithTimestamp};
+use signed_note::{NoteVerifier, VerifierList};
+use static_ct_api::TreeWithTimestamp;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -38,8 +38,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    CheckpointSigner, Hash, HashReader, PathElem, Tile, TlogError, TlogTile, UnixTimestamp,
-    HASH_SIZE,
+    CheckpointSigner, Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator,
+    TlogError, TlogTile, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -93,7 +93,7 @@ impl LogConfig {
 /// they are rotated out of `in_sequencing`.
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Debug)]
-pub(crate) struct PoolState<P: PendingLogEntryTrait> {
+pub(crate) struct PoolState<P: PendingLogEntry> {
     // How many times sequencing has been skipped for any entries in the pool.
     sequence_skips: usize,
 
@@ -116,7 +116,7 @@ pub(crate) struct PoolState<P: PendingLogEntryTrait> {
     leftover_timestamps_next_slot: usize,
 }
 
-impl<P: PendingLogEntryTrait> Default for PoolState<P> {
+impl<P: PendingLogEntry> Default for PoolState<P> {
     fn default() -> Self {
         PoolState {
             sequence_skips: 0,
@@ -129,7 +129,7 @@ impl<P: PendingLogEntryTrait> Default for PoolState<P> {
     }
 }
 
-impl<E: PendingLogEntryTrait> PoolState<E> {
+impl<E: PendingLogEntry> PoolState<E> {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
@@ -315,7 +315,7 @@ impl SequenceState {
     /// and when reloading (e.g., to recover after a fatal sequencing error).
     ///
     /// This will return an error if the log has not been created, or if recovery fails.
-    pub(crate) async fn load<L: LogEntryTrait>(
+    pub(crate) async fn load<L: LogEntry>(
         config: &LogConfig,
         object: &impl ObjectBackend,
         lock: &impl LockBackend,
@@ -414,7 +414,7 @@ impl SequenceState {
             )
             .enumerate()
             {
-                let got = tlog_tiles::record_hash(&entry?.merkle_tree_leaf());
+                let got = entry?.merkle_tree_leaf();
                 let exp = edge_tiles.get(&0).unwrap().tile.hash_at_index(
                     &edge_tiles.get(&0).unwrap().b,
                     tlog_tiles::stored_hash_index(0, start + i as u64),
@@ -499,7 +499,7 @@ pub(crate) enum PendingSource {
 /// with a [`AddLeafResult::Cached`]. If the pool is full, return
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
-pub(crate) fn add_leaf_to_pool<E: PendingLogEntryTrait>(
+pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     state: &mut PoolState<E>,
     cache: &impl CacheRead,
     config: &LogConfig,
@@ -564,7 +564,7 @@ pub(crate) async fn upload_issuers(
 }
 
 /// Sequences the current pool of pending entries in the ephemeral state.
-pub(crate) async fn sequence<L: LogEntryTrait>(
+pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &mut PoolState<L::Pending>,
     sequence_state: &mut Option<SequenceState>,
     config: &LogConfig,
@@ -642,7 +642,7 @@ enum SequenceError {
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
-async fn sequence_entries<L: LogEntryTrait>(
+async fn sequence_entries<L: LogEntry>(
     sequence_state: &mut SequenceState,
     config: &LogConfig,
     object: &impl ObjectBackend,
@@ -678,7 +678,7 @@ async fn sequence_entries<L: LogEntryTrait>(
         sequenced_metadata.push((sender, metadata));
 
         let sequenced_entry = L::new(entry, metadata);
-        let tile_leaf = sequenced_entry.tile_leaf();
+        let tile_leaf = sequenced_entry.to_data_tile_entry();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
         data_tile.extend(tile_leaf);
@@ -686,9 +686,9 @@ async fn sequence_entries<L: LogEntryTrait>(
         // Compute the new tree hashes and add them to the hashReader overlay
         // (we will use them later to insert more leaves and finally to produce
         // the new tiles).
-        let hashes = tlog_tiles::stored_hashes(
+        let hashes = tlog_tiles::stored_hashes_for_record_hash(
             n,
-            &merkle_tree_leaf,
+            merkle_tree_leaf,
             &HashReaderWithOverlay {
                 edge_tiles: &edge_tiles,
                 overlay: &overlay,
@@ -1189,10 +1189,10 @@ mod tests {
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::{PrecertData, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
+    use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::cell::RefCell;
-    use tlog_tiles::{Checkpoint, TlogTile};
+    use tlog_tiles::{Checkpoint, Ed25519CheckpointSigner, TlogTile};
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -1510,11 +1510,9 @@ mod tests {
         .unwrap_err();
 
         let mut c = log.config.clone_without_signers();
-        let checkpoint_signer = StandardEd25519CheckpointSigner::new(
-            &c.origin,
-            Ed25519SigningKey::generate(&mut OsRng),
-        )
-        .unwrap();
+        let checkpoint_signer =
+            Ed25519CheckpointSigner::new(&c.origin, Ed25519SigningKey::generate(&mut OsRng))
+                .unwrap();
         c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &c,
@@ -2114,11 +2112,9 @@ mod tests {
                 let signer =
                     StaticCTCheckpointSigner::new(&origin, EcdsaSigningKey::random(&mut rng))
                         .unwrap();
-                let witness = StandardEd25519CheckpointSigner::new(
-                    &origin,
-                    Ed25519SigningKey::generate(&mut rng),
-                )
-                .unwrap();
+                let witness =
+                    Ed25519CheckpointSigner::new(&origin, Ed25519SigningKey::generate(&mut rng))
+                        .unwrap();
                 vec![Box::new(signer), Box::new(witness)]
             };
 
@@ -2312,7 +2308,7 @@ mod tests {
                     ensure!(entry.timestamp <= sth_timestamp);
                     ensure!(
                         leaf_hashes[usize::try_from(idx).map_err(|e| anyhow!(e))?]
-                            == tlog_tiles::record_hash(&entry.merkle_tree_leaf())
+                            == entry.merkle_tree_leaf()
                     );
 
                     ensure!(!entry.inner.certificate.is_empty());

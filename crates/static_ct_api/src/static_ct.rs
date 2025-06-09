@@ -23,7 +23,7 @@
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
 //! use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
-//! use signed_note::{StandardVerifier, VerifierList};
+//! use signed_note::{Ed25519NoteVerifier, VerifierList};
 //! use static_ct_api::RFC6962Verifier;
 //!
 //! let origin: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b";
@@ -53,7 +53,7 @@
 //!     ).unwrap();
 //!     let ed25519_vkey = Ed25519VerifyingKey::from_public_key_der(vkey_bytes).unwrap();
 //!     let ed25519_verifier = signed_note::new_ed25519_verifier_key(origin, &ed25519_vkey);
-//!     StandardVerifier::new(&ed25519_verifier).unwrap()
+//!     Ed25519NoteVerifier::new(&ed25519_verifier).unwrap()
 //! };
 //!
 //! // Timestamp to use for verification, which must be at least as recent as the timestamp of the checkpoint.
@@ -74,7 +74,7 @@
 //! ```
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
-//! use signed_note::{Note, Verifier, VerifierList};
+//! use signed_note::{Note, NoteVerifier, VerifierList};
 //! use static_ct_api::RFC6962Verifier;
 //!
 //!
@@ -107,7 +107,6 @@
 use crate::{AddChainResponse, StaticCTError};
 use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
     ecdsa::{
@@ -118,19 +117,16 @@ use p256::{
     pkcs8::EncodePublicKey,
 };
 use rand::{seq::SliceRandom, Rng};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, NoteError, Signature as NoteSignature, SignerError, StandardVerifier, VerificationError,
-    Verifier as NoteVerifier, VerifierError, VerifierList, Verifiers,
+    Note, NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
+    VerifierError, VerifierList, Verifiers,
 };
-use std::{
-    io::{Cursor, Read},
-    marker::PhantomData,
-};
+use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LookupKey, SequenceMetadata,
-    UnixTimestamp,
+    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LogEntry, LookupKey,
+    PendingLogEntry, SequenceMetadata, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -165,46 +161,7 @@ pub fn log_id_from_key(vkey: &EcdsaVerifyingKey) -> Result<[u8; 32], StaticCTErr
     Ok(Sha256::digest(&pkix).into())
 }
 
-/// The functionality exposed by any data type that can be included in a Merkle tree
-pub trait PendingLogEntryTrait: core::fmt::Debug + Serialize + DeserializeOwned {
-    /// The lookup key belonging to this pending log entry
-    fn lookup_key(&self) -> LookupKey;
-
-    /// The labels this objects wants to be used when it appears in Prometheus logging messages
-    fn logging_labels(&self) -> Vec<String>;
-
-    /// The canonical byte representation of this object. Only used by [`GenericLogEntry`].
-    fn as_bytes(&self) -> &[u8];
-}
-
-pub trait LogEntryTrait: core::fmt::Debug + Sized {
-    /// The pending version of this log entry. Usually the same thing but doesn't have a timestamp or tree index
-    type Pending: PendingLogEntryTrait;
-
-    /// The error type for [`Self::parse_from_tile_entry`]
-    type ParseError: std::error::Error + Send + Sync + 'static;
-
-    fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self;
-
-    /// Returns the underlying pending entry
-    fn inner(&self) -> &Self::Pending;
-
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
-    fn merkle_tree_leaf(&self) -> Vec<u8>;
-
-    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
-    fn tile_leaf(&self) -> Vec<u8>;
-
-    /// Attempts to parse a `LogEntry` from a cursor into a tile. The position of the cursor is
-    /// expected to be the beginning of an entry. On success, returns a log entry.
-    ///
-    /// # Errors
-    ///
-    /// Errors if the log entry cannot be parsed from the cursor.
-    fn parse_from_tile_entry<R: Read>(input: &mut R) -> Result<Self, Self::ParseError>;
-}
-
-impl PendingLogEntryTrait for StaticCTPendingLogEntry {
+impl PendingLogEntry for StaticCTPendingLogEntry {
     /// Compute the cache key for a pending log entry.
     ///
     /// # Panics
@@ -245,13 +202,6 @@ impl PendingLogEntryTrait for StaticCTPendingLogEntry {
         } else {
             vec!["add-chain".to_string()]
         }
-    }
-
-    /// We don't have a canonical representation. Eg the type of the length prefix depends on
-    /// whether this is a precert. This is never used with `GenericLogEntry` so we can just not
-    /// implement it.
-    fn as_bytes(&self) -> &[u8] {
-        unimplemented!()
     }
 }
 
@@ -327,7 +277,7 @@ impl StaticCTLogEntry {
     }
 }
 
-impl LogEntryTrait for StaticCTLogEntry {
+impl LogEntry for StaticCTLogEntry {
     type Pending = StaticCTPendingLogEntry;
 
     // The error type for parse_from_tile_entry
@@ -345,19 +295,22 @@ impl LogEntryTrait for StaticCTLogEntry {
         &self.inner
     }
 
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
+    /// Returns the Merkle tree leaf hash of a [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
     ///
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
-    fn merkle_tree_leaf(&self) -> Vec<u8> {
-        let mut buffer = vec![
-            0, // version = v1 (0)
-            0, // leaf_type = timestamped_entry (0)
-        ];
-        buffer.extend(self.marshal_timestamped_entry());
-
-        buffer
+    fn merkle_tree_leaf(&self) -> Hash {
+        tlog_tiles::record_hash(
+            &[
+                &[
+                    0, // version = v1 (0)
+                    0, // leaf_type = timestamped_entry (0)
+                ],
+                self.marshal_timestamped_entry().as_slice(),
+            ]
+            .concat(),
+        )
     }
 
     /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
@@ -365,7 +318,7 @@ impl LogEntryTrait for StaticCTLogEntry {
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
-    fn tile_leaf(&self) -> Vec<u8> {
+    fn to_data_tile_entry(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend(self.marshal_timestamped_entry());
         if let Some(precert_data) = &self.inner.precert_opt {
@@ -470,81 +423,6 @@ impl LogEntryTrait for StaticCTLogEntry {
     }
 }
 
-/* TODO: Uncomment this once the static CT types are implemented
-/// A generic log entry compatible with the [tlog-tiles spec](https://github.com/C2SP/C2SP/blob/main/tlog-tiles.md)
-#[derive(Debug)]
-struct GenericLogEntry<E: PendingLogEntryTrait>(E);
-
-impl<E: PendingLogEntryTrait> LogEntryTrait<E> for GenericLogEntry<E> {
-    fn new(pending: E, _: SequenceMetadata) -> Self {
-        GenericLogEntry(pending)
-    }
-
-    fn inner(&self) -> &E {
-        &self.0
-    }
-
-    /// Returns a marshaled [RFC 6962 `MerkleTreeLeaf`](https://datatracker.ietf.org/doc/html/rfc6962#section-3.4).
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    fn merkle_tree_leaf(&self) -> Vec<u8> {
-        record_hash(self.0.as_bytes()).0.to_vec()
-    }
-
-    /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    fn tile_leaf(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.write_length_prefixed(self.0.as_bytes(), 2).unwrap();
-
-        buf
-    }
-}
-*/
-
-/// An iterator over log entries in a data tile.
-pub struct TileIterator<L: LogEntryTrait> {
-    s: Cursor<Vec<u8>>,
-    size: usize,
-    count: usize,
-    _marker: PhantomData<L>,
-}
-
-impl<L: LogEntryTrait> std::iter::Iterator for TileIterator<L> {
-    type Item = Result<L, L::ParseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.count == self.size {
-            return None;
-        }
-        self.count += 1;
-        Some(self.parse_next())
-    }
-}
-
-impl<L: LogEntryTrait> TileIterator<L> {
-    /// Returns a new [`TileIterator`], which always attempts to parse exactly
-    /// 'size' entries before terminating.
-    pub fn new(tile: Vec<u8>, size: usize) -> Self {
-        Self {
-            s: Cursor::new(tile),
-            size,
-            count: 0,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Parse the next [`LogEntry`] from the internal buffer.
-    fn parse_next(&mut self) -> Result<L, L::ParseError> {
-        L::parse_from_tile_entry(&mut self.s)
-    }
-}
-
 /// A transparency log tree with a timestamp.
 #[derive(Default, Debug)]
 pub struct TreeWithTimestamp {
@@ -626,53 +504,6 @@ impl TreeWithTimestamp {
     }
 }
 
-/// Implementation of [`NoteSigner`] that signs with a Ed25519 key.
-#[cfg_attr(test, derive(Clone))]
-pub struct StandardEd25519CheckpointSigner {
-    v: StandardVerifier,
-    k: Ed25519SigningKey,
-}
-
-impl StandardEd25519CheckpointSigner {
-    /// Returns a new `Ed25519Signer`.
-    ///
-    /// # Errors
-    ///
-    /// Errors if a verifier cannot be created from the provided signing key.
-    pub fn new(name: &str, k: Ed25519SigningKey) -> Result<Self, StaticCTError> {
-        let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
-        // Checks if the key name is valid
-        let v = StandardVerifier::new(&vk)?;
-        Ok(Self { v, k })
-    }
-}
-
-impl CheckpointSigner for StandardEd25519CheckpointSigner {
-    fn name(&self) -> &str {
-        self.v.name()
-    }
-
-    fn key_id(&self) -> u32 {
-        self.v.key_id()
-    }
-
-    fn sign(&self, _: UnixTimestamp, checkpoint: &Checkpoint) -> Result<NoteSignature, NoteError> {
-        let msg = checkpoint.to_bytes();
-        // Ed25519 signing cannot fail
-        let sig = self.k.try_sign(&msg).unwrap();
-
-        // Return the note signature. We can unwrap() here because the only cause for error is if
-        // the name is invalid, which is checked in the constructor
-        Ok(NoteSignature::new(self.name().to_string(), self.key_id(), sig.to_vec()).unwrap())
-    }
-
-    fn verifier(&self) -> Box<dyn NoteVerifier> {
-        let vk = signed_note::new_ed25519_verifier_key(self.name(), &self.k.verifying_key());
-        // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor
-        Box::new(StandardVerifier::new(&vk).unwrap())
-    }
-}
-
 /// The `CTExtensions` field of `SignedCertificateTimestamp` and
 /// `TimestampedEntry`, according to c2sp.org/static-ct-api.
 pub struct Extensions {
@@ -715,7 +546,7 @@ impl Extensions {
     /// # Errors
     ///
     /// Returns an error if the `leaf_index` extension is missing, if there are
-    /// unexpected extensions or the extension is otherwise malformed.
+    /// unexpected extensions, or the extension is otherwise malformed.
     pub fn from_bytes(mut input: &[u8]) -> Result<Self, StaticCTError> {
         let mut leaf_index_opt = None;
         while !input.is_empty() {
@@ -1126,7 +957,7 @@ mod tests {
             chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
         };
         let entry = StaticCTLogEntry::new(inner, (123, 456));
-        let tile: Vec<u8> = (0..5).flat_map(|_| entry.tile_leaf()).collect();
+        let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {

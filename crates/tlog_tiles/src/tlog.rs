@@ -464,7 +464,11 @@ pub enum TlogError {
     #[error("unmet input condition: {0}")]
     InvalidInput(String),
     #[error(transparent)]
+    Verifier(#[from] signed_note::VerifierError),
+    #[error(transparent)]
     InvalidBase64(#[from] base64::DecodeError),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
 }
 
 /// Verifies that `p` is a valid proof that the tree of size `t` with hash `th` has an `n`'th

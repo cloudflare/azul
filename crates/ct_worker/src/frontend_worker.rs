@@ -13,8 +13,9 @@ use log::{debug, warn, Level};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
-use static_ct_api::{AddChainRequest, GetRootsResponse, PendingLogEntryTrait, StaticCTLogEntry};
+use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
 use std::str::FromStr;
+use tlog_tiles::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
