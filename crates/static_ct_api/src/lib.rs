@@ -33,8 +33,6 @@ pub enum StaticCTError {
     #[error("unexpected extension")]
     UnexpectedExtension,
     #[error(transparent)]
-    Verifier(#[from] signed_note::VerifierError),
-    #[error(transparent)]
     Signer(#[from] signed_note::SignerError),
     #[error("invalid length")]
     InvalidLength,

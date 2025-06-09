@@ -53,7 +53,7 @@
 //! name of the server and the uint32 ID of the key, and it can verify a purported signature by
 //! that key.
 //!
-//! The standard implementation of a Verifier is constructed by [`StandardVerifier::new`] starting
+//! The standard implementation of a Verifier is constructed by [`Ed25519NoteVerifier::new`] starting
 //! from a verifier key, which is a plain text string of the form `<name>+<id>+<keydata>`.
 //!
 //! A [`Verifiers`] allows looking up a Verifier by the combination of server name and key ID.
@@ -69,7 +69,7 @@
 //! A [`Signer`] allows signing a text with a given key. It can report the name of the server and the
 //! ID of the key and can sign a raw text using that key.
 //!
-//! The standard implementation of a Signer is constructed by [`StandardSigner::new`] starting from
+//! The standard implementation of a Signer is constructed by [`Ed25519NoteSigner::new`] starting from
 //! an encoded signer key, which is a plain text string of the form
 //! `PRIVATE+KEY+<name>+<id>+<keydata>`.  Anyone with an encoded signer key can sign messages using
 //! that key, so it must be kept secret. The encoding begins with the literal text `PRIVATE+KEY` to
@@ -117,13 +117,13 @@
 //! It can be constructed and displayed using:
 //!
 //! ```
-//! use signed_note::{Note, StandardSigner};
+//! use signed_note::{Note, Ed25519NoteSigner};
 //!
 //! let skey = "PRIVATE+KEY+PeterNeumann+c74f20a3+AYEKFALVFGyNhPJEMzD1QIDr+Y7hfZx09iUvxdXHKDFz";
 //! let text = "If you think cryptography is the answer to your problem,\n\
 //!             then you don't know what your problem is.\n";
 //!
-//! let signer = StandardSigner::new(skey).unwrap();
+//! let signer = Ed25519NoteSigner::new(skey).unwrap();
 //! let mut n = Note::new(text.as_bytes(), &[]).unwrap();
 //! n.add_sigs(&[&signer]).unwrap();
 //!
@@ -143,7 +143,7 @@
 //! it will succeed at verifying the encoded message and returning the parsed [`Note`]:
 //!
 //! ```
-//! use signed_note::{Note, StandardVerifier, VerifierList};
+//! use signed_note::{Note, Ed25519NoteVerifier, VerifierList};
 //!
 //! let vkey = "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW";
 //! let msg = "If you think cryptography is the answer to your problem,\n\
@@ -151,7 +151,7 @@
 //!            \n\
 //!            — PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n";
 //!
-//! let verifier = StandardVerifier::new(vkey).unwrap();
+//! let verifier = Ed25519NoteVerifier::new(vkey).unwrap();
 //! let n = Note::from_bytes(msg.as_bytes()).unwrap();
 //! let (verified_sigs, _) = n.verify(&VerifierList::new(vec![Box::new(verifier.clone())])).unwrap();
 //!
@@ -167,7 +167,7 @@
 //!
 //! ### Sign and add signatures
 //! ```
-//! use signed_note::{Note, StandardSigner, StandardVerifier, VerifierList};
+//! use signed_note::{Note, Ed25519NoteSigner, Ed25519NoteVerifier, VerifierList};
 //!
 //! let vkey = "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW";
 //! let msg = "If you think cryptography is the answer to your problem,\n\
@@ -179,7 +179,7 @@
 //!
 //! let mut n = Note::from_bytes(msg.as_bytes()).unwrap();
 //!
-//! let verifier = StandardVerifier::new(vkey).unwrap();
+//! let verifier = Ed25519NoteVerifier::new(vkey).unwrap();
 //! let (verified_sigs, unverified_sigs) = n.verify(&VerifierList::new(vec![Box::new(verifier.clone())])).unwrap();
 //! assert_eq!(verified_sigs.len(), 1);
 //! assert!(unverified_sigs.is_empty());
@@ -210,7 +210,7 @@
 //! impl rand_core::CryptoRng for ZeroRng {}
 //!
 //! let (skey, _) = signed_note::generate_key(&mut ZeroRng{}, "EnochRoot");
-//! let signer = StandardSigner::new(&skey).unwrap();
+//! let signer = Ed25519NoteSigner::new(&skey).unwrap();
 //! n.add_sigs(&[&signer]).unwrap();
 //!
 //! let got = n.to_bytes();
@@ -238,7 +238,7 @@ const MAX_NOTE_SIZE: usize = 1_000_000;
 const MAX_NOTE_SIGNATURES: usize = 100;
 
 /// A Verifier verifies messages signed with a specific key.
-pub trait Verifier {
+pub trait NoteVerifier {
     /// Returns the server name associated with the key.
     /// The name must be non-empty and not have any Unicode spaces or pluses.
     fn name(&self) -> &str;
@@ -258,7 +258,7 @@ pub trait Verifier {
 }
 
 /// A Signer signs messages using a specific key.
-pub trait Signer {
+pub trait NoteSigner {
     /// Returns the server name associated with the key.
     /// The name must be non-empty and not have any Unicode spaces or pluses.
     fn name(&self) -> &str;
@@ -288,8 +288,8 @@ pub fn key_id(name: &str, key: &[u8]) -> u32 {
     u32::from_be_bytes(u32_bytes)
 }
 
-/// An error returned from the [`StandardVerifier::new`] function when
-/// constructing a [`StandardVerifier`] from an encoded verifier key.
+/// An error returned from the [`Ed25519NoteVerifier::new`] function when
+/// constructing a [`Ed25519NoteVerifier`] from an encoded verifier key.
 #[derive(Error, Debug)]
 pub enum VerifierError {
     #[error("malformed verifier key")]
@@ -308,15 +308,15 @@ pub fn is_key_name_valid(name: &str) -> bool {
     !(name.is_empty() || name.chars().any(char::is_whitespace) || name.contains('+'))
 }
 
-/// [`StandardVerifier`] is the verifier for the ordinary (non-timestamped) Ed25519 signature type
+/// [`Ed25519NoteVerifier`] is the verifier for the ordinary (non-timestamped) Ed25519 signature type
 #[derive(Clone)]
-pub struct StandardVerifier {
+pub struct Ed25519NoteVerifier {
     name: String,
     id: u32,
     verifying_key: Ed25519VerifyingKey,
 }
 
-impl Verifier for StandardVerifier {
+impl NoteVerifier for Ed25519NoteVerifier {
     fn name(&self) -> &str {
         &self.name
     }
@@ -336,12 +336,12 @@ impl Verifier for StandardVerifier {
     }
 
     fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, VerificationError> {
-        // StandardVerifier (alg type 0x01) has no timestamp in the signature
+        // Ed25519NoteVerifier (alg type 0x01) has no timestamp in the signature
         Ok(None)
     }
 }
 
-impl StandardVerifier {
+impl Ed25519NoteVerifier {
     /// Construct a new [Verifier] from an encoded verifier key.
     ///
     /// # Errors
@@ -383,8 +383,8 @@ impl StandardVerifier {
     }
 }
 
-/// An error returned from the [`StandardSigner::new`] function when
-/// constructing a [`StandardSigner`] from an encoded signer key.
+/// An error returned from the [`Ed25519NoteSigner::new`] function when
+/// constructing a [`Ed25519NoteSigner`] from an encoded signer key.
 #[derive(Error, Debug)]
 pub enum SignerError {
     #[error("malformed verifier key")]
@@ -395,15 +395,15 @@ pub enum SignerError {
     Id,
 }
 
-/// [`StandardSigner`] is the signer for the ordinary (non-timestamped) Ed25519 signature type
+/// [`Ed25519NoteSigner`] is the signer for the ordinary (non-timestamped) Ed25519 signature type
 #[derive(Clone)]
-pub struct StandardSigner {
+pub struct Ed25519NoteSigner {
     name: String,
     id: u32,
     signing_key: Ed25519SigningKey,
 }
 
-impl Signer for StandardSigner {
+impl NoteSigner for Ed25519NoteSigner {
     fn name(&self) -> &str {
         &self.name
     }
@@ -416,7 +416,7 @@ impl Signer for StandardSigner {
     }
 }
 
-impl StandardSigner {
+impl Ed25519NoteSigner {
     /// Construct a new [Signer] from an encoded signer key.
     ///
     /// # Errors
@@ -445,7 +445,7 @@ impl StandardSigner {
         // Note: id is the hash of the public key and we have the private key.
         // Must verify id after deriving public key.
 
-        let signer: StandardSigner;
+        let signer: Ed25519NoteSigner;
         let pubkey: Vec<u8>;
 
         let alg = key[0];
@@ -523,10 +523,10 @@ pub trait Verifiers {
     /// # Errors
     ///
     /// If the (name, id) pair is unknown, return a [`VerificationError::UnknownKey`].
-    fn verifier(&self, name: &str, id: u32) -> Result<&dyn Verifier, VerificationError>;
+    fn verifier(&self, name: &str, id: u32) -> Result<&dyn NoteVerifier, VerificationError>;
 }
 
-type VerifierMap = HashMap<(String, u32), Vec<Box<dyn Verifier>>>;
+type VerifierMap = HashMap<(String, u32), Vec<Box<dyn NoteVerifier>>>;
 
 /// [`VerifierList`] is a [Verifiers] implementation that uses the given list of verifiers.
 pub struct VerifierList {
@@ -545,7 +545,7 @@ pub enum VerificationError {
 }
 
 impl Verifiers for VerifierList {
-    fn verifier(&self, name: &str, id: u32) -> Result<&dyn Verifier, VerificationError> {
+    fn verifier(&self, name: &str, id: u32) -> Result<&dyn NoteVerifier, VerificationError> {
         match self.map.get(&(name.to_owned(), id)) {
             Some(verifiers) => {
                 if verifiers.len() > 1 {
@@ -566,7 +566,7 @@ impl Verifiers for VerifierList {
 
 impl VerifierList {
     /// Returns a [Verifiers] implementation that uses the given list of verifiers.
-    pub fn new(list: Vec<Box<dyn Verifier>>) -> Self {
+    pub fn new(list: Vec<Box<dyn NoteVerifier>>) -> Self {
         let mut map: VerifierMap = HashMap::new();
         for verifier in list {
             map.entry((verifier.name().to_owned(), verifier.key_id()))
@@ -828,7 +828,7 @@ impl Note {
     ///
     /// Returns an error if any signers have invalid names.
     /// Names must be non-empty and not have any Unicode spaces or pluses.
-    pub fn add_sigs(&mut self, signers: &[&dyn Signer]) -> Result<(), NoteError> {
+    pub fn add_sigs(&mut self, signers: &[&dyn NoteSigner]) -> Result<(), NoteError> {
         // Prepare signatures and populate 'have' set.
         let mut new_sigs = Vec::new();
         let mut have = BTreeSet::new();
@@ -875,7 +875,7 @@ mod tests {
     use rand::rngs::OsRng;
     static NAME: &str = "EnochRoot";
 
-    fn test_signer_and_verifier(name: &str, signer: &dyn Signer, verifier: &dyn Verifier) {
+    fn test_signer_and_verifier(name: &str, signer: &dyn NoteSigner, verifier: &dyn NoteVerifier) {
         assert_eq!(&name, &signer.name());
         assert_eq!(&name, &verifier.name());
         assert_eq!(signer.key_id(), verifier.key_id());
@@ -889,8 +889,8 @@ mod tests {
     fn test_generate_key() {
         let (skey, vkey) = generate_key(&mut OsRng, NAME);
 
-        let signer = StandardSigner::new(&skey).unwrap();
-        let verifier = StandardVerifier::new(&vkey).unwrap();
+        let signer = Ed25519NoteSigner::new(&skey).unwrap();
+        let verifier = Ed25519NoteVerifier::new(&vkey).unwrap();
 
         test_signer_and_verifier(NAME, &signer, &verifier);
     }
@@ -907,9 +907,9 @@ mod tests {
         let id = key_id(NAME, &pubkey);
 
         let vkey = new_ed25519_verifier_key(NAME, &signing_key.verifying_key());
-        let verifier = StandardVerifier::new(&vkey).unwrap();
+        let verifier = Ed25519NoteVerifier::new(&vkey).unwrap();
 
-        let signer = StandardSigner {
+        let signer = Ed25519NoteSigner {
             name: NAME.to_owned(),
             id,
             signing_key,
@@ -919,10 +919,10 @@ mod tests {
     }
 
     struct BadSigner {
-        s: Box<dyn Signer>,
+        s: Box<dyn NoteSigner>,
     }
 
-    impl Signer for BadSigner {
+    impl NoteSigner for BadSigner {
         fn name(&self) -> &'static str {
             "bad name"
         }
@@ -935,10 +935,10 @@ mod tests {
     }
 
     struct ErrSigner {
-        s: Box<dyn Signer>,
+        s: Box<dyn NoteSigner>,
     }
 
-    impl Signer for ErrSigner {
+    impl NoteSigner for ErrSigner {
         fn name(&self) -> &str {
             self.s.name()
         }
@@ -956,7 +956,7 @@ mod tests {
         let text = b"If you think cryptography is the answer to your problem,\n\
                     then you don't know what your problem is.\n";
 
-        let signer = StandardSigner::new(skey).unwrap();
+        let signer = Ed25519NoteSigner::new(skey).unwrap();
 
         let mut n = Note::new(text, &[]).unwrap();
         n.add_sigs(&[&signer]).unwrap();
@@ -1005,11 +1005,11 @@ mod tests {
     }
 
     struct FixedVerifier {
-        v: Box<dyn Verifier>,
+        v: Box<dyn NoteVerifier>,
     }
 
     impl Verifiers for FixedVerifier {
-        fn verifier(&self, _name: &str, _id: u32) -> Result<&dyn Verifier, VerificationError> {
+        fn verifier(&self, _name: &str, _id: u32) -> Result<&dyn NoteVerifier, VerificationError> {
             Ok(&*self.v)
         }
     }
@@ -1017,10 +1017,10 @@ mod tests {
     #[test]
     fn test_open() {
         let peter_key = "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW";
-        let peter_verifier = StandardVerifier::new(peter_key).unwrap();
+        let peter_verifier = Ed25519NoteVerifier::new(peter_key).unwrap();
 
         let enoch_key = "EnochRoot+af0cfe78+ATtqJ7zOtqQtYqOo0CpvDXNlMhV3HeJDpjrASKGLWdop";
-        let enoch_verifier = StandardVerifier::new(enoch_key).unwrap();
+        let enoch_verifier = Ed25519NoteVerifier::new(enoch_key).unwrap();
 
         let text = "If you think cryptography is the answer to your problem,\n\
                     then you don't know what your problem is.\n";

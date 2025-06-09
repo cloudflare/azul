@@ -13,13 +13,10 @@ use crate::{
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::{
-    StandardEd25519CheckpointSigner, StaticCTCheckpointSigner, StaticCTLogEntry,
-    StaticCTPendingLogEntry,
-};
+use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
 use std::str::FromStr;
 use std::time::Duration;
-use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry};
+use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, LogEntry, PendingLogEntry};
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -51,10 +48,9 @@ impl DurableObject for Sequencer {
             let signer = StaticCTCheckpointSigner::new(origin, signing_key).map_err(|e| {
                 Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
             })?;
-            let witness =
-                StandardEd25519CheckpointSigner::new(origin, witness_key).map_err(|e| {
-                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
-                })?;
+            let witness = Ed25519CheckpointSigner::new(origin, witness_key).map_err(|e| {
+                Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
+            })?;
 
             let out: Vec<Box<dyn CheckpointSigner>> = vec![Box::new(signer), Box::new(witness)];
             Ok(out)

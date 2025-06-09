@@ -23,7 +23,7 @@
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
 //! use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
-//! use signed_note::{StandardVerifier, VerifierList};
+//! use signed_note::{Ed25519NoteVerifier, VerifierList};
 //! use static_ct_api::RFC6962Verifier;
 //!
 //! let origin: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b";
@@ -53,7 +53,7 @@
 //!     ).unwrap();
 //!     let ed25519_vkey = Ed25519VerifyingKey::from_public_key_der(vkey_bytes).unwrap();
 //!     let ed25519_verifier = signed_note::new_ed25519_verifier_key(origin, &ed25519_vkey);
-//!     StandardVerifier::new(&ed25519_verifier).unwrap()
+//!     Ed25519NoteVerifier::new(&ed25519_verifier).unwrap()
 //! };
 //!
 //! // Timestamp to use for verification, which must be at least as recent as the timestamp of the checkpoint.
@@ -74,7 +74,7 @@
 //! ```
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
-//! use signed_note::{Note, Verifier, VerifierList};
+//! use signed_note::{Note, NoteVerifier, VerifierList};
 //! use static_ct_api::RFC6962Verifier;
 //!
 //!
@@ -107,7 +107,6 @@
 use crate::{AddChainResponse, StaticCTError};
 use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
     ecdsa::{
@@ -121,13 +120,13 @@ use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, NoteError, Signature as NoteSignature, SignerError, StandardVerifier, VerificationError,
-    Verifier as NoteVerifier, VerifierError, VerifierList, Verifiers,
+    Note, NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
+    VerifierError, VerifierList, Verifiers,
 };
 use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LookupKey, PendingLogEntry,
-    SequenceMetadata, LogEntry, UnixTimestamp,
+    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LogEntry, LookupKey,
+    PendingLogEntry, SequenceMetadata, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -499,53 +498,6 @@ impl TreeWithTimestamp {
         // Make a new signed note from the checkpoint and serialize it
         let signed_note = Note::new(&checkpoint.to_bytes(), &[grease_sigs, sigs].concat())?;
         Ok(signed_note.to_bytes())
-    }
-}
-
-/// Implementation of [`NoteSigner`] that signs with a Ed25519 key.
-#[cfg_attr(test, derive(Clone))]
-pub struct StandardEd25519CheckpointSigner {
-    v: StandardVerifier,
-    k: Ed25519SigningKey,
-}
-
-impl StandardEd25519CheckpointSigner {
-    /// Returns a new `Ed25519Signer`.
-    ///
-    /// # Errors
-    ///
-    /// Errors if a verifier cannot be created from the provided signing key.
-    pub fn new(name: &str, k: Ed25519SigningKey) -> Result<Self, StaticCTError> {
-        let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
-        // Checks if the key name is valid
-        let v = StandardVerifier::new(&vk)?;
-        Ok(Self { v, k })
-    }
-}
-
-impl CheckpointSigner for StandardEd25519CheckpointSigner {
-    fn name(&self) -> &str {
-        self.v.name()
-    }
-
-    fn key_id(&self) -> u32 {
-        self.v.key_id()
-    }
-
-    fn sign(&self, _: UnixTimestamp, checkpoint: &Checkpoint) -> Result<NoteSignature, NoteError> {
-        let msg = checkpoint.to_bytes();
-        // Ed25519 signing cannot fail
-        let sig = self.k.try_sign(&msg).unwrap();
-
-        // Return the note signature. We can unwrap() here because the only cause for error is if
-        // the name is invalid, which is checked in the constructor
-        Ok(NoteSignature::new(self.name().to_string(), self.key_id(), sig.to_vec()).unwrap())
-    }
-
-    fn verifier(&self) -> Box<dyn NoteVerifier> {
-        let vk = signed_note::new_ed25519_verifier_key(self.name(), &self.k.verifying_key());
-        // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor
-        Box::new(StandardVerifier::new(&vk).unwrap())
     }
 }
 
@@ -1006,8 +958,7 @@ mod tests {
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {
-            let parsed_entry =
-                StaticCTLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
+            let parsed_entry = StaticCTLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
             assert_eq!(entry, parsed_entry);
         }
     }

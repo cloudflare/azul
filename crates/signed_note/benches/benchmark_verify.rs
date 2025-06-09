@@ -13,7 +13,7 @@
 //! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/note/note_test.go)
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use signed_note::{Note, NoteError, StandardVerifier, VerifierList};
+use signed_note::{Ed25519NoteVerifier, Note, NoteError, VerifierList};
 use std::hint::black_box;
 
 fn benchmark_verify(c: &mut Criterion) {
@@ -23,7 +23,7 @@ fn benchmark_verify(c: &mut Criterion) {
                \n\
                — PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n".as_bytes();
 
-    let verifier = StandardVerifier::new(vkey).unwrap();
+    let verifier = Ed25519NoteVerifier::new(vkey).unwrap();
 
     c.bench_function("Sig0", |b| {
         b.iter(|| {

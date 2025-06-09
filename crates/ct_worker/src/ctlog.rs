@@ -28,7 +28,7 @@ use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use signed_note::{Verifier as NoteVerifier, VerifierList};
+use signed_note::{NoteVerifier, VerifierList};
 use static_ct_api::TreeWithTimestamp;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -1189,10 +1189,10 @@ mod tests {
         Rng, RngCore, SeedableRng,
     };
     use signed_note::{Note, VerifierList};
-    use static_ct_api::{PrecertData, StandardEd25519CheckpointSigner, StaticCTCheckpointSigner};
+    use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::cell::RefCell;
-    use tlog_tiles::{Checkpoint, TlogTile};
+    use tlog_tiles::{Checkpoint, Ed25519CheckpointSigner, TlogTile};
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -1510,11 +1510,9 @@ mod tests {
         .unwrap_err();
 
         let mut c = log.config.clone_without_signers();
-        let checkpoint_signer = StandardEd25519CheckpointSigner::new(
-            &c.origin,
-            Ed25519SigningKey::generate(&mut OsRng),
-        )
-        .unwrap();
+        let checkpoint_signer =
+            Ed25519CheckpointSigner::new(&c.origin, Ed25519SigningKey::generate(&mut OsRng))
+                .unwrap();
         c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &c,
@@ -2114,11 +2112,9 @@ mod tests {
                 let signer =
                     StaticCTCheckpointSigner::new(&origin, EcdsaSigningKey::random(&mut rng))
                         .unwrap();
-                let witness = StandardEd25519CheckpointSigner::new(
-                    &origin,
-                    Ed25519SigningKey::generate(&mut rng),
-                )
-                .unwrap();
+                let witness =
+                    Ed25519CheckpointSigner::new(&origin, Ed25519SigningKey::generate(&mut rng))
+                        .unwrap();
                 vec![Box::new(signer), Box::new(witness)]
             };
 

@@ -29,8 +29,9 @@
 //! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/note_test.go)
 //! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
 
-use crate::tlog::Hash;
-use signed_note::{NoteError, Signature as NoteSignature, Verifier as NoteVerifier};
+use crate::{tlog::Hash, TlogError, UnixTimestamp};
+use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
+use signed_note::{Ed25519NoteVerifier, NoteError, NoteVerifier, Signature as NoteSignature};
 use std::{
     fmt,
     io::{BufRead, Read},
@@ -297,6 +298,52 @@ pub trait CheckpointSigner {
     // be dyn-compatible, because we must be able to pass in a list of CheckpointSigners into
     // log configs
     fn verifier(&self) -> Box<dyn NoteVerifier>;
+}
+
+/// Implementation of [`NoteSigner`] that signs with a Ed25519 key.
+pub struct Ed25519CheckpointSigner {
+    v: Ed25519NoteVerifier,
+    k: Ed25519SigningKey,
+}
+
+impl Ed25519CheckpointSigner {
+    /// Returns a new `Ed25519Signer`.
+    ///
+    /// # Errors
+    ///
+    /// Errors if a verifier cannot be created from the provided signing key.
+    pub fn new(name: &str, k: Ed25519SigningKey) -> Result<Self, TlogError> {
+        let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
+        // Checks if the key name is valid
+        let v = Ed25519NoteVerifier::new(&vk)?;
+        Ok(Self { v, k })
+    }
+}
+
+impl CheckpointSigner for Ed25519CheckpointSigner {
+    fn name(&self) -> &str {
+        self.v.name()
+    }
+
+    fn key_id(&self) -> u32 {
+        self.v.key_id()
+    }
+
+    fn sign(&self, _: UnixTimestamp, checkpoint: &Checkpoint) -> Result<NoteSignature, NoteError> {
+        let msg = checkpoint.to_bytes();
+        // Ed25519 signing cannot fail
+        let sig = self.k.try_sign(&msg).unwrap();
+
+        // Return the note signature. We can unwrap() here because the only cause for error is if
+        // the name is invalid, which is checked in the constructor.
+        Ok(NoteSignature::new(self.name().to_string(), self.key_id(), sig.to_vec()).unwrap())
+    }
+
+    fn verifier(&self) -> Box<dyn NoteVerifier> {
+        let vk = signed_note::new_ed25519_verifier_key(self.name(), &self.k.verifying_key());
+        // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor.
+        Box::new(Ed25519NoteVerifier::new(&vk).unwrap())
+    }
 }
 
 #[cfg(test)]
