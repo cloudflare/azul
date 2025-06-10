@@ -1,12 +1,9 @@
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    io::{Cursor, Read},
-    marker::PhantomData,
-};
+use std::{io::Read, marker::PhantomData};
 
-use crate::{Hash, TlogError};
+use crate::{Hash, PathElem, TlogError};
 
 pub const LOOKUP_KEY_LEN: usize = 16;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];
@@ -26,6 +23,18 @@ pub type SequenceMetadata = (LeafIndex, UnixTimestamp);
 
 /// The functionality exposed by any data type that can be included in a Merkle tree
 pub trait PendingLogEntry: core::fmt::Debug + Serialize + DeserializeOwned {
+    /// The path to write data tiles in the object store, which is 'entries' for tlog-tiles.
+    const DATA_PATH: PathElem;
+
+    /// If configured, the path to write unhashed data associated with the entry
+    /// to the object store. This is unused in tlog-tiles and static-ct-api, but
+    /// is used for publishing 'bootstrap' certificiate chains in MTC.
+    const UNHASHED_PATH: Option<PathElem>;
+
+    /// Returns the unhashed data for this entry, if configured. It is an error
+    /// to call this function if `UNHASHED_PATH` is not specified.
+    fn unhashed_entry(&self) -> &[u8];
+
     /// The lookup key belonging to this pending log entry.
     fn lookup_key(&self) -> LookupKey;
 
@@ -41,9 +50,6 @@ pub trait LogEntry: core::fmt::Debug + Sized {
     type ParseError: std::error::Error + Send + Sync + 'static;
 
     fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self;
-
-    /// Returns the underlying pending entry
-    fn inner(&self) -> &Self::Pending;
 
     /// Returns the Merkle tree leaf hash for this entry. For tlog-tiles, this is the Merkle Tree Hash
     /// (according to <https://datatracker.ietf.org/doc/html/rfc6962#section-2.1>)
@@ -64,14 +70,14 @@ pub trait LogEntry: core::fmt::Debug + Sized {
 }
 
 /// An iterator over log entries in a data tile.
-pub struct TileIterator<L: LogEntry> {
-    s: Cursor<Vec<u8>>,
+pub struct TileIterator<'a, L: LogEntry> {
+    input: &'a [u8],
     size: usize,
     count: usize,
     _marker: PhantomData<L>,
 }
 
-impl<L: LogEntry> std::iter::Iterator for TileIterator<L> {
+impl<L: LogEntry> std::iter::Iterator for TileIterator<'_, L> {
     type Item = Result<L, L::ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -83,12 +89,12 @@ impl<L: LogEntry> std::iter::Iterator for TileIterator<L> {
     }
 }
 
-impl<L: LogEntry> TileIterator<L> {
+impl<'a, L: LogEntry> TileIterator<'a, L> {
     /// Returns a new [`TileIterator`], which always attempts to parse exactly
     /// 'size' entries before terminating.
-    pub fn new(tile: Vec<u8>, size: usize) -> Self {
+    pub fn new(input: &'a [u8], size: usize) -> Self {
         Self {
-            s: Cursor::new(tile),
+            input,
             size,
             count: 0,
             _marker: PhantomData,
@@ -97,7 +103,7 @@ impl<L: LogEntry> TileIterator<L> {
 
     /// Parse the next [`LogEntry`] from the internal buffer.
     fn parse_next(&mut self) -> Result<L, L::ParseError> {
-        L::parse_from_tile_entry(&mut self.s)
+        L::parse_from_tile_entry(&mut self.input)
     }
 }
 
@@ -112,6 +118,17 @@ pub struct TlogTilesLogEntry {
 }
 
 impl PendingLogEntry for TlogTilesPendingLogEntry {
+    /// The data tile path in tlog-tiles is 'entries'.
+    const DATA_PATH: PathElem = PathElem::Entries;
+
+    /// No unhashed data published in tlog-tiles.
+    const UNHASHED_PATH: Option<PathElem> = None;
+
+    /// Unused in tlog-tiles.
+    fn unhashed_entry(&self) -> &[u8] {
+        unimplemented!()
+    }
+
     fn lookup_key(&self) -> LookupKey {
         let hash = Sha256::digest(&self.data);
         let mut lookup_key = LookupKey::default();
@@ -132,10 +149,6 @@ impl LogEntry for TlogTilesLogEntry {
 
     fn new(pending: Self::Pending, _metadata: SequenceMetadata) -> Self {
         Self { inner: pending }
-    }
-
-    fn inner(&self) -> &Self::Pending {
-        &self.inner
     }
 
     fn merkle_tree_leaf(&self) -> Hash {
