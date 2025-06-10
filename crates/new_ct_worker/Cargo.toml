@@ -1,6 +1,5 @@
 [package]
-name = "ct_worker"
-readme = "README.md"
+name = "new_ct_worker"
 publish = false
 version.workspace = true
 authors.workspace = true
@@ -12,9 +11,23 @@ description = "An implementation of c2sp.org/static-ct-api on Cloudflare Workers
 categories = ["cryptography"]
 keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
 
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1351
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = true
+
+# https://github.com/rustwasm/wasm-pack/issues/1247
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
 [build-dependencies]
 chrono.workspace = true
-config = { path = "./config", package = "ct_worker_config" }
+ct_worker.workspace = true
 jsonschema.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -31,9 +44,9 @@ futures-executor.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 byteorder.workspace = true
-config = { path = "./config", package = "ct_worker_config" }
 console_error_panic_hook.workspace = true
 console_log.workspace = true
+ct_worker.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
@@ -56,3 +69,11 @@ tokio.workspace = true
 worker.workspace = true
 x509-verify.workspace = true
 x509_util.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(wasm_bindgen_unstable_test_coverage)',
+] }
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]

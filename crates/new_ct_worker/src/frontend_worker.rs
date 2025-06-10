@@ -3,12 +3,16 @@
 
 //! Entrypoint for the static CT submission APIs.
 
+use ct_worker::{
+    get_cached_entry, get_stub, load_public_bucket, put_cache_entry_metadata, ObjectBucket,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT,
+};
+
 use crate::{
-    ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
-    LookupKey, ObjectBucket, SequenceMetadata, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
+    ctlog, load_signing_key, load_witness_key, util, LookupKey, SequenceMetadata, CONFIG, ROOTS,
 };
 use base64::prelude::*;
-use config::TemporalInterval;
+use ct_worker::config::TemporalInterval;
 use log::{debug, warn, Level};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -188,33 +192,17 @@ async fn add_chain_or_pre_chain(
     let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
-    let kv = load_cache_kv(env, name)?;
-    if params.enable_dedup {
-        if let Some(metadata) = kv
-            .get(&BASE64_STANDARD.encode(lookup_key))
-            .bytes_with_metadata::<SequenceMetadata>()
-            .await?
-            .1
-        {
-            debug!("{name}: Entry is cached");
-            let entry = StaticCTLogEntry {
-                inner: pending_entry,
-                leaf_index: metadata.0,
-                timestamp: metadata.1,
-            };
-            let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-                .map_err(|e| e.to_string())?;
-            return Response::from_json(&sct);
-        }
+    if let Some(entry) = get_cached_entry(params, env, name, &pending_entry).await? {
+        debug!("{name}: Entry is cached");
+        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+            .map_err(|e| e.to_string())?;
+        return Response::from_json(&sct);
     }
 
     // Entry is not cached, so we need to sequence it.
 
     // First persist issuers.
-    let public_bucket = ObjectBucket {
-        bucket: load_public_bucket(env, name)?,
-        metrics: None,
-    };
+    let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
     ctlog::upload_issuers(
         &public_bucket,
         &req.chain[1..]
@@ -251,12 +239,7 @@ async fn add_chain_or_pre_chain(
     if params.num_batchers == 0 {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if kv
-            .put(&BASE64_STANDARD.encode(lookup_key), "")
-            .unwrap()
-            .metadata::<SequenceMetadata>(metadata)
-            .unwrap()
-            .execute()
+        if put_cache_entry_metadata(env, name, &pending_entry, metadata)
             .await
             .is_err()
         {

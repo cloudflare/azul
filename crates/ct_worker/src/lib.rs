@@ -3,15 +3,19 @@
 
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+pub use config;
+
 mod batcher_do;
-mod ctlog;
-mod frontend_worker;
+pub mod ctlog;
 mod metrics;
-mod sequencer_do;
+pub mod sequencer_do;
 mod util;
 
+use async_trait::async_trait;
 use byteorder::{BigEndian, WriteBytesExt};
-use config::AppConfig;
+use config::{AppConfig, LogParams};
 use ctlog::UploadOptions;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
@@ -22,16 +26,17 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{LookupKey, SequenceMetadata};
+use tlog_tiles::{LogEntry, LookupKey, PendingLogEntry, SequenceMetadata};
 use util::now_millis;
+use worker::kv::KvError;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_util::CertPool;
 use x509_verify::x509_cert::Certificate;
 
 const BATCH_ENDPOINT: &str = "/add_batch";
-const ENTRY_ENDPOINT: &str = "/add_entry";
-const METRICS_ENDPOINT: &str = "/metrics";
+pub const ENTRY_ENDPOINT: &str = "/add_entry";
+pub const METRICS_ENDPOINT: &str = "/metrics";
 
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
@@ -39,18 +44,7 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
         .expect("Failed to parse config")
 });
 
-static ROOTS: LazyLock<CertPool> = LazyLock::new(|| {
-    CertPool::new(
-        Certificate::load_pem_chain(include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem")))
-            .expect("Failed to parse roots"),
-    )
-    .unwrap()
-});
-
-static SIGNING_KEY_MAP: OnceLock<HashMap<String, OnceLock<EcdsaSigningKey>>> = OnceLock::new();
-static WITNESS_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
-
-fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Result<Stub> {
+pub fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Result<Stub> {
     let namespace = env.durable_object(binding)?;
     let object_name = if let Some(id) = shard_id {
         &format!("{name}_{id:x}")
@@ -65,52 +59,61 @@ fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Resul
     }
 }
 
-fn load_signing_key(env: &Env, name: &str) -> Result<&'static EcdsaSigningKey> {
-    let once = &SIGNING_KEY_MAP.get_or_init(|| {
-        CONFIG
-            .logs
-            .keys()
-            .map(|name| (name.clone(), OnceLock::new()))
-            .collect()
-    })[name];
-    if let Some(key) = once.get() {
-        Ok(key)
-    } else {
-        let key = EcdsaSigningKey::from_pkcs8_pem(
-            &env.secret(&format!("SIGNING_KEY_{name}"))?.to_string(),
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(once.get_or_init(|| key))
-    }
-}
-
-fn load_witness_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
-    let once = &WITNESS_KEY_MAP.get_or_init(|| {
-        CONFIG
-            .logs
-            .keys()
-            .map(|name| (name.clone(), OnceLock::new()))
-            .collect()
-    })[name];
-    if let Some(key) = once.get() {
-        Ok(key)
-    } else {
-        let key = Ed25519SigningKey::from_pkcs8_pem(
-            &env.secret(&format!("WITNESS_KEY_{name}"))?.to_string(),
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(once.get_or_init(|| key))
-    }
-}
-
 // Public R2 bucket from which to serve this log's static assets.
-fn load_public_bucket(env: &Env, name: &str) -> Result<Bucket> {
+pub fn load_public_bucket(env: &Env, name: &str) -> Result<Bucket> {
     env.bucket(&format!("public_{name}"))
 }
 
 // KV namespace to use for this log's deduplication cache.
 fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
     env.kv(&format!("cache_{name}"))
+}
+
+/// Given a pending entry, returns the corresponding log entry from the dedup
+/// cache, if it exists
+pub async fn get_cached_entry<L: LogEntry>(
+    params: &LogParams,
+    env: &Env,
+    cache_name: &str,
+    pending: &L::Pending,
+) -> Result<Option<L>> {
+    if params.enable_dedup {
+        // Load the key-value handle and get the lookup key
+        let kv = load_cache_kv(env, cache_name)?;
+        let lookup_key = pending.lookup_key();
+
+        // Query the cache and return the log entry if it exists
+        let value_opt = kv
+            .get(&BASE64_STANDARD.encode(lookup_key))
+            .bytes_with_metadata::<SequenceMetadata>()
+            .await?
+            .1;
+        Ok(value_opt.map(|e| L::new(pending.clone(), e)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Makes an empty entry in the dedup cache with `pending.lookup_key()` as the
+/// key, and `metadata` as the metadata
+pub async fn put_cache_entry_metadata<L: PendingLogEntry>(
+    env: &Env,
+    cache_name: &str,
+    pending: &L,
+    metadata: SequenceMetadata,
+) -> Result<()> {
+    // Load the key-value handle and get the lookup key
+    let kv = load_cache_kv(env, cache_name)?;
+    let lookup_key = pending.lookup_key();
+
+    // Store key => "", with metadata
+    kv.put(&BASE64_STANDARD.encode(lookup_key), "")
+        .unwrap()
+        .metadata::<SequenceMetadata>(metadata)
+        .unwrap()
+        .execute()
+        .await
+        .map_err(Error::from)
 }
 
 #[derive(Deserialize)]
@@ -381,14 +384,23 @@ impl LockBackend for State {
     }
 }
 
-trait ObjectBackend {
+pub trait ObjectBackend {
     async fn upload(&self, key: &str, data: &[u8], opts: &UploadOptions) -> Result<()>;
     async fn fetch(&self, key: &str) -> Result<Option<Vec<u8>>>;
 }
 
-struct ObjectBucket {
+pub struct ObjectBucket {
     bucket: Bucket,
     metrics: Option<ObjectMetrics>,
+}
+
+impl ObjectBucket {
+    pub fn new(bucket: Bucket) -> Self {
+        ObjectBucket {
+            bucket,
+            metrics: None,
+        }
+    }
 }
 
 impl ObjectBackend for ObjectBucket {
@@ -425,6 +437,7 @@ impl ObjectBackend for ObjectBucket {
         });
         Ok(())
     }
+
     async fn fetch(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let start = now_millis();
         let res = match self.bucket.get(key).execute().await? {

@@ -4,11 +4,11 @@
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
 use crate::{
-    ctlog, load_public_bucket, load_signing_key, load_witness_key,
+    ctlog, load_public_bucket,
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
     util::{self, now_millis},
     DedupCache, LookupKey, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata,
-    BATCH_ENDPOINT, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
+    BATCH_ENDPOINT, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
@@ -32,43 +32,7 @@ const MEMORY_CACHE_SIZE: usize = 300_000;
 pub type CheckpointSignerLoader =
     Box<dyn Fn(&Env, &str, &str) -> Result<Vec<Box<dyn CheckpointSigner>>>>;
 
-#[durable_object]
-struct Sequencer(GenericSequencer<StaticCTPendingLogEntry>);
-
-#[durable_object]
-impl DurableObject for Sequencer {
-    fn new(state: State, env: Env) -> Self {
-        // Need to define how we load our signing keys from the environment. This closure has type
-        // CheckpointSignerLoader
-        let load_signers = |e: &Env, name: &str, origin: &str| {
-            let signing_key = load_signing_key(e, name)?.clone();
-            let witness_key = load_witness_key(e, name)?.clone();
-
-            // Make the checkpoint signers from the secret keys and put them in a vec
-            let signer = StaticCTCheckpointSigner::new(origin, signing_key).map_err(|e| {
-                Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
-            })?;
-            let witness = Ed25519CheckpointSigner::new(origin, witness_key).map_err(|e| {
-                Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
-            })?;
-
-            let out: Vec<Box<dyn CheckpointSigner>> = vec![Box::new(signer), Box::new(witness)];
-            Ok(out)
-        };
-
-        Sequencer(GenericSequencer::new(state, env, Box::new(load_signers)))
-    }
-
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
-        self.0.fetch(req).await
-    }
-
-    async fn alarm(&mut self) -> Result<Response> {
-        self.0.alarm::<StaticCTLogEntry>().await
-    }
-}
-
-struct GenericSequencer<E: PendingLogEntry> {
+pub struct GenericSequencer<E: PendingLogEntry> {
     do_state: State, // implements LockBackend
     env: Env,
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
@@ -83,7 +47,7 @@ struct GenericSequencer<E: PendingLogEntry> {
 }
 
 impl<E: PendingLogEntry> GenericSequencer<E> {
-    fn new(state: State, env: Env, key_loader: CheckpointSignerLoader) -> Self {
+    pub fn new(state: State, env: Env, key_loader: CheckpointSignerLoader) -> Self {
         let level = CONFIG
             .logging_level
             .as_ref()
@@ -106,7 +70,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         }
     }
 
-    async fn fetch(&mut self, mut req: Request) -> Result<Response> {
+    pub async fn fetch(&mut self, mut req: Request) -> Result<Response> {
         let name = &req.query::<QueryParams>()?.name;
         if !self.initialized {
             info!("{name}: Initializing log from fetch handler");
@@ -149,7 +113,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         resp
     }
 
-    async fn alarm<L: LogEntry<Pending = E>>(&mut self) -> Result<Response> {
+    pub async fn alarm<L: LogEntry<Pending = E>>(&mut self) -> Result<Response> {
         if !self.initialized {
             let name = &self.do_state.storage().get::<String>("name").await?;
             info!("{name}: Initializing log from sequencing loop");

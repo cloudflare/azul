@@ -522,47 +522,6 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     }
 }
 
-/// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
-pub(crate) async fn upload_issuers(
-    object: &impl ObjectBackend,
-    issuers: &[&[u8]],
-    name: &str,
-) -> worker::Result<()> {
-    let issuer_futures: Vec<_> = issuers
-        .iter()
-        .map(|issuer| async move {
-            let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
-            let path = format!("issuer/{}", hex::encode(fingerprint));
-
-            if let Some(old) = object.fetch(&path).await? {
-                if old != *issuer {
-                    return Err(worker::Error::RustError(format!(
-                        "invalid existing issuer: {}",
-                        hex::encode(old)
-                    )));
-                }
-                Ok(None)
-            } else {
-                object.upload(&path, issuer, &OPTS_ISSUER).await?;
-                Ok(Some(path))
-            }
-        })
-        .collect();
-
-    for path in try_join_all(issuer_futures)
-        .await?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-    {
-        {
-            info!("{name}: Observed new issuer; path={path}");
-        }
-    }
-
-    Ok(())
-}
-
 /// Sequences the current pool of pending entries in the ephemeral state.
 pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &mut PoolState<L::Pending>,
@@ -1145,24 +1104,19 @@ fn marshal_staged_uploads(
 /// [`UploadOptions`] are used as part of the [`ObjectBackend::upload`] method, and are
 /// marshaled to JSON and stored in the staging bundles.
 #[derive(Debug, Default, Serialize, Clone, Deserialize)]
-pub(crate) struct UploadOptions {
+pub struct UploadOptions {
     /// The MIME type of the data. If empty, defaults to
     /// "application/octet-stream".
-    pub(crate) content_type: Option<String>,
+    pub content_type: Option<String>,
 
     /// Immutable is true if the data is never updated after being uploaded.
-    pub(crate) immutable: bool,
+    pub immutable: bool,
 }
 
 /// Options for uploading checkpoints.
 static OPTS_CHECKPOINT: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
     content_type: Some("text/plain; charset=utf-8".to_string()),
     immutable: false,
-});
-/// Options for uploading issuers.
-static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
-    content_type: Some("application/pkix-cert".to_string()),
-    immutable: true,
 });
 /// Options for uploading data tiles.
 static OPTS_DATA_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
@@ -2328,6 +2282,53 @@ mod tests {
 
             Ok(sth_timestamp)
         }
+    }
+
+    /// Content-type header for issuer cert uploads
+    static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
+        content_type: Some("application/pkix-cert".to_string()),
+        immutable: true,
+    });
+
+    /// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
+    async fn upload_issuers(
+        object: &impl ObjectBackend,
+        issuers: &[&[u8]],
+        name: &str,
+    ) -> worker::Result<()> {
+        let issuer_futures: Vec<_> = issuers
+            .iter()
+            .map(|issuer| async move {
+                let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
+                let path = format!("issuer/{}", hex::encode(fingerprint));
+
+                if let Some(old) = object.fetch(&path).await? {
+                    if old != *issuer {
+                        return Err(worker::Error::RustError(format!(
+                            "invalid existing issuer: {}",
+                            hex::encode(old)
+                        )));
+                    }
+                    Ok(None)
+                } else {
+                    object.upload(&path, issuer, &OPTS_ISSUER).await?;
+                    Ok(Some(path))
+                }
+            })
+            .collect();
+
+        for path in try_join_all(issuer_futures)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        {
+            {
+                info!("{name}: Observed new issuer; path={path}");
+            }
+        }
+
+        Ok(())
     }
 
     fn read_tile_hashes(
