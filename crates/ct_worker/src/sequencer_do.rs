@@ -250,7 +250,6 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         // Start sequencing loop (OK if alarm is already scheduled).
         self.do_state.storage().set_alarm(sequence_interval).await?;
 
-        self.metrics.config_roots.set(ROOTS.certs.len().as_f64());
         self.metrics.config_start.set(
             params
                 .temporal_interval
