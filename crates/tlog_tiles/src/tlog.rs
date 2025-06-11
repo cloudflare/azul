@@ -463,6 +463,18 @@ pub enum TlogError {
     IndexesOutOfOrder,
     #[error("unmet input condition: {0}")]
     InvalidInput(String),
+    #[error("missing verifier signature")]
+    MissingVerifierSignature,
+    #[error("timestamp is after current time")]
+    InvalidTimestamp,
+    #[error("checkpoint origin does not match")]
+    OriginMismatch,
+    #[error(transparent)]
+    Note(#[from] signed_note::NoteError),
+    #[error(transparent)]
+    MalformedCheckpoint(#[from] crate::MalformedCheckpointError),
+    #[error(transparent)]
+    Verification(#[from] signed_note::VerificationError),
     #[error(transparent)]
     Verifier(#[from] signed_note::VerifierError),
     #[error(transparent)]

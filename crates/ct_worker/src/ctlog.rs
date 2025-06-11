@@ -29,7 +29,6 @@ use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{NoteVerifier, VerifierList};
-use static_ct_api::TreeWithTimestamp;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{
@@ -39,7 +38,7 @@ use std::{
 use thiserror::Error;
 use tlog_tiles::{
     CheckpointSigner, Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator,
-    TlogError, TlogTile, UnixTimestamp, HASH_SIZE,
+    TlogError, TlogTile, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -339,7 +338,7 @@ impl SequenceState {
             VerifierList::new(vs)
         };
 
-        let (c, timestamp) = static_ct_api::open_checkpoint(
+        let (c, timestamp) = tlog_tiles::open_checkpoint(
             &config.origin,
             &verifiers,
             now_millis(),
@@ -359,8 +358,7 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) =
-            static_ct_api::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
+        let (c1, _) = tlog_tiles::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {

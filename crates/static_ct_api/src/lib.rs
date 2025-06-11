@@ -24,12 +24,6 @@ pub enum StaticCTError {
     #[error(transparent)]
     X509(#[from] x509_verify::spki::Error),
 
-    #[error("missing verifier signature")]
-    MissingVerifierSignature,
-    #[error("timestamp is after current time")]
-    InvalidTimestamp,
-    #[error("checkpoint origin does not match")]
-    OriginMismatch,
     #[error("unexpected extension")]
     UnexpectedExtension,
     #[error(transparent)]

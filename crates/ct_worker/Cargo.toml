@@ -17,6 +17,7 @@ rand = { workspace = true, features = ["small_rng"] }
 itertools.workspace = true
 parking_lot.workspace = true
 futures-executor.workspace = true
+static_ct_api.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -40,7 +41,6 @@ serde_json.workspace = true
 serde_with.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
-static_ct_api.workspace = true
 thiserror.workspace = true
 tlog_tiles.workspace = true
 tokio.workspace = true

@@ -26,7 +26,6 @@ use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{NoteVerifier, VerifierList};
-use static_ct_api::TreeWithTimestamp;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{

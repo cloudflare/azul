@@ -2423,6 +2423,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "length_prefixed",
+ "rand",
  "serde",
  "serde_json",
  "sha2",
