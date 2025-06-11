@@ -355,7 +355,9 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 }
 
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
-/// [Checkpoint] and the latest timestamp of any of its cosignatures (if defined).
+/// [Checkpoint] and the latest timestamp of any of its cosignatures (if
+/// defined). Returns an error if `extension_verifier` returns and error when
+/// given the checkpoint's extension.
 ///
 /// # Errors
 ///
@@ -363,6 +365,7 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 pub fn open_checkpoint(
     origin: &str,
     verifiers: &VerifierList,
+    extension_verifier: impl FnOnce(&str) -> Result<(), String>,
     current_time: UnixTimestamp,
     b: &[u8],
 ) -> Result<(Checkpoint, Option<UnixTimestamp>), TlogError> {
@@ -402,6 +405,7 @@ pub fn open_checkpoint(
     if checkpoint.origin() != origin {
         return Err(TlogError::OriginMismatch);
     }
+    extension_verifier(checkpoint.extension()).map_err(TlogError::InvalidExtension)?;
 
     Ok((checkpoint, latest_timestamp))
 }
@@ -462,6 +466,7 @@ impl TreeWithTimestamp {
     pub fn sign(
         &self,
         origin: &str,
+        extension: &str,
         signers: &[&dyn CheckpointSigner],
         rng: &mut impl Rng,
     ) -> Result<Vec<u8>, TlogError> {
@@ -470,7 +475,7 @@ impl TreeWithTimestamp {
         signers.shuffle(rng);
 
         // Construct the checkpoint with no extension lines
-        let checkpoint = Checkpoint::new(origin, self.size, self.hash, "")?;
+        let checkpoint = Checkpoint::new(origin, self.size, self.hash, extension)?;
 
         // Sign the checkpoint with the given signers
         let sigs = signers

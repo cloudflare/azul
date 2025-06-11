@@ -294,7 +294,7 @@ pub(crate) async fn create_log(
         .collect::<Vec<_>>();
 
     let sth = tree
-        .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
+        .sign(&config.origin, "", &dyn_signers, &mut rand::thread_rng())
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
@@ -337,10 +337,21 @@ impl SequenceState {
                 .collect();
             VerifierList::new(vs)
         };
+        // Verifier used to validate the extension lines of the checkpoint we
+        // are opening. We don't use extensions at all, so we require it to be
+        // the empty string.
+        let extension_verifier = |ext: &str| {
+            if !ext.is_empty() {
+                Err("expected empty extension".to_string())
+            } else {
+                Ok(())
+            }
+        };
 
         let (c, timestamp) = tlog_tiles::open_checkpoint(
             &config.origin,
             &verifiers,
+            extension_verifier,
             now_millis(),
             &stored_checkpoint,
         )?;
@@ -358,7 +369,13 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) = tlog_tiles::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
+        let (c1, _) = tlog_tiles::open_checkpoint(
+            &config.origin,
+            &verifiers,
+            extension_verifier,
+            now_millis(),
+            &sth,
+        )?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
@@ -746,7 +763,7 @@ async fn sequence_entries<L: LogEntry>(
         .collect::<Vec<_>>();
 
     let new_checkpoint = tree
-        .sign(&config.origin, &dyn_signers, &mut rand::thread_rng())
+        .sign(&config.origin, "", &dyn_signers, &mut rand::thread_rng())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
 
     // This is a critical error, since we don't know the state of the
