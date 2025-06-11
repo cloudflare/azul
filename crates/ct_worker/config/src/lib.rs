@@ -6,19 +6,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TemporalInterval {
     pub start_inclusive: DateTime<Utc>,
     pub end_exclusive: DateTime<Utc>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct AppConfig {
     pub logging_level: Option<String>,
     pub logs: HashMap<String, LogParams>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct LogParams {
     pub description: Option<String>,
     pub log_type: Option<String>,

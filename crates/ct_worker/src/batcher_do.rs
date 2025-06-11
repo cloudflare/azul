@@ -7,12 +7,12 @@
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
 use crate::{
-    get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata, BATCH_ENDPOINT, CONFIG,
+    get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata, BATCH_ENDPOINT,
     ENTRY_ENDPOINT,
 };
 use base64::prelude::*;
+use config::AppConfig;
 use futures_util::future::{join_all, select, Either};
-use static_ct_api::StaticCTPendingLogEntry;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -22,25 +22,12 @@ use tokio::sync::watch::{self, Sender};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-struct GenericBatcher<E: PendingLogEntry> {
+pub struct GenericBatcher<E: PendingLogEntry> {
     env: Env,
+    app_config: AppConfig,
     batch: Batch<E>,
     in_flight: usize,
     processed: usize,
-}
-
-#[durable_object]
-struct Batcher(GenericBatcher<StaticCTPendingLogEntry>);
-
-#[durable_object]
-impl DurableObject for Batcher {
-    fn new(state: State, env: Env) -> Self {
-        Batcher(GenericBatcher::new(state, env))
-    }
-
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
-        self.0.fetch(req).await
-    }
 }
 
 // A batch of entries to be submitted to the Sequencer together.
@@ -63,19 +50,21 @@ impl<E: PendingLogEntry> Default for Batch<E> {
 }
 
 impl<E: PendingLogEntry> GenericBatcher<E> {
-    fn new(_: State, env: Env) -> Self {
+    pub fn new(app_config: AppConfig, env: Env) -> Self {
         Self {
             env,
+            app_config,
             batch: Batch::default(),
             in_flight: 0,
             processed: 0,
         }
     }
-    async fn fetch(&mut self, mut req: Request) -> Result<Response> {
+
+    pub async fn fetch(&mut self, mut req: Request) -> Result<Response> {
         match req.path().as_str() {
             ENTRY_ENDPOINT => {
                 let name = &req.query::<QueryParams>()?.name;
-                let params = &CONFIG.logs[name];
+                let params = &self.app_config.logs[name];
                 let entry: E = req.json().await?;
                 let key = entry.lookup_key();
 
@@ -141,8 +130,8 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
 
 impl<E: PendingLogEntry> GenericBatcher<E> {
     // Submit the current pending batch to be sequenced.
-    async fn submit_batch(&mut self, name: &str) -> Result<()> {
-        let stub = get_stub(&self.env, name, None, "SEQUENCER")?;
+    pub async fn submit_batch(&mut self, name: &str) -> Result<()> {
+        let stub = get_stub(&self.app_config, &self.env, name, None, "SEQUENCER")?;
 
         // Take the current pending batch and replace it with a new one.
         let batch = std::mem::take(&mut self.batch);

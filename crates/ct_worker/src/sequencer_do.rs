@@ -8,15 +8,15 @@ use crate::{
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
     util::{self, now_millis},
     DedupCache, LookupKey, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata,
-    BATCH_ENDPOINT, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    BATCH_ENDPOINT, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
+use config::AppConfig;
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};
-use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
 use std::str::FromStr;
 use std::time::Duration;
-use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, LogEntry, PendingLogEntry};
+use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry};
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -37,7 +37,8 @@ pub struct GenericSequencer<E: PendingLogEntry> {
     env: Env,
     public_bucket: Option<ObjectBucket>, // implements ObjectBackend
     cache: Option<DedupCache>,           // implements CacheRead, CacheWrite
-    config: Option<LogConfig>,
+    app_config: AppConfig,
+    log_config: Option<LogConfig>,
     key_loader: CheckpointSignerLoader,
     sequence_state: Option<SequenceState>,
     pool_state: PoolState<E>,
@@ -47,8 +48,13 @@ pub struct GenericSequencer<E: PendingLogEntry> {
 }
 
 impl<E: PendingLogEntry> GenericSequencer<E> {
-    pub fn new(state: State, env: Env, key_loader: CheckpointSignerLoader) -> Self {
-        let level = CONFIG
+    pub fn new(
+        app_config: AppConfig,
+        state: State,
+        env: Env,
+        key_loader: CheckpointSignerLoader,
+    ) -> Self {
+        let level = app_config
             .logging_level
             .as_ref()
             .and_then(|level| Level::from_str(level).ok())
@@ -60,7 +66,8 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             env,
             public_bucket: None,
             cache: None,
-            config: None,
+            app_config,
+            log_config: None,
             key_loader,
             sequence_state: None,
             pool_state: PoolState::default(),
@@ -120,7 +127,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             self.initialize(name).await?;
         }
         // Safe to unwrap here as the log must be initialized.
-        let config = self.config.as_ref().unwrap();
+        let config = self.log_config.as_ref().unwrap();
         let name = &config.name;
 
         // Schedule the next sequencing.
@@ -150,7 +157,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
 impl<E: PendingLogEntry> GenericSequencer<E> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self, name: &str) -> Result<()> {
-        let params = &CONFIG.logs[name];
+        let params = &self.app_config.logs[name];
 
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
@@ -169,7 +176,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
         let checkpoint_signers = (self.key_loader)(&self.env, name, origin)?;
 
-        self.config = Some(LogConfig {
+        self.log_config = Some(LogConfig {
             name: name.to_string(),
             origin: origin.to_string(),
             checkpoint_signers,
@@ -193,7 +200,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
 
         // Safe to unwrap here as the relevant fields were set above.
         match ctlog::create_log(
-            self.config.as_ref().unwrap(),
+            self.log_config.as_ref().unwrap(),
             self.public_bucket.as_ref().unwrap(),
             &self.do_state,
         )
@@ -244,7 +251,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             let add_leaf_result = ctlog::add_leaf_to_pool(
                 &mut self.pool_state,
                 self.cache.as_ref().unwrap(),
-                self.config.as_ref().unwrap(),
+                self.log_config.as_ref().unwrap(),
                 pending_entry,
             );
 

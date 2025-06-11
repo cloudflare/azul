@@ -119,7 +119,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .get_async("/logs/:log/metrics", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
-            let stub = get_stub(&ctx.env, name, None, "SEQUENCER")?;
+            let stub = get_stub(&CONFIG, &ctx.env, name, None, "SEQUENCER")?;
             stub.fetch_with_str(&format!(
                 "http://fake_url.com{METRICS_ENDPOINT}?name={name}"
             ))
@@ -217,9 +217,9 @@ async fn add_chain_or_pre_chain(
     // sequencer.
     let stub = if params.num_batchers > 0 {
         let batcher_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
-        get_stub(env, name, Some(batcher_id), "BATCHER")?
+        get_stub(&CONFIG, env, name, Some(batcher_id), "BATCHER")?
     } else {
-        get_stub(env, name, None, "SEQUENCER")?
+        get_stub(&CONFIG, env, name, None, "SEQUENCER")?
     };
     let mut response = stub
         .fetch_with_request(Request::new_with_init(

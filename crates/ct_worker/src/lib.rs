@@ -7,7 +7,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 pub use config;
 
-mod batcher_do;
+pub mod batcher_do;
 pub mod ctlog;
 mod metrics;
 pub mod sequencer_do;
@@ -38,13 +38,13 @@ const BATCH_ENDPOINT: &str = "/add_batch";
 pub const ENTRY_ENDPOINT: &str = "/add_entry";
 pub const METRICS_ENDPOINT: &str = "/metrics";
 
-// Application configuration.
-static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
-    serde_json::from_str::<AppConfig>(include_str!(concat!(env!("OUT_DIR"), "/config.json")))
-        .expect("Failed to parse config")
-});
-
-pub fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> Result<Stub> {
+pub fn get_stub(
+    config: &AppConfig,
+    env: &Env,
+    name: &str,
+    shard_id: Option<u8>,
+    binding: &str,
+) -> Result<Stub> {
     let namespace = env.durable_object(binding)?;
     let object_name = if let Some(id) = shard_id {
         &format!("{name}_{id:x}")
@@ -52,7 +52,7 @@ pub fn get_stub(env: &Env, name: &str, shard_id: Option<u8>, binding: &str) -> R
         name
     };
     let object_id = namespace.id_from_name(object_name)?;
-    if let Some(hint) = &CONFIG.logs[name].location_hint {
+    if let Some(hint) = &config.logs[name].location_hint {
         Ok(object_id.get_stub_with_location_hint(hint)?)
     } else {
         Ok(object_id.get_stub()?)

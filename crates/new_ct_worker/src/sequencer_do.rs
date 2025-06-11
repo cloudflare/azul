@@ -3,7 +3,7 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use crate::{load_signing_key, load_witness_key};
+use crate::{load_signing_key, load_witness_key, CONFIG};
 use ct_worker::sequencer_do::GenericSequencer;
 use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
@@ -39,7 +39,12 @@ impl DurableObject for Sequencer {
             Ok(out)
         };
 
-        Sequencer(GenericSequencer::new(state, env, Box::new(load_signers)))
+        Sequencer(GenericSequencer::new(
+            CONFIG.clone(),
+            state,
+            env,
+            Box::new(load_signers),
+        ))
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {
