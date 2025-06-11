@@ -12,15 +12,6 @@ description = "An implementation of c2sp.org/static-ct-api on Cloudflare Workers
 categories = ["cryptography"]
 keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
 
-[build-dependencies]
-chrono.workspace = true
-config = { path = "./config", package = "ct_worker_config" }
-jsonschema.workspace = true
-serde_json.workspace = true
-serde.workspace = true
-url.workspace = true
-x509-verify.workspace = true
-
 [dev-dependencies]
 rand = { workspace = true, features = ["small_rng"] }
 itertools.workspace = true
@@ -31,7 +22,7 @@ futures-executor.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 byteorder.workspace = true
-config = { path = "./config", package = "ct_worker_config" }
+chrono.workspace = true
 console_error_panic_hook.workspace = true
 console_log.workspace = true
 ed25519-dalek.workspace = true

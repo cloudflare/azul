@@ -4,13 +4,13 @@
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
 use crate::{
+    config::AppConfig,
     ctlog, load_public_bucket,
     metrics::{millis_diff_as_secs, AsF64, Metrics, ObjectMetrics},
     util::{self, now_millis},
     DedupCache, LookupKey, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata,
     BATCH_ENDPOINT, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
-use config::AppConfig;
 use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn, Level};

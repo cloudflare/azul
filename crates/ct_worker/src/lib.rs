@@ -5,9 +5,9 @@
 
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-pub use config;
 
 pub mod batcher_do;
+pub mod config;
 pub mod ctlog;
 mod metrics;
 pub mod sequencer_do;

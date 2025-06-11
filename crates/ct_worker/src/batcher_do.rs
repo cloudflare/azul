@@ -7,11 +7,10 @@
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
 use crate::{
-    get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata, BATCH_ENDPOINT,
-    ENTRY_ENDPOINT,
+    config::AppConfig, get_stub, load_cache_kv, LookupKey, QueryParams, SequenceMetadata,
+    BATCH_ENDPOINT, ENTRY_ENDPOINT,
 };
 use base64::prelude::*;
-use config::AppConfig;
 use futures_util::future::{join_all, select, Either};
 use std::{
     collections::{HashMap, HashSet},

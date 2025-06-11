@@ -419,14 +419,12 @@ dependencies = [
  "chrono",
  "console_error_panic_hook",
  "console_log",
- "ct_worker_config",
  "ed25519-dalek",
  "futures-executor",
  "futures-util",
  "getrandom 0.2.16",
  "hex",
  "itertools 0.14.0",
- "jsonschema",
  "log",
  "p256",
  "parking_lot",
@@ -443,18 +441,9 @@ dependencies = [
  "thiserror 2.0.12",
  "tlog_tiles",
  "tokio",
- "url",
  "worker",
  "x509-verify",
  "x509_util",
-]
-
-[[package]]
-name = "ct_worker_config"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "serde",
 ]
 
 [[package]]
