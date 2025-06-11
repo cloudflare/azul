@@ -469,8 +469,6 @@ pub enum TlogError {
     InvalidTimestamp,
     #[error("checkpoint origin does not match")]
     OriginMismatch,
-    #[error("invalid checkpoint extension: {0}")]
-    InvalidExtension(String),
     #[error(transparent)]
     Note(#[from] signed_note::NoteError),
     #[error(transparent)]

@@ -356,8 +356,7 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
 /// [Checkpoint] and the latest timestamp of any of its cosignatures (if
-/// defined). Returns an error if `extension_verifier` returns and error when
-/// given the checkpoint's extension.
+/// defined).
 ///
 /// # Errors
 ///
@@ -365,7 +364,6 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 pub fn open_checkpoint(
     origin: &str,
     verifiers: &VerifierList,
-    extension_verifier: impl FnOnce(&str) -> Result<(), String>,
     current_time: UnixTimestamp,
     b: &[u8],
 ) -> Result<(Checkpoint, Option<UnixTimestamp>), TlogError> {
@@ -405,7 +403,6 @@ pub fn open_checkpoint(
     if checkpoint.origin() != origin {
         return Err(TlogError::OriginMismatch);
     }
-    extension_verifier(checkpoint.extension()).map_err(TlogError::InvalidExtension)?;
 
     Ok((checkpoint, latest_timestamp))
 }
@@ -534,6 +531,8 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 
 #[cfg(test)]
 mod tests {
+    use rand::rngs::OsRng;
+
     use super::*;
     use crate::tlog::record_hash;
 
@@ -624,5 +623,32 @@ mod tests {
             assert!(c.is_ok());
             assert!(text.starts_with(&c.unwrap().to_bytes()));
         }
+    }
+
+    #[test]
+    fn test_sign_verify() {
+        let mut rng = OsRng;
+
+        let origin = "example.com/origin";
+        let timestamp = 100;
+        let tree_size = 4;
+
+        // Make a tree head and sign it
+        let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
+        let signer = {
+            let sk = Ed25519SigningKey::generate(&mut rng);
+            Ed25519CheckpointSigner::new("my-signer", sk).unwrap()
+        };
+        let checkpoint = tree.sign(origin, "", &[&signer], &mut rng).unwrap();
+
+        // Now verify the signed checkpoint
+        let verifier = signer.verifier();
+        open_checkpoint(
+            origin,
+            &VerifierList::new(vec![verifier]),
+            timestamp,
+            &checkpoint,
+        )
+        .unwrap();
     }
 }

@@ -23,7 +23,7 @@ use crate::{
     util::now_millis,
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
 };
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, ensure};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -337,24 +337,19 @@ impl SequenceState {
                 .collect();
             VerifierList::new(vs)
         };
-        // Verifier used to validate the extension lines of the checkpoint we
-        // are opening. We don't use extensions at all, so we require it to be
-        // the empty string.
-        let extension_verifier = |ext: &str| {
-            if !ext.is_empty() {
-                Err("expected empty extension".to_string())
-            } else {
-                Ok(())
-            }
-        };
 
         let (c, timestamp) = tlog_tiles::open_checkpoint(
             &config.origin,
             &verifiers,
-            extension_verifier,
             now_millis(),
             &stored_checkpoint,
         )?;
+        // We don't use extension lines for any of our checkpoints
+        ensure!(
+            c.extension().is_empty(),
+            "unexpected extension in DO checkpoint"
+        );
+
         // TODO: This is guaranteed to succeed right now bc we've hardcoded the verifier types. But
         // this won't in general. Make an error type for this
         let timestamp = timestamp.expect("no verifiers with timestamped signatures were used");
@@ -369,13 +364,12 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) = tlog_tiles::open_checkpoint(
-            &config.origin,
-            &verifiers,
-            extension_verifier,
-            now_millis(),
-            &sth,
-        )?;
+        let (c1, _) = tlog_tiles::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
+        // We don't use extension lines for any of our checkpoints
+        ensure!(
+            c1.extension().is_empty(),
+            "unexpected extension in R2 checkpoint"
+        );
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
