@@ -61,7 +61,7 @@
 //!
 //! // Make a list of the verifiers that MUST apear on the checkpoint, and load the checkpoint
 //! let verifiers = VerifierList::new(vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]);
-//! let (_checkpoint, _timestamp) = static_ct_api::open_checkpoint(
+//! let (_checkpoint, _timestamp) = tlog_tiles::open_checkpoint(
 //!   "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b",
 //!   &verifiers,
 //!   now,
