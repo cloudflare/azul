@@ -3,16 +3,15 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use ct_worker::{
-    get_cached_entry, get_stub, load_public_bucket, put_cache_entry_metadata, ObjectBucket,
-    ENTRY_ENDPOINT, METRICS_ENDPOINT,
-};
-
 use crate::{
     ctlog, load_signing_key, load_witness_key, util, LookupKey, SequenceMetadata, CONFIG, ROOTS,
 };
 use base64::prelude::*;
-use ct_worker::config::TemporalInterval;
+use generic_log_worker::config::TemporalInterval;
+use generic_log_worker::{
+    get_cached_entry, get_stub, load_public_bucket, put_cache_entry_metadata, ObjectBucket,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT,
+};
 use log::{debug, warn, Level};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -20,6 +19,7 @@ use serde_with::{base64::Base64, serde_as};
 use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
 use std::str::FromStr;
 use tlog_tiles::PendingLogEntry;
+
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

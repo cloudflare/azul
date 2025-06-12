@@ -20,8 +20,8 @@
 
 use crate::{util::now_millis, LookupKey, SequenceMetadata};
 use anyhow::{anyhow, bail};
-use ct_worker::{ctlog::UploadOptions, ObjectBackend};
 use futures_util::future::try_join_all;
+use generic_log_worker::{ctlog::UploadOptions, ObjectBackend};
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

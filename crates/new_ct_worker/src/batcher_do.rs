@@ -1,5 +1,5 @@
 use crate::CONFIG;
-use ct_worker::batcher_do::GenericBatcher;
+use generic_log_worker::batcher_do::GenericBatcher;
 use static_ct_api::StaticCTPendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;

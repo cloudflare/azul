@@ -1,5 +1,5 @@
 [package]
-name = "ct_worker"
+name = "generic_log_worker"
 readme = "README.md"
 publish = false
 version.workspace = true

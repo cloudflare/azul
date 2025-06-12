@@ -27,7 +27,7 @@ crate-type = ["cdylib"]
 
 [build-dependencies]
 chrono.workspace = true
-ct_worker.workspace = true
+generic_log_worker.workspace = true
 jsonschema.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -46,7 +46,7 @@ base64.workspace = true
 byteorder.workspace = true
 console_error_panic_hook.workspace = true
 console_log.workspace = true
-ct_worker.workspace = true
+generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true

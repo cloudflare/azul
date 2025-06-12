@@ -4,7 +4,7 @@
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
 use crate::{load_signing_key, load_witness_key, CONFIG};
-use ct_worker::sequencer_do::GenericSequencer;
+use generic_log_worker::sequencer_do::GenericSequencer;
 use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
