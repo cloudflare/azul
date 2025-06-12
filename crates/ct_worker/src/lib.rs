@@ -3,11 +3,7 @@
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use generic_log_worker::config::AppConfig;
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
-use serde::Deserialize;
-use serde_bytes::ByteBuf;
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
-use std::io::Write;
+use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
 use tlog_tiles::{LookupKey, SequenceMetadata};
 #[allow(clippy::wildcard_imports)]

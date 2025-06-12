@@ -105,7 +105,6 @@
 //! ```
 
 use crate::{AddChainResponse, StaticCTError};
-use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
@@ -116,17 +115,16 @@ use p256::{
     },
     pkcs8::EncodePublicKey,
 };
-use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
-    VerifierError, VerifierList, Verifiers,
+    NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
+    VerifierError,
 };
 use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LogEntry, LookupKey,
-    PendingLogEntry, SequenceMetadata, UnixTimestamp,
+    Checkpoint, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PendingLogEntry,
+    SequenceMetadata, UnixTimestamp,
 };
 
 #[repr(u16)]

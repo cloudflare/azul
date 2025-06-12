@@ -18,26 +18,11 @@
 //! - [ctlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/ctlog_test.go)
 //! - [testlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/testlog_test.go)
 
-use crate::{util::now_millis, LookupKey, SequenceMetadata};
-use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
 use generic_log_worker::{ctlog::UploadOptions, ObjectBackend};
-use log::{debug, error, info, trace, warn};
-use serde::{Deserialize, Serialize};
+use log::info;
 use sha2::{Digest, Sha256};
-use signed_note::{NoteVerifier, VerifierList};
-use std::collections::HashMap;
-use std::time::Duration;
-use std::{
-    cmp::{Ord, Ordering},
-    sync::LazyLock,
-};
-use thiserror::Error;
-use tlog_tiles::{
-    CheckpointSigner, Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator,
-    TlogError, TlogTile, UnixTimestamp, HASH_SIZE,
-};
-use tokio::sync::watch::{channel, Receiver, Sender};
+use std::sync::LazyLock;
 
 /// Options for uploading issuers.
 static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {

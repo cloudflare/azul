@@ -27,7 +27,6 @@ use anyhow::{anyhow, bail, ensure};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use signed_note::{NoteVerifier, VerifierList};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -1142,6 +1141,7 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
 mod tests {
     use super::*;
     use crate::{util, LookupKey, SequenceMetadata};
+
     use anyhow::ensure;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use futures_executor::block_on;
@@ -1151,6 +1151,7 @@ mod tests {
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
     };
+    use sha2::{Digest, Sha256};
     use signed_note::{Note, VerifierList};
     use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};

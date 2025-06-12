@@ -35,8 +35,8 @@ use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
 use rand::{seq::SliceRandom, Rng};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Ed25519NoteVerifier, Note, NoteError, NoteVerifier, Signature as NoteSignature,
-    VerificationError, VerifierList, Verifiers,
+    Ed25519NoteVerifier, Note, NoteError, NoteVerifier, Signature as NoteSignature, VerifierList,
+    Verifiers,
 };
 use std::{
     fmt,

@@ -6,7 +6,6 @@
 use crate::{
     ctlog, load_signing_key, load_witness_key, util, LookupKey, SequenceMetadata, CONFIG, ROOTS,
 };
-use base64::prelude::*;
 use generic_log_worker::config::TemporalInterval;
 use generic_log_worker::{
     get_cached_entry, get_stub, load_public_bucket, put_cache_entry_metadata, ObjectBucket,

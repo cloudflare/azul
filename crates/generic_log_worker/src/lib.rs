@@ -11,26 +11,19 @@ mod metrics;
 pub mod sequencer_do;
 mod util;
 
-use async_trait::async_trait;
 use byteorder::{BigEndian, WriteBytesExt};
 use config::{AppConfig, LogParams};
 use ctlog::UploadOptions;
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
-use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
-use std::sync::{LazyLock, OnceLock};
 use tlog_tiles::{LogEntry, LookupKey, PendingLogEntry, SequenceMetadata};
 use util::now_millis;
-use worker::kv::KvError;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
-use x509_util::CertPool;
-use x509_verify::x509_cert::Certificate;
 
 const BATCH_ENDPOINT: &str = "/add_batch";
 pub const ENTRY_ENDPOINT: &str = "/add_entry";

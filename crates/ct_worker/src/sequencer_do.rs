@@ -10,11 +10,6 @@ use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-// The number of entries in the short-term deduplication cache.
-// This cache provides a secondary deduplication layer to bridge the gap in KV's eventual consistency.
-// It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
-const MEMORY_CACHE_SIZE: usize = 300_000;
-
 #[durable_object]
 struct Sequencer(GenericSequencer<StaticCTPendingLogEntry>);
 
