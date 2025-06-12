@@ -1,5 +1,5 @@
 [package]
-name = "new_ct_worker"
+name = "ct_worker"
 publish = false
 version.workspace = true
 authors.workspace = true

@@ -410,6 +410,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "ct_worker"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "byteorder",
+ "chrono",
+ "console_error_panic_hook",
+ "console_log",
+ "ed25519-dalek",
+ "futures-executor",
+ "futures-util",
+ "generic_log_worker",
+ "getrandom 0.2.16",
+ "hex",
+ "itertools 0.14.0",
+ "jsonschema",
+ "log",
+ "p256",
+ "parking_lot",
+ "prometheus",
+ "rand",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "serde_bytes",
+ "serde_json",
+ "serde_with",
+ "sha2",
+ "signed_note",
+ "static_ct_api",
+ "thiserror 2.0.12",
+ "tlog_tiles",
+ "tokio",
+ "url",
+ "worker",
+ "x509-verify",
+ "x509_util",
+]
+
+[[package]]
 name = "curve25519-dalek"
 version = "4.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1352,46 +1392,6 @@ dependencies = [
  "libc",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "new_ct_worker"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "base64",
- "byteorder",
- "chrono",
- "console_error_panic_hook",
- "console_log",
- "ed25519-dalek",
- "futures-executor",
- "futures-util",
- "generic_log_worker",
- "getrandom 0.2.16",
- "hex",
- "itertools 0.14.0",
- "jsonschema",
- "log",
- "p256",
- "parking_lot",
- "prometheus",
- "rand",
- "serde",
- "serde-wasm-bindgen 0.6.5",
- "serde_bytes",
- "serde_json",
- "serde_with",
- "sha2",
- "signed_note",
- "static_ct_api",
- "thiserror 2.0.12",
- "tlog_tiles",
- "tokio",
- "url",
- "worker",
- "x509-verify",
- "x509_util",
 ]
 
 [[package]]
