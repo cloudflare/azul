@@ -5,23 +5,27 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 
 pub mod batcher_do;
-pub mod config;
 pub mod ctlog;
 mod metrics;
 pub mod sequencer_do;
 mod util;
 
+pub use batcher_do::*;
+pub use sequencer_do::*;
+
 use byteorder::{BigEndian, WriteBytesExt};
-use config::{AppConfig, LogParams};
 use ctlog::UploadOptions;
+use log::Level;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
-use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
+use std::str::FromStr;
+use std::sync::Once;
 use tlog_tiles::{LogEntry, LookupKey, PendingLogEntry, SequenceMetadata};
 use util::now_millis;
+use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -29,12 +33,37 @@ const BATCH_ENDPOINT: &str = "/add_batch";
 pub const ENTRY_ENDPOINT: &str = "/add_entry";
 pub const METRICS_ENDPOINT: &str = "/metrics";
 
-pub fn get_stub(
-    config: &AppConfig,
+static INIT_LOGGING: Once = Once::new();
+
+/// Initialize logging and panic handling for the Worker. This should be called
+/// in the Worker's start event handler.
+///
+/// # Panics
+///
+/// Panics if the logger has already been initialized, which should never happen
+/// due to the use of `sync::Once`.
+pub fn init_logging(level: Option<&str>) {
+    let level = level
+        .and_then(|level| Level::from_str(level).ok())
+        .unwrap_or(Level::Info);
+    console_error_panic_hook::set_once();
+    INIT_LOGGING.call_once(|| {
+        console_log::init_with_level(level).expect("error initializing logger");
+    });
+}
+
+/// Retrieve a Durable Object stub for the given parameters.
+///
+/// # Errors
+///
+/// Errors if the stub cannot be retrieved, for example if the location hint
+/// corresponds to an invalid location.
+pub fn get_durable_object_stub(
     env: &Env,
     name: &str,
     shard_id: Option<u8>,
     binding: &str,
+    location_hint: Option<&str>,
 ) -> Result<Stub> {
     let namespace = env.durable_object(binding)?;
     let object_name = if let Some(id) = shard_id {
@@ -43,34 +72,65 @@ pub fn get_stub(
         name
     };
     let object_id = namespace.id_from_name(object_name)?;
-    if let Some(hint) = &config.logs[name].location_hint {
+    if let Some(hint) = location_hint {
         Ok(object_id.get_stub_with_location_hint(hint)?)
     } else {
         Ok(object_id.get_stub()?)
     }
 }
 
-// Public R2 bucket from which to serve this log's static assets.
+/// Retrieve the
+/// [name](https://developers.cloudflare.com/durable-objects/api/id/#name) that
+/// was used to create a Durable Object Id with `id_from_name`. The signature of
+/// this function is a little funny since the only way to access the `State`'s
+/// inner `DurableObjectState` is via the `_inner()` method which takes
+/// ownership of the state. Thus, we just re-derive the State from the inner
+/// state and return it in case the calling function still needs it.
+///
+/// # Errors
+///
+/// Returns an error if the 'name' property is not present, for example if the
+/// object was created with a random ID.
+pub fn get_durable_object_name(state: State) -> Result<(State, String)> {
+    let inner_state = state._inner();
+    let id = inner_state.id()?;
+    let obj = js_sys::Object::from(id);
+    let name = js_sys::Reflect::get(&obj, &"name".into())?
+        .as_string()
+        .unwrap_or_default();
+    Ok((State::from(inner_state), name))
+}
+
+/// Return a handle for the public R2 bucket from which to serve this log's
+/// static assets.
+///
+/// # Errors
+///
+/// Returns an error if the handle for the bucket cannot be created, for example
+/// if the bucket does not exist.
 pub fn load_public_bucket(env: &Env, name: &str) -> Result<Bucket> {
     env.bucket(&format!("public_{name}"))
 }
 
-// KV namespace to use for this log's deduplication cache.
-fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
+/// Returns a handle for the KV namespace to use for this log's deduplication
+/// cache.
+///
+/// # Errors
+///
+/// Returns an error if the handle for the KV namespace cannot be created, for
+/// example if the namespace does not exist.
+pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
     env.kv(&format!("cache_{name}"))
 }
 
 /// Given a pending entry, returns the corresponding log entry from the dedup
 /// cache, if it exists
 pub async fn get_cached_entry<L: LogEntry>(
-    params: &LogParams,
-    env: &Env,
-    cache_name: &str,
+    kv: &KvStore,
     pending: &L::Pending,
+    enable_dedup: bool,
 ) -> Result<Option<L>> {
-    if params.enable_dedup {
-        // Load the key-value handle and get the lookup key
-        let kv = load_cache_kv(env, cache_name)?;
+    if enable_dedup {
         let lookup_key = pending.lookup_key();
 
         // Query the cache and return the log entry if it exists
@@ -86,30 +146,26 @@ pub async fn get_cached_entry<L: LogEntry>(
 }
 
 /// Makes an empty entry in the dedup cache with `pending.lookup_key()` as the
-/// key, and `metadata` as the metadata
+/// key, and `metadata` as the metadata.
+///
+/// # Errors
+///
+/// Returns an error if either the KV namespace cannot doesn't exist, or if
+/// there is an exception when writing the value.
 pub async fn put_cache_entry_metadata<L: PendingLogEntry>(
-    env: &Env,
-    cache_name: &str,
+    kv: &KvStore,
     pending: &L,
     metadata: SequenceMetadata,
 ) -> Result<()> {
-    // Load the key-value handle and get the lookup key
-    let kv = load_cache_kv(env, cache_name)?;
+    // Get the lookup key.
     let lookup_key = pending.lookup_key();
 
     // Store key => "", with metadata
-    kv.put(&BASE64_STANDARD.encode(lookup_key), "")
-        .unwrap()
-        .metadata::<SequenceMetadata>(metadata)
-        .unwrap()
+    kv.put(&BASE64_STANDARD.encode(lookup_key), "")?
+        .metadata::<SequenceMetadata>(metadata)?
         .execute()
         .await
         .map_err(Error::from)
-}
-
-#[derive(Deserialize)]
-struct QueryParams {
-    name: String,
 }
 
 trait CacheWrite {
@@ -376,7 +432,9 @@ impl LockBackend for State {
 }
 
 pub trait ObjectBackend {
+    #[allow(async_fn_in_trait)]
     async fn upload(&self, key: &str, data: &[u8], opts: &UploadOptions) -> Result<()>;
+    #[allow(async_fn_in_trait)]
     async fn fetch(&self, key: &str) -> Result<Option<Vec<u8>>>;
 }
 

@@ -7,7 +7,7 @@ use prometheus::{
     self, register_counter_vec_with_registry, register_counter_with_registry,
     register_gauge_with_registry, register_histogram_vec_with_registry,
     register_histogram_with_registry, Counter, CounterVec, Gauge, Histogram, HistogramVec,
-    Registry, TextEncoder,
+    Registry,
 };
 
 // Metrics for the Sequencer DO. Use Cloudflare
@@ -15,9 +15,7 @@ use prometheus::{
 // the Frontend Worker.
 // Reference: <https://github.com/FiloSottile/sunlight/blob/main/internal/ctlog/metrics.go>
 #[derive(Debug)]
-pub(crate) struct Metrics {
-    pub(crate) registry: Registry,
-
+pub(crate) struct SequencerMetrics {
     pub(crate) req_count: CounterVec,
     pub(crate) req_in_flight: Gauge,
     pub(crate) req_duration: HistogramVec,
@@ -35,10 +33,9 @@ pub(crate) struct Metrics {
     pub(crate) tree_size: Gauge,
 }
 
-impl Metrics {
+impl SequencerMetrics {
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn new() -> Self {
-        let r = Registry::new();
+    pub(crate) fn new(r: &Registry) -> Self {
         let req_count = register_counter_vec_with_registry!(
             "do_requests_total",
             "Requests served by the Durable Object, by endpoint.",
@@ -129,7 +126,6 @@ impl Metrics {
         )
         .unwrap();
         Self {
-            registry: r,
             req_count,
             req_in_flight,
             req_duration,
@@ -141,17 +137,9 @@ impl Metrics {
             seq_leaf_size,
             seq_tiles,
             seq_data_tile_size,
-            tree_size,
             tree_time,
+            tree_size,
         }
-    }
-    pub(crate) fn encode(&self) -> String {
-        let mut buffer = String::new();
-        let encoder = TextEncoder::new();
-        encoder
-            .encode_utf8(&self.registry.gather(), &mut buffer)
-            .unwrap();
-        buffer
     }
 }
 

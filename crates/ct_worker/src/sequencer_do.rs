@@ -3,8 +3,13 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
+use std::time::Duration;
+
 use crate::{load_signing_key, load_witness_key, CONFIG};
-use generic_log_worker::sequencer_do::GenericSequencer;
+use generic_log_worker::{
+    get_durable_object_name, load_public_bucket, GenericSequencer, SequencerConfig,
+};
+use prometheus::Registry;
 use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
@@ -16,26 +21,50 @@ struct Sequencer(GenericSequencer<StaticCTPendingLogEntry>);
 #[durable_object]
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
-        // Need to define how we load our signing keys from the environment. This closure has type
-        // CheckpointSignerLoader
-        let load_signers = |e: &Env, name: &str, origin: &str| {
-            let signing_key = load_signing_key(e, name)?.clone();
-            let witness_key = load_witness_key(e, name)?.clone();
+        let (state, name) = get_durable_object_name(state).unwrap();
+        let params = &CONFIG.logs[&name];
+
+        // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
+        // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
+        let origin = params
+            .submission_url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .trim_end_matches('/');
+        let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
+
+        let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
+            let signing_key = load_signing_key(&env, &name).unwrap().clone();
+            let witness_key = load_witness_key(&env, &name).unwrap().clone();
 
             // Make the checkpoint signers from the secret keys and put them in a vec
-            let signer = StaticCTCheckpointSigner::new(origin, signing_key).map_err(|e| {
-                Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
-            })?;
-            let witness = Ed25519CheckpointSigner::new(origin, witness_key).map_err(|e| {
-                Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
-            })?;
+            let signer = StaticCTCheckpointSigner::new(origin, signing_key)
+                .map_err(|e| {
+                    Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
+                })
+                .unwrap();
+            let witness = Ed25519CheckpointSigner::new(origin, witness_key)
+                .map_err(|e| {
+                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
+                })
+                .unwrap();
 
-            let out: Vec<Box<dyn CheckpointSigner>> = vec![Box::new(signer), Box::new(witness)];
-            Ok(out)
+            vec![Box::new(signer), Box::new(witness)]
+        };
+        let bucket = load_public_bucket(&env, &name).unwrap();
+        let registry = Registry::new();
+
+        let config = SequencerConfig {
+            name,
+            origin: origin.to_string(),
+            checkpoint_signers,
+            sequence_interval,
+            max_sequence_skips: params.max_sequence_skips,
+            enable_dedup: params.enable_dedup,
+            sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
         };
 
-        // TODO: is this unwrap OK?
-        Sequencer(GenericSequencer::new(&CONFIG, state, env, Box::new(load_signers)).unwrap())
+        Sequencer(GenericSequencer::new(config, state, bucket, registry))
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {

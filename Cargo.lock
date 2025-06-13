@@ -417,6 +417,7 @@ dependencies = [
  "chrono",
  "console_error_panic_hook",
  "console_log",
+ "ct_worker_config",
  "ed25519-dalek",
  "futures-executor",
  "futures-util",
@@ -428,6 +429,7 @@ dependencies = [
  "log",
  "p256",
  "parking_lot",
+ "prometheus",
  "rand",
  "serde",
  "serde_json",
@@ -439,6 +441,14 @@ dependencies = [
  "worker",
  "x509-verify",
  "x509_util",
+]
+
+[[package]]
+name = "ct_worker_config"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde",
 ]
 
 [[package]]

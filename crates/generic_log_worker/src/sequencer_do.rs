@@ -3,104 +3,87 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
+use std::time::Duration;
+
 use crate::{
-    config::AppConfig,
-    ctlog, load_public_bucket,
-    metrics::{millis_diff_as_secs, Metrics, ObjectMetrics},
-    util::{get_durable_object_name, now_millis},
-    DedupCache, LookupKey, MemoryCache, ObjectBucket, QueryParams, SequenceMetadata,
-    BATCH_ENDPOINT, ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    ctlog::{self, CreateError, PoolState, SequenceState},
+    metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
+    util::now_millis,
+    DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
-use anyhow::anyhow;
-use ctlog::{CreateError, LogConfig, PoolState, SequenceState};
 use futures_util::future::join_all;
 use log::{info, warn};
-use std::time::Duration;
+use prometheus::{Registry, TextEncoder};
 use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry};
 use tokio::sync::Mutex;
-use worker::{Env, Error as WorkerError, Request, Response, State};
+use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
 // The number of entries in the short-term deduplication cache.
 // This cache provides a secondary deduplication layer to bridge the gap in KV's eventual consistency.
 // It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
-/// Function that takes env, name, origin, and loads the checkpoint signing objects
-// We have to use Box dyn because we need to be able to monomorphize Sequencer, and making it
-// generic over a function type doesn't let us write down the type
-pub type CheckpointSignerLoader =
-    Box<dyn Fn(&Env, &str, &str) -> Result<Vec<Box<dyn CheckpointSigner>>, WorkerError>>;
-
 pub struct GenericSequencer<E: PendingLogEntry> {
-    do_state: State, // implements LockBackend
-    env: Env,
-    public_bucket: Option<ObjectBucket>, // implements ObjectBackend
-    cache: Option<DedupCache>,           // implements CacheRead, CacheWrite
-    log_config: LogConfig,
-    key_loader: CheckpointSignerLoader,
+    do_state: State,             // implements LockBackend
+    public_bucket: ObjectBucket, // implements ObjectBackend
+    cache: DedupCache,           // implements CacheRead, CacheWrite
+    config: SequencerConfig,
     sequence_state: Option<SequenceState>,
     pool_state: PoolState<E>,
     initialized: bool,
     init_mux: Mutex<()>,
-    metrics: Metrics,
+    registry: Registry,
+    metrics: SequencerMetrics,
+}
+
+/// Configuration for a CT log.
+pub struct SequencerConfig {
+    pub name: String,
+    pub origin: String,
+    pub checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
+    pub sequence_interval: Duration,
+    pub max_sequence_skips: usize,
+    pub sequence_skip_threshold_millis: Option<u64>,
+    pub enable_dedup: bool,
 }
 
 impl<E: PendingLogEntry> GenericSequencer<E> {
-    /// Creates a new generic sequencer. Returns an error if it cannot extract
-    /// the name of this Durable Object from `state`.
-    pub fn new(
-        app_config: &AppConfig,
-        state: State,
-        env: Env,
-        key_loader: CheckpointSignerLoader,
-    ) -> Result<Self, anyhow::Error> {
-        let (state, dur_obj_name) = get_durable_object_name(state)?;
-
-        let params = app_config
-            .logs
-            .get(&dur_obj_name)
-            .ok_or_else(|| anyhow!("could not get log param with object name {dur_obj_name}",))?;
-
-        // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
-        // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
-        let origin = params
-            .submission_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/');
-        let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
-        let checkpoint_signers = (key_loader)(&env, &dur_obj_name, origin)?;
-
-        let log_config = LogConfig {
-            name: dur_obj_name.to_string(),
-            origin: origin.to_string(),
-            checkpoint_signers,
-            sequence_interval,
-            max_sequence_skips: params.max_sequence_skips,
-            enable_dedup: params.enable_dedup,
-            sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
+    /// Return a new sequencer with the given config.
+    pub fn new(config: SequencerConfig, state: State, bucket: Bucket, registry: Registry) -> Self {
+        let metrics = SequencerMetrics::new(&registry);
+        let public_bucket = ObjectBucket {
+            bucket,
+            metrics: Some(ObjectMetrics::new(&registry)),
+        };
+        let cache = DedupCache {
+            memory: MemoryCache::new(MEMORY_CACHE_SIZE),
+            storage: state.storage(),
         };
 
-        Ok(Self {
+        Self {
             do_state: state,
-            env,
-            public_bucket: None,
-            cache: None,
-            log_config,
-            key_loader,
+            public_bucket,
+            cache,
+            config,
             sequence_state: None,
             pool_state: PoolState::default(),
             initialized: false,
             init_mux: Mutex::new(()),
-            metrics: Metrics::new(),
-        })
+            registry,
+            metrics,
+        }
     }
 
+    /// Handles requests to add new entries to the sequencing pool, and returns
+    /// a response with the sequencing result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be parsed.
     pub async fn fetch(&mut self, mut req: Request) -> Result<Response, WorkerError> {
-        let name = &req.query::<QueryParams>()?.name;
         if !self.initialized {
-            info!("{name}: Initializing log from fetch handler");
-            // TODO: Remove name from req params
+            info!("{}: Initializing log from fetch handler", self.config.name);
             self.initialize().await?;
         }
 
@@ -140,26 +123,31 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         resp
     }
 
+    /// Handles alarm events by sequencing the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are issues scheduling the next alarm.
     pub async fn alarm<L: LogEntry<Pending = E>>(&mut self) -> Result<Response, WorkerError> {
         if !self.initialized {
+            info!("{}: Initializing log from alarm handler", self.config.name);
             self.initialize().await?;
         }
-        // Safe to unwrap here as the log must be initialized.
-        let name = &self.log_config.name;
+        let name = &self.config.name;
 
         // Schedule the next sequencing.
         self.do_state
             .storage()
-            .set_alarm(self.log_config.sequence_interval)
+            .set_alarm(self.config.sequence_interval)
             .await?;
 
         if let Err(e) = ctlog::sequence::<L>(
             &mut self.pool_state,
             &mut self.sequence_state,
-            &self.log_config,
-            self.public_bucket.as_ref().unwrap(),
+            &self.config,
+            &self.public_bucket,
             &self.do_state,
-            self.cache.as_mut().unwrap(),
+            &mut self.cache,
             &self.metrics,
         )
         .await
@@ -176,38 +164,17 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     async fn initialize(&mut self) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
+        let name = &self.config.name;
 
         if self.initialized {
             return Ok(());
         }
 
-        let LogConfig {
-            ref name,
-            sequence_interval,
-            ..
-        } = &self.log_config;
-
-        self.public_bucket = Some(ObjectBucket {
-            bucket: load_public_bucket(&self.env, name)?,
-            metrics: Some(ObjectMetrics::new(&self.metrics.registry)),
-        });
-        self.cache = Some(DedupCache {
-            memory: MemoryCache::new(MEMORY_CACHE_SIZE),
-            storage: self.do_state.storage(),
-        });
-
-        if let Err(e) = self.cache.as_mut().unwrap().load().await {
+        if let Err(e) = self.cache.load().await {
             warn!("Failed to load short-term dedup cache from DO storage: {e}");
         };
 
-        // Safe to unwrap here as the relevant fields were set above.
-        match ctlog::create_log(
-            &self.log_config,
-            self.public_bucket.as_ref().unwrap(),
-            &self.do_state,
-        )
-        .await
-        {
+        match ctlog::create_log(&self.config, &self.public_bucket, &self.do_state).await {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),
             Err(CreateError::Other(msg)) => {
                 return Err(format!("{name}: failed to create: {msg}").into())
@@ -218,7 +185,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         // Start sequencing loop (OK if alarm is already scheduled).
         self.do_state
             .storage()
-            .set_alarm(*sequence_interval)
+            .set_alarm(self.config.sequence_interval)
             .await?;
 
         self.initialized = true;
@@ -239,8 +206,8 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
 
             let add_leaf_result = ctlog::add_leaf_to_pool(
                 &mut self.pool_state,
-                self.cache.as_ref().unwrap(),
-                &self.log_config,
+                &self.cache,
+                &self.config,
                 pending_entry,
             );
 
@@ -264,6 +231,11 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     }
 
     fn fetch_metrics(&self) -> Result<Response, WorkerError> {
-        Response::ok(self.metrics.encode())
+        let mut buffer = String::new();
+        let encoder = TextEncoder::new();
+        encoder
+            .encode_utf8(&self.registry.gather(), &mut buffer)
+            .unwrap();
+        Response::ok(buffer)
     }
 }

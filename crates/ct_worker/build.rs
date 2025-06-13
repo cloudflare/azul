@@ -4,7 +4,7 @@
 // Build script to include per-environment configuration and trusted roots.
 
 use chrono::Months;
-use generic_log_worker::config::AppConfig;
+use config::AppConfig;
 use serde_json::from_str;
 use std::env;
 use std::fs;

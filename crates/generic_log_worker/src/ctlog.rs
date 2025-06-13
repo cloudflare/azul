@@ -19,9 +19,10 @@
 //! - [testlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/testlog_test.go)
 
 use crate::{
-    metrics::{millis_diff_as_secs, AsF64, Metrics},
+    metrics::{millis_diff_as_secs, AsF64, SequencerMetrics},
     util::now_millis,
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
+    SequencerConfig,
 };
 use anyhow::{anyhow, bail, ensure};
 use futures_util::future::try_join_all;
@@ -29,15 +30,14 @@ use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use signed_note::{NoteVerifier, VerifierList};
 use std::collections::HashMap;
-use std::time::Duration;
 use std::{
     cmp::{Ord, Ordering},
     sync::LazyLock,
 };
 use thiserror::Error;
 use tlog_tiles::{
-    CheckpointSigner, Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator,
-    TlogError, TlogTile, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    Hash, HashReader, LogEntry, PathElem, PendingLogEntry, Tile, TileIterator, TlogError, TlogTile,
+    TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -52,33 +52,6 @@ const STAGING_KEY: &str = "staging";
 // leaves (e.g., with PQ signatures) could cause us to exceed the 128MB Workers
 // memory limit. Storing 4000 10KB certificates is 40MB.
 const MAX_POOL_SIZE: usize = 4000;
-
-/// Configuration for a CT log.
-pub(crate) struct LogConfig {
-    pub(crate) name: String,
-    pub(crate) origin: String,
-    pub(crate) checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
-    pub(crate) sequence_interval: Duration,
-    pub(crate) max_sequence_skips: usize,
-    pub(crate) sequence_skip_threshold_millis: Option<u64>,
-    pub(crate) enable_dedup: bool,
-}
-
-#[cfg(test)]
-impl LogConfig {
-    /// Clones all the elements of this config, except `self.checkpoint_signers`. Useful for testing
-    fn clone_without_signers(&self) -> Self {
-        LogConfig {
-            name: self.name.clone(),
-            origin: self.origin.clone(),
-            checkpoint_signers: Vec::new(),
-            sequence_interval: self.sequence_interval,
-            max_sequence_skips: self.max_sequence_skips,
-            sequence_skip_threshold_millis: None,
-            enable_dedup: true,
-        }
-    }
-}
 
 /// Ephemeral state for pooling entries to the CT log.
 ///
@@ -263,7 +236,7 @@ pub(crate) enum CreateError {
 /// If the log already exists, returns an [`CreateError::LogExists`]
 /// to allow the caller to differentiate it from other errors.
 pub(crate) async fn create_log(
-    config: &LogConfig,
+    config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
 ) -> Result<(), CreateError> {
@@ -313,8 +286,9 @@ impl SequenceState {
     /// and when reloading (e.g., to recover after a fatal sequencing error).
     ///
     /// This will return an error if the log has not been created, or if recovery fails.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn load<L: LogEntry>(
-        config: &LogConfig,
+        config: &SequencerConfig,
         object: &impl ObjectBackend,
         lock: &impl LockBackend,
     ) -> Result<Self, anyhow::Error> {
@@ -510,7 +484,7 @@ pub(crate) enum PendingSource {
 pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     state: &mut PoolState<E>,
     cache: &impl CacheRead,
-    config: &LogConfig,
+    config: &SequencerConfig,
     entry: E,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
@@ -534,11 +508,11 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
 pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &mut PoolState<L::Pending>,
     sequence_state: &mut Option<SequenceState>,
-    config: &LogConfig,
+    config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &mut impl CacheWrite,
-    metrics: &Metrics,
+    metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
     // Retrieve old sequencing state.
     let old = if let Some(s) = sequence_state {
@@ -611,12 +585,12 @@ enum SequenceError {
 #[allow(clippy::too_many_lines)]
 async fn sequence_entries<L: LogEntry>(
     sequence_state: &mut SequenceState,
-    config: &LogConfig,
+    config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &mut impl CacheWrite,
     entries: Vec<(L::Pending, Sender<SequenceMetadata>)>,
-    metrics: &Metrics,
+    metrics: &SequencerMetrics,
 ) -> Result<(), SequenceError> {
     let name = &config.name;
 
@@ -1147,6 +1121,7 @@ mod tests {
     use futures_executor::block_on;
     use itertools::Itertools;
     use p256::ecdsa::SigningKey as EcdsaSigningKey;
+    use prometheus::Registry;
     use rand::{
         rngs::{OsRng, SmallRng},
         Rng, RngCore, SeedableRng,
@@ -1155,8 +1130,8 @@ mod tests {
     use signed_note::{Note, VerifierList};
     use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
-    use std::cell::RefCell;
-    use tlog_tiles::{Checkpoint, Ed25519CheckpointSigner, TlogTile};
+    use std::{cell::RefCell, time::Duration};
+    use tlog_tiles::{Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile};
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -1461,25 +1436,25 @@ mod tests {
         );
 
         // Try to load the checkpoint with two randomly generated checkpoint signers. These should fail
-
-        let mut c = log.config.clone_without_signers();
         let checkpoint_signer =
-            StaticCTCheckpointSigner::new(&c.origin, EcdsaSigningKey::random(&mut OsRng)).unwrap();
-        c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
+            StaticCTCheckpointSigner::new(&log.config.origin, EcdsaSigningKey::random(&mut OsRng))
+                .unwrap();
+        log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
-            &c,
+            &log.config,
             &log.object,
             &log.lock,
         ))
         .unwrap_err();
 
-        let mut c = log.config.clone_without_signers();
-        let checkpoint_signer =
-            Ed25519CheckpointSigner::new(&c.origin, Ed25519SigningKey::generate(&mut OsRng))
-                .unwrap();
-        c.checkpoint_signers = vec![Box::new(checkpoint_signer)];
+        let checkpoint_signer = Ed25519CheckpointSigner::new(
+            &log.config.origin,
+            Ed25519SigningKey::generate(&mut OsRng),
+        )
+        .unwrap();
+        log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
-            &c,
+            &log.config,
             &log.object,
             &log.lock,
         ))
@@ -2053,13 +2028,13 @@ mod tests {
     }
 
     struct TestLog {
-        config: LogConfig,
+        config: SequencerConfig,
         pool_state: PoolState<StaticCTPendingLogEntry>,
         sequence_state: Option<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
         cache: TestCacheBackend,
-        metrics: Metrics,
+        metrics: SequencerMetrics,
     }
 
     impl TestLog {
@@ -2082,7 +2057,7 @@ mod tests {
                 vec![Box::new(signer), Box::new(witness)]
             };
 
-            let config = LogConfig {
+            let config = SequencerConfig {
                 name: "TestLog".to_string(),
                 origin,
                 checkpoint_signers,
@@ -2092,7 +2067,7 @@ mod tests {
                 sequence_skip_threshold_millis: None,
             };
             let pool_state = PoolState::default();
-            let metrics = Metrics::new();
+            let metrics = SequencerMetrics::new(&Registry::new());
             block_on(create_log(&config, &object, &lock)).unwrap();
             Self {
                 config,

@@ -4,19 +4,18 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{
-    ctlog, load_signing_key, load_witness_key, util, LookupKey, SequenceMetadata, CONFIG, ROOTS,
+    ctlog, load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CONFIG, ROOTS,
 };
-use generic_log_worker::config::TemporalInterval;
+use config::TemporalInterval;
 use generic_log_worker::{
-    get_cached_entry, get_stub, load_public_bucket, put_cache_entry_metadata, ObjectBucket,
-    ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    get_cached_entry, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
+    put_cache_entry_metadata, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
-use log::{debug, warn, Level};
+use log::{debug, warn};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
-use std::str::FromStr;
 use tlog_tiles::PendingLogEntry;
 
 #[allow(clippy::wildcard_imports)]
@@ -50,15 +49,10 @@ struct MetadataResponse<'a> {
     temporal_interval: &'a TemporalInterval,
 }
 
+/// Start is the first code run when the Wasm module is loaded.
 #[event(start)]
 fn start() {
-    let level = CONFIG
-        .logging_level
-        .as_ref()
-        .and_then(|level| Level::from_str(level).ok())
-        .unwrap_or(Level::Info);
-    util::init_logging(level);
-    console_error_panic_hook::set_once();
+    init_logging(CONFIG.logging_level.as_deref());
 }
 
 /// Worker entrypoint.
@@ -118,11 +112,15 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .get_async("/logs/:log/metrics", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
-            let stub = get_stub(&CONFIG, &ctx.env, name, None, "SEQUENCER")?;
-            stub.fetch_with_str(&format!(
-                "http://fake_url.com{METRICS_ENDPOINT}?name={name}"
-            ))
-            .await
+            let stub = get_durable_object_stub(
+                &ctx.env,
+                name,
+                None,
+                "SEQUENCER",
+                CONFIG.logs[name].location_hint.as_deref(),
+            )?;
+            stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
+                .await
         })
         .get_async("/logs/:log/*key", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
@@ -191,7 +189,8 @@ async fn add_chain_or_pre_chain(
     let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
-    if let Some(entry) = get_cached_entry(params, env, name, &pending_entry).await? {
+    let kv = load_cache_kv(env, name)?;
+    if let Some(entry) = get_cached_entry(&kv, &pending_entry, params.enable_dedup).await? {
         debug!("{name}: Entry is cached");
         let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
             .map_err(|e| e.to_string())?;
@@ -216,13 +215,25 @@ async fn add_chain_or_pre_chain(
     // sequencer.
     let stub = if params.num_batchers > 0 {
         let batcher_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
-        get_stub(&CONFIG, env, name, Some(batcher_id), "BATCHER")?
+        get_durable_object_stub(
+            env,
+            name,
+            Some(batcher_id),
+            "BATCHER",
+            CONFIG.logs[name].location_hint.as_deref(),
+        )?
     } else {
-        get_stub(&CONFIG, env, name, None, "SEQUENCER")?
+        get_durable_object_stub(
+            env,
+            name,
+            None,
+            "SEQUENCER",
+            CONFIG.logs[name].location_hint.as_deref(),
+        )?
     };
     let mut response = stub
         .fetch_with_request(Request::new_with_init(
-            &format!("http://fake_url.com{ENTRY_ENDPOINT}?name={name}"),
+            &format!("http://fake_url.com{ENTRY_ENDPOINT}"),
             &RequestInit {
                 method: Method::Post,
                 body: Some(serde_json::to_string(&pending_entry)?.into()),
@@ -238,7 +249,7 @@ async fn add_chain_or_pre_chain(
     if params.num_batchers == 0 {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if put_cache_entry_metadata(env, name, &pending_entry, metadata)
+        if put_cache_entry_metadata(&kv, &pending_entry, metadata)
             .await
             .is_err()
         {
