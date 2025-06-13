@@ -3,12 +3,12 @@
 
 //! Utility functions.
 
-use std::sync::Once;
-
+use anyhow::anyhow;
 #[cfg(test)]
 use parking_lot::ReentrantMutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use worker::State;
 
 /// Returns the current Unix timestamp at millisecond precision.
 #[cfg(not(test))]
@@ -45,10 +45,27 @@ pub(crate) fn now_millis() -> u64 {
     }
 }
 
-static INIT_LOGGING: Once = Once::new();
-
-pub(crate) fn init_logging(level: log::Level) {
-    INIT_LOGGING.call_once(|| {
-        console_log::init_with_level(level).expect("error initializing logger");
-    });
+/// Retrieve the
+/// [name](https://developers.cloudflare.com/durable-objects/api/id/#name) that
+/// was used to create a Durable Object Id with `id_from_name`. The signature of
+/// this function is a little funny since the only way to access the `State`'s
+/// inner `DurableObjectState` is via the `_inner()` method which takes
+/// ownership of the state. Thus, we just re-derive the State from the inner
+/// state and return it in case the calling function still needs it.
+///
+/// # Errors
+///
+/// Returns an error if the 'name' property is not present, for example if the
+/// object was created with a random ID.
+pub fn get_durable_object_name(state: State) -> Result<(State, String), anyhow::Error> {
+    let inner_state = state._inner();
+    let id = inner_state
+        .id()
+        .map_err(|e| anyhow!("could not get state obj id: {:?}", e))?;
+    let obj = js_sys::Object::from(id);
+    let name = js_sys::Reflect::get(&obj, &"name".into())
+        .map_err(|e| anyhow!("could not get `name` field from state object: {:?}", e))?
+        .as_string()
+        .unwrap_or_default();
+    Ok((State::from(inner_state), name))
 }

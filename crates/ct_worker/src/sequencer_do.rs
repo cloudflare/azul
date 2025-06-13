@@ -34,12 +34,8 @@ impl DurableObject for Sequencer {
             Ok(out)
         };
 
-        Sequencer(GenericSequencer::new(
-            CONFIG.clone(),
-            state,
-            env,
-            Box::new(load_signers),
-        ))
+        // TODO: is this unwrap OK?
+        Sequencer(GenericSequencer::new(&CONFIG, state, env, Box::new(load_signers)).unwrap())
     }
 
     async fn fetch(&mut self, req: Request) -> Result<Response> {

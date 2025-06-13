@@ -43,3 +43,4 @@ thiserror.workspace = true
 tlog_tiles.workspace = true
 tokio.workspace = true
 worker.workspace = true
+js-sys = "0.3.77"

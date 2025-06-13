@@ -33,11 +33,6 @@ pub(crate) struct Metrics {
 
     pub(crate) tree_time: Gauge,
     pub(crate) tree_size: Gauge,
-
-    // Also available in /metadata endpoint.
-    pub(crate) config_start: Gauge,
-    // Also available in /metadata endpoint.
-    pub(crate) config_end: Gauge,
 }
 
 impl Metrics {
@@ -133,18 +128,6 @@ impl Metrics {
             r
         )
         .unwrap();
-        let config_start = register_gauge_with_registry!(
-            "config_notafter_start_timestamp_seconds",
-            "Start of the NotAfter accepted period.",
-            r
-        )
-        .unwrap();
-        let config_end = register_gauge_with_registry!(
-            "config_notafter_end_timestamp_seconds",
-            "End of the NotAfter accepted period.",
-            r
-        )
-        .unwrap();
         Self {
             registry: r,
             req_count,
@@ -160,8 +143,6 @@ impl Metrics {
             seq_data_tile_size,
             tree_size,
             tree_time,
-            config_start,
-            config_end,
         }
     }
     pub(crate) fn encode(&self) -> String {
