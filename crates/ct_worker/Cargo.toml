@@ -44,8 +44,6 @@ futures-executor.workspace = true
 [dependencies]
 base64.workspace = true
 config = { path = "./config", package = "ct_worker_config" }
-console_error_panic_hook.workspace = true
-console_log.workspace = true
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
