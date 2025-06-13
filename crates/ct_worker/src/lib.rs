@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 use config::AppConfig;
@@ -12,7 +15,6 @@ use x509_util::CertPool;
 use x509_verify::x509_cert::Certificate;
 
 mod batcher_do;
-mod ctlog;
 mod frontend_worker;
 mod sequencer_do;
 

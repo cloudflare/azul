@@ -39,14 +39,10 @@ impl DurableObject for Sequencer {
 
             // Make the checkpoint signers from the secret keys and put them in a vec
             let signer = StaticCTCheckpointSigner::new(origin, signing_key)
-                .map_err(|e| {
-                    Error::RustError(format!("could not create static-ct checkpoint signer: {e}"))
-                })
+                .map_err(|e| format!("could not create static-ct checkpoint signer: {e}"))
                 .unwrap();
             let witness = Ed25519CheckpointSigner::new(origin, witness_key)
-                .map_err(|e| {
-                    Error::RustError(format!("could not create ed25519 checkpoint signer: {e}"))
-                })
+                .map_err(|e| format!("could not create ed25519 checkpoint signer: {e}"))
                 .unwrap();
 
             vec![Box::new(signer), Box::new(witness)]
