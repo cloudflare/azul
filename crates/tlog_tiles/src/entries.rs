@@ -25,7 +25,7 @@ pub type LeafIndex = u64;
 pub type SequenceMetadata = (LeafIndex, UnixTimestamp);
 
 /// The functionality exposed by any data type that can be included in a Merkle tree
-pub trait PendingLogEntry: core::fmt::Debug + Serialize + DeserializeOwned {
+pub trait PendingLogEntry: core::fmt::Debug + Clone + Serialize + DeserializeOwned {
     /// The lookup key belonging to this pending log entry.
     fn lookup_key(&self) -> LookupKey;
 

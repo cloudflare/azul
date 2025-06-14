@@ -3,8 +3,6 @@
 
 //! Utility functions.
 
-use std::sync::Once;
-
 #[cfg(test)]
 use parking_lot::ReentrantMutex;
 #[cfg(test)]
@@ -43,12 +41,4 @@ pub(crate) fn now_millis() -> u64 {
     } else {
         GLOBAL_TIME.fetch_add(1, Ordering::Relaxed)
     }
-}
-
-static INIT_LOGGING: Once = Once::new();
-
-pub(crate) fn init_logging(level: log::Level) {
-    INIT_LOGGING.call_once(|| {
-        console_log::init_with_level(level).expect("error initializing logger");
-    });
 }

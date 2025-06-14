@@ -61,7 +61,7 @@
 //!
 //! // Make a list of the verifiers that MUST apear on the checkpoint, and load the checkpoint
 //! let verifiers = VerifierList::new(vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]);
-//! let (_checkpoint, _timestamp) = static_ct_api::open_checkpoint(
+//! let (_checkpoint, _timestamp) = tlog_tiles::open_checkpoint(
 //!   "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b",
 //!   &verifiers,
 //!   now,
@@ -105,7 +105,6 @@
 //! ```
 
 use crate::{AddChainResponse, StaticCTError};
-use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
@@ -116,17 +115,16 @@ use p256::{
     },
     pkcs8::EncodePublicKey,
 };
-use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Note, NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
-    VerifierError, VerifierList, Verifiers,
+    NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
+    VerifierError,
 };
 use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, HashReader, LeafIndex, LogEntry, LookupKey,
-    PendingLogEntry, SequenceMetadata, UnixTimestamp,
+    Checkpoint, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PendingLogEntry,
+    SequenceMetadata, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -423,87 +421,6 @@ impl LogEntry for StaticCTLogEntry {
     }
 }
 
-/// A transparency log tree with a timestamp.
-#[derive(Default, Debug)]
-pub struct TreeWithTimestamp {
-    size: u64,
-    hash: Hash,
-    time: UnixTimestamp,
-}
-
-impl TreeWithTimestamp {
-    /// Returns a new tree with the given hash.
-    pub fn new(size: u64, hash: Hash, time: UnixTimestamp) -> Self {
-        Self { size, hash, time }
-    }
-
-    /// Calculates the tree hash by reading tiles from the reader.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if unable to compute the tree hash.
-    ///
-    pub fn from_hash_reader<R: HashReader>(
-        size: u64,
-        r: &R,
-        time: UnixTimestamp,
-    ) -> Result<TreeWithTimestamp, StaticCTError> {
-        let hash = tlog_tiles::tree_hash(size, r)?;
-        Ok(Self { size, hash, time })
-    }
-
-    /// Returns the size of the tree.
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    /// Returns the root hash of the tree.
-    pub fn hash(&self) -> &Hash {
-        &self.hash
-    }
-
-    /// Returns the timestamp of the tree.
-    pub fn time(&self) -> UnixTimestamp {
-        self.time
-    }
-
-    /// Signs the tree and returns a [checkpoint](c2sp.org/tlog-checkpoint).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if signing fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    pub fn sign(
-        &self,
-        origin: &str,
-        signers: &[&dyn CheckpointSigner],
-        rng: &mut impl Rng,
-    ) -> Result<Vec<u8>, StaticCTError> {
-        // Shuffle the signer order
-        let mut signers = signers.to_vec();
-        signers.shuffle(rng);
-
-        // Construct the checkpoint with no extension lines
-        let Ok(checkpoint) = Checkpoint::new(origin, self.size, self.hash, "") else {
-            return Err(StaticCTError::Malformed);
-        };
-        // Sign the checkpoint with the given signers
-        let sigs = signers
-            .iter()
-            .map(|s| s.sign(self.time, &checkpoint))
-            .collect::<Result<Vec<_>, NoteError>>()?;
-        // Generate some fake signatures as grease
-        let grease_sigs = gen_grease_signatures(origin, rng);
-
-        // Make a new signed note from the checkpoint and serialize it
-        let signed_note = Note::new(&checkpoint.to_bytes(), &[grease_sigs, sigs].concat())?;
-        Ok(signed_note.to_bytes())
-    }
-}
-
 /// The `CTExtensions` field of `SignedCertificateTimestamp` and
 /// `TimestampedEntry`, according to c2sp.org/static-ct-api.
 pub struct Extensions {
@@ -567,63 +484,6 @@ impl Extensions {
             Err(StaticCTError::MissingLeafIndex)
         }
     }
-}
-
-/// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
-/// [Checkpoint] and the latest timestamp of any of its cosignatures (if defined).
-///
-/// # Errors
-///
-/// Returns an error if the checkpoint cannot be successfully opened and verified.
-pub fn open_checkpoint(
-    origin: &str,
-    verifiers: &VerifierList,
-    current_time: UnixTimestamp,
-    b: &[u8],
-) -> Result<(Checkpoint, Option<UnixTimestamp>), StaticCTError> {
-    let n = Note::from_bytes(b)?;
-    let (verified_sigs, _) = n.verify(verifiers)?;
-
-    // Go through the signatures and make sure we find all the key IDs in our verifiers list
-    let mut key_ids_to_observe = verifiers.key_ids();
-    // The latest timestamp of the signatures in the note. We use this to check that nothing was signed in the future
-    let mut latest_timestamp: Option<UnixTimestamp> = None;
-    for sig in &verified_sigs {
-        // Fetch the verifier for this signature, if it's here
-        let verif = match verifiers.verifier(sig.name(), sig.id()) {
-            Ok(v) => {
-                // We've now observed this key ID. Remove it from the list
-                key_ids_to_observe.remove(&sig.id());
-                v
-            }
-            Err(_) => continue,
-        };
-
-        // Extract the timestamp if it's in the sig, and update the latest running timestamp
-        let sig_timestamp = verif.extract_timestamp_millis(sig.signature())?;
-        if let Some(t) = sig_timestamp {
-            latest_timestamp = Some(core::cmp::max(latest_timestamp.unwrap_or(0), t));
-        }
-    }
-
-    // If we didn't see all the verifiers we wanted to see, error
-    if !key_ids_to_observe.is_empty() {
-        return Err(StaticCTError::MissingVerifierSignature);
-    }
-    let Ok(checkpoint) = Checkpoint::from_bytes(n.text()) else {
-        return Err(StaticCTError::Malformed);
-    };
-    if current_time < latest_timestamp.unwrap_or(0) {
-        return Err(StaticCTError::InvalidTimestamp);
-    }
-    if checkpoint.origin() != origin {
-        return Err(StaticCTError::OriginMismatch);
-    }
-    if !checkpoint.extension().is_empty() {
-        return Err(StaticCTError::UnexpectedExtension);
-    }
-
-    Ok((checkpoint, latest_timestamp))
 }
 
 /// [`RFC6962Verifier`] is a [`NoteVerifier`] implementation
@@ -787,47 +647,6 @@ pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     digitally_signed.extend_from_slice(sig_bytes);
 
     digitally_signed
-}
-
-/// Produces unverifiable but otherwise correct signatures.
-/// Clients MUST ignore unknown signatures, and including some "grease" ones
-/// ensures they do.
-fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature> {
-    let mut g1 = vec![0u8; 5 + rng.gen_range(0..100)];
-    rng.fill(&mut g1[..]);
-
-    let mut g2 = vec![0u8; 5 + rng.gen_range(0..100)];
-    let mut hasher = Sha256::new();
-    hasher.update(b"grease\n");
-    hasher.update([rng.gen()]);
-    let h = hasher.finalize();
-    g2[..4].copy_from_slice(&h[..4]);
-    rng.fill(&mut g2[4..]);
-
-    let mut signatures = vec![
-        NoteSignature::from_bytes(
-            format!(
-                "— {name} {signature}",
-                name = "grease.invalid",
-                signature = BASE64_STANDARD.encode(&g1)
-            )
-            .as_bytes(),
-        )
-        .unwrap(),
-        NoteSignature::from_bytes(
-            format!(
-                "— {name} {signature}",
-                name = origin,
-                signature = BASE64_STANDARD.encode(&g2)
-            )
-            .as_bytes(),
-        )
-        .unwrap(),
-    ];
-
-    signatures.shuffle(rng);
-
-    signatures
 }
 
 /// Serializes the passed in STH parameters into the correct format for signing

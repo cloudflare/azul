@@ -20,22 +20,13 @@ pub enum StaticCTError {
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
-    DER(#[from] der::Error),
+    Der(#[from] der::Error),
     #[error(transparent)]
     X509(#[from] x509_verify::spki::Error),
-
-    #[error("missing verifier signature")]
-    MissingVerifierSignature,
-    #[error("timestamp is after current time")]
-    InvalidTimestamp,
-    #[error("checkpoint origin does not match")]
-    OriginMismatch,
     #[error("unexpected extension")]
     UnexpectedExtension,
     #[error(transparent)]
     Signer(#[from] signed_note::SignerError),
-    #[error("invalid length")]
-    InvalidLength,
     #[error("malformed")]
     Malformed,
     #[error("missing leaf_index extension")]
