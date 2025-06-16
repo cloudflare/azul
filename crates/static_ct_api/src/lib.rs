@@ -53,4 +53,6 @@ pub enum StaticCTError {
         "{}certificate submitted to add-{}chain", if *.is_precert { "pre-" } else { "final " }, if *.is_precert { "" } else { "pre-" }
     )]
     EndpointMismatch { is_precert: bool },
+    #[error("mismatching signature algorithm identifier")]
+    MismatchingSigAlg,
 }
