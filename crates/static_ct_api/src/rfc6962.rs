@@ -93,10 +93,10 @@ pub fn validate_chain(
     expect_precert: bool,
     require_server_auth_eku: bool,
 ) -> Result<StaticCTPendingLogEntry, StaticCTError> {
-    // First make sure the cert parses as X.509.
+    // First make sure the cert is well-formed.
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
-        Some(v) => Certificate::from_der(v)?,
+        Some(v) => parse_certificate(v)?,
         None => return Err(StaticCTError::EmptyChain),
     };
 
@@ -136,7 +136,7 @@ pub fn validate_chain(
     // CT is intended to observe certifications rather than police them.
 
     let mut intermediates: Vec<Certificate> = iter
-        .map(|v| Certificate::from_der(v))
+        .map(|v| parse_certificate(v))
         .collect::<Result<_, _>>()?;
 
     // Walk up the chain, ensuring that each certificate signs the previous one.
@@ -352,6 +352,17 @@ fn build_precert_tbs(
     Ok(tbs.to_der()?)
 }
 
+// Parse a certificate and verify that it is well-formed.
+fn parse_certificate(bytes: &[u8]) -> Result<Certificate, StaticCTError> {
+    let cert = Certificate::from_der(bytes)?;
+    // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
+    if cert.signature_algorithm != cert.tbs_certificate.signature {
+        return Err(StaticCTError::MismatchingSigAlg);
+    }
+
+    Ok(cert)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +371,12 @@ mod tests {
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
+    }
+
+    #[test]
+    fn test_mismatched_sig_alg() {
+        // Mismatched signature on leaf.
+        parse_certificate(include_bytes!("../tests/mismatching-sig-alg.pem")).unwrap_err();
     }
 
     macro_rules! test_is_precert {
@@ -478,6 +495,11 @@ mod tests {
         "../tests/leaf-signed-by-fake-intermediate-cert.pem",
         "../tests/fake-intermediate-cert.pem",
         "../tests/test-cert.pem"
+    );
+    test_validate_chain_fail!(
+        mismatched_sig_alg_on_intermediate,
+        "../tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../tests/fake-intermediate-with-mismatching-sig-alg.pem"
     );
     test_validate_chain_success!(
         valid_chain,
