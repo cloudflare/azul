@@ -3,18 +3,22 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{
-    ctlog, get_stub, load_cache_kv, load_public_bucket, load_signing_key, load_witness_key, util,
-    LookupKey, ObjectBucket, SequenceMetadata, CONFIG, ENTRY_ENDPOINT, METRICS_ENDPOINT, ROOTS,
-};
-use base64::prelude::*;
+use std::sync::LazyLock;
+
+use crate::{load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CONFIG, ROOTS};
 use config::TemporalInterval;
-use log::{debug, warn, Level};
+use futures_util::future::try_join_all;
+use generic_log_worker::{
+    ctlog::UploadOptions, get_cached_entry, get_durable_object_stub, init_logging, load_cache_kv,
+    load_public_bucket, put_cache_entry_metadata, ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
+    METRICS_ENDPOINT,
+};
+use log::{debug, info, warn};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
+use sha2::{Digest, Sha256};
 use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
-use std::str::FromStr;
 use tlog_tiles::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -47,15 +51,10 @@ struct MetadataResponse<'a> {
     temporal_interval: &'a TemporalInterval,
 }
 
+/// Start is the first code run when the Wasm module is loaded.
 #[event(start)]
 fn start() {
-    let level = CONFIG
-        .logging_level
-        .as_ref()
-        .and_then(|level| Level::from_str(level).ok())
-        .unwrap_or(Level::Info);
-    util::init_logging(level);
-    console_error_panic_hook::set_once();
+    init_logging(CONFIG.logging_level.as_deref());
 }
 
 /// Worker entrypoint.
@@ -115,11 +114,15 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .get_async("/logs/:log/metrics", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
-            let stub = get_stub(&ctx.env, name, None, "SEQUENCER")?;
-            stub.fetch_with_str(&format!(
-                "http://fake_url.com{METRICS_ENDPOINT}?name={name}"
-            ))
-            .await
+            let stub = get_durable_object_stub(
+                &ctx.env,
+                name,
+                None,
+                "SEQUENCER",
+                CONFIG.logs[name].location_hint.as_deref(),
+            )?;
+            stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
+                .await
         })
         .get_async("/logs/:log/*key", |_req, ctx| async move {
             let name = valid_log_name(&ctx)?;
@@ -189,33 +192,18 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if params.enable_dedup {
-        if let Some(metadata) = kv
-            .get(&BASE64_STANDARD.encode(lookup_key))
-            .bytes_with_metadata::<SequenceMetadata>()
-            .await?
-            .1
-        {
-            debug!("{name}: Entry is cached");
-            let entry = StaticCTLogEntry {
-                inner: pending_entry,
-                leaf_index: metadata.0,
-                timestamp: metadata.1,
-            };
-            let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-                .map_err(|e| e.to_string())?;
-            return Response::from_json(&sct);
-        }
+    if let Some(entry) = get_cached_entry(&kv, &pending_entry, params.enable_dedup).await? {
+        debug!("{name}: Entry is cached");
+        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+            .map_err(|e| e.to_string())?;
+        return Response::from_json(&sct);
     }
 
     // Entry is not cached, so we need to sequence it.
 
     // First persist issuers.
-    let public_bucket = ObjectBucket {
-        bucket: load_public_bucket(env, name)?,
-        metrics: None,
-    };
-    ctlog::upload_issuers(
+    let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
+    upload_issuers(
         &public_bucket,
         &req.chain[1..]
             .iter()
@@ -229,13 +217,25 @@ async fn add_chain_or_pre_chain(
     // sequencer.
     let stub = if params.num_batchers > 0 {
         let batcher_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
-        get_stub(env, name, Some(batcher_id), "BATCHER")?
+        get_durable_object_stub(
+            env,
+            name,
+            Some(batcher_id),
+            "BATCHER",
+            params.location_hint.as_deref(),
+        )?
     } else {
-        get_stub(env, name, None, "SEQUENCER")?
+        get_durable_object_stub(
+            env,
+            name,
+            None,
+            "SEQUENCER",
+            params.location_hint.as_deref(),
+        )?
     };
     let mut response = stub
         .fetch_with_request(Request::new_with_init(
-            &format!("http://fake_url.com{ENTRY_ENDPOINT}?name={name}"),
+            &format!("http://fake_url.com{ENTRY_ENDPOINT}"),
             &RequestInit {
                 method: Method::Post,
                 body: Some(serde_json::to_string(&pending_entry)?.into()),
@@ -251,12 +251,7 @@ async fn add_chain_or_pre_chain(
     if params.num_batchers == 0 {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if kv
-            .put(&BASE64_STANDARD.encode(lookup_key), "")
-            .unwrap()
-            .metadata::<SequenceMetadata>(metadata)
-            .unwrap()
-            .execute()
+        if put_cache_entry_metadata(&kv, &pending_entry, metadata)
             .await
             .is_err()
         {
@@ -301,4 +296,51 @@ fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
         h.append("Content-Type", &hdr).unwrap();
     }
     h
+}
+
+/// Options for uploading issuers.
+static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
+    content_type: Some("application/pkix-cert".to_string()),
+    immutable: true,
+});
+
+/// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
+pub(crate) async fn upload_issuers(
+    object: &ObjectBucket,
+    issuers: &[&[u8]],
+    name: &str,
+) -> worker::Result<()> {
+    let issuer_futures: Vec<_> = issuers
+        .iter()
+        .map(|issuer| async move {
+            let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
+            let path = format!("issuer/{}", hex::encode(fingerprint));
+
+            if let Some(old) = object.fetch(&path).await? {
+                if old != *issuer {
+                    return Err(worker::Error::RustError(format!(
+                        "invalid existing issuer: {}",
+                        hex::encode(old)
+                    )));
+                }
+                Ok(None)
+            } else {
+                object.upload(&path, issuer, &OPTS_ISSUER).await?;
+                Ok(Some(path))
+            }
+        })
+        .collect();
+
+    for path in try_join_all(issuer_futures)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+    {
+        {
+            info!("{name}: Observed new issuer; path={path}");
+        }
+    }
+
+    Ok(())
 }

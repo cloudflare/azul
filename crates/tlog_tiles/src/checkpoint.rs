@@ -29,9 +29,15 @@
 //! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/note_test.go)
 //! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
 
-use crate::{tlog::Hash, TlogError, UnixTimestamp};
+use crate::{tlog::Hash, HashReader, TlogError, UnixTimestamp};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use signed_note::{Ed25519NoteVerifier, NoteError, NoteVerifier, Signature as NoteSignature};
+use rand::{seq::SliceRandom, Rng};
+use sha2::{Digest, Sha256};
+use signed_note::{
+    Ed25519NoteVerifier, Note, NoteError, NoteVerifier, Signature as NoteSignature, VerifierList,
+    Verifiers,
+};
 use std::{
     fmt,
     io::{BufRead, Read},
@@ -116,6 +122,8 @@ const MAX_CHECKPOINT_SIZE: usize = 1_000_000;
 /// An error that can occur when parsing a tree.
 #[derive(Debug)]
 pub struct MalformedCheckpointError;
+
+impl std::error::Error for MalformedCheckpointError {}
 
 impl fmt::Display for MalformedCheckpointError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -346,8 +354,185 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
     }
 }
 
+/// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
+/// [Checkpoint] and the latest timestamp of any of its cosignatures (if
+/// defined).
+///
+/// # Errors
+///
+/// Returns an error if the checkpoint cannot be successfully opened and verified.
+pub fn open_checkpoint(
+    origin: &str,
+    verifiers: &VerifierList,
+    current_time: UnixTimestamp,
+    b: &[u8],
+) -> Result<(Checkpoint, Option<UnixTimestamp>), TlogError> {
+    let n = Note::from_bytes(b)?;
+    let (verified_sigs, _) = n.verify(verifiers)?;
+
+    // Go through the signatures and make sure we find all the key IDs in our verifiers list
+    let mut key_ids_to_observe = verifiers.key_ids();
+    // The latest timestamp of the signatures in the note. We use this to check that nothing was signed in the future
+    let mut latest_timestamp: Option<UnixTimestamp> = None;
+    for sig in &verified_sigs {
+        // Fetch the verifier for this signature, if it's here
+        let verif = match verifiers.verifier(sig.name(), sig.id()) {
+            Ok(v) => {
+                // We've now observed this key ID. Remove it from the list
+                key_ids_to_observe.remove(&sig.id());
+                v
+            }
+            Err(_) => continue,
+        };
+
+        // Extract the timestamp if it's in the sig, and update the latest running timestamp
+        let sig_timestamp = verif.extract_timestamp_millis(sig.signature())?;
+        if let Some(t) = sig_timestamp {
+            latest_timestamp = Some(core::cmp::max(latest_timestamp.unwrap_or(0), t));
+        }
+    }
+
+    // If we didn't see all the verifiers we wanted to see, error
+    if !key_ids_to_observe.is_empty() {
+        return Err(TlogError::MissingVerifierSignature);
+    }
+    let checkpoint = Checkpoint::from_bytes(n.text())?;
+    if current_time < latest_timestamp.unwrap_or(0) {
+        return Err(TlogError::InvalidTimestamp);
+    }
+    if checkpoint.origin() != origin {
+        return Err(TlogError::OriginMismatch);
+    }
+
+    Ok((checkpoint, latest_timestamp))
+}
+
+/// A transparency log tree with a timestamp.
+#[derive(Default, Debug)]
+pub struct TreeWithTimestamp {
+    size: u64,
+    hash: Hash,
+    time: UnixTimestamp,
+}
+
+impl TreeWithTimestamp {
+    /// Returns a new tree with the given hash.
+    pub fn new(size: u64, hash: Hash, time: UnixTimestamp) -> Self {
+        Self { size, hash, time }
+    }
+
+    /// Calculates the tree hash by reading tiles from the reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unable to compute the tree hash.
+    ///
+    pub fn from_hash_reader<R: HashReader>(
+        size: u64,
+        r: &R,
+        time: UnixTimestamp,
+    ) -> Result<TreeWithTimestamp, TlogError> {
+        let hash = crate::tree_hash(size, r)?;
+        Ok(Self { size, hash, time })
+    }
+
+    /// Returns the size of the tree.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Returns the root hash of the tree.
+    pub fn hash(&self) -> &Hash {
+        &self.hash
+    }
+
+    /// Returns the timestamp of the tree.
+    pub fn time(&self) -> UnixTimestamp {
+        self.time
+    }
+
+    /// Signs the tree and returns a [checkpoint](c2sp.org/tlog-checkpoint).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if signing fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to the internal buffer fails, which should never happen.
+    pub fn sign(
+        &self,
+        origin: &str,
+        extension: &str,
+        signers: &[&dyn CheckpointSigner],
+        rng: &mut impl Rng,
+    ) -> Result<Vec<u8>, TlogError> {
+        // Shuffle the signer order
+        let mut signers = signers.to_vec();
+        signers.shuffle(rng);
+
+        // Construct the checkpoint with no extension lines
+        let checkpoint = Checkpoint::new(origin, self.size, self.hash, extension)?;
+
+        // Sign the checkpoint with the given signers
+        let sigs = signers
+            .iter()
+            .map(|s| s.sign(self.time, &checkpoint))
+            .collect::<Result<Vec<_>, NoteError>>()?;
+        // Generate some fake signatures as grease
+        let grease_sigs = gen_grease_signatures(origin, rng);
+
+        // Make a new signed note from the checkpoint and serialize it
+        let signed_note = Note::new(&checkpoint.to_bytes(), &[grease_sigs, sigs].concat())?;
+        Ok(signed_note.to_bytes())
+    }
+}
+
+/// Produces unverifiable but otherwise correct signatures.
+/// Clients MUST ignore unknown signatures, and including some "grease" ones
+/// ensures they do.
+fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature> {
+    let mut g1 = vec![0u8; 5 + rng.gen_range(0..100)];
+    rng.fill(&mut g1[..]);
+
+    let mut g2 = vec![0u8; 5 + rng.gen_range(0..100)];
+    let mut hasher = Sha256::new();
+    hasher.update(b"grease\n");
+    hasher.update([rng.gen()]);
+    let h = hasher.finalize();
+    g2[..4].copy_from_slice(&h[..4]);
+    rng.fill(&mut g2[4..]);
+
+    let mut signatures = vec![
+        NoteSignature::from_bytes(
+            format!(
+                "— {name} {signature}",
+                name = "grease.invalid",
+                signature = BASE64_STANDARD.encode(&g1)
+            )
+            .as_bytes(),
+        )
+        .unwrap(),
+        NoteSignature::from_bytes(
+            format!(
+                "— {name} {signature}",
+                name = origin,
+                signature = BASE64_STANDARD.encode(&g2)
+            )
+            .as_bytes(),
+        )
+        .unwrap(),
+    ];
+
+    signatures.shuffle(rng);
+
+    signatures
+}
+
 #[cfg(test)]
 mod tests {
+    use rand::rngs::OsRng;
+
     use super::*;
     use crate::tlog::record_hash;
 
@@ -438,5 +623,32 @@ mod tests {
             assert!(c.is_ok());
             assert!(text.starts_with(&c.unwrap().to_bytes()));
         }
+    }
+
+    #[test]
+    fn test_sign_verify() {
+        let mut rng = OsRng;
+
+        let origin = "example.com/origin";
+        let timestamp = 100;
+        let tree_size = 4;
+
+        // Make a tree head and sign it
+        let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
+        let signer = {
+            let sk = Ed25519SigningKey::generate(&mut rng);
+            Ed25519CheckpointSigner::new("my-signer", sk).unwrap()
+        };
+        let checkpoint = tree.sign(origin, "", &[&signer], &mut rng).unwrap();
+
+        // Now verify the signed checkpoint
+        let verifier = signer.verifier();
+        open_checkpoint(
+            origin,
+            &VerifierList::new(vec![verifier]),
+            timestamp,
+            &checkpoint,
+        )
+        .unwrap();
     }
 }
