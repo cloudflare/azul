@@ -26,14 +26,15 @@ pub trait PendingLogEntry: core::fmt::Debug + Clone + Serialize + DeserializeOwn
     /// The path to write data tiles in the object store, which is 'entries' for tlog-tiles.
     const DATA_TILE_PATH: PathElem;
 
-    /// If configured, the path to write unhashed data associated with the entry
-    /// to the object store. This is unused in tlog-tiles and static-ct-api, but
-    /// is used for publishing 'bootstrap' certificiate chains in MTC.
-    const UNHASHED_TILE_PATH: Option<PathElem>;
+    /// If configured, the path to write auxiliary data associated with the
+    /// entry to the object store. This is unused in tlog-tiles and
+    /// static-ct-api, but is used for publishing 'bootstrap' certificiate
+    /// chains in MTC.
+    const AUX_TILE_PATH: Option<PathElem>;
 
-    /// Returns the unhashed data for this entry, if configured. It is an error
-    /// to call this function if `UNHASHED_PATH` is not specified.
-    fn unhashed_entry(&self) -> &[u8];
+    /// Returns the auxiliary data for this entry, if configured. It is an error
+    /// to call this function if [`AUX_TILE_PATH`] is not specified.
+    fn aux_entry(&self) -> &[u8];
 
     /// The lookup key belonging to this pending log entry.
     fn lookup_key(&self) -> LookupKey;
@@ -121,11 +122,11 @@ impl PendingLogEntry for TlogTilesPendingLogEntry {
     /// The data tile path in tlog-tiles is 'entries'.
     const DATA_TILE_PATH: PathElem = PathElem::Entries;
 
-    /// No unhashed data published in tlog-tiles.
-    const UNHASHED_TILE_PATH: Option<PathElem> = None;
+    /// No auxiliary data tile published in tlog-tiles.
+    const AUX_TILE_PATH: Option<PathElem> = None;
 
     /// Unused in tlog-tiles.
-    fn unhashed_entry(&self) -> &[u8] {
+    fn aux_entry(&self) -> &[u8] {
         unimplemented!()
     }
 

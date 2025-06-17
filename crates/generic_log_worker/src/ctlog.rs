@@ -420,19 +420,19 @@ impl SequenceState {
                 },
             );
 
-            // Fetch and store the right-most unhashed tile, if configured.
-            if let Some(path_elem) = L::Pending::UNHASHED_TILE_PATH {
-                let unhashed_tile = level0_tile.with_data_path(path_elem);
-                let unhashed_tile_bytes = object
-                    .fetch(&unhashed_tile.path())
+            // Fetch and store the right-most auxiliary tile, if configured.
+            if let Some(path_elem) = L::Pending::AUX_TILE_PATH {
+                let aux_tile = level0_tile.with_data_path(path_elem);
+                let aux_tile_bytes = object
+                    .fetch(&aux_tile.path())
                     .await?
-                    .ok_or(anyhow!("no unhashed tile in object storage"))?;
+                    .ok_or(anyhow!("no auxiliary tile in object storage"))?;
 
                 edge_tiles.insert(
                     UNHASHED_TILE_LEVEL_KEY,
                     TileWithBytes {
-                        tile: unhashed_tile,
-                        b: unhashed_tile_bytes,
+                        tile: aux_tile,
+                        b: aux_tile_bytes,
                     },
                 );
             }
@@ -636,12 +636,12 @@ async fn sequence_entries<L: LogEntry>(
         }
     }
 
-    // Load the current partial unhashed tile, if configured.
-    let mut unhashed_tile = Vec::new();
-    if L::Pending::UNHASHED_TILE_PATH.is_some() {
+    // Load the current partial auxiliary tile, if configured.
+    let mut aux_tile = Vec::new();
+    if L::Pending::AUX_TILE_PATH.is_some() {
         if let Some(t) = edge_tiles.get(&UNHASHED_TILE_LEVEL_KEY) {
             if t.tile.width() < TlogTile::FULL_WIDTH {
-                unhashed_tile.clone_from(&t.b);
+                aux_tile.clone_from(&t.b);
             }
         }
     }
@@ -657,9 +657,9 @@ async fn sequence_entries<L: LogEntry>(
         cache_metadata.push((entry.lookup_key(), metadata));
         sequenced_metadata.push((sender, metadata));
 
-        // Write to the unhashed tile, if configured.
-        if L::Pending::UNHASHED_TILE_PATH.is_some() {
-            unhashed_tile.extend(entry.unhashed_entry());
+        // Write to the auxiliary tile, if configured.
+        if L::Pending::AUX_TILE_PATH.is_some() {
+            aux_tile.extend(entry.aux_entry());
         }
 
         let sequenced_entry = L::new(entry, metadata);
@@ -702,7 +702,7 @@ async fn sequence_entries<L: LogEntry>(
                 &mut edge_tiles,
                 &mut tile_uploads,
                 std::mem::take(&mut data_tile),
-                std::mem::take(&mut unhashed_tile),
+                std::mem::take(&mut aux_tile),
             );
         }
     }
@@ -718,7 +718,7 @@ async fn sequence_entries<L: LogEntry>(
             &mut edge_tiles,
             &mut tile_uploads,
             std::mem::take(&mut data_tile),
-            std::mem::take(&mut unhashed_tile),
+            std::mem::take(&mut aux_tile),
         );
     }
 
@@ -870,14 +870,14 @@ async fn sequence_entries<L: LogEntry>(
     Ok(())
 }
 
-// Stage a data tile, and if configured an unhashed tile.
+// Stage a data tile, and if configured an auxiliary tile.
 // This is used as a helper function for [`sequence_entries`].
 fn stage_data_tile<L: LogEntry>(
     n: u64,
     edge_tiles: &mut HashMap<u8, TileWithBytes>,
     tile_uploads: &mut Vec<UploadAction>,
     data_tile: Vec<u8>,
-    unhashed_tile: Vec<u8>,
+    aux_tile: Vec<u8>,
 ) {
     let tile = TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1))
         .with_data_path(L::Pending::DATA_TILE_PATH);
@@ -893,19 +893,19 @@ fn stage_data_tile<L: LogEntry>(
         data: data_tile,
         opts: OPTS_DATA_TILE.clone(),
     });
-    if let Some(path_elem) = L::Pending::UNHASHED_TILE_PATH {
+    if let Some(path_elem) = L::Pending::AUX_TILE_PATH {
         let tile =
             TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1)).with_data_path(path_elem);
         edge_tiles.insert(
             UNHASHED_TILE_LEVEL_KEY,
             TileWithBytes {
                 tile,
-                b: unhashed_tile.clone(),
+                b: aux_tile.clone(),
             },
         );
         tile_uploads.push(UploadAction {
             key: tile.path(),
-            data: unhashed_tile,
+            data: aux_tile,
             opts: OPTS_DATA_TILE.clone(),
         });
     }

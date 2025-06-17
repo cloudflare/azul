@@ -56,10 +56,10 @@ impl PendingLogEntry for MtcPendingLogEntry {
     const DATA_TILE_PATH: PathElem = TlogTilesPendingLogEntry::DATA_TILE_PATH;
 
     /// MTC publishes unauthenticated bootstrap data at 'bootstrap'.
-    const UNHASHED_TILE_PATH: Option<PathElem> = Some(PathElem::Custom("bootstrap"));
+    const AUX_TILE_PATH: Option<PathElem> = Some(PathElem::Custom("bootstrap"));
 
     /// Returns the serialized bootstrap data.
-    fn unhashed_entry(&self) -> &[u8] {
+    fn aux_entry(&self) -> &[u8] {
         &self.bootstrap
     }
 
@@ -280,19 +280,21 @@ pub fn validate_chain(
         None => return Err(MtcError::EmptyChain),
     };
 
-    if validity.not_after.to_unix_duration().gt(&leaf
-        .tbs_certificate
-        .validity
-        .not_after
-        .to_unix_duration())
-    {
-        validity.not_after = leaf.tbs_certificate.validity.not_after;
-    }
-
     // TODO actually validate chain
-    let _chain = iter
+    let chain = iter
         .map(|x| Certificate::from_der(x))
         .collect::<Result<Vec<Certificate>, der::Error>>()?;
+
+    for cert in std::iter::once(&leaf).chain(&chain) {
+        if validity.not_after.to_unix_duration().gt(&cert
+            .tbs_certificate
+            .validity
+            .not_after
+            .to_unix_duration())
+        {
+            validity.not_after = cert.tbs_certificate.validity.not_after;
+        }
+    }
 
     let mut bootstrap = Vec::new();
     bootstrap.write_length_prefixed(&raw_chain[0], 3)?;

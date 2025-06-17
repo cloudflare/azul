@@ -163,12 +163,12 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
     /// The data tile path in static-ct-api is 'data'.
     const DATA_TILE_PATH: PathElem = PathElem::Data;
 
-    /// No unhashed data published in static-ct-api. (Rather, the unhashed
-    /// `chain_fingerprints` is included in the data tile directly.)
-    const UNHASHED_TILE_PATH: Option<PathElem> = None;
+    /// No auxiliary data tile published in static-ct-api. (Rather, the
+    /// auxiliary `chain_fingerprints` is included in the data tile directly.)
+    const AUX_TILE_PATH: Option<PathElem> = None;
 
     /// Unused in static-ct-api.
-    fn unhashed_entry(&self) -> &[u8] {
+    fn aux_entry(&self) -> &[u8] {
         unimplemented!()
     }
 
