@@ -1,0 +1,104 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "logging_level": {
+            "type": "string",
+            "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+            ],
+            "description": "Log verbosity."
+        },
+        "logs": {
+            "type": "object",
+            "description": "Dictionary MTC log shard names to configurations.",
+            "additionalProperties": false,
+            "patternProperties": {
+                "^[a-zA-Z0-9_]+$": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the log."
+                        },
+                        "issuer_rdn": {
+                            "type": "string",
+                            "description": "The Relative Distinguish Name to use as the CA's issuer."
+                        },
+                        "validity_interval_seconds": {
+                            "type": "integer",
+                            "default": 604800,
+                            "description": "The maximum validity interval for issued certificates. The actual validity window could be less, for example, to fit within the bootstrap certificate's validity."
+                        },
+                        "submission_url": {
+                            "type": "string",
+                            "description": "URL for log submissions."
+                        },
+                        "monitoring_url": {
+                            "type": "string",
+                            "default": "<submission_url>",
+                            "description": "URL for log monitoring. If unspecified, use the submission URL and the Worker will proxy requests to the R2 bucket."
+                        },
+                        "location_hint": {
+                            "type": "string",
+                            "description": "Provide a hint to place the log in a specific geographic location. See https://developers.cloudflare.com/durable-objects/reference/data-location/ for supported locations. If unspecified, the Durable Object will be created in proximity to the first request."
+                        },
+                        "sequence_interval_millis": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "default": 1000,
+                            "description": "The duration in between sequencing operations, in milliseconds."
+                        },
+                        "max_sequence_skips": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by either a multiple of the sequence interval or sequence_skip_threshold_millis if set."
+                        },
+                        "sequence_skip_threshold_millis": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "If provided, entries will only be skipped by sequencing (when max_sequenced_skips is non-zero) if they have been in the pool for less than this timeout."
+                        },
+                        "num_batchers": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 8,
+                            "maximum": 255,
+                            "description": "The number of batchers to use to proxy requests to the sequencer. If zero, requests from the frontend worker go directly to the sequencer."
+                        },
+                        "batch_timeout_millis": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "default": 1000,
+                            "description": "The maximum duration to wait before submitting a batch to the sequencer, in milliseconds."
+                        },
+                        "max_batch_entries": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1000,
+                            "description": "The maximum number of entries per batch."
+                        },
+                        "enable_dedup": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disabled for tests and benchmarks."
+                        }
+                    },
+                    "required": [
+                        "issuer_rdn",
+                        "submission_url"
+                    ]
+                }
+            }
+        }
+    },
+    "required": [
+        "logs"
+    ]
+}

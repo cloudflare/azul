@@ -59,8 +59,8 @@ impl SequencerMetrics {
         .unwrap();
         let entry_count = register_counter_vec_with_registry!(
             "do_entries_total",
-            "Entries submitted to be sequenced, by type and status.",
-            &["type", "status"],
+            "Entries submitted to sequencer, by sequencing status.",
+            &["status"],
             r
         )
         .unwrap();

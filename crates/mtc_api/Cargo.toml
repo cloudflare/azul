@@ -1,0 +1,22 @@
+[package]
+name = "mtc_api"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+der.workspace = true
+length_prefixed.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tlog_tiles.workspace = true
+x509-verify.workspace = true
+x509_util.workspace = true
