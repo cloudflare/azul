@@ -9,9 +9,9 @@ use crate::{load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CON
 use config::TemporalInterval;
 use futures_util::future::try_join_all;
 use generic_log_worker::{
-    ctlog::UploadOptions, get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv,
-    load_public_bucket, put_cache_entry_metadata, ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
-    METRICS_ENDPOINT,
+    ctlog::UploadOptions, get_cached_metadata, get_durable_object_stub, init_logging,
+    load_cache_kv, load_public_bucket, put_cache_entry_metadata, ObjectBackend, ObjectBucket,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
 use p256::pkcs8::EncodePublicKey;
@@ -192,9 +192,7 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if let Some(metadata) =
-        get_cached_metadata::<StaticCTLogEntry>(&kv, &pending_entry, params.enable_dedup).await?
-    {
+    if let Some(metadata) = get_cached_metadata(&kv, &pending_entry, params.enable_dedup).await? {
         debug!("{name}: Entry is cached");
         let entry = StaticCTLogEntry::new(pending_entry, metadata);
         let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)

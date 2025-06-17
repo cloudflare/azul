@@ -1,6 +1,6 @@
-# Static CT API Worker
+# Merkle Tree CA Worker
 
-A Rust implementation of a [Merkle Tree Certificate CA][] for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
+A Rust implementation of a [Merkle Tree CA][] for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
 
 ## License
 

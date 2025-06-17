@@ -13,7 +13,7 @@ use generic_log_worker::{
     ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
-use mtc_api::{AddEntryRequest, AddEntryResponse, MtcLogEntry};
+use mtc_api::{AddEntryRequest, AddEntryResponse};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
@@ -162,9 +162,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     // Check if entry is cached and return right away if so.
     let kv = load_cache_kv(env, name)?;
-    if let Some(metadata) =
-        get_cached_metadata::<MtcLogEntry>(&kv, &pending_entry, params.enable_dedup).await?
-    {
+    if let Some(metadata) = get_cached_metadata(&kv, &pending_entry, params.enable_dedup).await? {
         debug!("{name}: Entry is cached");
         let resp = AddEntryResponse {
             leaf_index: metadata.0,

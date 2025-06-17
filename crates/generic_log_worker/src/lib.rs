@@ -23,7 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::Once;
-use tlog_tiles::{LogEntry, LookupKey, PendingLogEntry, SequenceMetadata};
+use tlog_tiles::{LookupKey, PendingLogEntry, SequenceMetadata};
 use util::now_millis;
 use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
@@ -124,22 +124,26 @@ pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
 }
 
 /// Given a pending entry, returns the corresponding metadata from the dedup
-/// cache, if it exists
-pub async fn get_cached_metadata<L: LogEntry>(
+/// cache, if it exists.
+///
+/// # Errors
+///
+/// Returns an error if there are issues retrieving the metadata.
+pub async fn get_cached_metadata(
     kv: &KvStore,
-    pending: &L::Pending,
+    pending: &impl PendingLogEntry,
     enable_dedup: bool,
 ) -> Result<Option<SequenceMetadata>> {
     if enable_dedup {
         let lookup_key = pending.lookup_key();
 
-        // Query the cache and return the log entry if it exists
-        let value_opt = kv
+        // Query the cache and return the entry metadata if it exists
+        let metadata_opt = kv
             .get(&BASE64_STANDARD.encode(lookup_key))
             .bytes_with_metadata::<SequenceMetadata>()
             .await?
             .1;
-        Ok(value_opt)
+        Ok(metadata_opt)
     } else {
         Ok(None)
     }
@@ -150,8 +154,8 @@ pub async fn get_cached_metadata<L: LogEntry>(
 ///
 /// # Errors
 ///
-/// Returns an error if either the KV namespace cannot doesn't exist, or if
-/// there is an exception when writing the value.
+/// Returns an error if either the KV namespace doesn't exist, or if there is an
+/// exception when writing the value.
 pub async fn put_cache_entry_metadata<L: PendingLogEntry>(
     kv: &KvStore,
     pending: &L,
