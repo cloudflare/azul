@@ -46,11 +46,12 @@ impl DurableObject for Sequencer {
             let witness_key = load_witness_key(&env, name).unwrap().clone();
 
             // Make the checkpoint signers from the secret keys and put them in a vec
+            // TODO: use cosignature/v1 for log signature
             let signer = Ed25519CheckpointSigner::new(origin, signing_key)
-                .map_err(|e| format!("could not create static-ct checkpoint signer: {e}"))
+                .map_err(|e| format!("could not create ed25519 log cosigner: {e}"))
                 .unwrap();
             let witness = Ed25519CheckpointSigner::new(origin, witness_key)
-                .map_err(|e| format!("could not create ed25519 checkpoint signer: {e}"))
+                .map_err(|e| format!("could not create ed25519 witness cosigner: {e}"))
                 .unwrap();
 
             vec![Box::new(signer), Box::new(witness)]

@@ -1,10 +1,13 @@
-use anyhow::{anyhow, ensure};
+use anyhow::{anyhow, bail, ensure};
 use der::{asn1::BitString, oid::db::rfc5280, Decode, Encode, Sequence, ValueOrd};
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, io::Read};
+use std::{
+    collections::{BTreeSet, HashMap},
+    io::Read,
+};
 use thiserror::Error;
 use tlog_tiles::{
     Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, SequenceMetadata, TlogError,
@@ -113,7 +116,7 @@ pub struct TbsCertificateLogEntry {
     pub issuer: RdnSequence,
     pub validity: Validity,
     pub subject: RdnSequence,
-    pub subject_public_key_hash: OctetString,
+    pub subject_public_key_info_hash: OctetString,
     pub issuer_unique_id: Option<BitString>,
     pub subject_unique_id: Option<BitString>,
     pub extensions: Option<Vec<Extension>>,
@@ -152,6 +155,46 @@ fn filter_key_usage(extension: &mut Extension) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+fn filter_extensions(extensions: &mut Vec<Extension>) -> Result<(), anyhow::Error> {
+    let mut result = Ok(());
+    let mut oids = BTreeSet::new();
+    extensions.retain_mut(|extension| {
+        if oids.contains(&extension.extn_id) {
+            result = Err(anyhow!("duplicate extension"));
+            return false;
+        }
+        oids.insert(extension.extn_id);
+
+        match extension.extn_id {
+            rfc5280::ID_CE_EXT_KEY_USAGE => {
+                if let Err(e) = filter_ext_key_usage(extension) {
+                    result = Err(e);
+                }
+                true
+            }
+            rfc5280::ID_CE_SUBJECT_ALT_NAME => true,
+            rfc5280::ID_CE_KEY_USAGE => {
+                if let Err(e) = filter_key_usage(extension) {
+                    result = Err(e);
+                }
+                true
+            }
+            rfc5280::ID_PE_AUTHORITY_INFO_ACCESS
+            | rfc5280::ID_CE_AUTHORITY_KEY_IDENTIFIER
+            | rfc5280::ID_CE_CRL_DISTRIBUTION_POINTS
+            | rfc5280::ID_CE_CERTIFICATE_POLICIES
+            | rfc5280::ID_CE_BASIC_CONSTRAINTS => false,
+            id => {
+                if extension.critical {
+                    result = Err(anyhow!("unsupported critical extension {id}"));
+                }
+                false
+            }
+        }
+    });
+    result
+}
+
 /// Convert a `TbsCertificate` to a `TbsCertificateLogEntry` with the provided
 /// issuer and validity.
 ///
@@ -173,43 +216,20 @@ pub fn tbs_cert_to_log_entry(
         .not_after
         .to_unix_duration()
         .le(&bootstrap.validity.not_after.to_unix_duration()));
-    ensure!(bootstrap.issuer_unique_id.is_none());
-    ensure!(bootstrap.subject_unique_id.is_none());
 
-    let mut oids = BTreeSet::new();
-    let mut extensions = Vec::new();
-    if let Some(bootstrap_extensions) = bootstrap.extensions {
-        for mut extension in bootstrap_extensions {
-            ensure!(!oids.contains(&extension.extn_id), "duplicate extension");
-            oids.insert(extension.extn_id);
-            match extension.extn_id {
-                rfc5280::ID_PE_AUTHORITY_INFO_ACCESS
-                | rfc5280::ID_CE_AUTHORITY_KEY_IDENTIFIER
-                | rfc5280::ID_CE_CRL_DISTRIBUTION_POINTS
-                | rfc5280::ID_CE_CERTIFICATE_POLICIES
-                | rfc5280::ID_CE_BASIC_CONSTRAINTS => { /* DROP */ }
-                rfc5280::ID_CE_EXT_KEY_USAGE => {
-                    filter_ext_key_usage(&mut extension)?;
-                    extensions.push(extension);
-                }
-                rfc5280::ID_CE_SUBJECT_ALT_NAME => {
-                    extensions.push(extension);
-                }
-                rfc5280::ID_CE_KEY_USAGE => {
-                    filter_key_usage(&mut extension)?;
-                    extensions.push(extension);
-                }
-                _ => ensure!(!extension.critical, "unsupported critical extension"),
-            }
-        }
-    }
+    let extensions = if let Some(mut bootstrap_extensions) = bootstrap.extensions {
+        filter_extensions(&mut bootstrap_extensions)?;
+        Some(bootstrap_extensions)
+    } else {
+        None
+    };
 
     Ok(TbsCertificateLogEntry {
         version: bootstrap.version,
         issuer,
         validity,
         subject: bootstrap.subject,
-        subject_public_key_hash: OctetString::new(
+        subject_public_key_info_hash: OctetString::new(
             Sha256::digest(
                 bootstrap
                     .subject_public_key_info
@@ -219,13 +239,9 @@ pub fn tbs_cert_to_log_entry(
             .as_slice(),
         )
         .map_err(|e| anyhow!(e.to_string()))?,
-        issuer_unique_id: None,
-        subject_unique_id: None,
-        extensions: if extensions.is_empty() {
-            None
-        } else {
-            Some(extensions)
-        },
+        issuer_unique_id: bootstrap.issuer_unique_id,
+        subject_unique_id: bootstrap.subject_unique_id,
+        extensions,
     })
 }
 
@@ -237,29 +253,79 @@ pub fn tbs_cert_to_log_entry(
 /// certificate doesn't cover the log entry.
 pub fn validate_correspondence(
     log_entry: &TbsCertificateLogEntry,
-    bootstrap: &TbsCertificate,
+    chain: &[Certificate],
 ) -> Result<(), anyhow::Error> {
-    let mut bootstrap_log_entry = tbs_cert_to_log_entry(
-        bootstrap.clone(),
-        log_entry.issuer.clone(),
-        log_entry.validity,
-    )?;
+    // TODO validate bootstrap chain
+    ensure!(!chain.is_empty());
+    let bootstrap = chain[0].tbs_certificate.clone();
 
-    // Sort extensions before comparing.
-    bootstrap_log_entry
-        .extensions
-        .as_mut()
-        .unwrap_or(&mut Vec::new())
-        .sort_by(|a, b| a.extn_id.cmp(&b.extn_id));
+    ensure!(log_entry.version == bootstrap.version && log_entry.version == Version::V3);
+    // Make sure the validity is contained within the validity of every cert in
+    // the chain.
+    for cert in chain {
+        ensure!(log_entry.validity.not_after.to_unix_duration().le(&cert
+            .tbs_certificate
+            .validity
+            .not_after
+            .to_unix_duration()));
+        ensure!(log_entry.validity.not_before.to_unix_duration().ge(&cert
+            .tbs_certificate
+            .validity
+            .not_before
+            .to_unix_duration()));
+    }
+    ensure!(log_entry.subject == bootstrap.subject);
+    ensure!(
+        log_entry.subject_public_key_info_hash
+            == OctetString::new(
+                Sha256::digest(
+                    bootstrap
+                        .subject_public_key_info
+                        .to_der()
+                        .map_err(|e| anyhow!(e.to_string()))?,
+                )
+                .as_slice(),
+            )
+            .map_err(|e| anyhow!(e.to_string()))?
+    );
+    ensure!(log_entry.issuer_unique_id == bootstrap.issuer_unique_id);
+    ensure!(log_entry.subject_unique_id == bootstrap.subject_unique_id);
 
-    let mut log_entry_sorted = log_entry.clone();
-    log_entry_sorted
-        .extensions
-        .as_mut()
-        .unwrap_or(&mut Vec::new())
-        .sort_by(|a, b| a.extn_id.cmp(&b.extn_id));
+    match (log_entry.extensions.as_ref(), bootstrap.extensions) {
+        (None, None) => {}
+        (Some(log_entry_extensions), Some(mut bootstrap_extensions)) => {
+            // Check and filter bootstrap extensions.
+            filter_extensions(&mut bootstrap_extensions)?;
 
-    ensure!(log_entry_sorted == bootstrap_log_entry);
+            // Make sure the filtered bootstrap extensions cover those of the log entry.
+            ensure!(log_entry_extensions.len() == bootstrap_extensions.len());
+            let bootstrap_extensions_map = bootstrap_extensions
+                .into_iter()
+                .map(|extn| (extn.extn_id, extn))
+                .collect::<HashMap<_, _>>();
+            for extension in log_entry_extensions {
+                match extension.extn_id {
+                    id @ (rfc5280::ID_CE_EXT_KEY_USAGE
+                    | rfc5280::ID_CE_SUBJECT_ALT_NAME
+                    | rfc5280::ID_CE_KEY_USAGE) => {
+                        if let Some(bootstrap_extension) = bootstrap_extensions_map.get(&id) {
+                            // This currently checks for strict equality, but
+                            // could be relaxed somewhat, for example to allow a
+                            // bootstrap cert with the key usage
+                            // DigitalSignature+KeyEncipherment to cover a log
+                            // entry with only the DigitalSignature key usage.
+                            ensure!(extension == bootstrap_extension);
+                        } else {
+                            bail!("bootstrap missing extension {id}");
+                        }
+                    }
+                    id => bail!("log entry has unsupported extension {id}"),
+                }
+            }
+        }
+        _ => bail!("mismatched extensions"),
+    }
+
     Ok(())
 }
 
@@ -331,10 +397,10 @@ mod tests {
 
     #[test]
     fn test_tbs_cert_to_log_entry() {
-        let certs =
+        let bootstrap_chain =
             Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
                 .unwrap();
-        let bootstrap = &certs[0].tbs_certificate;
+        let bootstrap = &bootstrap_chain[0].tbs_certificate;
         let issuer = RdnSequence::default();
 
         let validity = Validity {
@@ -349,7 +415,7 @@ mod tests {
         let mut log_entry = tbs_cert_to_log_entry(bootstrap.clone(), issuer, validity).unwrap();
 
         // Valid.
-        validate_correspondence(&log_entry, bootstrap).unwrap();
+        validate_correspondence(&log_entry, &bootstrap_chain).unwrap();
 
         // Put the extensions in a different order.
         log_entry
@@ -359,7 +425,7 @@ mod tests {
             .sort_by(|a, b| b.extn_id.cmp(&a.extn_id));
 
         // Still valid.
-        validate_correspondence(&log_entry, bootstrap).unwrap();
+        validate_correspondence(&log_entry, &bootstrap_chain).unwrap();
 
         // Remove an extension.
         let ext = log_entry
@@ -370,7 +436,7 @@ mod tests {
             .unwrap();
 
         // No longer valid.
-        validate_correspondence(&log_entry, bootstrap).unwrap_err();
+        validate_correspondence(&log_entry, &bootstrap_chain).unwrap_err();
 
         // Put it back.
         log_entry
@@ -380,14 +446,14 @@ mod tests {
             .push(ext);
 
         // Valid again.
-        validate_correspondence(&log_entry, bootstrap).unwrap();
+        validate_correspondence(&log_entry, &bootstrap_chain).unwrap();
 
         // Increase the validity to outside the bootstrap's validity.
         log_entry.validity.not_after =
             Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_920)).unwrap());
 
         // No longer valid.
-        validate_correspondence(&log_entry, bootstrap).unwrap_err();
+        validate_correspondence(&log_entry, &bootstrap_chain).unwrap_err();
     }
 
     #[test]

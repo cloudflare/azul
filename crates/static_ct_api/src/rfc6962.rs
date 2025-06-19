@@ -251,7 +251,7 @@ impl_newtype!(CTPrecertPoison, Null);
 /// ```
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     if let Ok(key) = VerifyingKey::try_from(issuer) {
-        key.verify(child).is_ok()
+        key.verify_strict(child).is_ok()
     } else {
         false
     }
