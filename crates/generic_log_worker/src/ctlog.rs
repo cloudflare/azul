@@ -36,8 +36,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, HashReader, LogEntry, PendingLogEntry, Tile, TileIterator, TlogError, TlogTile,
-    TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    tlog, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileIterator, TlogError,
+    TlogTile, TreeProof, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -452,6 +452,33 @@ impl SequenceState {
             tree: TreeWithTimestamp::new(c.size(), *c.hash(), timestamp),
             checkpoint: stored_checkpoint,
         })
+    }
+
+    /// Proves inclusion of the last leaf in the current tree
+    pub(crate) fn prove_inclusion_of_last_elem(&self) -> RecordProof {
+        let tree_size = self.tree.size();
+        let reader = HashReaderWithOverlay {
+            edge_tiles: &self.edge_tiles,
+            overlay: &HashMap::default(),
+        };
+        // We can unwrap because edge_tiles is guaranteed to contain the tiles
+        // necessary to prove this
+        tlog::prove_record(tree_size, tree_size - 1, &reader).unwrap()
+    }
+
+    /// Proves that this tree of size n is compatible with the subtree of size
+    /// n-1. In other words, prove that we appended 1 element to the tree.
+    ///
+    /// # Errors
+    /// Errors when the last tree was size 0. We cannot prove consistency with
+    /// respect to an empty tree
+    pub(crate) fn prove_consistency_of_single_append(&self) -> Result<TreeProof, TlogError> {
+        let tree_size = self.tree.size();
+        let reader = HashReaderWithOverlay {
+            edge_tiles: &self.edge_tiles,
+            overlay: &HashMap::default(),
+        };
+        tlog::prove_tree(tree_size, tree_size - 1, &reader)
     }
 }
 
@@ -1225,6 +1252,20 @@ mod tests {
             let (leaf_index, _) = block_on(res.resolve()).unwrap();
             assert_eq!(leaf_index, i);
             log.check(i + 1).unwrap();
+
+            // Check we can make proofs
+            log.sequence_state
+                .as_ref()
+                .unwrap()
+                .prove_inclusion_of_last_elem();
+            // Can't prove consistency with a size-0 subtree
+            if i > 0 {
+                log.sequence_state
+                    .as_ref()
+                    .unwrap()
+                    .prove_consistency_of_single_append()
+                    .unwrap();
+            }
         }
         log.check(n).unwrap();
     }
@@ -1251,6 +1292,18 @@ mod tests {
                 add_leaf_to_pool(&mut log.pool_state, &log.cache, &log.config, leaf);
             }
             log.sequence().unwrap();
+
+            // Check we can make proofs
+            log.sequence_state
+                .as_ref()
+                .unwrap()
+                .prove_inclusion_of_last_elem();
+            // We're batch-adding, so there's no chance tree_size - 1 is 0
+            log.sequence_state
+                .as_ref()
+                .unwrap()
+                .prove_consistency_of_single_append()
+                .unwrap();
         }
         log.check(5 + 500 * 3000).unwrap();
     }

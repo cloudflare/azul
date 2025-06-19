@@ -15,7 +15,7 @@ use crate::{
 use futures_util::future::join_all;
 use log::{info, warn};
 use prometheus::{Registry, TextEncoder};
-use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry};
+use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry, RecordProof, TlogError};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
@@ -226,6 +226,38 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             .zip(entries_metadata.iter())
             .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
             .collect::<Vec<_>>()
+    }
+
+    /// Proves inclusion of the last leaf in the current tree. This may only be
+    /// called after the sequencer state has been loaded, i.e., after the first
+    /// `alarm()` has triggered.
+    ///
+    /// # Errors
+    /// Errors when sequencer state has not been loaded
+    pub fn prove_inclusion_of_last_elem(&self) -> Result<RecordProof, WorkerError> {
+        if let Some(s) = self.sequence_state.as_ref() {
+            Ok(s.prove_inclusion_of_last_elem())
+        } else {
+            Err(WorkerError::RustError(
+                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
+            ))
+        }
+    }
+
+    /// Proves that this tree of size n is compatible with the subtree of size
+    /// n-1. In other words, prove that we appended 1 element to the tree.
+    ///
+    /// # Errors
+    /// Errors when this sequencer has not been used to sequence anything yet.
+    pub fn prove_consistency_of_single_append(&self) -> Result<RecordProof, WorkerError> {
+        if let Some(s) = self.sequence_state.as_ref() {
+            s.prove_consistency_of_single_append()
+                .map_err(|e| WorkerError::RustError(e.to_string()))
+        } else {
+            Err(WorkerError::RustError(
+                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
+            ))
+        }
     }
 
     fn fetch_metrics(&self) -> Result<Response, WorkerError> {
