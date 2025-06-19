@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::{
-    ctlog::{self, CreateError, PoolState, SequenceState},
+    log_ops::{self, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
@@ -15,7 +15,7 @@ use crate::{
 use futures_util::future::join_all;
 use log::{info, warn};
 use prometheus::{Registry, TextEncoder};
-use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry};
+use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry, RecordProof};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
@@ -141,7 +141,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             .set_alarm(self.config.sequence_interval)
             .await?;
 
-        if let Err(e) = ctlog::sequence::<L>(
+        if let Err(e) = log_ops::sequence::<L>(
             &mut self.pool_state,
             &mut self.sequence_state,
             &self.config,
@@ -174,7 +174,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             warn!("Failed to load short-term dedup cache from DO storage: {e}");
         };
 
-        match ctlog::create_log(&self.config, &self.public_bucket, &self.do_state).await {
+        match log_ops::create_log(&self.config, &self.public_bucket, &self.do_state).await {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),
             Err(CreateError::Other(msg)) => {
                 return Err(format!("{name}: failed to create: {msg}").into())
@@ -203,7 +203,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         for pending_entry in pending_entries {
             lookup_keys.push(pending_entry.lookup_key());
 
-            let add_leaf_result = ctlog::add_leaf_to_pool(
+            let add_leaf_result = log_ops::add_leaf_to_pool(
                 &mut self.pool_state,
                 &self.cache,
                 &self.config,
@@ -226,6 +226,38 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             .zip(entries_metadata.iter())
             .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
             .collect::<Vec<_>>()
+    }
+
+    /// Proves inclusion of the last leaf in the current tree. This may only be
+    /// called after the sequencer state has been loaded, i.e., after the first
+    /// `alarm()` has triggered.
+    ///
+    /// # Errors
+    /// Errors when sequencer state has not been loaded
+    pub fn prove_inclusion_of_last_elem(&self) -> Result<RecordProof, WorkerError> {
+        if let Some(s) = self.sequence_state.as_ref() {
+            Ok(s.prove_inclusion_of_last_elem())
+        } else {
+            Err(WorkerError::RustError(
+                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
+            ))
+        }
+    }
+
+    /// Proves that this tree of size n is compatible with the subtree of size
+    /// n-1. In other words, prove that we appended 1 element to the tree.
+    ///
+    /// # Errors
+    /// Errors when this sequencer has not been used to sequence anything yet.
+    pub fn prove_consistency_of_single_append(&self) -> Result<RecordProof, WorkerError> {
+        if let Some(s) = self.sequence_state.as_ref() {
+            s.prove_consistency_of_single_append()
+                .map_err(|e| WorkerError::RustError(e.to_string()))
+        } else {
+            Err(WorkerError::RustError(
+                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
+            ))
+        }
     }
 
     fn fetch_metrics(&self) -> Result<Response, WorkerError> {

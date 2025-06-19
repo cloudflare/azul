@@ -8,8 +8,8 @@ use std::{str::FromStr, sync::LazyLock, time::Duration};
 use crate::{load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CONFIG, ROOTS};
 use futures_util::future::try_join_all;
 use generic_log_worker::{
-    ctlog::UploadOptions, get_cached_metadata, get_durable_object_stub, init_logging,
-    load_cache_kv, load_public_bucket, put_cache_entry_metadata, util::now_millis, ObjectBackend,
+    get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
+    log_ops::UploadOptions, put_cache_entry_metadata, util::now_millis, ObjectBackend,
     ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};

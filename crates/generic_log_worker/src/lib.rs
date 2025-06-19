@@ -5,7 +5,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 
 pub mod batcher_do;
-pub mod ctlog;
+pub mod log_ops;
 mod metrics;
 pub mod sequencer_do;
 pub mod util;
@@ -14,8 +14,8 @@ pub use batcher_do::*;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use ctlog::UploadOptions;
 use log::Level;
+use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
