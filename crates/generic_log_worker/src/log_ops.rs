@@ -1250,7 +1250,9 @@ mod tests {
     use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::{cell::RefCell, time::Duration};
-    use tlog_tiles::{Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile};
+    use tlog_tiles::{
+        check_record, check_tree, Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile,
+    };
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -1266,6 +1268,8 @@ mod tests {
     fn sequence_one_leaf(n: u64) {
         let mut log = TestLog::new();
         for i in 0..n {
+            let old_tree_hash = log.sequence_state.as_ref().map(|s| s.tree.hash().clone());
+
             let res = log.add_certificate();
             log.sequence().unwrap();
             // Wait until sequencing completes for this entry's pool.
@@ -1274,17 +1278,31 @@ mod tests {
             log.check(i + 1).unwrap();
 
             // Check we can make proofs
-            log.sequence_state
-                .as_ref()
-                .unwrap()
-                .prove_inclusion_of_last_elem();
-            // Can't prove consistency with a size-0 subtree
+            let sequence_state = log.sequence_state.as_ref().unwrap();
+            let new_tree_hash = *sequence_state.tree.hash();
+            let tree_size = i + 1;
+            let inc_proof = sequence_state.prove_inclusion_of_last_elem();
+            // Verify the inclusion proof
+            let last_hash: Hash = {
+                // Get the rightmost leaf tile, then extract the last hash from it
+                let leaf_edge = &sequence_state.edge_tiles.get(&0u8).unwrap().b;
+                Hash(leaf_edge[leaf_edge.len() - 32..].try_into().unwrap())
+            };
+            check_record(&inc_proof, tree_size, new_tree_hash, leaf_index, last_hash).unwrap();
+
+            // Make a consistency proof. Just can't do it with a size-0 subtree
             if i > 0 {
-                log.sequence_state
-                    .as_ref()
-                    .unwrap()
-                    .prove_consistency_of_single_append()
-                    .unwrap();
+                let consistency_proof =
+                    sequence_state.prove_consistency_of_single_append().unwrap();
+                // Verify the proof
+                check_tree(
+                    &consistency_proof,
+                    tree_size,
+                    new_tree_hash,
+                    tree_size - 1,
+                    old_tree_hash.unwrap(),
+                )
+                .unwrap()
             }
         }
         log.check(n).unwrap();
@@ -1324,6 +1342,8 @@ mod tests {
                 .unwrap()
                 .prove_consistency_of_single_append()
                 .unwrap();
+            // It's annoying to verify these proofs right here. See
+            // sequence_one_leaf() for the verifications
         }
         log.check(5 + 500 * 3000).unwrap();
     }
