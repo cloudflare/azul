@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use crate::{load_signing_key, load_witness_key, CONFIG};
 use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
-use mtc_api::MtcLogEntry;
+use mtc_api::MerkleTreeCertLogEntry;
 use prometheus::Registry;
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object]
-struct Sequencer(GenericSequencer<MtcLogEntry>);
+struct Sequencer(GenericSequencer<MerkleTreeCertLogEntry>);
 
 #[durable_object]
 impl DurableObject for Sequencer {

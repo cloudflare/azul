@@ -745,6 +745,13 @@ pub(crate) async fn sequence<L: LogEntry>(
     let old =
         unwrap_or_load_sequence_state::<L>(sequence_state, config, object, lock, metrics).await?;
 
+    // Add the log's initial entry if needed.
+    if old.tree.size() == 0 {
+        if let Some(entry) = L::initial_entry() {
+            pool_state.add(entry.lookup_key(), entry);
+        }
+    }
+
     let Some(entries) = pool_state.take(
         old.tree.size(),
         config.max_sequence_skips,

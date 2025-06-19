@@ -282,9 +282,11 @@ impl StaticCTLogEntry {
 impl LogEntry for StaticCTLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = true;
     type Pending = StaticCTPendingLogEntry;
-
-    // The error type for parse_from_tile_entry
     type ParseError = StaticCTError;
+
+    fn initial_entry() -> Option<Self::Pending> {
+        None
+    }
 
     fn new(pending: StaticCTPendingLogEntry, metadata: SequenceMetadata) -> Self {
         StaticCTLogEntry {

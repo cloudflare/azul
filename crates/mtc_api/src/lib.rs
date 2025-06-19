@@ -46,15 +46,63 @@ pub struct AddEntryResponse {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct MtcPendingLogEntry {
+pub struct MerkleTreeCertPendingLogEntry {
     /// The serialized bootstrap chain.
     pub bootstrap: Vec<u8>,
 
-    /// The serialized `TbsCertificateLogEntry`.
+    /// The serialized `MerkleTreeCertEntry`.
     pub entry: TlogTilesPendingLogEntry,
 }
 
-impl PendingLogEntry for MtcPendingLogEntry {
+#[allow(clippy::large_enum_variant)]
+#[derive(PartialEq, Debug)]
+pub enum MerkleTreeCertEntry {
+    NullEntry,
+    TbsCertEntry(TbsCertificateLogEntry),
+}
+
+impl MerkleTreeCertEntry {
+    /// Encode entry to bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are issue encoding the entry.
+    pub fn encode(&self) -> Result<Vec<u8>, anyhow::Error> {
+        match &self {
+            Self::NullEntry => Ok(vec![0, 0]),
+            Self::TbsCertEntry(tbs_cert_entry) => {
+                Ok([vec![0, 1], tbs_cert_entry.to_der()?].concat())
+            }
+        }
+    }
+
+    /// Decode entry from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entry cannot be decoded.
+    pub fn decode(data: &[u8]) -> Result<Self, anyhow::Error> {
+        if data.len() < 2 {
+            bail!("failed to parse entry type");
+        }
+        match data[0..2] {
+            [0, 0] => {
+                if data.len() == 2 {
+                    Ok(Self::NullEntry)
+                } else {
+                    Err(anyhow!("null entry data must be empty"))
+                }
+            }
+            [0, 1] => {
+                let tbs_cert_entry = TbsCertificateLogEntry::from_der(&data[2..])?;
+                Ok(Self::TbsCertEntry(tbs_cert_entry))
+            }
+            _ => Err(anyhow!("unrecognized entry type")),
+        }
+    }
+}
+
+impl PendingLogEntry for MerkleTreeCertPendingLogEntry {
     /// MTC uses the same data tile path as tlog-tiles, 'entries'.
     const DATA_TILE_PATH: PathElem = TlogTilesPendingLogEntry::DATA_TILE_PATH;
 
@@ -72,12 +120,21 @@ impl PendingLogEntry for MtcPendingLogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MtcLogEntry(TlogTilesLogEntry);
+pub struct MerkleTreeCertLogEntry(TlogTilesLogEntry);
 
-impl LogEntry for MtcLogEntry {
+impl LogEntry for MerkleTreeCertLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
-    type Pending = MtcPendingLogEntry;
+    type Pending = MerkleTreeCertPendingLogEntry;
     type ParseError = MtcError;
+
+    fn initial_entry() -> Option<Self::Pending> {
+        Some(Self::Pending {
+            bootstrap: vec![0, 0, 0], // u24 length prefix
+            entry: TlogTilesPendingLogEntry {
+                data: MerkleTreeCertEntry::NullEntry.encode().unwrap(),
+            },
+        })
+    }
 
     fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self {
         Self(TlogTilesLogEntry::new(pending.entry, metadata))
@@ -230,15 +287,8 @@ pub fn tbs_cert_to_log_entry(
         validity,
         subject: bootstrap.subject,
         subject_public_key_info_hash: OctetString::new(
-            Sha256::digest(
-                bootstrap
-                    .subject_public_key_info
-                    .to_der()
-                    .map_err(|e| anyhow!(e.to_string()))?,
-            )
-            .as_slice(),
-        )
-        .map_err(|e| anyhow!(e.to_string()))?,
+            Sha256::digest(bootstrap.subject_public_key_info.to_der()?).as_slice(),
+        )?,
         issuer_unique_id: bootstrap.issuer_unique_id,
         subject_unique_id: bootstrap.subject_unique_id,
         extensions,
@@ -278,15 +328,8 @@ pub fn validate_correspondence(
     ensure!(
         log_entry.subject_public_key_info_hash
             == OctetString::new(
-                Sha256::digest(
-                    bootstrap
-                        .subject_public_key_info
-                        .to_der()
-                        .map_err(|e| anyhow!(e.to_string()))?,
-                )
-                .as_slice(),
-            )
-            .map_err(|e| anyhow!(e.to_string()))?
+                Sha256::digest(bootstrap.subject_public_key_info.to_der()?,).as_slice(),
+            )?
     );
     ensure!(log_entry.issuer_unique_id == bootstrap.issuer_unique_id);
     ensure!(log_entry.subject_unique_id == bootstrap.subject_unique_id);
@@ -339,7 +382,7 @@ pub fn validate_chain(
     _roots: &CertPool,
     issuer: RdnSequence,
     mut validity: Validity,
-) -> Result<MtcPendingLogEntry, MtcError> {
+) -> Result<MerkleTreeCertPendingLogEntry, MtcError> {
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
         Some(v) => Certificate::from_der(v)?,
@@ -376,12 +419,15 @@ pub fn validate_chain(
     let mut bootstrap_tile_entry = Vec::new();
     bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
 
-    let tbs_certificate_log_entry = tbs_cert_to_log_entry(leaf.tbs_certificate, issuer, validity)?;
-
-    let pending_entry = MtcPendingLogEntry {
+    let pending_entry = MerkleTreeCertPendingLogEntry {
         bootstrap: bootstrap_tile_entry,
         entry: TlogTilesPendingLogEntry {
-            data: tbs_certificate_log_entry.to_der()?,
+            data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
+                leaf.tbs_certificate,
+                issuer,
+                validity,
+            )?)
+            .encode()?,
         },
     };
     Ok(pending_entry)
@@ -457,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_log_entry_der() {
+    fn test_encode() {
         let certs =
             Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
                 .unwrap();
@@ -474,9 +520,20 @@ mod tests {
         };
 
         let log_entry = tbs_cert_to_log_entry(bootstrap.clone(), issuer, validity).unwrap();
-        let encoded = log_entry.to_der().unwrap();
-        let decoded = TbsCertificateLogEntry::from_der(&encoded).unwrap();
+        let decoded = TbsCertificateLogEntry::from_der(&log_entry.to_der().unwrap()).unwrap();
 
         assert_eq!(log_entry, decoded);
+
+        let merkle_tree_cert_entry = MerkleTreeCertEntry::TbsCertEntry(log_entry);
+        let decoded =
+            MerkleTreeCertEntry::decode(&merkle_tree_cert_entry.encode().unwrap()).unwrap();
+
+        assert_eq!(merkle_tree_cert_entry, decoded);
+
+        let null_entry = MerkleTreeCertEntry::NullEntry;
+        assert_eq!(
+            null_entry,
+            MerkleTreeCertEntry::decode(&null_entry.encode().unwrap()).unwrap()
+        );
     }
 }

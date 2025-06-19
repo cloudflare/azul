@@ -1,11 +1,11 @@
 use crate::CONFIG;
 use generic_log_worker::{get_durable_object_stub, load_cache_kv, BatcherConfig, GenericBatcher};
-use mtc_api::MtcPendingLogEntry;
+use mtc_api::MerkleTreeCertPendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object]
-struct Batcher(GenericBatcher<MtcPendingLogEntry>);
+struct Batcher(GenericBatcher<MerkleTreeCertPendingLogEntry>);
 
 #[durable_object]
 impl DurableObject for Batcher {
