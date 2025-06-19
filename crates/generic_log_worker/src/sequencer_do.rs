@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::{
-    ctlog::{self, CreateError, PoolState, SequenceState},
+    log_ops::{self, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
@@ -141,7 +141,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             .set_alarm(self.config.sequence_interval)
             .await?;
 
-        if let Err(e) = ctlog::sequence::<L>(
+        if let Err(e) = log_ops::sequence::<L>(
             &mut self.pool_state,
             &mut self.sequence_state,
             &self.config,
@@ -174,7 +174,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             warn!("Failed to load short-term dedup cache from DO storage: {e}");
         };
 
-        match ctlog::create_log(&self.config, &self.public_bucket, &self.do_state).await {
+        match log_ops::create_log(&self.config, &self.public_bucket, &self.do_state).await {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),
             Err(CreateError::Other(msg)) => {
                 return Err(format!("{name}: failed to create: {msg}").into())
@@ -203,7 +203,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
         for pending_entry in pending_entries {
             lookup_keys.push(pending_entry.lookup_key());
 
-            let add_leaf_result = ctlog::add_leaf_to_pool(
+            let add_leaf_result = log_ops::add_leaf_to_pool(
                 &mut self.pool_state,
                 &self.cache,
                 &self.config,
