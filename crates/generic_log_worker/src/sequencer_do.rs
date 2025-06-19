@@ -15,7 +15,7 @@ use crate::{
 use futures_util::future::join_all;
 use log::{info, warn};
 use prometheus::{Registry, TextEncoder};
-use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry, RecordProof, TlogError};
+use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry, RecordProof};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 

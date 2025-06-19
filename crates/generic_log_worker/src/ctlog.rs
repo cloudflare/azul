@@ -24,7 +24,7 @@ use crate::{
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
     SequencerConfig,
 };
-use anyhow::{anyhow, bail, ensure};
+use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -319,11 +319,6 @@ impl SequenceState {
             now_millis(),
             &stored_checkpoint,
         )?;
-        // We don't use extension lines for any of our checkpoints
-        ensure!(
-            c.extension().is_empty(),
-            "unexpected extension in DO checkpoint"
-        );
 
         let timestamp = match timestamp {
             Some(timestamp) => timestamp,
@@ -344,11 +339,6 @@ impl SequenceState {
             std::str::from_utf8(&stored_checkpoint)?
         );
         let (c1, _) = tlog_tiles::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
-        // We don't use extension lines for any of our checkpoints
-        ensure!(
-            c1.extension().is_empty(),
-            "unexpected extension in R2 checkpoint"
-        );
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
