@@ -40,6 +40,7 @@ use tlog_tiles::{
     TlogTile, TreeProof, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
+use worker::Error as WorkerError;
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
@@ -444,6 +445,11 @@ impl SequenceState {
         })
     }
 
+    /// Returns the current checkpoint
+    pub(crate) fn checkpoint(&self) -> &[u8] {
+        &self.checkpoint
+    }
+
     /// Proves inclusion of the last leaf in the current tree
     pub(crate) fn prove_inclusion_of_last_elem(&self) -> RecordProof {
         let tree_size = self.tree.size();
@@ -808,7 +814,7 @@ async fn sequence_entries<L: LogEntry>(
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, &sequence_state.checkpoint, &new_checkpoint)
+    swap_checkpoint(lock, &sequence_state.checkpoint(), &new_checkpoint)
         .await
         .map_err(|e| {
             SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
@@ -1170,6 +1176,20 @@ fn marshal_staged_uploads(
         .chain(hash.0.iter().copied())
         .chain(serde_json::to_vec(uploads)?)
         .collect::<Vec<_>>())
+}
+
+/// Does a compare-and-swap of checkpoints. Useful for updating a checkpoint
+/// to include new cosignatures
+///
+/// # Errors
+/// Errors when `old` doesn't match the current checkpoint, or if fetching or
+/// setting storage failed.
+pub(crate) async fn swap_checkpoint(
+    lock: &impl LockBackend,
+    old: &[u8],
+    new: &[u8],
+) -> Result<(), WorkerError> {
+    lock.swap(CHECKPOINT_KEY, old, new).await
 }
 
 /// [`UploadOptions`] are used as part of the [`ObjectBackend::upload`] method, and are

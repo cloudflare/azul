@@ -228,6 +228,32 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
             .collect::<Vec<_>>()
     }
 
+    /// Returns the latest checkpoint. This may only be called after the
+    /// sequencer state has been loaded, i.e., after the first `alarm()` has
+    /// triggered.
+    ///
+    /// # Errors
+    /// Errors when sequencer state has not been loaded
+    pub fn checkpoint(&self) -> Result<&[u8], WorkerError> {
+        if let Some(s) = self.sequence_state.as_ref() {
+            Ok(s.checkpoint())
+        } else {
+            Err(WorkerError::RustError(
+                "cannot get checkpoint of a sequencer with no sequence state".to_string(),
+            ))
+        }
+    }
+
+    /// Does a compare-and-swap of checkpoints. Useful for updating a checkpoint
+    /// to include new cosignatures
+    ///
+    /// # Errors
+    /// Errors when `old` doesn't match the current checkpoint, or if fetching
+    /// or setting storage failed.
+    pub async fn swap_checkpoint(&self, old: &[u8], new: &[u8]) -> Result<(), WorkerError> {
+        log_ops::swap_checkpoint(&self.do_state, old, new).await
+    }
+
     /// Proves inclusion of the last leaf in the current tree. This may only be
     /// called after the sequencer state has been loaded, i.e., after the first
     /// `alarm()` has triggered.
@@ -252,7 +278,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     pub fn prove_consistency_of_single_append(&self) -> Result<RecordProof, WorkerError> {
         if let Some(s) = self.sequence_state.as_ref() {
             s.prove_consistency_of_single_append()
-                .map_err(|e| WorkerError::RustError(e.to_string()))
+                .map_err(|e| WorkerError::RustError(format!("consistency proof failed: {e}")))
         } else {
             Err(WorkerError::RustError(
                 "cannot prove inclusion in a sequencer with no sequence state".to_string(),
