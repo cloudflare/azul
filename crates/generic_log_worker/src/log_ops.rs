@@ -445,6 +445,16 @@ impl SequenceState {
         })
     }
 
+    /// Returns the current number of leaves in the tree
+    pub(crate) fn num_leaves(&self) -> u64 {
+        self.tree.size()
+    }
+
+    /// Returns the current tree hash
+    pub(crate) fn tree_hash(&self) -> &Hash {
+        self.tree.hash()
+    }
+
     /// Returns the current checkpoint
     pub(crate) fn checkpoint(&self) -> &[u8] {
         &self.checkpoint

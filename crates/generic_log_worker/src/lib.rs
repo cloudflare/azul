@@ -29,6 +29,7 @@ use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+pub const PROVE_INCLUSION_ENDPOINT: &str = "/prove_inclusion";
 const BATCH_ENDPOINT: &str = "/add_batch";
 pub const ENTRY_ENDPOINT: &str = "/add_entry";
 pub const METRICS_ENDPOINT: &str = "/metrics";
