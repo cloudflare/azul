@@ -3,14 +3,14 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use crate::{
     log_ops::{self, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     util::now_millis,
-    DedupCache, LookupKey, MemoryCache, ObjectBackend, ObjectBucket, SequenceMetadata,
-    BATCH_ENDPOINT, ENTRY_ENDPOINT, METRICS_ENDPOINT, PROVE_INCLUSION_ENDPOINT,
+    DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT, PROVE_INCLUSION_ENDPOINT,
 };
 use futures_util::future::join_all;
 use log::{info, warn};
@@ -18,10 +18,7 @@ use prometheus::{Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
-use tlog_tiles::{
-    prove_record, CheckpointSigner, LogEntry, PendingLogEntry, RecordProof, Tile, TileHashReader,
-    TileReader, TlogError, TlogTile,
-};
+use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry, RecordProof};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
@@ -190,55 +187,6 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     }
 }
 
-/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements TileReader
-/// so we can use it for producing inclusion proofs.
-struct SimpleTlogTileReader(HashMap<TlogTile, Vec<u8>>);
-
-impl TileReader for SimpleTlogTileReader {
-    fn height(&self) -> u8 {
-        8
-    }
-
-    /// Converts the given tiles into tlog tiles, then reads them from the
-    /// internal hashmap.
-    ///
-    /// # Errors
-    /// Errors if any of given tiles hash height != 8, or is a data tile. Also
-    /// errors if the hash map is missing tiles from the input here.
-    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
-        let mut buf = Vec::with_capacity(32 * (1 << self.height()));
-
-        for tile in tiles {
-            // Convert the tile to a tlog-tile, ie one where height=8 and data=false
-            if tile.height() != 8 {
-                return Err(TlogError::InvalidInput(
-                    "SimpleTlogTileReader cannot read tiles of height not equal to 8".to_string(),
-                ));
-            }
-            if tile.is_data() {
-                return Err(TlogError::InvalidInput(
-                    "SimpleTlogTileReader cannot read data tiles".to_string(),
-                ));
-            }
-            let tlog_tile = TlogTile::new(tile.level(), tile.level_index(), tile.width(), None);
-
-            // Record the tile's contents
-            let Some(contents) = self.0.get(&tlog_tile) else {
-                return Err(TlogError::InvalidInput(format!(
-                    "SimpleTlogTileReader cannot find {}",
-                    tlog_tile.path()
-                )));
-            };
-            buf.push(contents.clone());
-        }
-
-        Ok(buf)
-    }
-
-    // Do nothing; we only use this struct to read tiles
-    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
-}
-
 impl<E: PendingLogEntry> GenericSequencer<E> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self) -> Result<(), WorkerError> {
@@ -337,73 +285,17 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     /// Returns an inclusion proof for the given leaf index
     ///
     /// # Errors
-    /// Errors when sequencer state has not been loaded, or when the desired
-    /// tiles do not exist as bucket objects.
+    /// Errors when the leaf index equals or exceeds the number of leaves, or
+    /// when sequencer state has not been loaded, or when the desired tiles do
+    /// not exist as bucket objects.
     pub async fn prove_inclusion(&self, leaf_index: u64) -> Result<RecordProof, WorkerError> {
-        // Get the size of the tree
-        let (num_leaves, tree_hash) = if let Some(s) = self.sequence_state.as_ref() {
-            (s.num_leaves(), *s.tree_hash())
+        if let Some(s) = self.sequence_state.as_ref() {
+            s.prove_inclusion(&self.public_bucket, leaf_index).await
         } else {
-            return Err(WorkerError::RustError(
+            Err(WorkerError::RustError(
                 "cannot prove inclusion in a sequencer with no sequence state".to_string(),
-            ));
-        };
-
-        if leaf_index >= num_leaves {
-            return Err(WorkerError::RustError(
-                "leaf index exceeds number of leaves in the tree".to_string(),
-            ));
+            ))
         }
-
-        let mut all_tile_data = HashMap::new();
-
-        // Get the leaf tile
-        let mut cur_tile = TlogTile::from_leaf_index(leaf_index);
-        // Set the correct width. from_leaf_index returns the least width, but
-        // our current tile might be larger if we've added more elements. This
-        // subtraction is ok because we checked that num_leaves > leaf_index
-        // above.
-        if num_leaves - leaf_index < 128 {
-            let last_partial_tile_width = (num_leaves % 128) as u32;
-            cur_tile = TlogTile::new(
-                cur_tile.level(),
-                cur_tile.level_index(),
-                last_partial_tile_width,
-                None,
-            );
-        }
-        // Collect the leaf tile
-        let Some(tile_data) = self.public_bucket.fetch(&cur_tile.path()).await? else {
-            return Err(WorkerError::RustError(format!(
-                "missing tile for inclusion proof {}",
-                cur_tile.path()
-            )));
-        };
-        all_tile_data.insert(cur_tile, tile_data);
-
-        // It suffices to grab all the tiles from the leaf to the root. This
-        // will contain the copath necessary for the inclusion proof
-        while let Some(parent) = cur_tile.parent(1, num_leaves) {
-            let Some(tile_data) = self.public_bucket.fetch(&parent.path()).await? else {
-                return Err(WorkerError::RustError(format!(
-                    "missing tile for inclusion proof {}",
-                    parent.path()
-                )));
-            };
-            all_tile_data.insert(parent, tile_data);
-
-            cur_tile = parent;
-        }
-
-        // Now make the proof
-        let proof = {
-            // Put the recorded tiles into the appropriate Reader structs for prove_record()
-            let tile_reader = SimpleTlogTileReader(all_tile_data);
-            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
-            prove_record(num_leaves, leaf_index, &hash_reader)
-                .map_err(|e| WorkerError::RustError(e.to_string()))?
-        };
-        Ok(proof)
     }
 
     /// Proves inclusion of the last leaf in the current tree. This may only be

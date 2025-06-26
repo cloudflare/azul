@@ -31,13 +31,15 @@ use serde::{Deserialize, Serialize};
 use signed_note::{NoteVerifier, VerifierList};
 use std::collections::HashMap;
 use std::{
+    cell::RefCell,
     cmp::{Ord, Ordering},
     sync::LazyLock,
 };
 use thiserror::Error;
 use tlog_tiles::{
-    tlog, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileIterator, TlogError,
-    TlogTile, TreeProof, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    prove_record, tlog, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile,
+    TileHashReader, TileIterator, TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp,
+    UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 use worker::Error as WorkerError;
@@ -222,6 +224,90 @@ pub(crate) struct SequenceState {
 struct TileWithBytes {
     tile: TlogTile,
     b: Vec<u8>,
+}
+
+/// A fake TileReader that just accumulates the tiles that we'll need for a proof
+#[derive(Default)]
+struct ProofPreparer(RefCell<Vec<TlogTile>>);
+
+impl TileReader for ProofPreparer {
+    fn height(&self) -> u8 {
+        8
+    }
+
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+        // Record the tiles we're meant to read. Convert them to tlog tiles,
+        // ensuring their height is always 8
+        *self.0.borrow_mut() = tiles
+            .iter()
+            .map(|t| {
+                if t.height() != 8 {
+                    Err(TlogError::InvalidInput(
+                        "SimpleTlogTileReader cannot read tiles of height not equal to 8"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
+                }
+            })
+            .collect::<Result<Vec<_>, TlogError>>()?;
+
+        // Make a dummy return. This is guaranteed to trigger TlogError::BadMath
+        // in prove_records
+        Ok(Vec::new())
+    }
+
+    // Do nothing; we only use this struct to record tiles
+    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
+}
+
+/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements TileReader
+/// so we can use it for producing inclusion proofs.
+struct SimpleTlogTileReader(HashMap<TlogTile, Vec<u8>>);
+
+impl TileReader for SimpleTlogTileReader {
+    fn height(&self) -> u8 {
+        8
+    }
+
+    /// Converts the given tiles into tlog tiles, then reads them from the
+    /// internal hashmap.
+    ///
+    /// # Errors
+    /// Errors if any of given tiles hash height != 8, or is a data tile. Also
+    /// errors if the hash map is missing tiles from the input here.
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+        let mut buf = Vec::with_capacity(32 * (1 << self.height()));
+
+        for tile in tiles {
+            // Convert the tile to a tlog-tile, ie one where height=8 and data=false
+            if tile.height() != 8 {
+                return Err(TlogError::InvalidInput(
+                    "SimpleTlogTileReader cannot read tiles of height not equal to 8".to_string(),
+                ));
+            }
+            if tile.is_data() {
+                return Err(TlogError::InvalidInput(
+                    "SimpleTlogTileReader cannot read data tiles".to_string(),
+                ));
+            }
+            let tlog_tile = TlogTile::new(tile.level(), tile.level_index(), tile.width(), None);
+
+            // Record the tile's contents
+            let Some(contents) = self.0.get(&tlog_tile) else {
+                return Err(TlogError::InvalidInput(format!(
+                    "SimpleTlogTileReader cannot find {}",
+                    tlog_tile.path()
+                )));
+            };
+            buf.push(contents.clone());
+        }
+
+        Ok(buf)
+    }
+
+    // Do nothing; we only use this struct to read tiles
+    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
 }
 
 /// An error that can occur when creating a log.
@@ -446,14 +532,8 @@ impl SequenceState {
     }
 
     /// Returns the current number of leaves in the tree
-    pub(crate) fn num_leaves(&self) -> u64 {
-        self.tree.size()
-    }
 
     /// Returns the current tree hash
-    pub(crate) fn tree_hash(&self) -> &Hash {
-        self.tree.hash()
-    }
 
     /// Returns the current checkpoint
     pub(crate) fn checkpoint(&self) -> &[u8] {
@@ -485,6 +565,62 @@ impl SequenceState {
             overlay: &HashMap::default(),
         };
         tlog::prove_tree(tree_size, tree_size - 1, &reader)
+    }
+
+    /// Returns an inclusion proof for the given leaf index
+    ///
+    /// # Errors
+    /// Errors when the leaf index equals or exceeds the number of leaves, or
+    /// the desired tiles do not exist as bucket objects.
+    pub async fn prove_inclusion(
+        &self,
+        object: &impl ObjectBackend,
+        leaf_index: u64,
+    ) -> Result<RecordProof, WorkerError> {
+        // Get the size of the tree
+        let num_leaves = self.tree.size();
+        let tree_hash = *self.tree.hash();
+
+        if leaf_index >= num_leaves {
+            return Err(WorkerError::RustError(
+                "leaf index exceeds number of leaves in the tree".to_string(),
+            ));
+        }
+
+        let mut all_tile_data = HashMap::new();
+
+        // Make a fake proof using ProofPreparer to get all the tiles we need
+        // TODO: This seems useful. We can probably move this into the tlog_tiles crate
+        let tiles_to_fetch = {
+            let tile_reader = ProofPreparer::default();
+            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
+            // ProofPreparer is guaranteed to make prove_record return a BadMath
+            // error. This is fine, because it already collected the data we
+            // needed
+            let _ = prove_record(num_leaves, leaf_index, &hash_reader);
+            tile_reader.0.into_inner()
+        };
+
+        // Fetch all the tiles we need for a proof
+        for tile in tiles_to_fetch {
+            let Some(tile_data) = object.fetch(&tile.path()).await? else {
+                return Err(WorkerError::RustError(format!(
+                    "missing tile for inclusion proof {}",
+                    tile.path()
+                )));
+            };
+            all_tile_data.insert(tile, tile_data);
+        }
+
+        // Now make the proof
+        let proof = {
+            // Put the recorded tiles into the appropriate Reader structs for prove_record()
+            let tile_reader = SimpleTlogTileReader(all_tile_data);
+            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
+            prove_record(num_leaves, leaf_index, &hash_reader)
+                .map_err(|e| WorkerError::RustError(e.to_string()))?
+        };
+        Ok(proof)
     }
 }
 
@@ -1305,7 +1441,33 @@ mod tests {
                 .unwrap()
             }
         }
+        // Check that the static CT log is valid
         log.check(n).unwrap();
+
+        // Check that we can make an inclusion proof for every leaf in the tree
+        let sequence_state = log.sequence_state.as_ref().unwrap();
+        let tree_hash = *sequence_state.tree.hash();
+        for i in 0..n {
+            // Compute the inclusion proof for leaf i
+            let proof = block_on(sequence_state.prove_inclusion(&log.object, i)).unwrap();
+            // Verify the inclusino proof. We need the leaf hash
+            let leaf_hash = {
+                // Get the tile the leaf belongs to, and correct the width by getting the 0th parent
+                let leaf_tile = TlogTile::from_leaf_index(i).parent(0, n).unwrap();
+                let leaf_tile_data = block_on(log.object.fetch(&leaf_tile.path()))
+                    .unwrap()
+                    .unwrap();
+                // Extract the correct hash from the tile
+                let leaf_tile_idx = i as usize % 256;
+                Hash(
+                    leaf_tile_data[32 * leaf_tile_idx..32 * (leaf_tile_idx + 1)]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            // Verify the inclusion proof
+            check_record(&proof, n, tree_hash, i, leaf_hash).unwrap();
+        }
     }
 
     #[test]
