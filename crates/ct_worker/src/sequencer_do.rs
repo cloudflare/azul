@@ -33,6 +33,9 @@ impl DurableObject for Sequencer {
             .trim_end_matches('/');
         let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
 
+        // We don't use checkpoint extensions for CT
+        let checkpoint_extension = Box::new(|_| vec![]);
+
         let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
             let signing_key = load_signing_key(&env, &name).unwrap().clone();
             let witness_key = load_witness_key(&env, &name).unwrap().clone();
@@ -54,6 +57,7 @@ impl DurableObject for Sequencer {
             name,
             origin: origin.to_string(),
             checkpoint_signers,
+            checkpoint_extension,
             sequence_interval,
             max_sequence_skips: params.max_sequence_skips,
             enable_dedup: params.enable_dedup,

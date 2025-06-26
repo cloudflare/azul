@@ -45,6 +45,9 @@ pub struct SequencerConfig {
     pub name: String,
     pub origin: String,
     pub checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
+    /// A function that takes a Unix timestamp in milliseconds and returns
+    /// extension lines to be included in the checkpoint
+    pub checkpoint_extension: Box<dyn Fn(u64) -> Vec<String>>,
     pub sequence_interval: Duration,
     pub max_sequence_skips: usize,
     pub sequence_skip_threshold_millis: Option<u64>,

@@ -353,9 +353,16 @@ pub(crate) async fn create_log(
         .iter()
         .map(AsRef::as_ref)
         .collect::<Vec<_>>();
+    // Construct the checkpoint extension
+    let extensions = (config.checkpoint_extension)(timestamp);
 
     let sth = tree
-        .sign(&config.origin, "", &dyn_signers, &mut rand::thread_rng())
+        .sign(
+            &config.origin,
+            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &dyn_signers,
+            &mut rand::thread_rng(),
+        )
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
@@ -953,8 +960,16 @@ async fn sequence_entries<L: LogEntry>(
         .map(AsRef::as_ref)
         .collect::<Vec<_>>();
 
+    // Construct the checkpoint extensions
+    let extensions = (config.checkpoint_extension)(timestamp);
+
     let new_checkpoint = tree
-        .sign(&config.origin, "", &dyn_signers, &mut rand::thread_rng())
+        .sign(
+            &config.origin,
+            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &dyn_signers,
+            &mut rand::thread_rng(),
+        )
         .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
 
     // This is a critical error, since we don't know the state of the
@@ -2383,11 +2398,14 @@ mod tests {
                         .unwrap();
                 vec![Box::new(signer), Box::new(witness)]
             };
+            // Don't use checkpoint extensions
+            let checkpoint_extension = Box::new(|_| vec![]);
 
             let config = SequencerConfig {
                 name: "TestLog".to_string(),
                 origin,
                 checkpoint_signers,
+                checkpoint_extension,
                 sequence_interval: Duration::from_secs(1),
                 max_sequence_skips: 0,
                 enable_dedup: true,
