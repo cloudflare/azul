@@ -10,13 +10,13 @@ use generic_log_worker::{
     get_durable_object_name, load_public_bucket, GenericSequencer, SequencerConfig,
 };
 use prometheus::Registry;
-use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
+use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry};
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object]
-struct Sequencer(GenericSequencer<StaticCTPendingLogEntry>);
+struct Sequencer(GenericSequencer<StaticCTLogEntry>);
 
 #[durable_object]
 impl DurableObject for Sequencer {
@@ -72,6 +72,6 @@ impl DurableObject for Sequencer {
     }
 
     async fn alarm(&mut self) -> Result<Response> {
-        self.0.alarm::<StaticCTLogEntry>().await
+        self.0.alarm().await
     }
 }

@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::{
-    log_ops::{self, CreateError, PoolState, SequenceState},
+    log_ops::{self, unwrap_or_load_sequence_state, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
@@ -27,13 +27,13 @@ use worker::{Bucket, Error as WorkerError, Request, Response, State};
 // It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
-pub struct GenericSequencer<E: PendingLogEntry> {
+pub struct GenericSequencer<L: LogEntry> {
     do_state: State,             // implements LockBackend
     public_bucket: ObjectBucket, // implements ObjectBackend
     cache: DedupCache,           // implements CacheRead, CacheWrite
     config: SequencerConfig,
     sequence_state: Option<SequenceState>,
-    pool_state: PoolState<E>,
+    pool_state: PoolState<L::Pending>,
     initialized: bool,
     init_mux: Mutex<()>,
     registry: Registry,
@@ -68,7 +68,7 @@ pub struct ProveInclusionResponse {
     pub proof: Vec<Vec<u8>>,
 }
 
-impl<E: PendingLogEntry> GenericSequencer<E> {
+impl<L: LogEntry> GenericSequencer<L> {
     /// Return a new sequencer with the given config.
     pub fn new(config: SequencerConfig, state: State, bucket: Bucket, registry: Registry) -> Self {
         let metrics = SequencerMetrics::new(&registry);
@@ -119,14 +119,15 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
                 // Construct the proof and convert the hashes to Vec<u8>
                 let proof = self
                     .prove_inclusion(leaf_index)
-                    .await?
-                    .into_iter()
-                    .map(|h| h.0.to_vec())
-                    .collect::<Vec<_>>();
-                Response::from_json(&ProveInclusionResponse { proof })
+                    .await
+                    .map_err(|e| WorkerError::RustError(e.to_string()))?;
+                let proof_bytestrings = proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
+                Response::from_json(&ProveInclusionResponse {
+                    proof: proof_bytestrings,
+                })
             }
             ENTRY_ENDPOINT => {
-                let pending_entry: E = req.json().await?;
+                let pending_entry: L::Pending = req.json().await?;
                 let lookup_key = pending_entry.lookup_key();
                 let result = self.add_batch(vec![pending_entry]).await;
                 if result.is_empty() || result[0].0 != lookup_key {
@@ -136,7 +137,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
                 }
             }
             BATCH_ENDPOINT => {
-                let pending_entries: Vec<E> = req.json().await?;
+                let pending_entries: Vec<L::Pending> = req.json().await?;
                 Response::from_json(&self.add_batch(pending_entries).await)
             }
             _ => {
@@ -159,7 +160,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     /// # Errors
     ///
     /// Returns an error if there are issues scheduling the next alarm.
-    pub async fn alarm<L: LogEntry<Pending = E>>(&mut self) -> Result<Response, WorkerError> {
+    pub async fn alarm(&mut self) -> Result<Response, WorkerError> {
         if !self.initialized {
             info!("{}: Initializing log from alarm handler", self.config.name);
             self.initialize().await?;
@@ -190,7 +191,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     }
 }
 
-impl<E: PendingLogEntry> GenericSequencer<E> {
+impl<L: LogEntry> GenericSequencer<L> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&mut self) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
@@ -227,7 +228,10 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     // Add a batch of entries, returning metadata for successfully sequenced
     // entries. Entries that fail to be added (e.g., due to rate limiting) are
     // omitted.
-    async fn add_batch(&mut self, pending_entries: Vec<E>) -> Vec<(LookupKey, SequenceMetadata)> {
+    async fn add_batch(
+        &mut self,
+        pending_entries: Vec<L::Pending>,
+    ) -> Vec<(LookupKey, SequenceMetadata)> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());
@@ -291,14 +295,20 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     /// Errors when the leaf index equals or exceeds the number of leaves, or
     /// when sequencer state has not been loaded, or when the desired tiles do
     /// not exist as bucket objects.
-    pub async fn prove_inclusion(&self, leaf_index: u64) -> Result<RecordProof, WorkerError> {
-        if let Some(s) = self.sequence_state.as_ref() {
-            s.prove_inclusion(&self.public_bucket, leaf_index).await
-        } else {
-            Err(WorkerError::RustError(
-                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
-            ))
-        }
+    pub async fn prove_inclusion(&mut self, leaf_index: u64) -> Result<RecordProof, anyhow::Error> {
+        let sequence_state = unwrap_or_load_sequence_state::<L>(
+            &mut self.sequence_state,
+            &self.config,
+            &self.public_bucket,
+            &self.do_state,
+            &self.metrics,
+        )
+        .await?;
+
+        sequence_state
+            .prove_inclusion(&self.public_bucket, leaf_index)
+            .await
+            .map_err(anyhow::Error::from)
     }
 
     /// Proves inclusion of the last leaf in the current tree. This may only be
@@ -307,7 +317,7 @@ impl<E: PendingLogEntry> GenericSequencer<E> {
     ///
     /// # Errors
     /// Errors when sequencer state has not been loaded
-    pub fn prove_inclusion_of_last_elem(&self) -> Result<RecordProof, WorkerError> {
+    pub fn prove_inclusion_of_last_elem(&mut self) -> Result<RecordProof, WorkerError> {
         if let Some(s) = self.sequence_state.as_ref() {
             Ok(s.prove_inclusion_of_last_elem())
         } else {

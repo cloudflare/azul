@@ -708,6 +708,32 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     }
 }
 
+/// Returns the given `SequenceState` if it's defined. If not, it loads the
+/// sequence state and then returns it.
+///
+/// # Errors
+/// Errors when the log has not been created, or if recovery fails.
+pub(crate) async fn unwrap_or_load_sequence_state<'a, L: LogEntry>(
+    state: &'a mut Option<SequenceState>,
+    config: &SequencerConfig,
+    object: &impl ObjectBackend,
+    lock: &impl LockBackend,
+    metrics: &SequencerMetrics,
+) -> Result<&'a mut SequenceState, anyhow::Error> {
+    if let Some(s) = state {
+        Ok(s)
+    } else {
+        match SequenceState::load::<L>(config, object, lock).await {
+            Ok(s) => Ok(state.insert(s)),
+            Err(e) => {
+                metrics.seq_count.with_label_values(&["fatal"]).inc();
+                error!("{}: Fatal sequencing error {e}", config.name);
+                bail!(e);
+            }
+        }
+    }
+}
+
 /// Sequences the current pool of pending entries in the ephemeral state.
 pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &mut PoolState<L::Pending>,
@@ -719,18 +745,8 @@ pub(crate) async fn sequence<L: LogEntry>(
     metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
     // Retrieve old sequencing state.
-    let old = if let Some(s) = sequence_state {
-        s
-    } else {
-        match SequenceState::load::<L>(config, object, lock).await {
-            Ok(s) => sequence_state.insert(s),
-            Err(e) => {
-                metrics.seq_count.with_label_values(&["fatal"]).inc();
-                error!("{}: Fatal sequencing error {e}", config.name);
-                bail!(e);
-            }
-        }
-    };
+    let old =
+        unwrap_or_load_sequence_state::<L>(sequence_state, config, object, lock, metrics).await?;
 
     let Some(entries) = pool_state.take(
         old.tree.size(),

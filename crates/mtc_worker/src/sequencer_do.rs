@@ -9,14 +9,14 @@ use crate::{load_signing_key, load_witness_key, CONFIG};
 use generic_log_worker::{
     get_durable_object_name, load_public_bucket, GenericSequencer, SequencerConfig,
 };
-use mtc_api::{MtcLogEntry, MtcPendingLogEntry};
+use mtc_api::MtcLogEntry;
 use prometheus::Registry;
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object]
-struct Sequencer(GenericSequencer<MtcPendingLogEntry>);
+struct Sequencer(GenericSequencer<MtcLogEntry>);
 
 #[durable_object]
 impl DurableObject for Sequencer {
@@ -72,6 +72,6 @@ impl DurableObject for Sequencer {
     }
 
     async fn alarm(&mut self) -> Result<Response> {
-        self.0.alarm::<MtcLogEntry>().await
+        self.0.alarm().await
     }
 }
