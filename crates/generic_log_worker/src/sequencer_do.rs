@@ -263,6 +263,17 @@ impl<L: LogEntry> GenericSequencer<L> {
             .collect::<Vec<_>>()
     }
 
+    /// Returns the number of entires in this log
+    pub fn log_size(&self) -> Result<u64, WorkerError> {
+        if let Some(s) = self.sequence_state.as_ref() {
+            Ok(s.num_leaves())
+        } else {
+            Err(WorkerError::RustError(
+                "cannot get log size of a sequencer with no sequence state".to_string(),
+            ))
+        }
+    }
+
     /// Returns the latest checkpoint. This may only be called after the
     /// sequencer state has been loaded, i.e., after the first `alarm()` has
     /// triggered.
