@@ -992,7 +992,7 @@ async fn sequence_entries<L: LogEntry>(
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    swap_checkpoint(lock, &sequence_state.checkpoint(), &new_checkpoint)
+    swap_checkpoint(lock, sequence_state.checkpoint(), &new_checkpoint)
         .await
         .map_err(|e| {
             SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
