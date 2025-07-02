@@ -274,6 +274,22 @@ impl<L: LogEntry> GenericSequencer<L> {
         }
     }
 
+    /// Loads the sequence state if it's not already loaded.
+    ///
+    /// # Errors
+    /// Errors when the log has not been created, or if recovery fails.
+    pub async fn load_sequence_state(&mut self) -> Result<(), anyhow::Error> {
+        unwrap_or_load_sequence_state::<L>(
+            &mut self.sequence_state,
+            &self.config,
+            &self.public_bucket,
+            &self.do_state,
+            &self.metrics,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Returns the latest checkpoint. This may only be called after the
     /// sequencer state has been loaded, i.e., after the first `alarm()` has
     /// triggered.
@@ -303,9 +319,8 @@ impl<L: LogEntry> GenericSequencer<L> {
     /// Returns an inclusion proof for the given leaf index
     ///
     /// # Errors
-    /// Errors when the leaf index equals or exceeds the number of leaves, or
-    /// when sequencer state has not been loaded, or when the desired tiles do
-    /// not exist as bucket objects.
+    /// Errors when the leaf index equals or exceeds the number of leaves or
+    /// when the desired tiles do not exist as bucket objects.
     pub async fn prove_inclusion(&mut self, leaf_index: u64) -> Result<RecordProof, anyhow::Error> {
         let sequence_state = unwrap_or_load_sequence_state::<L>(
             &mut self.sequence_state,
