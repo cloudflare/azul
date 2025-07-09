@@ -14,7 +14,7 @@ pub struct AppConfig {
 #[derive(Deserialize, Debug)]
 pub struct LogParams {
     pub description: Option<String>,
-    pub issuer_rdn: String,
+    pub log_id: String,
     #[serde(default = "default_u64::<604_800>")]
     pub validity_interval_seconds: u64,
     #[serde(default)]

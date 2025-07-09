@@ -30,6 +30,7 @@ chrono.workspace = true
 config = { path = "./config", package = "mtc_worker_config" }
 generic_log_worker.workspace = true
 jsonschema.workspace = true
+mtc_api.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 url.workspace = true
@@ -55,13 +56,12 @@ serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 sha2.workspace = true
-static_ct_api.workspace = true
 tlog_tiles.workspace = true
 worker.workspace = true
 x509-verify.workspace = true
 x509_util.workspace = true
 prometheus.workspace = true
-mtc_api = { version = "0.2.0", path = "../mtc_api" }
+mtc_api.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

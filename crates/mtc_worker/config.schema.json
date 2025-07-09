@@ -26,9 +26,9 @@
                             "type": "string",
                             "description": "Description of the log."
                         },
-                        "issuer_rdn": {
+                        "log_id": {
                             "type": "string",
-                            "description": "The Relative Distinguish Name to use as the CA's issuer."
+                            "description": "The log name (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
                         },
                         "validity_interval_seconds": {
                             "type": "integer",
@@ -91,7 +91,7 @@
                         }
                     },
                     "required": [
-                        "issuer_rdn",
+                        "log_id",
                         "submission_url"
                     ]
                 }

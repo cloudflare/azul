@@ -4,13 +4,21 @@
 // Build script to include per-environment configuration and trusted roots.
 
 use config::AppConfig;
+use mtc_api::ID_RDNA_TRUSTANCHOR_ID;
 use serde_json::from_str;
 use std::env;
 use std::fs;
 use std::str::FromStr;
 use url::Url;
-use x509_verify::x509_cert::name::RdnSequence;
-use x509_verify::x509_cert::Certificate;
+use x509_verify::{
+    der::{asn1::SetOfVec, Any},
+    spki::ObjectIdentifier,
+    x509_cert::{
+        attr::AttributeTypeAndValue,
+        name::{RdnSequence, RelativeDistinguishedName},
+        Certificate,
+    },
+};
 
 fn main() {
     let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
@@ -35,10 +43,16 @@ fn main() {
         panic!("failed to deserialize JSON config '{config_file}': {e}");
     });
     for (name, params) in conf.logs {
-        // Make sure issuer RDN parses correctly.
-        RdnSequence::from_str(&params.issuer_rdn)
-            .map_err(|e| format!("failed to parse issuer RDN {}: {e}", params.issuer_rdn))
-            .unwrap();
+        // Make sure we can create the RDN sequence for the issuer log ID.
+        let _ = RdnSequence::from(vec![RelativeDistinguishedName(
+            SetOfVec::from_iter([AttributeTypeAndValue {
+                oid: ID_RDNA_TRUSTANCHOR_ID,
+                // TODO: switch to RelativeOidRef after https://github.com/RustCrypto/formats/issues/1875
+                value: Any::from(ObjectIdentifier::from_str(&params.log_id).unwrap()),
+            }])
+            .unwrap(),
+        )]);
+
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {
             assert!(

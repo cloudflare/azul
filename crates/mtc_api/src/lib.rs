@@ -1,5 +1,9 @@
 use anyhow::{anyhow, bail, ensure};
-use der::{asn1::BitString, oid::db::rfc5280, Decode, Encode, Sequence, ValueOrd};
+use der::{
+    asn1::BitString,
+    oid::{db::rfc5280, ObjectIdentifier},
+    Decode, Encode, Sequence, ValueOrd,
+};
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
@@ -27,6 +31,11 @@ use x509_verify::{
         Certificate, TbsCertificate,
     },
 };
+
+// https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids
+//pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.TBD1.TBD2");
+pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.1");
 
 /// Add-entry request. Chain is a certificate from which to bootstrap the
 /// request in the same format as RFC6962 add-chain requests.
