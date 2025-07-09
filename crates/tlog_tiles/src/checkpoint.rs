@@ -152,7 +152,8 @@ impl Checkpoint {
         &self.extension
     }
 
-    /// Return a new checkpoint with the given arguments.
+    /// Return a new checkpoint with the given arguments. The items in
+    /// `extensions` MUST NOT be empty or contain a newline.
     ///
     /// # Errors
     ///
@@ -162,29 +163,27 @@ impl Checkpoint {
         origin: &str,
         size: u64,
         hash: Hash,
-        extension: &str,
+        extensions: &[&str],
     ) -> Result<Self, MalformedCheckpointError> {
         if origin.is_empty() {
             return Err(MalformedCheckpointError);
         }
 
-        let mut rest = extension;
-        while !rest.is_empty() {
-            if let Some((before, after)) = rest.split_once('\n') {
-                if before.is_empty() {
-                    return Err(MalformedCheckpointError);
-                }
-                rest = after;
-            } else {
-                return Err(MalformedCheckpointError);
-            }
+        if extensions.iter().any(|e| e.is_empty() || e.contains('\n')) {
+            return Err(MalformedCheckpointError);
         }
+
+        let extension = if extensions.is_empty() {
+            String::new()
+        } else {
+            extensions.join("\n") + "\n"
+        };
 
         Ok(Self {
             origin: origin.to_string(),
             size,
             hash,
-            extension: extension.to_string(),
+            extension,
         })
     }
 
@@ -251,11 +250,6 @@ impl Checkpoint {
                 Err(_) => return Err(MalformedCheckpointError),
             }
         }
-        let extension = if extensions.is_empty() {
-            String::new()
-        } else {
-            extensions.join("\n") + "\n"
-        };
 
         let Ok(n) = n_str.parse::<u64>() else {
             return Err(MalformedCheckpointError);
@@ -268,7 +262,12 @@ impl Checkpoint {
             return Err(MalformedCheckpointError);
         };
 
-        Self::new(&origin, n, hash, &extension)
+        Self::new(
+            &origin,
+            n,
+            hash,
+            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+        )
     }
 
     /// Returns an encoded checkpoint.
@@ -456,14 +455,10 @@ impl TreeWithTimestamp {
     /// # Errors
     ///
     /// Returns an error if signing fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
     pub fn sign(
         &self,
         origin: &str,
-        extension: &str,
+        extensions: &[&str],
         signers: &[&dyn CheckpointSigner],
         rng: &mut impl Rng,
     ) -> Result<Vec<u8>, TlogError> {
@@ -472,7 +467,7 @@ impl TreeWithTimestamp {
         signers.shuffle(rng);
 
         // Construct the checkpoint with no extension lines
-        let checkpoint = Checkpoint::new(origin, self.size, self.hash, extension)?;
+        let checkpoint = Checkpoint::new(origin, self.size, self.hash, extensions)?;
 
         // Sign the checkpoint with the given signers
         let sigs = signers
@@ -542,7 +537,7 @@ mod tests {
             "example.com/origin",
             123,
             record_hash(b"hello world"),
-            "abc\ndef\n",
+            &["abc", "def"],
         )
         .unwrap();
         let c2 = Checkpoint::from_bytes(&c.to_bytes()).unwrap();
@@ -639,7 +634,7 @@ mod tests {
             let sk = Ed25519SigningKey::generate(&mut rng);
             Ed25519CheckpointSigner::new("my-signer", sk).unwrap()
         };
-        let checkpoint = tree.sign(origin, "", &[&signer], &mut rng).unwrap();
+        let checkpoint = tree.sign(origin, &[], &[&signer], &mut rng).unwrap();
 
         // Now verify the signed checkpoint
         let verifier = signer.verifier();

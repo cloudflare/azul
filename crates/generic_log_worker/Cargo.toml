@@ -42,3 +42,4 @@ thiserror.workspace = true
 tlog_tiles.workspace = true
 tokio.workspace = true
 worker.workspace = true
+serde_with.workspace = true

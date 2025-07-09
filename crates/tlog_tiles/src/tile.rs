@@ -440,6 +440,14 @@ impl TlogTile {
         TlogTile(Tile::from_index(Self::HEIGHT, index))
     }
 
+    /// Returns the tile of fixed height `h = 8`
+    /// and least width storing the given leaf index.
+    pub fn from_leaf_index(leaf_index: u64) -> Self {
+        // Convert from leaf index to hash storage index on level 0
+        let hash_index = stored_hash_index(0, leaf_index);
+        Self::from_index(hash_index)
+    }
+
     /// Returns the coordinates of the tiles of height `h = 8` that must be
     /// published when publishing from a tree of size `new_tree_size` to replace
     /// a tree of size `old_tree_size`.  (No tiles need to be published for a

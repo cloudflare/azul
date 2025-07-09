@@ -31,15 +31,18 @@ use serde::{Deserialize, Serialize};
 use signed_note::{NoteVerifier, VerifierList};
 use std::collections::HashMap;
 use std::{
+    cell::RefCell,
     cmp::{Ord, Ordering},
     sync::LazyLock,
 };
 use thiserror::Error;
 use tlog_tiles::{
-    tlog, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileIterator, TlogError,
-    TlogTile, TreeProof, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    prove_record, tlog, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile,
+    TileHashReader, TileIterator, TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp,
+    UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
+use worker::Error as WorkerError;
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
@@ -223,6 +226,90 @@ struct TileWithBytes {
     b: Vec<u8>,
 }
 
+/// A fake TileReader that just accumulates the tiles that we'll need for a proof
+#[derive(Default)]
+struct ProofPreparer(RefCell<Vec<TlogTile>>);
+
+impl TileReader for ProofPreparer {
+    fn height(&self) -> u8 {
+        TlogTile::HEIGHT
+    }
+
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+        // Record the tiles we're meant to read. Convert them to tlog tiles,
+        // ensuring their height is always 8
+        *self.0.borrow_mut() = tiles
+            .iter()
+            .map(|t| {
+                if t.height() != TlogTile::HEIGHT {
+                    Err(TlogError::InvalidInput(
+                        "SimpleTlogTileReader cannot read tiles of height not equal to 8"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
+                }
+            })
+            .collect::<Result<Vec<_>, TlogError>>()?;
+
+        // Make a dummy return. This is guaranteed to trigger TlogError::BadMath
+        // in prove_records
+        Ok(Vec::new())
+    }
+
+    // Do nothing; we only use this struct to record tiles
+    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
+}
+
+/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements TileReader
+/// so we can use it for producing inclusion proofs.
+struct SimpleTlogTileReader(HashMap<TlogTile, Vec<u8>>);
+
+impl TileReader for SimpleTlogTileReader {
+    fn height(&self) -> u8 {
+        TlogTile::HEIGHT
+    }
+
+    /// Converts the given tiles into tlog tiles, then reads them from the
+    /// internal hashmap.
+    ///
+    /// # Errors
+    /// Errors if any of given tiles hash height != 8, or is a data tile. Also
+    /// errors if the hash map is missing tiles from the input here.
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+        let mut buf = Vec::with_capacity(HASH_SIZE * TlogTile::FULL_WIDTH as usize);
+
+        for tile in tiles {
+            // Convert the tile to a tlog-tile, ie one where height=8 and data=false
+            if tile.height() != TlogTile::HEIGHT {
+                return Err(TlogError::InvalidInput(
+                    "SimpleTlogTileReader cannot read tiles of height not equal to 8".to_string(),
+                ));
+            }
+            if tile.is_data() {
+                return Err(TlogError::InvalidInput(
+                    "SimpleTlogTileReader cannot read data tiles".to_string(),
+                ));
+            }
+            let tlog_tile = TlogTile::new(tile.level(), tile.level_index(), tile.width(), None);
+
+            // Record the tile's contents
+            let Some(contents) = self.0.get(&tlog_tile) else {
+                return Err(TlogError::InvalidInput(format!(
+                    "SimpleTlogTileReader cannot find {}",
+                    tlog_tile.path()
+                )));
+            };
+            buf.push(contents.clone());
+        }
+
+        Ok(buf)
+    }
+
+    // Do nothing; we only use this struct to read tiles
+    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
+}
+
 /// An error that can occur when creating a log.
 #[derive(Error, Debug)]
 pub(crate) enum CreateError {
@@ -266,9 +353,16 @@ pub(crate) async fn create_log(
         .iter()
         .map(AsRef::as_ref)
         .collect::<Vec<_>>();
+    // Construct the checkpoint extension
+    let extensions = (config.checkpoint_extension)(timestamp);
 
     let sth = tree
-        .sign(&config.origin, "", &dyn_signers, &mut rand::thread_rng())
+        .sign(
+            &config.origin,
+            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &dyn_signers,
+            &mut rand::thread_rng(),
+        )
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
@@ -444,6 +538,16 @@ impl SequenceState {
         })
     }
 
+    /// Returns the current number of leaves in the tree
+    pub(crate) fn num_leaves(&self) -> u64 {
+        self.tree.size()
+    }
+
+    /// Returns the current checkpoint
+    pub(crate) fn checkpoint(&self) -> &[u8] {
+        &self.checkpoint
+    }
+
     /// Proves inclusion of the last leaf in the current tree
     pub(crate) fn prove_inclusion_of_last_elem(&self) -> RecordProof {
         let tree_size = self.tree.size();
@@ -469,6 +573,62 @@ impl SequenceState {
             overlay: &HashMap::default(),
         };
         tlog::prove_tree(tree_size, tree_size - 1, &reader)
+    }
+
+    /// Returns an inclusion proof for the given leaf index
+    ///
+    /// # Errors
+    /// Errors when the leaf index equals or exceeds the number of leaves, or
+    /// the desired tiles do not exist as bucket objects.
+    pub async fn prove_inclusion(
+        &self,
+        object: &impl ObjectBackend,
+        leaf_index: u64,
+    ) -> Result<RecordProof, WorkerError> {
+        // Get the size of the tree
+        let num_leaves = self.tree.size();
+        let tree_hash = *self.tree.hash();
+
+        if leaf_index >= num_leaves {
+            return Err(WorkerError::RustError(
+                "leaf index exceeds number of leaves in the tree".to_string(),
+            ));
+        }
+
+        let mut all_tile_data = HashMap::new();
+
+        // Make a fake proof using ProofPreparer to get all the tiles we need
+        // TODO: This seems useful. We can probably move this into the tlog_tiles crate
+        let tiles_to_fetch = {
+            let tile_reader = ProofPreparer::default();
+            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
+            // ProofPreparer is guaranteed to make prove_record return a BadMath
+            // error. This is fine, because it already collected the data we
+            // needed
+            let _ = prove_record(num_leaves, leaf_index, &hash_reader);
+            tile_reader.0.into_inner()
+        };
+
+        // Fetch all the tiles we need for a proof
+        for tile in tiles_to_fetch {
+            let Some(tile_data) = object.fetch(&tile.path()).await? else {
+                return Err(WorkerError::RustError(format!(
+                    "missing tile for inclusion proof {}",
+                    tile.path()
+                )));
+            };
+            all_tile_data.insert(tile, tile_data);
+        }
+
+        // Now make the proof
+        let proof = {
+            // Put the recorded tiles into the appropriate Reader structs for prove_record()
+            let tile_reader = SimpleTlogTileReader(all_tile_data);
+            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
+            prove_record(num_leaves, leaf_index, &hash_reader)
+                .map_err(|e| WorkerError::RustError(e.to_string()))?
+        };
+        Ok(proof)
     }
 }
 
@@ -549,6 +709,32 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     }
 }
 
+/// Returns the given `SequenceState` if it's defined. If not, it loads the
+/// sequence state and then returns it.
+///
+/// # Errors
+/// Errors when the log has not been created, or if recovery fails.
+pub(crate) async fn unwrap_or_load_sequence_state<'a, L: LogEntry>(
+    state: &'a mut Option<SequenceState>,
+    config: &SequencerConfig,
+    object: &impl ObjectBackend,
+    lock: &impl LockBackend,
+    metrics: &SequencerMetrics,
+) -> Result<&'a mut SequenceState, anyhow::Error> {
+    if let Some(s) = state {
+        Ok(s)
+    } else {
+        match SequenceState::load::<L>(config, object, lock).await {
+            Ok(s) => Ok(state.insert(s)),
+            Err(e) => {
+                metrics.seq_count.with_label_values(&["fatal"]).inc();
+                error!("{}: Fatal sequencing error {e}", config.name);
+                bail!(e);
+            }
+        }
+    }
+}
+
 /// Sequences the current pool of pending entries in the ephemeral state.
 pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &mut PoolState<L::Pending>,
@@ -560,18 +746,8 @@ pub(crate) async fn sequence<L: LogEntry>(
     metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
     // Retrieve old sequencing state.
-    let old = if let Some(s) = sequence_state {
-        s
-    } else {
-        match SequenceState::load::<L>(config, object, lock).await {
-            Ok(s) => sequence_state.insert(s),
-            Err(e) => {
-                metrics.seq_count.with_label_values(&["fatal"]).inc();
-                error!("{}: Fatal sequencing error {e}", config.name);
-                bail!(e);
-            }
-        }
-    };
+    let old =
+        unwrap_or_load_sequence_state::<L>(sequence_state, config, object, lock, metrics).await?;
 
     let Some(entries) = pool_state.take(
         old.tree.size(),
@@ -801,14 +977,22 @@ async fn sequence_entries<L: LogEntry>(
         .map(AsRef::as_ref)
         .collect::<Vec<_>>();
 
+    // Construct the checkpoint extensions
+    let extensions = (config.checkpoint_extension)(timestamp);
+
     let new_checkpoint = tree
-        .sign(&config.origin, "", &dyn_signers, &mut rand::thread_rng())
+        .sign(
+            &config.origin,
+            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &dyn_signers,
+            &mut rand::thread_rng(),
+        )
         .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
 
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, &sequence_state.checkpoint, &new_checkpoint)
+    lock.swap(CHECKPOINT_KEY, sequence_state.checkpoint(), &new_checkpoint)
         .await
         .map_err(|e| {
             SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
@@ -1220,7 +1404,9 @@ mod tests {
     use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::{cell::RefCell, time::Duration};
-    use tlog_tiles::{Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile};
+    use tlog_tiles::{
+        check_record, check_tree, Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile,
+    };
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -1236,6 +1422,8 @@ mod tests {
     fn sequence_one_leaf(n: u64) {
         let mut log = TestLog::new();
         for i in 0..n {
+            let old_tree_hash = log.sequence_state.as_ref().map(|s| s.tree.hash().clone());
+
             let res = log.add_certificate();
             log.sequence().unwrap();
             // Wait until sequencing completes for this entry's pool.
@@ -1244,20 +1432,60 @@ mod tests {
             log.check(i + 1).unwrap();
 
             // Check we can make proofs
-            log.sequence_state
-                .as_ref()
-                .unwrap()
-                .prove_inclusion_of_last_elem();
-            // Can't prove consistency with a size-0 subtree
+            let sequence_state = log.sequence_state.as_ref().unwrap();
+            let new_tree_hash = *sequence_state.tree.hash();
+            let tree_size = i + 1;
+            let inc_proof = sequence_state.prove_inclusion_of_last_elem();
+            // Verify the inclusion proof
+            let last_hash: Hash = {
+                // Get the rightmost leaf tile, then extract the last hash from it
+                let leaf_edge = &sequence_state.edge_tiles.get(&0u8).unwrap().b;
+                Hash(leaf_edge[leaf_edge.len() - HASH_SIZE..].try_into().unwrap())
+            };
+            check_record(&inc_proof, tree_size, new_tree_hash, leaf_index, last_hash).unwrap();
+
+            // Make a consistency proof. Just can't do it with a size-0 subtree
             if i > 0 {
-                log.sequence_state
-                    .as_ref()
-                    .unwrap()
-                    .prove_consistency_of_single_append()
-                    .unwrap();
+                let consistency_proof =
+                    sequence_state.prove_consistency_of_single_append().unwrap();
+                // Verify the proof
+                check_tree(
+                    &consistency_proof,
+                    tree_size,
+                    new_tree_hash,
+                    tree_size - 1,
+                    old_tree_hash.unwrap(),
+                )
+                .unwrap()
             }
         }
+        // Check that the static CT log is valid
         log.check(n).unwrap();
+
+        // Check that we can make an inclusion proof for every leaf in the tree
+        let sequence_state = log.sequence_state.as_ref().unwrap();
+        let tree_hash = *sequence_state.tree.hash();
+        for i in 0..n {
+            // Compute the inclusion proof for leaf i
+            let proof = block_on(sequence_state.prove_inclusion(&log.object, i)).unwrap();
+            // Verify the inclusion proof. We need the leaf hash
+            let leaf_hash = {
+                // Get the tile the leaf belongs to, and correct the width by getting the 0th parent
+                let leaf_tile = TlogTile::from_leaf_index(i).parent(0, n).unwrap();
+                let leaf_tile_data = block_on(log.object.fetch(&leaf_tile.path()))
+                    .unwrap()
+                    .unwrap();
+                // Extract the correct hash from the tile
+                let leaf_tile_idx = (i % TlogTile::FULL_WIDTH as u64) as usize;
+                Hash(
+                    leaf_tile_data[HASH_SIZE * leaf_tile_idx..HASH_SIZE * (leaf_tile_idx + 1)]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            // Verify the inclusion proof
+            check_record(&proof, n, tree_hash, i, leaf_hash).unwrap();
+        }
     }
 
     #[test]
@@ -1294,6 +1522,8 @@ mod tests {
                 .unwrap()
                 .prove_consistency_of_single_append()
                 .unwrap();
+            // It's annoying to verify these proofs right here. See
+            // sequence_one_leaf() for the verifications
         }
         log.check(5 + 500 * 3000).unwrap();
     }
@@ -2171,11 +2401,14 @@ mod tests {
                         .unwrap();
                 vec![Box::new(signer), Box::new(witness)]
             };
+            // Don't use checkpoint extensions
+            let checkpoint_extension = Box::new(|_| vec![]);
 
             let config = SequencerConfig {
                 name: "TestLog".to_string(),
                 origin,
                 checkpoint_signers,
+                checkpoint_extension,
                 sequence_interval: Duration::from_secs(1),
                 max_sequence_skips: 0,
                 enable_dedup: true,

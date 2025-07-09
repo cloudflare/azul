@@ -10,13 +10,13 @@ use generic_log_worker::{
     get_durable_object_name, load_public_bucket, GenericSequencer, SequencerConfig,
 };
 use prometheus::Registry;
-use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry};
+use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry};
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object]
-struct Sequencer(GenericSequencer<StaticCTPendingLogEntry>);
+struct Sequencer(GenericSequencer<StaticCTLogEntry>);
 
 #[durable_object]
 impl DurableObject for Sequencer {
@@ -32,6 +32,9 @@ impl DurableObject for Sequencer {
             .trim_start_matches("https://")
             .trim_end_matches('/');
         let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
+
+        // We don't use checkpoint extensions for CT
+        let checkpoint_extension = Box::new(|_| vec![]);
 
         let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
             let signing_key = load_signing_key(&env, &name).unwrap().clone();
@@ -54,6 +57,7 @@ impl DurableObject for Sequencer {
             name,
             origin: origin.to_string(),
             checkpoint_signers,
+            checkpoint_extension,
             sequence_interval,
             max_sequence_skips: params.max_sequence_skips,
             enable_dedup: params.enable_dedup,
@@ -68,6 +72,6 @@ impl DurableObject for Sequencer {
     }
 
     async fn alarm(&mut self) -> Result<Response> {
-        self.0.alarm::<StaticCTLogEntry>().await
+        self.0.alarm().await
     }
 }
