@@ -18,7 +18,9 @@ use prometheus::{Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
-use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntry, RecordProof};
+use tlog_tiles::{
+    CheckpointSigner, LeafIndex, LogEntry, PendingLogEntry, RecordProof, UnixTimestamp,
+};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
@@ -47,7 +49,7 @@ pub struct SequencerConfig {
     pub checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     /// A function that takes a Unix timestamp in milliseconds and returns
     /// extension lines to be included in the checkpoint
-    pub checkpoint_extension: Box<dyn Fn(u64) -> Vec<String>>,
+    pub checkpoint_extension: Box<dyn Fn(UnixTimestamp) -> Vec<String>>,
     pub sequence_interval: Duration,
     pub max_sequence_skips: usize,
     pub sequence_skip_threshold_millis: Option<u64>,
@@ -57,7 +59,7 @@ pub struct SequencerConfig {
 /// GET query structure for the sequencer's /prove_inclusion endpoint
 #[derive(Serialize, Deserialize)]
 pub struct ProveInclusionQuery {
-    pub leaf_index: u64,
+    pub leaf_index: LeafIndex,
 }
 
 /// GET response structure for the sequencer's /prove_inclusion endpoint
@@ -263,7 +265,7 @@ impl<L: LogEntry> GenericSequencer<L> {
             .collect::<Vec<_>>()
     }
 
-    /// Returns the number of entires in this log
+    /// Returns the number of entries in this log
     pub fn log_size(&self) -> Result<u64, WorkerError> {
         if let Some(s) = self.sequence_state.as_ref() {
             Ok(s.num_leaves())
@@ -343,7 +345,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     ///
     /// # Errors
     /// Errors when sequencer state has not been loaded
-    pub fn prove_inclusion_of_last_elem(&mut self) -> Result<RecordProof, WorkerError> {
+    pub fn prove_inclusion_of_last_elem(&self) -> Result<RecordProof, WorkerError> {
         if let Some(s) = self.sequence_state.as_ref() {
             Ok(s.prove_inclusion_of_last_elem())
         } else {

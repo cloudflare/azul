@@ -232,7 +232,7 @@ struct ProofPreparer(RefCell<Vec<TlogTile>>);
 
 impl TileReader for ProofPreparer {
     fn height(&self) -> u8 {
-        8
+        TlogTile::HEIGHT
     }
 
     fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
@@ -241,7 +241,7 @@ impl TileReader for ProofPreparer {
         *self.0.borrow_mut() = tiles
             .iter()
             .map(|t| {
-                if t.height() != 8 {
+                if t.height() != TlogTile::HEIGHT {
                     Err(TlogError::InvalidInput(
                         "SimpleTlogTileReader cannot read tiles of height not equal to 8"
                             .to_string(),
@@ -267,7 +267,7 @@ struct SimpleTlogTileReader(HashMap<TlogTile, Vec<u8>>);
 
 impl TileReader for SimpleTlogTileReader {
     fn height(&self) -> u8 {
-        8
+        TlogTile::HEIGHT
     }
 
     /// Converts the given tiles into tlog tiles, then reads them from the
@@ -277,11 +277,11 @@ impl TileReader for SimpleTlogTileReader {
     /// Errors if any of given tiles hash height != 8, or is a data tile. Also
     /// errors if the hash map is missing tiles from the input here.
     fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
-        let mut buf = Vec::with_capacity(32 * (1 << self.height()));
+        let mut buf = Vec::with_capacity(HASH_SIZE * TlogTile::FULL_WIDTH as usize);
 
         for tile in tiles {
             // Convert the tile to a tlog-tile, ie one where height=8 and data=false
-            if tile.height() != 8 {
+            if tile.height() != TlogTile::HEIGHT {
                 return Err(TlogError::InvalidInput(
                     "SimpleTlogTileReader cannot read tiles of height not equal to 8".to_string(),
                 ));
@@ -1454,7 +1454,7 @@ mod tests {
             let last_hash: Hash = {
                 // Get the rightmost leaf tile, then extract the last hash from it
                 let leaf_edge = &sequence_state.edge_tiles.get(&0u8).unwrap().b;
-                Hash(leaf_edge[leaf_edge.len() - 32..].try_into().unwrap())
+                Hash(leaf_edge[leaf_edge.len() - HASH_SIZE..].try_into().unwrap())
             };
             check_record(&inc_proof, tree_size, new_tree_hash, leaf_index, last_hash).unwrap();
 
@@ -1482,7 +1482,7 @@ mod tests {
         for i in 0..n {
             // Compute the inclusion proof for leaf i
             let proof = block_on(sequence_state.prove_inclusion(&log.object, i)).unwrap();
-            // Verify the inclusino proof. We need the leaf hash
+            // Verify the inclusion proof. We need the leaf hash
             let leaf_hash = {
                 // Get the tile the leaf belongs to, and correct the width by getting the 0th parent
                 let leaf_tile = TlogTile::from_leaf_index(i).parent(0, n).unwrap();
@@ -1490,9 +1490,9 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 // Extract the correct hash from the tile
-                let leaf_tile_idx = i as usize % 256;
+                let leaf_tile_idx = (i % TlogTile::FULL_WIDTH as u64) as usize;
                 Hash(
-                    leaf_tile_data[32 * leaf_tile_idx..32 * (leaf_tile_idx + 1)]
+                    leaf_tile_data[HASH_SIZE * leaf_tile_idx..HASH_SIZE * (leaf_tile_idx + 1)]
                         .try_into()
                         .unwrap(),
                 )

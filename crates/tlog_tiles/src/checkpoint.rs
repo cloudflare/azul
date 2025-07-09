@@ -153,7 +153,7 @@ impl Checkpoint {
     }
 
     /// Return a new checkpoint with the given arguments. The items in
-    /// `extensions` MUST NOT contain a newline.
+    /// `extensions` MUST NOT be empty or contain a newline.
     ///
     /// # Errors
     ///
@@ -169,7 +169,7 @@ impl Checkpoint {
             return Err(MalformedCheckpointError);
         }
 
-        if extensions.iter().any(|e| e.is_empty()) {
+        if extensions.iter().any(|e| e.is_empty() || e.contains('\n')) {
             return Err(MalformedCheckpointError);
         }
 
