@@ -118,8 +118,7 @@ use p256::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    NoteError, NoteVerifier, Signature as NoteSignature, SignerError, VerificationError,
-    VerifierError,
+    NoteError, NoteSignature, NoteVerifier, SignerError, VerificationError, VerifierError,
 };
 use std::io::Read;
 use tlog_tiles::{

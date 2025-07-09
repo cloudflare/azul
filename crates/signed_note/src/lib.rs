@@ -588,12 +588,12 @@ pub struct Note {
     /// Text of note. Guaranteed to be well-formed.
     text: Vec<u8>,
     /// Signatures on note. Guaranteed to be well-formed.
-    sigs: Vec<Signature>,
+    sigs: Vec<NoteSignature>,
 }
 
-/// A Signature is a single signature found in a note.
+/// A `NoteSignature` is a single signature found in a note.
 #[derive(Debug, PartialEq, Clone)]
-pub struct Signature {
+pub struct NoteSignature {
     /// Name for the key that generated the signature.
     name: String,
     /// Key ID for the key that generated the signature.
@@ -602,7 +602,7 @@ pub struct Signature {
     sig: Vec<u8>,
 }
 
-impl Signature {
+impl NoteSignature {
     /// Returns a new signature from the given name and base64-encoded signature string.
     ///
     /// # Errors
@@ -637,7 +637,7 @@ impl Signature {
         }
         let id = u32::from_be_bytes(sig[..4].try_into().unwrap());
         let sig = &sig[4..];
-        Signature::new(name.to_owned(), id, sig.to_owned())
+        NoteSignature::new(name.to_owned(), id, sig.to_owned())
     }
 
     /// Return a signature's name.
@@ -691,7 +691,7 @@ impl Note {
     /// Returns a [`NoteError::MalformedNote`] if the text is larger than
     /// we're willing to parse, cannot be decoded as UTF-8, or contains
     /// any non-newline ASCII control characters.
-    pub fn new(text: &[u8], existing_sigs: &[Signature]) -> Result<Self, NoteError> {
+    pub fn new(text: &[u8], existing_sigs: &[NoteSignature]) -> Result<Self, NoteError> {
         // Set some upper limit on what we're willing to process.
         if text.len() > MAX_NOTE_SIZE {
             return Err(NoteError::MalformedNote);
@@ -745,11 +745,11 @@ impl Note {
 
         let sigs = sigs.strip_suffix("\n").ok_or(NoteError::MalformedNote)?;
 
-        let mut parsed_sigs: Vec<Signature> = Vec::new();
+        let mut parsed_sigs: Vec<NoteSignature> = Vec::new();
         let mut num_sig = 0;
 
         for line in sigs.split('\n') {
-            let sig = Signature::from_bytes(line.as_bytes())?;
+            let sig = NoteSignature::from_bytes(line.as_bytes())?;
             num_sig += 1;
             if num_sig > MAX_NOTE_SIGNATURES {
                 return Err(NoteError::MalformedNote);
@@ -779,7 +779,7 @@ impl Note {
     pub fn verify(
         &self,
         known: &impl Verifiers,
-    ) -> Result<(Vec<Signature>, Vec<Signature>), NoteError> {
+    ) -> Result<(Vec<NoteSignature>, Vec<NoteSignature>), NoteError> {
         let mut verified_sigs = Vec::new();
         let mut unverified_sigs = Vec::new();
         let mut seen = BTreeSet::new();
@@ -840,7 +840,7 @@ impl Note {
                 return Err(NoteError::InvalidSigner);
             }
             let sig = s.sign(&self.text)?;
-            new_sigs.push(Signature::new(name.to_owned(), id, sig)?);
+            new_sigs.push(NoteSignature::new(name.to_owned(), id, sig)?);
         }
 
         // Remove existing signatures that have been replaced by new ones.
@@ -970,7 +970,7 @@ mod tests {
         // Check that existing signature is replaced by new one.
         let mut n = Note::new(
             text,
-            &[Signature::new("PeterNeumann".into(), 0xc74f_20a3, vec![]).unwrap()],
+            &[NoteSignature::new("PeterNeumann".into(), 0xc74f_20a3, vec![]).unwrap()],
         )
         .unwrap();
         n.add_sigs(&[&signer]).unwrap();
@@ -983,7 +983,7 @@ mod tests {
         assert!(matches!(err, NoteError::MalformedNote));
 
         // Attempt to create signature with bad name.
-        let err = Signature::new("a+b".into(), 0, vec![]).unwrap_err();
+        let err = NoteSignature::new("a+b".into(), 0, vec![]).unwrap_err();
         assert!(matches!(err, NoteError::MalformedNote));
 
         // Attempt to sign with bad signer.
@@ -1027,8 +1027,8 @@ mod tests {
         let peter_sig = "— PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n";
         let enoch_sig = "— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5n2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ=\n";
 
-        let peter = Signature::from_bytes(peter_sig.trim_end().as_bytes()).unwrap();
-        let enoch = Signature::from_bytes(enoch_sig.trim_end().as_bytes()).unwrap();
+        let peter = NoteSignature::from_bytes(peter_sig.trim_end().as_bytes()).unwrap();
+        let enoch = NoteSignature::from_bytes(enoch_sig.trim_end().as_bytes()).unwrap();
 
         // Check one signature verified, one not.
         let n = Note::from_bytes(format!("{text}\n{peter_sig}{enoch_sig}").as_bytes()).unwrap();
@@ -1091,7 +1091,7 @@ mod tests {
         );
 
         // Duplicated verified and unverified signatures.
-        let enoch_abcd = Signature::from_bytes("— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5nABCD2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ="
+        let enoch_abcd = NoteSignature::from_bytes("— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5nABCD2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ="
             .as_bytes(),
         )
         .unwrap();
