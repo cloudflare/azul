@@ -308,16 +308,6 @@ impl<L: LogEntry> GenericSequencer<L> {
         }
     }
 
-    /// Does a compare-and-swap of checkpoints. Useful for updating a checkpoint
-    /// to include new cosignatures
-    ///
-    /// # Errors
-    /// Errors when `old` doesn't match the current checkpoint, or if fetching
-    /// or setting storage failed.
-    pub async fn swap_checkpoint(&self, old: &[u8], new: &[u8]) -> Result<(), WorkerError> {
-        log_ops::swap_checkpoint(&self.do_state, old, new).await
-    }
-
     /// Returns an inclusion proof for the given leaf index
     ///
     /// # Errors
