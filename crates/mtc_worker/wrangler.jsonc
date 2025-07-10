@@ -16,21 +16,21 @@
             "workers_dev": true,
             "kv_namespaces": [
                 {
-                    "id": "3a23691917c844d59aea47fdf964850f", // REPLACE ME
+                    "id": "8d57aa29bcc646e6959d6bbcbca415d2",
                     "binding": "cache_dev1"
                 },
                 {
-                    "id": "38045c90369140b091b3b68451dc6c29", // REPLACE ME
+                    "id": "4f1c6619ffa8444ea8e78a05e70d36e6",
                     "binding": "cache_dev2"
                 }
             ],
             "r2_buckets": [
                 {
-                    "bucket_name": "static-ct-public-dev1",
+                    "bucket_name": "mtc-public-dev1",
                     "binding": "public_dev1"
                 },
                 {
-                    "bucket_name": "static-ct-public-dev2",
+                    "bucket_name": "mtc-public-dev2",
                     "binding": "public_dev2"
                 }
             ],
