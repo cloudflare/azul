@@ -266,7 +266,7 @@ impl Checkpoint {
             &origin,
             n,
             hash,
-            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
         )
     }
 

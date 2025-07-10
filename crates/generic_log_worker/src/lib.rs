@@ -80,28 +80,6 @@ pub fn get_durable_object_stub(
     }
 }
 
-/// Retrieve the
-/// [name](https://developers.cloudflare.com/durable-objects/api/id/#name) that
-/// was used to create a Durable Object Id with `id_from_name`. The signature of
-/// this function is a little funny since the only way to access the `State`'s
-/// inner `DurableObjectState` is via the `_inner()` method which takes
-/// ownership of the state. Thus, we just re-derive the State from the inner
-/// state and return it in case the calling function still needs it.
-///
-/// # Errors
-///
-/// Returns an error if the 'name' property is not present, for example if the
-/// object was created with a random ID.
-pub fn get_durable_object_name(state: State) -> Result<(State, String)> {
-    let inner_state = state._inner();
-    let id = inner_state.id()?;
-    let obj = js_sys::Object::from(id);
-    let name = js_sys::Reflect::get(&obj, &"name".into())?
-        .as_string()
-        .unwrap_or_default();
-    Ok((State::from(inner_state), name))
-}
-
 /// Return a handle for the public R2 bucket from which to serve this log's
 /// static assets.
 ///

@@ -56,13 +56,13 @@ pub struct SequencerConfig {
     pub enable_dedup: bool,
 }
 
-/// GET query structure for the sequencer's /prove_inclusion endpoint
+/// GET query structure for the sequencer's `/prove_inclusion` endpoint
 #[derive(Serialize, Deserialize)]
 pub struct ProveInclusionQuery {
     pub leaf_index: LeafIndex,
 }
 
-/// GET response structure for the sequencer's /prove_inclusion endpoint
+/// GET response structure for the sequencer's `/prove_inclusion` endpoint
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ProveInclusionResponse {
@@ -263,17 +263,6 @@ impl<L: LogEntry> GenericSequencer<L> {
             .zip(entries_metadata.iter())
             .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
             .collect::<Vec<_>>()
-    }
-
-    /// Returns the number of entries in this log
-    pub fn log_size(&self) -> Result<u64, WorkerError> {
-        if let Some(s) = self.sequence_state.as_ref() {
-            Ok(s.num_leaves())
-        } else {
-            Err(WorkerError::RustError(
-                "cannot get log size of a sequencer with no sequence state".to_string(),
-            ))
-        }
     }
 
     /// Loads the sequence state if it's not already loaded.
