@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::{
     cell::RefCell,
     cmp::{Ord, Ordering},
+    string::String,
     sync::LazyLock,
 };
 use thiserror::Error;
@@ -226,7 +227,7 @@ struct TileWithBytes {
     b: Vec<u8>,
 }
 
-/// A fake TileReader that just accumulates the tiles that we'll need for a proof
+/// A fake `TileReader` that just accumulates the tiles that we'll need for a proof
 #[derive(Default)]
 struct ProofPreparer(RefCell<Vec<TlogTile>>);
 
@@ -241,13 +242,13 @@ impl TileReader for ProofPreparer {
         *self.0.borrow_mut() = tiles
             .iter()
             .map(|t| {
-                if t.height() != TlogTile::HEIGHT {
+                if t.height() == TlogTile::HEIGHT {
+                    Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
+                } else {
                     Err(TlogError::InvalidInput(
                         "SimpleTlogTileReader cannot read tiles of height not equal to 8"
                             .to_string(),
                     ))
-                } else {
-                    Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
                 }
             })
             .collect::<Result<Vec<_>, TlogError>>()?;
@@ -261,7 +262,7 @@ impl TileReader for ProofPreparer {
     fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
 }
 
-/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements TileReader
+/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements `TileReader`
 /// so we can use it for producing inclusion proofs.
 struct SimpleTlogTileReader(HashMap<TlogTile, Vec<u8>>);
 
@@ -359,7 +360,7 @@ pub(crate) async fn create_log(
     let sth = tree
         .sign(
             &config.origin,
-            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
             &dyn_signers,
             &mut rand::thread_rng(),
         )
@@ -536,11 +537,6 @@ impl SequenceState {
             tree: TreeWithTimestamp::new(c.size(), *c.hash(), timestamp),
             checkpoint: stored_checkpoint,
         })
-    }
-
-    /// Returns the current number of leaves in the tree
-    pub(crate) fn num_leaves(&self) -> u64 {
-        self.tree.size()
     }
 
     /// Returns the current checkpoint
@@ -983,7 +979,7 @@ async fn sequence_entries<L: LogEntry>(
     let new_checkpoint = tree
         .sign(
             &config.origin,
-            &extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
+            &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
             &dyn_signers,
             &mut rand::thread_rng(),
         )
@@ -1422,7 +1418,7 @@ mod tests {
     fn sequence_one_leaf(n: u64) {
         let mut log = TestLog::new();
         for i in 0..n {
-            let old_tree_hash = log.sequence_state.as_ref().map(|s| s.tree.hash().clone());
+            let old_tree_hash = log.sequence_state.as_ref().map(|s| *s.tree.hash());
 
             let res = log.add_certificate();
             log.sequence().unwrap();
@@ -1456,7 +1452,7 @@ mod tests {
                     tree_size - 1,
                     old_tree_hash.unwrap(),
                 )
-                .unwrap()
+                .unwrap();
             }
         }
         // Check that the static CT log is valid
@@ -1476,7 +1472,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 // Extract the correct hash from the tile
-                let leaf_tile_idx = (i % TlogTile::FULL_WIDTH as u64) as usize;
+                let leaf_tile_idx = usize::try_from(i % u64::from(TlogTile::FULL_WIDTH)).unwrap();
                 Hash(
                     leaf_tile_data[HASH_SIZE * leaf_tile_idx..HASH_SIZE * (leaf_tile_idx + 1)]
                         .try_into()

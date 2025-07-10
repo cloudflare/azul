@@ -6,9 +6,7 @@
 use std::time::Duration;
 
 use crate::{load_signing_key, load_witness_key, CONFIG};
-use generic_log_worker::{
-    get_durable_object_name, load_public_bucket, GenericSequencer, SequencerConfig,
-};
+use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
 use mtc_api::MtcLogEntry;
 use prometheus::Registry;
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
@@ -21,8 +19,15 @@ struct Sequencer(GenericSequencer<MtcLogEntry>);
 #[durable_object]
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
-        let (state, name) = get_durable_object_name(state).unwrap();
-        let params = &CONFIG.logs[&name];
+        // Find the Durable Object name by enumerating all possibilities.
+        // TODO after update to worker > 0.6.0 use ObjectId::equals for comparison.
+        let id = state.id().to_string();
+        let namespace = env.durable_object("SEQUENCER").unwrap();
+        let (name, params) = CONFIG
+            .logs
+            .iter()
+            .find(|(name, _)| id == namespace.id_from_name(name).unwrap().to_string())
+            .expect("unable to find sequencer name");
 
         // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
         // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
@@ -37,8 +42,8 @@ impl DurableObject for Sequencer {
         let checkpoint_extension = Box::new(|_| vec![]);
 
         let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
-            let signing_key = load_signing_key(&env, &name).unwrap().clone();
-            let witness_key = load_witness_key(&env, &name).unwrap().clone();
+            let signing_key = load_signing_key(&env, name).unwrap().clone();
+            let witness_key = load_witness_key(&env, name).unwrap().clone();
 
             // Make the checkpoint signers from the secret keys and put them in a vec
             let signer = Ed25519CheckpointSigner::new(origin, signing_key)
@@ -50,11 +55,11 @@ impl DurableObject for Sequencer {
 
             vec![Box::new(signer), Box::new(witness)]
         };
-        let bucket = load_public_bucket(&env, &name).unwrap();
+        let bucket = load_public_bucket(&env, name).unwrap();
         let registry = Registry::new();
 
         let config = SequencerConfig {
-            name,
+            name: name.to_string(),
             origin: origin.to_string(),
             checkpoint_signers,
             checkpoint_extension,

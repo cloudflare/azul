@@ -1,7 +1,5 @@
 use crate::CONFIG;
-use generic_log_worker::{
-    get_durable_object_name, get_durable_object_stub, load_cache_kv, BatcherConfig, GenericBatcher,
-};
+use generic_log_worker::{get_durable_object_stub, load_cache_kv, BatcherConfig, GenericBatcher};
 use static_ct_api::StaticCTPendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -12,11 +10,27 @@ struct Batcher(GenericBatcher<StaticCTPendingLogEntry>);
 #[durable_object]
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
-        let (_, object_name) = get_durable_object_name(state).unwrap();
-        // Get the log name from the batcher name (see 'get_durable_object_stub'
-        // for how the batcher name is derived).
-        let name = object_name.rsplit_once('_').unwrap().0;
-        let params = &CONFIG.logs[name];
+        // Find the Durable Object name by enumerating all possibilities.
+        // TODO after update to worker > 0.6.0 use ObjectId::equals for comparison.
+        let id = state.id().to_string();
+        let namespace = env.durable_object("BATCHER").unwrap();
+        let (name, params) = CONFIG
+            .logs
+            .iter()
+            .find(|(name, params)| {
+                for shard_id in 0..params.num_batchers {
+                    if id
+                        == namespace
+                            .id_from_name(&format!("{name}_{shard_id:x}"))
+                            .unwrap()
+                            .to_string()
+                    {
+                        return true;
+                    }
+                }
+                false
+            })
+            .expect("unable to find batcher name");
         let kv = load_cache_kv(&env, name).unwrap();
         let sequencer = get_durable_object_stub(
             &env,
