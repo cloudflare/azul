@@ -331,6 +331,15 @@ pub(crate) async fn create_log(
     lock: &impl LockBackend,
 ) -> Result<(), CreateError> {
     let name = &config.name;
+
+    // To reset a dev log without deleting the existing checkpoints from DO
+    // storage and R2, you can temporarily disable the below checks for the
+    // specific targeted log name. Make sure to clean up afterwards or the log
+    // will keep reseting every time the sequencer DO is re-initialized.
+    //
+    //     if name != "dev1" {
+    //         <check if log exists>
+    //     }
     if lock.get(CHECKPOINT_KEY).await.is_ok() {
         return Err(CreateError::LogExists);
     }
