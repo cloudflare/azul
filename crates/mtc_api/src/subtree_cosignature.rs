@@ -120,6 +120,7 @@ impl MTCSubtreeNoteVerifier {
     }
 }
 
+/// Support verifying signed note signatures created using the subtree cosigner.
 impl NoteVerifier for MTCSubtreeNoteVerifier {
     fn name(&self) -> &KeyName {
         &self.name

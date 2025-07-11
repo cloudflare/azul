@@ -21,7 +21,7 @@ use worker::*;
 
 pub struct GenericBatcher<E: PendingLogEntry> {
     config: BatcherConfig,
-    kv: KvStore,
+    kv: Option<KvStore>,
     sequencer: Stub,
     batch: Batch<E>,
     in_flight: usize,
@@ -54,7 +54,7 @@ impl<E: PendingLogEntry> Default for Batch<E> {
 
 impl<E: PendingLogEntry> GenericBatcher<E> {
     /// Returns a new batcher with the given config.
-    pub fn new(config: BatcherConfig, kv: KvStore, sequencer: Stub) -> Self {
+    pub fn new(config: BatcherConfig, kv: Option<KvStore>, sequencer: Stub) -> Self {
         Self {
             config,
             kv,
@@ -190,17 +190,18 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
         batch.done.send_modify(|v| v.clone_from(&sequenced_entries));
 
         // Write sequenced entries to the long-term deduplication cache in Workers KV.
-        let futures = sequenced_entries
-            .into_iter()
-            .map(|(k, v)| {
-                Ok(self
-                    .kv
-                    .put(&BASE64_STANDARD.encode(k), "")?
-                    .metadata::<SequenceMetadata>(v)?
-                    .execute())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        join_all(futures).await;
+        if let Some(kv) = &self.kv {
+            let futures = sequenced_entries
+                .into_iter()
+                .map(|(k, v)| {
+                    Ok(kv
+                        .put(&BASE64_STANDARD.encode(k), "")?
+                        .metadata::<SequenceMetadata>(v)?
+                        .execute())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            join_all(futures).await;
+        }
         Ok(())
     }
 }

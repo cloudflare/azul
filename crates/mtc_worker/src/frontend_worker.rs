@@ -173,14 +173,17 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let lookup_key = pending_entry.lookup_key();
 
     // Check if entry is cached and return right away if so.
-    let kv = load_cache_kv(env, name)?;
-    if let Some(metadata) = get_cached_metadata(&kv, &pending_entry, params.enable_dedup).await? {
-        debug!("{name}: Entry is cached");
-        let resp = AddEntryResponse {
-            leaf_index: metadata.0,
-            timestamp: metadata.1,
-        };
-        return Response::from_json(&resp);
+    if params.enable_dedup {
+        if let Some(metadata) =
+            get_cached_metadata(&load_cache_kv(env, name)?, &pending_entry).await?
+        {
+            debug!("{name}: Entry is cached");
+            let resp = AddEntryResponse {
+                leaf_index: metadata.0,
+                timestamp: metadata.1,
+            };
+            return Response::from_json(&resp);
+        }
     }
 
     // Entry is not cached, so we need to sequence it.
@@ -232,10 +235,10 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         return Ok(response);
     }
     let metadata = response.json::<SequenceMetadata>().await?;
-    if params.num_batchers == 0 {
+    if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if put_cache_entry_metadata(&kv, &pending_entry, metadata)
+        if put_cache_entry_metadata(&load_cache_kv(env, name)?, &pending_entry, metadata)
             .await
             .is_err()
         {

@@ -14,16 +14,6 @@
                 "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
             },
             "workers_dev": true,
-            "kv_namespaces": [
-                {
-                    "id": "8d57aa29bcc646e6959d6bbcbca415d2",
-                    "binding": "cache_dev1"
-                },
-                {
-                    "id": "4f1c6619ffa8444ea8e78a05e70d36e6",
-                    "binding": "cache_dev2"
-                }
-            ],
             "r2_buckets": [
                 {
                     "bucket_name": "mtc-public-dev1",
