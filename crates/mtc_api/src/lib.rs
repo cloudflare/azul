@@ -1,3 +1,9 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+mod subtree_cosignature;
+pub use subtree_cosignature::*;
+
 use anyhow::{anyhow, bail, ensure};
 use der::{
     asn1::BitString,

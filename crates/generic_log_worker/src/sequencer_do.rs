@@ -18,6 +18,7 @@ use prometheus::{Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
+use signed_note::KeyName;
 use tlog_tiles::{
     CheckpointSigner, LeafIndex, LogEntry, PendingLogEntry, RecordProof, UnixTimestamp,
 };
@@ -45,7 +46,7 @@ pub struct GenericSequencer<L: LogEntry> {
 /// Configuration for a CT log.
 pub struct SequencerConfig {
     pub name: String,
-    pub origin: String,
+    pub origin: KeyName,
     pub checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     /// A function that takes a Unix timestamp in milliseconds and returns
     /// extension lines to be included in the checkpoint

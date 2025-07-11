@@ -52,6 +52,7 @@ serde_json.workspace = true
 serde_with.workspace = true
 sha2.workspace = true
 static_ct_api.workspace = true
+signed_note.workspace = true
 tlog_tiles.workspace = true
 worker.workspace = true
 x509-verify.workspace = true

@@ -23,10 +23,10 @@
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
 //! use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
-//! use signed_note::{Ed25519NoteVerifier, VerifierList};
-//! use static_ct_api::RFC6962Verifier;
+//! use signed_note::{Ed25519NoteVerifier, VerifierList, KeyName};
+//! use static_ct_api::RFC6962NoteVerifier;
 //!
-//! let origin: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b";
+//! let origin = KeyName::new("static-ct-dev.cloudflareresearch.com/logs/dev2024h2b".into()).unwrap();
 //! let checkpoint: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b
 //! 5
 //! YsndMEZccH1fI4kviHLu/Z1Ye3MgKkDwUHluUAOYuoY=
@@ -43,7 +43,7 @@
 //!         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAES4yrL7jarwxEdSWrJp35uef789UYLma/F0x7bfBpW2KWnN5yuDE5XgeOAKeWM3RpycCZF2xRGAp2iHFCa4PtqA=="
 //!     ).unwrap();
 //!     let ecdsa_vkey = EcdsaVerifyingKey::from_public_key_der(vkey_bytes).unwrap();
-//!     RFC6962Verifier::new(origin, &ecdsa_vkey).unwrap()
+//!     RFC6962NoteVerifier::new(origin.clone(), &ecdsa_vkey).unwrap()
 //! };
 //!
 //! // Witness verification key from `curl <submission_url>/metadata | jq -r ".witness_key"`.
@@ -52,8 +52,8 @@
 //!         "MCowBQYDK2VwAyEARN4KXLGKQrfUUGU1zwbFvEN1AckVY76d4CnuNRc20vI="
 //!     ).unwrap();
 //!     let ed25519_vkey = Ed25519VerifyingKey::from_public_key_der(vkey_bytes).unwrap();
-//!     let ed25519_verifier = signed_note::new_ed25519_verifier_key(origin, &ed25519_vkey);
-//!     Ed25519NoteVerifier::new(&ed25519_verifier).unwrap()
+//!     let ed25519_verifier = signed_note::new_encoded_ed25519_verifier_key(&origin, &ed25519_vkey);
+//!     Ed25519NoteVerifier::new_from_encoded_key(&ed25519_verifier).unwrap()
 //! };
 //!
 //! // Timestamp to use for verification, which must be at least as recent as the timestamp of the checkpoint.
@@ -74,8 +74,8 @@
 //! ```
 //! use base64::prelude::*;
 //! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
-//! use signed_note::{Note, NoteVerifier, VerifierList};
-//! use static_ct_api::RFC6962Verifier;
+//! use signed_note::{Note, NoteVerifier, VerifierList, KeyName};
+//! use static_ct_api::RFC6962NoteVerifier;
 //!
 //!
 //! let checkpoint: &str = "willow.ct.letsencrypt.org/2025h1b
@@ -92,7 +92,7 @@
 //! let rfc6962_vkey = &BASE64_STANDARD.decode("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbNmWXyYsF2pohGOAiNELea6UL4/XioI3w6ChE5Udlos0HUqM7KOHIP9qBuWCVs6VAdtDXrvanmxKq52Whh2+2w==").unwrap();
 //! let rfc6962_vkey = &EcdsaVerifyingKey::from_public_key_der(rfc6962_vkey).unwrap();
 //!
-//! let verifier = RFC6962Verifier::new("willow.ct.letsencrypt.org/2025h1b", rfc6962_vkey).unwrap();
+//! let verifier = RFC6962NoteVerifier::new(KeyName::new("willow.ct.letsencrypt.org/2025h1b".into()).unwrap(), rfc6962_vkey).unwrap();
 //! let n = Note::from_bytes(checkpoint.as_bytes()).unwrap();
 //! let (verified_sigs, _) = n.verify(&VerifierList::new(vec![
 //!     Box::new(verifier.clone()),
@@ -117,9 +117,7 @@ use p256::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use signed_note::{
-    NoteError, NoteSignature, NoteVerifier, SignerError, VerificationError, VerifierError,
-};
+use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use std::io::Read;
 use tlog_tiles::{
     Checkpoint, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PathElem, PendingLogEntry,
@@ -488,36 +486,32 @@ impl Extensions {
     }
 }
 
-/// [`RFC6962Verifier`] is a [`NoteVerifier`] implementation
+/// [`RFC6962NoteVerifier`] is a [`NoteVerifier`] implementation
 /// that verifies a RFC 6962 `TreeHeadSignature` formatted
 /// according to <c2sp.org/static-ct-api>.
 #[derive(Clone)]
-pub struct RFC6962Verifier {
-    name: String,
+pub struct RFC6962NoteVerifier {
+    name: KeyName,
     id: u32,
     verifying_key: EcdsaVerifyingKey,
 }
 
-impl RFC6962Verifier {
-    /// Returns a new [`RFC6962Verifier`] with the given name and verifying key.
+impl RFC6962NoteVerifier {
+    /// Returns a new [`RFC6962NoteVerifier`] with the given name and verifying key.
     ///
     /// # Errors
     ///
-    /// Returns an error if the key name is invalid or if there are encoding issues.
-    pub fn new(name: &str, verifying_key: &EcdsaVerifyingKey) -> Result<Self, VerifierError> {
-        if !signed_note::is_key_name_valid(name) {
-            return Err(VerifierError::Format);
-        }
-
+    /// Returns an error if there are encoding issues.
+    pub fn new(name: KeyName, verifying_key: &EcdsaVerifyingKey) -> Result<Self, NoteError> {
         let pkix = verifying_key
             .to_public_key_der()
-            .map_err(|_| VerifierError::Format)?
+            .map_err(|_| NoteError::Format)?
             .to_vec();
         let key_id = Sha256::digest(&pkix);
 
-        let id = signed_note::key_id(
-            name,
-            &[0x05]
+        let id = signed_note::compute_key_id(
+            &name,
+            &[SignatureType::RFC6962TreeHead as u8]
                 .iter()
                 .chain(key_id.iter())
                 .copied()
@@ -525,15 +519,15 @@ impl RFC6962Verifier {
         );
 
         Ok(Self {
-            name: name.to_string(),
+            name,
             id,
             verifying_key: *verifying_key,
         })
     }
 }
 
-impl NoteVerifier for RFC6962Verifier {
-    fn name(&self) -> &str {
+impl NoteVerifier for RFC6962NoteVerifier {
+    fn name(&self) -> &KeyName {
         &self.name
     }
 
@@ -581,17 +575,14 @@ impl NoteVerifier for RFC6962Verifier {
         self.verifying_key.verify(&sth_bytes, &signature).is_ok()
     }
 
-    fn extract_timestamp_millis(
-        &self,
-        mut sig: &[u8],
-    ) -> Result<Option<UnixTimestamp>, VerificationError> {
+    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<UnixTimestamp>, NoteError> {
         // In a static-ct signed tree head, the timestamp is the first 8 bytes of the sig
         //   https://github.com/C2SP/C2SP/blob/efb68c16664309a68120e37528fa1c046dd1ac09/static-ct-api.md#checkpoints
         // and it's in milliseconds
         //   https://www.rfc-editor.org/rfc/rfc6962.html#section-3.2
         let ts = sig
             .read_u64::<BigEndian>()
-            .map_err(|_| VerificationError::Timestamp)?;
+            .map_err(|_| NoteError::Timestamp)?;
         Ok(Some(ts))
     }
 }
@@ -685,7 +676,7 @@ fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Has
 /// and index from the deduplication cache, the new SCT we produce is identical.
 #[cfg_attr(test, derive(Clone))]
 pub struct StaticCTCheckpointSigner {
-    name: String,
+    name: KeyName,
     id: u32,
     signing_key: EcdsaSigningKey,
 }
@@ -696,15 +687,15 @@ impl StaticCTCheckpointSigner {
     /// # Errors
     ///
     /// Errors if the provided name is invalid.
-    pub fn new(name: &str, signing_key: EcdsaSigningKey) -> Result<Self, SignerError> {
+    pub fn new(name: KeyName, signing_key: EcdsaSigningKey) -> Result<Self, NoteError> {
         // Reuse the verifier code. This compute the correct key ID
         let vk = signing_key.verifying_key();
-        // This checks if the name is invalid. If it is, it returns VerifierError::Format. That's
+        // This checks if the name is invalid. If it is, it returns NoteError::Format. That's
         // actually all it returns on error, so the map_err isn't losing any info.
-        let verifier = RFC6962Verifier::new(name, vk).map_err(|_| SignerError::Format)?;
+        let verifier = RFC6962NoteVerifier::new(name.clone(), vk).map_err(|_| NoteError::Format)?;
 
         Ok(Self {
-            name: name.to_owned(),
+            name,
             id: verifier.id,
             signing_key,
         })
@@ -712,7 +703,7 @@ impl StaticCTCheckpointSigner {
 }
 
 impl CheckpointSigner for StaticCTCheckpointSigner {
-    fn name(&self) -> &str {
+    fn name(&self) -> &KeyName {
         &self.name
     }
 
@@ -756,12 +747,14 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
 
         // Return the note signature. We can unwrap() here because the only cause for error is if
         // the name is invalid, which is checked in the constructor
-        Ok(NoteSignature::new(self.name.clone(), self.id, note_sig).unwrap())
+        Ok(NoteSignature::new(self.name.clone(), self.id, note_sig))
     }
 
     fn verifier(&self) -> Box<dyn NoteVerifier> {
         // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor
-        Box::new(RFC6962Verifier::new(&self.name, self.signing_key.verifying_key()).unwrap())
+        Box::new(
+            RFC6962NoteVerifier::new(self.name.clone(), self.signing_key.verifying_key()).unwrap(),
+        )
     }
 }
 

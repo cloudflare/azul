@@ -16,8 +16,6 @@ pub enum StaticCTError {
     #[error(transparent)]
     Note(#[from] signed_note::NoteError),
     #[error(transparent)]
-    Verification(#[from] signed_note::VerificationError),
-    #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
     Der(#[from] der::Error),
@@ -25,8 +23,6 @@ pub enum StaticCTError {
     X509(#[from] x509_verify::spki::Error),
     #[error("unexpected extension")]
     UnexpectedExtension,
-    #[error(transparent)]
-    Signer(#[from] signed_note::SignerError),
     #[error("malformed")]
     Malformed,
     #[error("missing leaf_index extension")]

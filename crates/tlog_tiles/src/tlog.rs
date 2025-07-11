@@ -474,10 +474,6 @@ pub enum TlogError {
     #[error(transparent)]
     MalformedCheckpoint(#[from] crate::MalformedCheckpointError),
     #[error(transparent)]
-    Verification(#[from] signed_note::VerificationError),
-    #[error(transparent)]
-    Verifier(#[from] signed_note::VerifierError),
-    #[error(transparent)]
     InvalidBase64(#[from] base64::DecodeError),
     #[error(transparent)]
     IO(#[from] std::io::Error),

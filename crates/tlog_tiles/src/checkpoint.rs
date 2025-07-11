@@ -35,7 +35,8 @@ use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
 use rand::{seq::SliceRandom, Rng};
 use sha2::{Digest, Sha256};
 use signed_note::{
-    Ed25519NoteVerifier, Note, NoteError, NoteSignature, NoteVerifier, VerifierList, Verifiers,
+    Ed25519NoteVerifier, KeyName, Note, NoteError, NoteSignature, NoteVerifier, VerifierList,
+    Verifiers,
 };
 use std::{
     fmt,
@@ -282,8 +283,7 @@ impl Checkpoint {
 /// An object that can produce a [note signature](https://github.com/C2SP/C2SP/blob/main/signed-note.md) for a given checkpoint
 pub trait CheckpointSigner {
     /// Returns the server name associated with the key.
-    /// The name must be non-empty and not have any Unicode spaces or pluses.
-    fn name(&self) -> &str;
+    fn name(&self) -> &KeyName;
 
     /// Returns the key ID.
     fn key_id(&self) -> u32;
@@ -295,7 +295,7 @@ pub trait CheckpointSigner {
     /// Errors if the signing fails.
     fn sign(
         &self,
-        timestamp_unix_millis: u64,
+        timestamp_unix_millis: UnixTimestamp,
         checkpoint: &Checkpoint,
     ) -> Result<NoteSignature, NoteError>;
 
@@ -306,7 +306,7 @@ pub trait CheckpointSigner {
     fn verifier(&self) -> Box<dyn NoteVerifier>;
 }
 
-/// Implementation of [`NoteSigner`] that signs with a Ed25519 key.
+/// Implementation of [`CheckpointSigner`] that produces a (non-timestamped) Ed25519 signature (alg 0x01 from <c2sp.org/signed-note>).
 pub struct Ed25519CheckpointSigner {
     v: Ed25519NoteVerifier,
     k: Ed25519SigningKey,
@@ -318,16 +318,16 @@ impl Ed25519CheckpointSigner {
     /// # Errors
     ///
     /// Errors if a verifier cannot be created from the provided signing key.
-    pub fn new(name: &str, k: Ed25519SigningKey) -> Result<Self, TlogError> {
-        let vk = signed_note::new_ed25519_verifier_key(name, &k.verifying_key());
-        // Checks if the key name is valid
-        let v = Ed25519NoteVerifier::new(&vk)?;
-        Ok(Self { v, k })
+    pub fn new(name: KeyName, k: Ed25519SigningKey) -> Result<Self, TlogError> {
+        Ok(Self {
+            v: Ed25519NoteVerifier::new(name, k.verifying_key()),
+            k,
+        })
     }
 }
 
 impl CheckpointSigner for Ed25519CheckpointSigner {
-    fn name(&self) -> &str {
+    fn name(&self) -> &KeyName {
         self.v.name()
     }
 
@@ -340,15 +340,16 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
         // Ed25519 signing cannot fail
         let sig = self.k.try_sign(&msg).unwrap();
 
-        // Return the note signature. We can unwrap() here because the only cause for error is if
-        // the name is invalid, which is checked in the constructor.
-        Ok(NoteSignature::new(self.name().to_string(), self.key_id(), sig.to_vec()).unwrap())
+        // Return the note signature.
+        Ok(NoteSignature::new(
+            self.name().clone(),
+            self.key_id(),
+            sig.to_vec(),
+        ))
     }
 
     fn verifier(&self) -> Box<dyn NoteVerifier> {
-        let vk = signed_note::new_ed25519_verifier_key(self.name(), &self.k.verifying_key());
-        // We can unwrap because it only fails on an invalid key name, but this was checked in the constructor.
-        Box::new(Ed25519NoteVerifier::new(&vk).unwrap())
+        Box::new(self.v.clone())
     }
 }
 
@@ -631,7 +632,7 @@ mod tests {
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
             let sk = Ed25519SigningKey::generate(&mut rng);
-            Ed25519CheckpointSigner::new("my-signer", sk).unwrap()
+            Ed25519CheckpointSigner::new(KeyName::new("my-signer".into()).unwrap(), sk).unwrap()
         };
         let checkpoint = tree.sign(origin, &[], &[&signer], &mut rng).unwrap();
 

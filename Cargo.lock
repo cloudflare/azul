@@ -433,6 +433,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
+ "signed_note",
  "static_ct_api",
  "tlog_tiles",
  "url",
@@ -1399,6 +1400,7 @@ dependencies = [
  "der",
  "ed25519-dalek",
  "length_prefixed",
+ "rand",
  "serde",
  "serde_with",
  "sha2",
@@ -1434,6 +1436,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
+ "signed_note",
  "tlog_tiles",
  "url",
  "worker",
@@ -2249,6 +2252,7 @@ name = "signed_note"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "byteorder",
  "criterion",
  "ed25519-dalek",
  "rand",
@@ -2474,6 +2478,7 @@ name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "byteorder",
  "ed25519-dalek",
  "length_prefixed",
  "rand",

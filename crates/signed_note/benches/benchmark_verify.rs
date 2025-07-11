@@ -23,7 +23,7 @@ fn benchmark_verify(c: &mut Criterion) {
                \n\
                — PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n".as_bytes();
 
-    let verifier = Ed25519NoteVerifier::new(vkey).unwrap();
+    let verifier = Ed25519NoteVerifier::new_from_encoded_key(vkey).unwrap();
 
     c.bench_function("Sig0", |b| {
         b.iter(|| {

@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::{load_signing_key, load_witness_key, CONFIG};
 use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
 use prometheus::Registry;
+use signed_note::KeyName;
 use static_ct_api::{StaticCTCheckpointSigner, StaticCTLogEntry};
 use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
@@ -31,11 +32,15 @@ impl DurableObject for Sequencer {
 
         // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
         // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
-        let origin = params
-            .submission_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/');
+        let origin = KeyName::new(
+            params
+                .submission_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .to_string(),
+        )
+        .expect("invalid origin name");
         let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
 
         // We don't use checkpoint extensions for CT
@@ -46,10 +51,10 @@ impl DurableObject for Sequencer {
             let witness_key = load_witness_key(&env, name).unwrap().clone();
 
             // Make the checkpoint signers from the secret keys and put them in a vec
-            let signer = StaticCTCheckpointSigner::new(origin, signing_key)
+            let signer = StaticCTCheckpointSigner::new(origin.clone(), signing_key)
                 .map_err(|e| format!("could not create static-ct checkpoint signer: {e}"))
                 .unwrap();
-            let witness = Ed25519CheckpointSigner::new(origin, witness_key)
+            let witness = Ed25519CheckpointSigner::new(origin.clone(), witness_key)
                 .map_err(|e| format!("could not create ed25519 checkpoint signer: {e}"))
                 .unwrap();
 
@@ -60,7 +65,7 @@ impl DurableObject for Sequencer {
 
         let config = SequencerConfig {
             name: name.to_string(),
-            origin: origin.to_string(),
+            origin,
             checkpoint_signers,
             checkpoint_extension,
             sequence_interval,
