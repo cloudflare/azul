@@ -2,6 +2,7 @@
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 mod subtree_cosignature;
+use byteorder::{BigEndian, ReadBytesExt};
 pub use subtree_cosignature::*;
 
 use anyhow::{anyhow, bail, ensure};
@@ -38,8 +39,8 @@ use x509_verify::{
     },
 };
 
-// https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids
-//pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.TBD1.TBD2");
+// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
+// as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
 pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.1");
 
@@ -60,64 +61,17 @@ pub struct AddEntryResponse {
     pub timestamp: UnixTimestamp,
 }
 
+/// A wrapper around `TlogTilesPendingLogEntry` that supports auxiliary bootstrap data.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct MerkleTreeCertPendingLogEntry {
+pub struct BootstrapMtcPendingLogEntry {
     /// The serialized bootstrap chain.
     pub bootstrap: Vec<u8>,
 
-    /// The serialized `MerkleTreeCertEntry`.
+    /// An encoded `MerkleTreeCertEntry` wrapped in a generic `TlogTilesPendingLogEntry`.
     pub entry: TlogTilesPendingLogEntry,
 }
 
-#[allow(clippy::large_enum_variant)]
-#[derive(PartialEq, Debug)]
-pub enum MerkleTreeCertEntry {
-    NullEntry,
-    TbsCertEntry(TbsCertificateLogEntry),
-}
-
-impl MerkleTreeCertEntry {
-    /// Encode entry to bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there are issue encoding the entry.
-    pub fn encode(&self) -> Result<Vec<u8>, anyhow::Error> {
-        match &self {
-            Self::NullEntry => Ok(vec![0, 0]),
-            Self::TbsCertEntry(tbs_cert_entry) => {
-                Ok([vec![0, 1], tbs_cert_entry.to_der()?].concat())
-            }
-        }
-    }
-
-    /// Decode entry from bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the entry cannot be decoded.
-    pub fn decode(data: &[u8]) -> Result<Self, anyhow::Error> {
-        if data.len() < 2 {
-            bail!("failed to parse entry type");
-        }
-        match data[0..2] {
-            [0, 0] => {
-                if data.len() == 2 {
-                    Ok(Self::NullEntry)
-                } else {
-                    Err(anyhow!("null entry data must be empty"))
-                }
-            }
-            [0, 1] => {
-                let tbs_cert_entry = TbsCertificateLogEntry::from_der(&data[2..])?;
-                Ok(Self::TbsCertEntry(tbs_cert_entry))
-            }
-            _ => Err(anyhow!("unrecognized entry type")),
-        }
-    }
-}
-
-impl PendingLogEntry for MerkleTreeCertPendingLogEntry {
+impl PendingLogEntry for BootstrapMtcPendingLogEntry {
     /// MTC uses the same data tile path as tlog-tiles, 'entries'.
     const DATA_TILE_PATH: PathElem = TlogTilesPendingLogEntry::DATA_TILE_PATH;
 
@@ -134,17 +88,18 @@ impl PendingLogEntry for MerkleTreeCertPendingLogEntry {
     }
 }
 
+/// A wrapper around `TlogTilesLogEntry` that supports customizations for MTCs like the initial log entry.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MerkleTreeCertLogEntry(TlogTilesLogEntry);
+pub struct BootstrapMtcLogEntry(TlogTilesLogEntry);
 
-impl LogEntry for MerkleTreeCertLogEntry {
+impl LogEntry for BootstrapMtcLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
-    type Pending = MerkleTreeCertPendingLogEntry;
+    type Pending = BootstrapMtcPendingLogEntry;
     type ParseError = MtcError;
 
     fn initial_entry() -> Option<Self::Pending> {
         Some(Self::Pending {
-            bootstrap: vec![0, 0, 0], // u24 length prefix
+            bootstrap: vec![0, 0, 0], // u24 length prefix for empty bootstrap data
             entry: TlogTilesPendingLogEntry {
                 data: MerkleTreeCertEntry::NullEntry.encode().unwrap(),
             },
@@ -180,6 +135,81 @@ pub enum MtcError {
     IO(#[from] std::io::Error),
     #[error("empty chain")]
     EmptyChain,
+    #[error("unknown entry type")]
+    UnknownEntryType,
+}
+
+#[repr(u16)]
+pub enum MerkleTreeCertEntryType {
+    NullEntry = 0x0000,
+    TbsCertEntry = 0x0001,
+}
+
+impl TryFrom<u16> for MerkleTreeCertEntryType {
+    type Error = MtcError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0x0000 => Ok(MerkleTreeCertEntryType::NullEntry),
+            0x0001 => Ok(MerkleTreeCertEntryType::TbsCertEntry),
+            _ => Err(MtcError::UnknownEntryType),
+        }
+    }
+}
+
+/// A `MerkleTreeCertEntry` as defined in
+/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-entries>.
+/// The `NullEntry` type is used as the first element in the tree so that the
+/// serial number for each subsequent `TbsCertEntry` in the tree corresponds to
+/// its index in the tree.
+#[allow(clippy::large_enum_variant)]
+#[derive(PartialEq, Debug)]
+pub enum MerkleTreeCertEntry {
+    NullEntry,
+    TbsCertEntry(TbsCertificateLogEntry),
+}
+
+impl MerkleTreeCertEntry {
+    /// Encode entry to bytes.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if there are issues encoding the entry.
+    pub fn encode(&self) -> Result<Vec<u8>, anyhow::Error> {
+        match &self {
+            Self::NullEntry => Ok((MerkleTreeCertEntryType::NullEntry as u16)
+                .to_be_bytes()
+                .to_vec()),
+            Self::TbsCertEntry(tbs_cert_entry) => Ok([
+                (MerkleTreeCertEntryType::TbsCertEntry as u16)
+                    .to_be_bytes()
+                    .to_vec(),
+                tbs_cert_entry.to_der()?,
+            ]
+            .concat()),
+        }
+    }
+
+    /// Decode entry from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entry cannot be decoded.
+    pub fn decode(mut data: &[u8]) -> Result<Self, anyhow::Error> {
+        match MerkleTreeCertEntryType::try_from(data.read_u16::<BigEndian>()?)? {
+            MerkleTreeCertEntryType::NullEntry => {
+                if data.is_empty() {
+                    Ok(Self::NullEntry)
+                } else {
+                    Err(anyhow!("data for null entry must be empty"))
+                }
+            }
+            MerkleTreeCertEntryType::TbsCertEntry => {
+                let tbs_cert_entry = TbsCertificateLogEntry::from_der(data)?;
+                Ok(Self::TbsCertEntry(tbs_cert_entry))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Sequence, ValueOrd)]
@@ -227,6 +257,12 @@ fn filter_key_usage(extension: &mut Extension) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+// Validate and filter extensions.
+//
+// # Errors
+//
+// Will return an error if there are any duplicate extensions, or if there are
+// any critical extensions that cannot be filtered out.
 fn filter_extensions(extensions: &mut Vec<Extension>) -> Result<(), anyhow::Error> {
     let mut result = Ok(());
     let mut oids = BTreeSet::new();
@@ -397,7 +433,7 @@ pub fn validate_chain(
     _roots: &CertPool,
     issuer: RdnSequence,
     mut validity: Validity,
-) -> Result<MerkleTreeCertPendingLogEntry, MtcError> {
+) -> Result<BootstrapMtcPendingLogEntry, MtcError> {
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
         Some(v) => Certificate::from_der(v)?,
@@ -434,7 +470,7 @@ pub fn validate_chain(
     let mut bootstrap_tile_entry = Vec::new();
     bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
 
-    let pending_entry = MerkleTreeCertPendingLogEntry {
+    let pending_entry = BootstrapMtcPendingLogEntry {
         bootstrap: bootstrap_tile_entry,
         entry: TlogTilesPendingLogEntry {
             data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(

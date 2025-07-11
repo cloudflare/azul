@@ -39,7 +39,7 @@ impl MTCSubtreeCosigner {
     /// # Errors
     ///
     /// Will return `signature::Error` if signing fails. This cannot happen for
-    /// Ed25519 signatures, but might for other signature types.
+    /// Ed25519 signatures, but might for other signature types added in the future.
     pub fn sign_subtree(
         &self,
         start: LeafIndex,
@@ -58,6 +58,7 @@ impl MTCSubtreeCosigner {
     }
 }
 
+/// Support signing tlog-checkpoint with the subtree cosigner.
 impl CheckpointSigner for MTCSubtreeCosigner {
     fn name(&self) -> &KeyName {
         self.v.name()
@@ -67,6 +68,7 @@ impl CheckpointSigner for MTCSubtreeCosigner {
         self.v.key_id()
     }
 
+    /// Sign a checkpoint with the subtree cosigner. For checkpoints, the start index is always 0.
     fn sign(
         &self,
         _timestamp_unix_millis: UnixTimestamp,

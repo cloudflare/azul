@@ -7,7 +7,7 @@ use std::{str::FromStr, time::Duration};
 
 use crate::{load_signing_key, load_witness_key, CONFIG};
 use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
-use mtc_api::{MTCSubtreeCosigner, MerkleTreeCertLogEntry, TrustAnchorID};
+use mtc_api::{BootstrapMtcLogEntry, MTCSubtreeCosigner, TrustAnchorID};
 use prometheus::Registry;
 use signed_note::KeyName;
 use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner};
@@ -16,7 +16,7 @@ use worker::*;
 use x509_verify::spki::ObjectIdentifier;
 
 #[durable_object]
-struct Sequencer(GenericSequencer<MerkleTreeCertLogEntry>);
+struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
 
 #[durable_object]
 impl DurableObject for Sequencer {
