@@ -2252,7 +2252,6 @@ name = "signed_note"
 version = "0.2.0"
 dependencies = [
  "base64",
- "byteorder",
  "criterion",
  "ed25519-dalek",
  "rand",

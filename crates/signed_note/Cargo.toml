@@ -23,7 +23,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 base64.workspace = true
-byteorder.workspace = true
 ed25519-dalek = { workspace = true, features=["alloc", "rand_core"] }
 rand_core.workspace = true
 sha2.workspace = true
