@@ -331,6 +331,15 @@ pub(crate) async fn create_log(
     lock: &impl LockBackend,
 ) -> Result<(), CreateError> {
     let name = &config.name;
+
+    // To reset a dev log without deleting the existing checkpoints from DO
+    // storage and R2, you can temporarily disable the below checks for the
+    // specific targeted log name. Make sure to clean up afterwards or the log
+    // will keep reseting every time the sequencer DO is re-initialized.
+    //
+    //     if name != "dev1" {
+    //         <check if log exists>
+    //     }
     if lock.get(CHECKPOINT_KEY).await.is_ok() {
         return Err(CreateError::LogExists);
     }
@@ -359,7 +368,7 @@ pub(crate) async fn create_log(
 
     let sth = tree
         .sign(
-            &config.origin,
+            config.origin.as_str(),
             &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
             &dyn_signers,
             &mut rand::thread_rng(),
@@ -409,7 +418,7 @@ impl SequenceState {
         };
 
         let (c, timestamp) = tlog_tiles::open_checkpoint(
-            &config.origin,
+            config.origin.as_str(),
             &verifiers,
             now_millis(),
             &stored_checkpoint,
@@ -433,7 +442,8 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) = tlog_tiles::open_checkpoint(&config.origin, &verifiers, now_millis(), &sth)?;
+        let (c1, _) =
+            tlog_tiles::open_checkpoint(config.origin.as_str(), &verifiers, now_millis(), &sth)?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
@@ -745,6 +755,13 @@ pub(crate) async fn sequence<L: LogEntry>(
     let old =
         unwrap_or_load_sequence_state::<L>(sequence_state, config, object, lock, metrics).await?;
 
+    // Add the log's initial entry if needed.
+    if old.tree.size() == 0 {
+        if let Some(entry) = L::initial_entry() {
+            pool_state.add(entry.lookup_key(), entry);
+        }
+    }
+
     let Some(entries) = pool_state.take(
         old.tree.size(),
         config.max_sequence_skips,
@@ -978,7 +995,7 @@ async fn sequence_entries<L: LogEntry>(
 
     let new_checkpoint = tree
         .sign(
-            &config.origin,
+            config.origin.as_str(),
             &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
             &dyn_signers,
             &mut rand::thread_rng(),
@@ -1396,7 +1413,7 @@ mod tests {
         Rng, RngCore, SeedableRng,
     };
     use sha2::{Digest, Sha256};
-    use signed_note::{Note, VerifierList};
+    use signed_note::{KeyName, Note, VerifierList};
     use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::{cell::RefCell, time::Duration};
@@ -1755,7 +1772,7 @@ mod tests {
             .unwrap(),
         );
 
-        log.config.origin = "wrong".to_string();
+        log.config.origin = KeyName::new("wrong".to_string()).unwrap();
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
             &log.object,
@@ -1777,9 +1794,11 @@ mod tests {
         );
 
         // Try to load the checkpoint with two randomly generated checkpoint signers. These should fail
-        let checkpoint_signer =
-            StaticCTCheckpointSigner::new(&log.config.origin, EcdsaSigningKey::random(&mut OsRng))
-                .unwrap();
+        let checkpoint_signer = StaticCTCheckpointSigner::new(
+            log.config.origin.clone(),
+            EcdsaSigningKey::random(&mut OsRng),
+        )
+        .unwrap();
         log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
@@ -1789,7 +1808,7 @@ mod tests {
         .unwrap_err();
 
         let checkpoint_signer = Ed25519CheckpointSigner::new(
-            &log.config.origin,
+            log.config.origin.clone(),
             Ed25519SigningKey::generate(&mut OsRng),
         )
         .unwrap();
@@ -2385,16 +2404,20 @@ mod tests {
             let cache = TestCacheBackend(HashMap::new());
             let object = TestObjectBackend::new();
             let lock = TestLockBackend::new();
-            let origin = "example.com/TestLog".to_string();
+            let origin = KeyName::new("example.com/TestLog".to_string()).unwrap();
 
             // Generate two signing keys
             let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
-                let signer =
-                    StaticCTCheckpointSigner::new(&origin, EcdsaSigningKey::random(&mut rng))
-                        .unwrap();
-                let witness =
-                    Ed25519CheckpointSigner::new(&origin, Ed25519SigningKey::generate(&mut rng))
-                        .unwrap();
+                let signer = StaticCTCheckpointSigner::new(
+                    origin.clone(),
+                    EcdsaSigningKey::random(&mut rng),
+                )
+                .unwrap();
+                let witness = Ed25519CheckpointSigner::new(
+                    origin.clone(),
+                    Ed25519SigningKey::generate(&mut rng),
+                )
+                .unwrap();
                 vec![Box::new(signer), Box::new(witness)]
             };
             // Don't use checkpoint extensions

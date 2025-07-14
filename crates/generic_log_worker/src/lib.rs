@@ -111,21 +111,16 @@ pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
 pub async fn get_cached_metadata(
     kv: &KvStore,
     pending: &impl PendingLogEntry,
-    enable_dedup: bool,
 ) -> Result<Option<SequenceMetadata>> {
-    if enable_dedup {
-        let lookup_key = pending.lookup_key();
+    let lookup_key = pending.lookup_key();
 
-        // Query the cache and return the entry metadata if it exists
-        let metadata_opt = kv
-            .get(&BASE64_STANDARD.encode(lookup_key))
-            .bytes_with_metadata::<SequenceMetadata>()
-            .await?
-            .1;
-        Ok(metadata_opt)
-    } else {
-        Ok(None)
-    }
+    // Query the cache and return the entry metadata if it exists
+    let metadata_opt = kv
+        .get(&BASE64_STANDARD.encode(lookup_key))
+        .bytes_with_metadata::<SequenceMetadata>()
+        .await?
+        .1;
+    Ok(metadata_opt)
 }
 
 /// Makes an empty entry in the dedup cache with `pending.lookup_key()` as the

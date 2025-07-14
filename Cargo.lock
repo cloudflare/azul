@@ -433,6 +433,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
+ "signed_note",
  "static_ct_api",
  "tlog_tiles",
  "url",
@@ -1395,11 +1396,15 @@ name = "mtc_api"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "der",
+ "ed25519-dalek",
  "length_prefixed",
+ "rand",
  "serde",
  "serde_with",
  "sha2",
+ "signed_note",
  "thiserror 2.0.12",
  "tlog_tiles",
  "x509-verify",
@@ -1431,7 +1436,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
- "static_ct_api",
+ "signed_note",
  "tlog_tiles",
  "url",
  "worker",
@@ -1443,7 +1448,6 @@ dependencies = [
 name = "mtc_worker_config"
 version = "0.2.0"
 dependencies = [
- "chrono",
  "serde",
 ]
 
@@ -2473,6 +2477,7 @@ name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "byteorder",
  "ed25519-dalek",
  "length_prefixed",
  "rand",

@@ -3,18 +3,20 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use crate::{load_signing_key, load_witness_key, CONFIG};
 use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
-use mtc_api::MtcLogEntry;
+use mtc_api::{BootstrapMtcLogEntry, MTCSubtreeCosigner, TrustAnchorID};
 use prometheus::Registry;
-use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
+use signed_note::KeyName;
+use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+use x509_verify::spki::ObjectIdentifier;
 
 #[durable_object]
-struct Sequencer(GenericSequencer<MtcLogEntry>);
+struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
 
 #[durable_object]
 impl DurableObject for Sequencer {
@@ -31,27 +33,36 @@ impl DurableObject for Sequencer {
 
         // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
         // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
-        let origin = params
-            .submission_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/');
+        let origin = KeyName::new(
+            params
+                .submission_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .to_string(),
+        )
+        .expect("invalid origin name");
         let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
 
-        // We don't use checkpoint extensions for MTC
+        // We don't use checkpoint extensions for MTC.
         let checkpoint_extension = Box::new(|_| vec![]);
+
+        // TODO parse log ID as a RelativeOid after https://github.com/RustCrypto/formats/issues/1875
+        let log_id_relative_oid = ObjectIdentifier::from_str(&params.log_id).unwrap();
+
+        // Get the BER/DER serialization of the content bytes, as described in <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
+        let log_id = TrustAnchorID(log_id_relative_oid.as_bytes().to_vec());
+
+        // TODO should the CA cosigner have a different ID than the log itself?
+        let cosigner_id = log_id.clone();
 
         let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
             let signing_key = load_signing_key(&env, name).unwrap().clone();
             let witness_key = load_witness_key(&env, name).unwrap().clone();
 
-            // Make the checkpoint signers from the secret keys and put them in a vec
-            let signer = Ed25519CheckpointSigner::new(origin, signing_key)
-                .map_err(|e| format!("could not create static-ct checkpoint signer: {e}"))
-                .unwrap();
-            let witness = Ed25519CheckpointSigner::new(origin, witness_key)
-                .map_err(|e| format!("could not create ed25519 checkpoint signer: {e}"))
-                .unwrap();
+            // Make the checkpoint signers from the secret keys and put them in a vec.
+            let signer = MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key);
+            let witness = CosignatureV1CheckpointSigner::new(origin.clone(), witness_key);
 
             vec![Box::new(signer), Box::new(witness)]
         };
@@ -60,7 +71,7 @@ impl DurableObject for Sequencer {
 
         let config = SequencerConfig {
             name: name.to_string(),
-            origin: origin.to_string(),
+            origin,
             checkpoint_signers,
             checkpoint_extension,
             sequence_interval,

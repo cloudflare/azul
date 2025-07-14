@@ -25,7 +25,7 @@
 //! non-empty, well-formed UTF-8 containing neither Unicode spaces nor plus (U+002B).
 //!
 //! A server signs texts using public key cryptography.  A given server may have multiple public
-//! keys, each identified by a 32-bit ID of the public key.  The [`key_id`] function computes the
+//! keys, each identified by a 32-bit ID of the public key.  The [`compute_key_id`] function computes the
 //! key ID as RECOMMENDED by the [spec](https://c2sp.org/signed-note#signatures).
 //! ```text
 //! key ID = SHA-256(key name || 0x0A || signature type || public key)[:4]
@@ -53,7 +53,7 @@
 //! name of the server and the uint32 ID of the key, and it can verify a purported signature by
 //! that key.
 //!
-//! The standard implementation of a Verifier is constructed by [`Ed25519NoteVerifier::new`] starting
+//! The standard implementation of a Verifier is constructed by [`Ed25519NoteVerifier::new_from_encoded_key`] starting
 //! from a verifier key, which is a plain text string of the form `<name>+<id>+<keydata>`.
 //!
 //! A [`Verifiers`] allows looking up a Verifier by the combination of server name and key ID.
@@ -69,7 +69,7 @@
 //! A [`Signer`] allows signing a text with a given key. It can report the name of the server and the
 //! ID of the key and can sign a raw text using that key.
 //!
-//! The standard implementation of a Signer is constructed by [`Ed25519NoteSigner::new`] starting from
+//! The standard implementation of a Signer is constructed by [`Ed25519NoteSigner::new_from_encoded_key`] starting from
 //! an encoded signer key, which is a plain text string of the form
 //! `PRIVATE+KEY+<name>+<id>+<keydata>`.  Anyone with an encoded signer key can sign messages using
 //! that key, so it must be kept secret. The encoding begins with the literal text `PRIVATE+KEY` to
@@ -123,7 +123,7 @@
 //! let text = "If you think cryptography is the answer to your problem,\n\
 //!             then you don't know what your problem is.\n";
 //!
-//! let signer = Ed25519NoteSigner::new(skey).unwrap();
+//! let signer = Ed25519NoteSigner::new_from_encoded_key(skey).unwrap();
 //! let mut n = Note::new(text.as_bytes(), &[]).unwrap();
 //! n.add_sigs(&[&signer]).unwrap();
 //!
@@ -151,7 +151,7 @@
 //!            \n\
 //!            — PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n";
 //!
-//! let verifier = Ed25519NoteVerifier::new(vkey).unwrap();
+//! let verifier = Ed25519NoteVerifier::new_from_encoded_key(vkey).unwrap();
 //! let n = Note::from_bytes(msg.as_bytes()).unwrap();
 //! let (verified_sigs, _) = n.verify(&VerifierList::new(vec![Box::new(verifier.clone())])).unwrap();
 //!
@@ -167,7 +167,7 @@
 //!
 //! ### Sign and add signatures
 //! ```
-//! use signed_note::{Note, Ed25519NoteSigner, Ed25519NoteVerifier, VerifierList};
+//! use signed_note::{Note, Ed25519NoteSigner, Ed25519NoteVerifier, VerifierList, KeyName};
 //!
 //! let vkey = "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW";
 //! let msg = "If you think cryptography is the answer to your problem,\n\
@@ -179,7 +179,7 @@
 //!
 //! let mut n = Note::from_bytes(msg.as_bytes()).unwrap();
 //!
-//! let verifier = Ed25519NoteVerifier::new(vkey).unwrap();
+//! let verifier = Ed25519NoteVerifier::new_from_encoded_key(vkey).unwrap();
 //! let (verified_sigs, unverified_sigs) = n.verify(&VerifierList::new(vec![Box::new(verifier.clone())])).unwrap();
 //! assert_eq!(verified_sigs.len(), 1);
 //! assert!(unverified_sigs.is_empty());
@@ -209,8 +209,8 @@
 //!
 //! impl rand_core::CryptoRng for ZeroRng {}
 //!
-//! let (skey, _) = signed_note::generate_key(&mut ZeroRng{}, "EnochRoot");
-//! let signer = Ed25519NoteSigner::new(&skey).unwrap();
+//! let (skey, _) = signed_note::generate_encoded_ed25519_key(&mut ZeroRng{}, &KeyName::new("EnochRoot".into()).unwrap());
+//! let signer = Ed25519NoteSigner::new_from_encoded_key(&skey).unwrap();
 //! n.add_sigs(&[&signer]).unwrap();
 //!
 //! let got = n.to_bytes();
@@ -225,23 +225,74 @@
 //! ```
 
 use base64::prelude::*;
-use ed25519_dalek::{
-    Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
-    VerifyingKey as Ed25519VerifyingKey,
-};
-use rand_core::CryptoRngCore;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt,
+};
 use thiserror::Error;
+
+mod ed25519;
+pub use ed25519::*;
 
 const MAX_NOTE_SIZE: usize = 1_000_000;
 const MAX_NOTE_SIGNATURES: usize = 100;
 
+#[repr(u8)]
+pub enum SignatureType {
+    Ed25519 = 0x01,
+    CosignatureV1 = 0x04,
+    RFC6962TreeHead = 0x05,
+    Undefined = 0xff,
+}
+
+impl TryFrom<u8> for SignatureType {
+    type Error = NoteError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x01 => Ok(SignatureType::Ed25519),
+            0x04 => Ok(SignatureType::CosignatureV1),
+            0x05 => Ok(SignatureType::RFC6962TreeHead),
+            0xff => Ok(SignatureType::Undefined),
+            _ => Err(NoteError::UnknownSignatureType),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialOrd, Ord, Hash, PartialEq, Clone)]
+pub struct KeyName(String);
+
+impl KeyName {
+    /// Return a valid key name according to <https://c2sp.org/signed-note#format>.
+    /// It must be non-empty and not have any Unicode spaces or pluses.
+    ///
+    /// # Errors
+    /// Will return `Err` if the key name is empty or has Unicode spaces or pluses.
+    pub fn new(name: String) -> Result<Self, NoteError> {
+        if name.is_empty() || name.chars().any(char::is_whitespace) || name.contains('+') {
+            Err(NoteError::InvalidKeyName)
+        } else {
+            Ok(Self(name))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for KeyName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A Verifier verifies messages signed with a specific key.
 pub trait NoteVerifier {
     /// Returns the server name associated with the key.
-    /// The name must be non-empty and not have any Unicode spaces or pluses.
-    fn name(&self) -> &str;
+    /// The name is guaranteed to be valid.
+    fn name(&self) -> &KeyName;
 
     /// Returns the key ID.
     fn key_id(&self) -> u32;
@@ -254,14 +305,14 @@ pub trait NoteVerifier {
     /// # Errors
     ///
     /// Errors if the signature is malformed.
-    fn extract_timestamp_millis(&self, sig: &[u8]) -> Result<Option<u64>, VerificationError>;
+    fn extract_timestamp_millis(&self, sig: &[u8]) -> Result<Option<u64>, NoteError>;
 }
 
 /// A Signer signs messages using a specific key.
 pub trait NoteSigner {
     /// Returns the server name associated with the key.
     /// The name must be non-empty and not have any Unicode spaces or pluses.
-    fn name(&self) -> &str;
+    fn name(&self) -> &KeyName;
 
     /// Returns the key ID.
     fn key_id(&self) -> u32;
@@ -276,9 +327,9 @@ pub trait NoteSigner {
 
 /// Computes the key ID for the given server name and encoded public key
 /// as RECOMMENDED at <https://c2sp.org/signed-note#signatures>.
-pub fn key_id(name: &str, key: &[u8]) -> u32 {
+pub fn compute_key_id(name: &KeyName, key: &[u8]) -> u32 {
     let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
+    hasher.update(name.0.as_bytes());
     hasher.update(b"\n");
     hasher.update(key);
     let result = hasher.finalize();
@@ -288,233 +339,6 @@ pub fn key_id(name: &str, key: &[u8]) -> u32 {
     u32::from_be_bytes(u32_bytes)
 }
 
-/// An error returned from the [`Ed25519NoteVerifier::new`] function when
-/// constructing a [`Ed25519NoteVerifier`] from an encoded verifier key.
-#[derive(Error, Debug)]
-pub enum VerifierError {
-    #[error("malformed verifier key")]
-    Format,
-    #[error("unknown verifier algorithm")]
-    Alg,
-    #[error("invalid verifier ID")]
-    Id,
-}
-
-const ALG_ED25519: u8 = 1;
-
-// Reports whether name is valid according to <https://c2sp.org/signed-note#format>.
-// It must be non-empty and not have any Unicode spaces or pluses.
-pub fn is_key_name_valid(name: &str) -> bool {
-    !(name.is_empty() || name.chars().any(char::is_whitespace) || name.contains('+'))
-}
-
-/// [`Ed25519NoteVerifier`] is the verifier for the ordinary (non-timestamped) Ed25519 signature type
-#[derive(Clone)]
-pub struct Ed25519NoteVerifier {
-    name: String,
-    id: u32,
-    verifying_key: Ed25519VerifyingKey,
-}
-
-impl NoteVerifier for Ed25519NoteVerifier {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn key_id(&self) -> u32 {
-        self.id
-    }
-
-    fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
-        let sig_bytes: [u8; ed25519_dalek::SIGNATURE_LENGTH] = match sig.try_into() {
-            Ok(ok) => ok,
-            Err(_) => return false,
-        };
-        self.verifying_key
-            .verify(msg, &ed25519_dalek::Signature::from_bytes(&sig_bytes))
-            .is_ok()
-    }
-
-    fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, VerificationError> {
-        // Ed25519NoteVerifier (alg type 0x01) has no timestamp in the signature
-        Ok(None)
-    }
-}
-
-impl Ed25519NoteVerifier {
-    /// Construct a new [Verifier] from an encoded verifier key.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`VerifierError`] if `vkey` is malformed or otherwise invalid.
-    pub fn new(vkey: &str) -> Result<Self, VerifierError> {
-        let (name, vkey) = vkey.split_once('+').ok_or(VerifierError::Format)?;
-        let (id16, key64) = vkey.split_once('+').ok_or(VerifierError::Format)?;
-
-        let id = u32::from_str_radix(id16, 16).map_err(|_| VerifierError::Format)?;
-        let key = BASE64_STANDARD
-            .decode(key64)
-            .map_err(|_| VerifierError::Format)?;
-
-        if id16.len() != 8 || !is_key_name_valid(name) || key.is_empty() {
-            return Err(VerifierError::Format);
-        }
-
-        if id != key_id(name, &key) {
-            return Err(VerifierError::Id);
-        }
-
-        let alg = key[0];
-        let key = &key[1..];
-        match alg {
-            ALG_ED25519 => {
-                let key_bytes: &[u8; ed25519_dalek::PUBLIC_KEY_LENGTH] =
-                    &key.try_into().map_err(|_| VerifierError::Format)?;
-                let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
-                    .map_err(|_| VerifierError::Format)?;
-                Ok(Self {
-                    name: name.to_owned(),
-                    id,
-                    verifying_key,
-                })
-            }
-            _ => Err(VerifierError::Alg),
-        }
-    }
-}
-
-/// An error returned from the [`Ed25519NoteSigner::new`] function when
-/// constructing a [`Ed25519NoteSigner`] from an encoded signer key.
-#[derive(Error, Debug)]
-pub enum SignerError {
-    #[error("malformed verifier key")]
-    Format,
-    #[error("unknown verifier algorithm")]
-    Alg,
-    #[error("invalid verifier ID")]
-    Id,
-}
-
-/// [`Ed25519NoteSigner`] is the signer for the ordinary (non-timestamped) Ed25519 signature type
-#[derive(Clone)]
-pub struct Ed25519NoteSigner {
-    name: String,
-    id: u32,
-    signing_key: Ed25519SigningKey,
-}
-
-impl NoteSigner for Ed25519NoteSigner {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn key_id(&self) -> u32 {
-        self.id
-    }
-    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
-        let sig = self.signing_key.try_sign(msg)?;
-        Ok(sig.to_vec())
-    }
-}
-
-impl Ed25519NoteSigner {
-    /// Construct a new [Signer] from an encoded signer key.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`SignerError`] if `skey` is malformed or otherwise invalid.
-    pub fn new(skey: &str) -> Result<Self, SignerError> {
-        let (priv1, skey) = skey.split_once('+').ok_or(SignerError::Format)?;
-        let (priv2, skey) = skey.split_once('+').ok_or(SignerError::Format)?;
-        let (name, skey) = skey.split_once('+').ok_or(SignerError::Format)?;
-        let (id16, key64) = skey.split_once('+').ok_or(SignerError::Format)?;
-
-        let id = u32::from_str_radix(id16, 16).map_err(|_| SignerError::Format)?;
-        let key = BASE64_STANDARD
-            .decode(key64)
-            .map_err(|_| SignerError::Format)?;
-
-        if priv1 != "PRIVATE"
-            || priv2 != "KEY"
-            || id16.len() != 8
-            || !is_key_name_valid(name)
-            || key.is_empty()
-        {
-            return Err(SignerError::Format);
-        }
-
-        // Note: id is the hash of the public key and we have the private key.
-        // Must verify id after deriving public key.
-
-        let signer: Ed25519NoteSigner;
-        let pubkey: Vec<u8>;
-
-        let alg = key[0];
-        let key = &key[1..];
-        match alg {
-            ALG_ED25519 => {
-                let signing_key =
-                    ed25519_dalek::SigningKey::try_from(key).map_err(|_| SignerError::Format)?;
-
-                pubkey = [
-                    &[ALG_ED25519],
-                    ed25519_dalek::VerifyingKey::from(&signing_key)
-                        .to_bytes()
-                        .as_slice(),
-                ]
-                .concat();
-
-                signer = Self {
-                    name: name.to_owned(),
-                    id,
-                    signing_key,
-                };
-            }
-            _ => {
-                return Err(SignerError::Alg);
-            }
-        }
-
-        if id != key_id(name, &pubkey) {
-            return Err(SignerError::Id);
-        }
-
-        Ok(signer)
-    }
-}
-
-/// Generates a signer and verifier key pair for a named server.
-/// The signer key skey is private and must be kept secret.
-pub fn generate_key<R: CryptoRngCore + ?Sized>(csprng: &mut R, name: &str) -> (String, String) {
-    let signing_key = ed25519_dalek::SigningKey::generate(csprng);
-
-    let pubkey = [
-        &[ALG_ED25519],
-        signing_key.verifying_key().to_bytes().as_slice(),
-    ]
-    .concat();
-    let privkey = [&[ALG_ED25519], signing_key.to_bytes().as_slice()].concat();
-    let skey = format!(
-        "PRIVATE+KEY+{}+{:08x}+{}",
-        name,
-        key_id(name, &pubkey),
-        BASE64_STANDARD.encode(privkey)
-    );
-    let vkey = new_ed25519_verifier_key(name, &signing_key.verifying_key());
-
-    (skey, vkey)
-}
-
-/// Returns an encoded verifier key using the given name and Ed25519 public key.
-pub fn new_ed25519_verifier_key(name: &str, key: &ed25519_dalek::VerifyingKey) -> String {
-    let pubkey = [&[ALG_ED25519], key.to_bytes().as_slice()].concat();
-    format!(
-        "{}+{:08x}+{}",
-        name,
-        key_id(name, &pubkey),
-        BASE64_STANDARD.encode(&pubkey)
-    )
-}
-
 /// [`Verifiers`] is a collection of known verifier keys.
 pub trait Verifiers {
     /// Returns the [`Verifier`] associated with the key identified by the name and
@@ -522,41 +346,30 @@ pub trait Verifiers {
     ///
     /// # Errors
     ///
-    /// If the (name, id) pair is unknown, return a [`VerificationError::UnknownKey`].
-    fn verifier(&self, name: &str, id: u32) -> Result<&dyn NoteVerifier, VerificationError>;
+    /// If the (name, id) pair is unknown, return a [`NoteError::UnknownKey`].
+    fn verifier(&self, name: &KeyName, id: u32) -> Result<&dyn NoteVerifier, NoteError>;
 }
 
-type VerifierMap = HashMap<(String, u32), Vec<Box<dyn NoteVerifier>>>;
+type VerifierMap = HashMap<(KeyName, u32), Vec<Box<dyn NoteVerifier>>>;
 
 /// [`VerifierList`] is a [Verifiers] implementation that uses the given list of verifiers.
 pub struct VerifierList {
     map: VerifierMap,
 }
 
-/// An error returned from a Verifier when verifying a signature.
-#[derive(Error, Debug)]
-pub enum VerificationError {
-    #[error("unknown key {name}+{id:08x}")]
-    UnknownKey { name: String, id: u32 },
-    #[error("ambiguous key {name}+{id:08x}")]
-    AmbiguousKey { name: String, id: u32 },
-    #[error("malformed timestamp")]
-    Timestamp,
-}
-
 impl Verifiers for VerifierList {
-    fn verifier(&self, name: &str, id: u32) -> Result<&dyn NoteVerifier, VerificationError> {
+    fn verifier(&self, name: &KeyName, id: u32) -> Result<&dyn NoteVerifier, NoteError> {
         match self.map.get(&(name.to_owned(), id)) {
             Some(verifiers) => {
                 if verifiers.len() > 1 {
-                    return Err(VerificationError::AmbiguousKey {
+                    return Err(NoteError::AmbiguousKey {
                         name: name.to_owned(),
                         id,
                     });
                 }
                 Ok(&*verifiers[0])
             }
-            None => Err(VerificationError::UnknownKey {
+            None => Err(NoteError::UnknownKey {
                 name: name.to_owned(),
                 id,
             }),
@@ -569,7 +382,7 @@ impl VerifierList {
     pub fn new(list: Vec<Box<dyn NoteVerifier>>) -> Self {
         let mut map: VerifierMap = HashMap::new();
         for verifier in list {
-            map.entry((verifier.name().to_owned(), verifier.key_id()))
+            map.entry((verifier.name().clone(), verifier.key_id()))
                 .or_default()
                 .push(verifier);
         }
@@ -588,32 +401,29 @@ pub struct Note {
     /// Text of note. Guaranteed to be well-formed.
     text: Vec<u8>,
     /// Signatures on note. Guaranteed to be well-formed.
-    sigs: Vec<Signature>,
+    sigs: Vec<NoteSignature>,
 }
 
-/// A Signature is a single signature found in a note.
+/// A `NoteSignature` is a single signature found in a note.
 #[derive(Debug, PartialEq, Clone)]
-pub struct Signature {
+pub struct NoteSignature {
     /// Name for the key that generated the signature.
-    name: String,
+    name: KeyName,
     /// Key ID for the key that generated the signature.
     id: u32,
     /// The signature bytes.
     sig: Vec<u8>,
 }
 
-impl Signature {
+impl NoteSignature {
     /// Returns a new signature from the given name and base64-encoded signature string.
     ///
     /// # Errors
     ///
     /// Returns [`NoteError::MalformedNote`] if the name is invalid according to [`is_key_name_valid`].
     ///
-    pub fn new(name: String, id: u32, sig: Vec<u8>) -> Result<Self, NoteError> {
-        if !is_key_name_valid(&name) {
-            return Err(NoteError::MalformedNote);
-        }
-        Ok(Self { name, id, sig })
+    pub fn new(name: KeyName, id: u32, sig: Vec<u8>) -> Self {
+        Self { name, id, sig }
     }
 
     /// Parse a signature line into a [Signature].
@@ -637,11 +447,15 @@ impl Signature {
         }
         let id = u32::from_be_bytes(sig[..4].try_into().unwrap());
         let sig = &sig[4..];
-        Signature::new(name.to_owned(), id, sig.to_owned())
+        Ok(NoteSignature::new(
+            KeyName::new(name.to_owned())?,
+            id,
+            sig.to_owned(),
+        ))
     }
 
     /// Return a signature's name.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &KeyName {
         &self.name
     }
 
@@ -659,7 +473,7 @@ impl Signature {
     pub fn to_bytes(&self) -> Vec<u8> {
         let hbuf = self.id.to_be_bytes();
         let base64 = BASE64_STANDARD.encode([&hbuf, self.sig.as_slice()].concat());
-        format!("— {} {}\n", self.name, base64).into()
+        format!("— {} {base64}\n", self.name).into()
     }
 }
 
@@ -670,14 +484,28 @@ pub enum NoteError {
     MalformedNote,
     #[error("invalid signer")]
     InvalidSigner,
+    #[error("invalid key name")]
+    InvalidKeyName,
     #[error("invalid signature for key {name}+{id:08x}")]
-    InvalidSignature { name: String, id: u32 },
+    InvalidSignature { name: KeyName, id: u32 },
+    #[error("unknown signature type")]
+    UnknownSignatureType,
     #[error("verifier name or id doesn't match signature")]
     MismatchedVerifier,
     #[error("note has no verifiable signatures")]
     UnverifiedNote,
-    #[error(transparent)]
-    VerificationError(#[from] VerificationError),
+    #[error("unknown key {name}+{id:08x}")]
+    UnknownKey { name: KeyName, id: u32 },
+    #[error("ambiguous key {name}+{id:08x}")]
+    AmbiguousKey { name: KeyName, id: u32 },
+    #[error("malformed timestamp")]
+    Timestamp,
+    #[error("malformed verifier key")]
+    Format,
+    #[error("unknown verifier algorithm")]
+    Alg,
+    #[error("invalid verifier ID")]
+    Id,
     #[error(transparent)]
     SignatureError(#[from] signature::Error),
 }
@@ -691,7 +519,7 @@ impl Note {
     /// Returns a [`NoteError::MalformedNote`] if the text is larger than
     /// we're willing to parse, cannot be decoded as UTF-8, or contains
     /// any non-newline ASCII control characters.
-    pub fn new(text: &[u8], existing_sigs: &[Signature]) -> Result<Self, NoteError> {
+    pub fn new(text: &[u8], existing_sigs: &[NoteSignature]) -> Result<Self, NoteError> {
         // Set some upper limit on what we're willing to process.
         if text.len() > MAX_NOTE_SIZE {
             return Err(NoteError::MalformedNote);
@@ -745,11 +573,11 @@ impl Note {
 
         let sigs = sigs.strip_suffix("\n").ok_or(NoteError::MalformedNote)?;
 
-        let mut parsed_sigs: Vec<Signature> = Vec::new();
+        let mut parsed_sigs: Vec<NoteSignature> = Vec::new();
         let mut num_sig = 0;
 
         for line in sigs.split('\n') {
-            let sig = Signature::from_bytes(line.as_bytes())?;
+            let sig = NoteSignature::from_bytes(line.as_bytes())?;
             num_sig += 1;
             if num_sig > MAX_NOTE_SIGNATURES {
                 return Err(NoteError::MalformedNote);
@@ -765,7 +593,7 @@ impl Note {
     /// For each signature in the message, [`Note::verify`] calls known.verifier to find a verifier.
     /// If known.verifier returns a verifier and the verifier accepts the signature,
     /// [`Note::verify`] includes the signature in the returned list of verified signatures.
-    /// If known.verifier returns a [`VerificationError::UnknownKey`],
+    /// If known.verifier returns a [`NoteError::UnknownKey`],
     /// [`Note::verify`] includes the signature in the returned list of unverified signatures.
     ///
     /// # Errors
@@ -779,7 +607,7 @@ impl Note {
     pub fn verify(
         &self,
         known: &impl Verifiers,
-    ) -> Result<(Vec<Signature>, Vec<Signature>), NoteError> {
+    ) -> Result<(Vec<NoteSignature>, Vec<NoteSignature>), NoteError> {
         let mut verified_sigs = Vec::new();
         let mut unverified_sigs = Vec::new();
         let mut seen = BTreeSet::new();
@@ -787,13 +615,13 @@ impl Note {
         for sig in &self.sigs {
             match known.verifier(&sig.name, sig.id) {
                 Ok(verifier) => {
-                    if verifier.name() != sig.name || verifier.key_id() != sig.id {
+                    if verifier.name() != sig.name() || verifier.key_id() != sig.id {
                         return Err(NoteError::MismatchedVerifier);
                     }
-                    if seen.contains(&(&sig.name, sig.id)) {
+                    if seen.contains(&(sig.name.as_str(), sig.id)) {
                         continue;
                     }
-                    seen.insert((&sig.name, sig.id));
+                    seen.insert((sig.name.as_str(), sig.id));
                     if !verifier.verify(&self.text, &sig.sig) {
                         return Err(NoteError::InvalidSignature {
                             name: sig.name.clone(),
@@ -802,7 +630,7 @@ impl Note {
                     }
                     verified_sigs.push(sig.clone());
                 }
-                Err(VerificationError::UnknownKey { name: _, id: _ }) => {
+                Err(NoteError::UnknownKey { name: _, id: _ }) => {
                     // Drop repeated identical unverified signatures.
                     if seen_unverified.contains(&sig.to_bytes()) {
                         continue;
@@ -810,7 +638,7 @@ impl Note {
                     seen_unverified.insert(sig.to_bytes());
                     unverified_sigs.push(sig.clone());
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
         if verified_sigs.is_empty() {
@@ -836,11 +664,8 @@ impl Note {
             let name = s.name();
             let id = s.key_id();
             have.insert((name, id));
-            if !is_key_name_valid(name) {
-                return Err(NoteError::InvalidSigner);
-            }
             let sig = s.sign(&self.text)?;
-            new_sigs.push(Signature::new(name.to_owned(), id, sig)?);
+            new_sigs.push(NoteSignature::new(name.clone(), id, sig));
         }
 
         // Remove existing signatures that have been replaced by new ones.
@@ -873,11 +698,17 @@ mod tests {
 
     use super::*;
     use rand::rngs::OsRng;
-    static NAME: &str = "EnochRoot";
+    use std::sync::LazyLock;
 
-    fn test_signer_and_verifier(name: &str, signer: &dyn NoteSigner, verifier: &dyn NoteVerifier) {
-        assert_eq!(&name, &signer.name());
-        assert_eq!(&name, &verifier.name());
+    static NAME: LazyLock<KeyName> = LazyLock::new(|| KeyName::new("EnochRoot".into()).unwrap());
+
+    fn test_signer_and_verifier(
+        name: &KeyName,
+        signer: &dyn NoteSigner,
+        verifier: &dyn NoteVerifier,
+    ) {
+        assert_eq!(name, signer.name());
+        assert_eq!(name, verifier.name());
         assert_eq!(signer.key_id(), verifier.key_id());
 
         let msg: &[u8] = b"hi";
@@ -887,12 +718,12 @@ mod tests {
 
     #[test]
     fn test_generate_key() {
-        let (skey, vkey) = generate_key(&mut OsRng, NAME);
+        let (skey, vkey) = generate_encoded_ed25519_key(&mut OsRng, &NAME);
 
-        let signer = Ed25519NoteSigner::new(&skey).unwrap();
-        let verifier = Ed25519NoteVerifier::new(&vkey).unwrap();
+        let signer = Ed25519NoteSigner::new_from_encoded_key(&skey).unwrap();
+        let verifier = Ed25519NoteVerifier::new_from_encoded_key(&vkey).unwrap();
 
-        test_signer_and_verifier(NAME, &signer, &verifier);
+        test_signer_and_verifier(&NAME, &signer, &verifier);
     }
 
     #[test]
@@ -900,14 +731,14 @@ mod tests {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
 
         let pubkey = [
-            &[ALG_ED25519],
+            &[SignatureType::Ed25519 as u8],
             signing_key.verifying_key().to_bytes().as_slice(),
         ]
         .concat();
-        let id = key_id(NAME, &pubkey);
+        let id = compute_key_id(&NAME, &pubkey);
 
-        let vkey = new_ed25519_verifier_key(NAME, &signing_key.verifying_key());
-        let verifier = Ed25519NoteVerifier::new(&vkey).unwrap();
+        let vkey = new_encoded_ed25519_verifier_key(&NAME, &signing_key.verifying_key());
+        let verifier = Ed25519NoteVerifier::new_from_encoded_key(&vkey).unwrap();
 
         let signer = Ed25519NoteSigner {
             name: NAME.to_owned(),
@@ -915,23 +746,7 @@ mod tests {
             signing_key,
         };
 
-        test_signer_and_verifier(NAME, &signer, &verifier);
-    }
-
-    struct BadSigner {
-        s: Box<dyn NoteSigner>,
-    }
-
-    impl NoteSigner for BadSigner {
-        fn name(&self) -> &'static str {
-            "bad name"
-        }
-        fn key_id(&self) -> u32 {
-            self.s.key_id()
-        }
-        fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
-            self.s.sign(msg)
-        }
+        test_signer_and_verifier(&NAME, &signer, &verifier);
     }
 
     struct ErrSigner {
@@ -939,7 +754,7 @@ mod tests {
     }
 
     impl NoteSigner for ErrSigner {
-        fn name(&self) -> &str {
+        fn name(&self) -> &KeyName {
             self.s.name()
         }
         fn key_id(&self) -> u32 {
@@ -956,7 +771,7 @@ mod tests {
         let text = b"If you think cryptography is the answer to your problem,\n\
                     then you don't know what your problem is.\n";
 
-        let signer = Ed25519NoteSigner::new(skey).unwrap();
+        let signer = Ed25519NoteSigner::new_from_encoded_key(skey).unwrap();
 
         let mut n = Note::new(text, &[]).unwrap();
         n.add_sigs(&[&signer]).unwrap();
@@ -970,7 +785,11 @@ mod tests {
         // Check that existing signature is replaced by new one.
         let mut n = Note::new(
             text,
-            &[Signature::new("PeterNeumann".into(), 0xc74f_20a3, vec![]).unwrap()],
+            &[NoteSignature::new(
+                KeyName::new("PeterNeumann".into()).unwrap(),
+                0xc74f_20a3,
+                vec![],
+            )],
         )
         .unwrap();
         n.add_sigs(&[&signer]).unwrap();
@@ -982,18 +801,9 @@ mod tests {
         let err = Note::new(b"abc", &[]).unwrap_err();
         assert!(matches!(err, NoteError::MalformedNote));
 
-        // Attempt to create signature with bad name.
-        let err = Signature::new("a+b".into(), 0, vec![]).unwrap_err();
-        assert!(matches!(err, NoteError::MalformedNote));
-
-        // Attempt to sign with bad signer.
-        let err = Note::new(text, &[])
-            .unwrap()
-            .add_sigs(&[&BadSigner {
-                s: Box::new(signer.clone()),
-            }])
-            .unwrap_err();
-        assert!(matches!(err, NoteError::InvalidSigner));
+        // Attempt to create invalid key name.
+        let err = KeyName::new("a+b".into()).unwrap_err();
+        assert!(matches!(err, NoteError::InvalidKeyName));
 
         let err = Note::new(text, &[])
             .unwrap()
@@ -1009,7 +819,7 @@ mod tests {
     }
 
     impl Verifiers for FixedVerifier {
-        fn verifier(&self, _name: &str, _id: u32) -> Result<&dyn NoteVerifier, VerificationError> {
+        fn verifier(&self, _name: &KeyName, _id: u32) -> Result<&dyn NoteVerifier, NoteError> {
             Ok(&*self.v)
         }
     }
@@ -1017,18 +827,18 @@ mod tests {
     #[test]
     fn test_open() {
         let peter_key = "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW";
-        let peter_verifier = Ed25519NoteVerifier::new(peter_key).unwrap();
+        let peter_verifier = Ed25519NoteVerifier::new_from_encoded_key(peter_key).unwrap();
 
         let enoch_key = "EnochRoot+af0cfe78+ATtqJ7zOtqQtYqOo0CpvDXNlMhV3HeJDpjrASKGLWdop";
-        let enoch_verifier = Ed25519NoteVerifier::new(enoch_key).unwrap();
+        let enoch_verifier = Ed25519NoteVerifier::new_from_encoded_key(enoch_key).unwrap();
 
         let text = "If you think cryptography is the answer to your problem,\n\
                     then you don't know what your problem is.\n";
         let peter_sig = "— PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n";
         let enoch_sig = "— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5n2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ=\n";
 
-        let peter = Signature::from_bytes(peter_sig.trim_end().as_bytes()).unwrap();
-        let enoch = Signature::from_bytes(enoch_sig.trim_end().as_bytes()).unwrap();
+        let peter = NoteSignature::from_bytes(peter_sig.trim_end().as_bytes()).unwrap();
+        let enoch = NoteSignature::from_bytes(enoch_sig.trim_end().as_bytes()).unwrap();
 
         // Check one signature verified, one not.
         let n = Note::from_bytes(format!("{text}\n{peter_sig}{enoch_sig}").as_bytes()).unwrap();
@@ -1091,7 +901,7 @@ mod tests {
         );
 
         // Duplicated verified and unverified signatures.
-        let enoch_abcd = Signature::from_bytes("— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5nABCD2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ="
+        let enoch_abcd = NoteSignature::from_bytes("— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5nABCD2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ="
             .as_bytes(),
         )
         .unwrap();

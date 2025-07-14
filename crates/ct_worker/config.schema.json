@@ -107,7 +107,7 @@
                         "enable_dedup": {
                             "type": "boolean",
                             "default": true,
-                            "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disabled for tests and benchmarks."
+                            "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disabled for tests and benchmarks. If disabled, `kv_namespaces` can be omitted from `wrangler.jsonc`."
                         }
                     },
                     "required": [

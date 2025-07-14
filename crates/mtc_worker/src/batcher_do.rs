@@ -1,11 +1,11 @@
 use crate::CONFIG;
 use generic_log_worker::{get_durable_object_stub, load_cache_kv, BatcherConfig, GenericBatcher};
-use mtc_api::MtcPendingLogEntry;
+use mtc_api::BootstrapMtcPendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object]
-struct Batcher(GenericBatcher<MtcPendingLogEntry>);
+struct Batcher(GenericBatcher<BootstrapMtcPendingLogEntry>);
 
 #[durable_object]
 impl DurableObject for Batcher {
@@ -31,7 +31,11 @@ impl DurableObject for Batcher {
                 false
             })
             .expect("unable to find batcher name");
-        let kv = load_cache_kv(&env, name).unwrap();
+        let kv = if params.enable_dedup {
+            Some(load_cache_kv(&env, name).unwrap())
+        } else {
+            None
+        };
         let sequencer = get_durable_object_stub(
             &env,
             name,

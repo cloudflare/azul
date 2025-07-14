@@ -3,15 +3,17 @@
     "logs": {
         "dev1": {
             "description": "MTCA Dev1",
-            "issuer_rdn": "CN=dev1",
+            "log_id": "1.3.3.3.5.1",
             "submission_url": "http://localhost:8787/logs/dev1/",
-            "location_hint": "enam"
+            "location_hint": "enam",
+            "enable_dedup": false
         },
         "dev2": {
             "description": "MTCA Dev2",
-            "issuer_rdn": "CN=dev2",
+            "log_id": "1.3.3.3.5.2",
             "submission_url": "http://localhost:8787/logs/dev2/",
-            "location_hint": "enam"
+            "location_hint": "enam",
+            "enable_dedup": false
         }
     }
 }

@@ -50,6 +50,11 @@ pub trait LogEntry: core::fmt::Debug + Sized {
     /// The error type for [`Self::parse_from_tile_entry`]
     type ParseError: std::error::Error + Send + Sync + 'static;
 
+    /// Returns an optional initial entry to add into the log. This is used for
+    /// the initial `null_entry` in Merkle Tree Certificates, but likely not
+    /// useful anywhere else.
+    fn initial_entry() -> Option<Self::Pending>;
+
     fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self;
 
     /// Returns the Merkle tree leaf hash for this entry. For tlog-tiles, this is the Merkle Tree Hash
@@ -143,6 +148,10 @@ impl LogEntry for TlogTilesLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
     type Pending = TlogTilesPendingLogEntry;
     type ParseError = TlogError;
+
+    fn initial_entry() -> Option<Self::Pending> {
+        None
+    }
 
     fn new(pending: Self::Pending, _metadata: SequenceMetadata) -> Self {
         Self { inner: pending }

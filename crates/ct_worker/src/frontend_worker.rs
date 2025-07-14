@@ -214,13 +214,16 @@ async fn add_chain_or_pre_chain(
     let signing_key = load_signing_key(env, name)?;
 
     // Check if entry is cached and return right away if so.
-    let kv = load_cache_kv(env, name)?;
-    if let Some(metadata) = get_cached_metadata(&kv, &pending_entry, params.enable_dedup).await? {
-        debug!("{name}: Entry is cached");
-        let entry = StaticCTLogEntry::new(pending_entry, metadata);
-        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-            .map_err(|e| e.to_string())?;
-        return Response::from_json(&sct);
+    if params.enable_dedup {
+        if let Some(metadata) =
+            get_cached_metadata(&load_cache_kv(env, name)?, &pending_entry).await?
+        {
+            debug!("{name}: Entry is cached");
+            let entry = StaticCTLogEntry::new(pending_entry, metadata);
+            let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+                .map_err(|e| e.to_string())?;
+            return Response::from_json(&sct);
+        }
     }
 
     // Entry is not cached, so we need to sequence it.
@@ -272,10 +275,10 @@ async fn add_chain_or_pre_chain(
         return Ok(response);
     }
     let metadata = response.json::<SequenceMetadata>().await?;
-    if params.num_batchers == 0 {
+    if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if put_cache_entry_metadata(&kv, &pending_entry, metadata)
+        if put_cache_entry_metadata(&load_cache_kv(env, name)?, &pending_entry, metadata)
             .await
             .is_err()
         {

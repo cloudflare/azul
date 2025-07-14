@@ -31,7 +31,11 @@ impl DurableObject for Batcher {
                 false
             })
             .expect("unable to find batcher name");
-        let kv = load_cache_kv(&env, name).unwrap();
+        let kv = if params.enable_dedup {
+            Some(load_cache_kv(&env, name).unwrap())
+        } else {
+            None
+        };
         let sequencer = get_durable_object_stub(
             &env,
             name,

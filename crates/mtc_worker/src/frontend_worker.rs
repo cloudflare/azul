@@ -13,7 +13,7 @@ use generic_log_worker::{
     ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
-use mtc_api::{AddEntryRequest, AddEntryResponse};
+use mtc_api::{AddEntryRequest, AddEntryResponse, ID_RDNA_TRUSTANCHOR_ID};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
@@ -22,9 +22,14 @@ use tlog_tiles::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_verify::{
-    der::asn1::UtcTime,
+    der::{
+        asn1::{SetOfVec, UtcTime},
+        Any,
+    },
+    spki::ObjectIdentifier,
     x509_cert::{
-        name::RdnSequence,
+        attr::AttributeTypeAndValue,
+        name::{RdnSequence, RelativeDistinguishedName},
         time::{Time, Validity},
     },
 };
@@ -135,7 +140,14 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let params = &CONFIG.logs[name];
     let req: AddEntryRequest = req.json().await?;
 
-    let issuer = RdnSequence::from_str(&params.issuer_rdn).map_err(|e| e.to_string())?;
+    let issuer = RdnSequence::from(vec![RelativeDistinguishedName(
+        SetOfVec::from_iter([AttributeTypeAndValue {
+            oid: ID_RDNA_TRUSTANCHOR_ID,
+            // TODO: switch to RelativeOidRef after https://github.com/RustCrypto/formats/issues/1875
+            value: Any::from(ObjectIdentifier::from_str(&params.log_id).unwrap()),
+        }])
+        .unwrap(),
+    )]);
 
     let now = Duration::from_millis(now_millis());
     let validity = Validity {
@@ -161,14 +173,17 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let lookup_key = pending_entry.lookup_key();
 
     // Check if entry is cached and return right away if so.
-    let kv = load_cache_kv(env, name)?;
-    if let Some(metadata) = get_cached_metadata(&kv, &pending_entry, params.enable_dedup).await? {
-        debug!("{name}: Entry is cached");
-        let resp = AddEntryResponse {
-            leaf_index: metadata.0,
-            timestamp: metadata.1,
-        };
-        return Response::from_json(&resp);
+    if params.enable_dedup {
+        if let Some(metadata) =
+            get_cached_metadata(&load_cache_kv(env, name)?, &pending_entry).await?
+        {
+            debug!("{name}: Entry is cached");
+            let resp = AddEntryResponse {
+                leaf_index: metadata.0,
+                timestamp: metadata.1,
+            };
+            return Response::from_json(&resp);
+        }
     }
 
     // Entry is not cached, so we need to sequence it.
@@ -220,10 +235,10 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         return Ok(response);
     }
     let metadata = response.json::<SequenceMetadata>().await?;
-    if params.num_batchers == 0 {
+    if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if put_cache_entry_metadata(&kv, &pending_entry, metadata)
+        if put_cache_entry_metadata(&load_cache_kv(env, name)?, &pending_entry, metadata)
             .await
             .is_err()
         {
