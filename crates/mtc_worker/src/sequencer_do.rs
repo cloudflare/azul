@@ -7,13 +7,12 @@ use std::{str::FromStr, time::Duration};
 
 use crate::{load_signing_key, load_witness_key, CONFIG};
 use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
-use mtc_api::{BootstrapMtcLogEntry, MTCSubtreeCosigner, TrustAnchorID};
+use mtc_api::{BootstrapMtcLogEntry, MTCSubtreeCosigner, RelativeOid, TrustAnchorID};
 use prometheus::Registry;
 use signed_note::KeyName;
 use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
-use x509_verify::spki::ObjectIdentifier;
 
 #[durable_object]
 struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
@@ -47,8 +46,8 @@ impl DurableObject for Sequencer {
         // We don't use checkpoint extensions for MTC.
         let checkpoint_extension = Box::new(|_| vec![]);
 
-        // TODO parse log ID as a RelativeOid after https://github.com/RustCrypto/formats/issues/1875
-        let log_id_relative_oid = ObjectIdentifier::from_str(&params.log_id).unwrap();
+        // Parse the log ID, an ASN.1 `RELATIVE OID` in decimal-dotted string form.
+        let log_id_relative_oid = RelativeOid::from_str(&params.log_id).unwrap();
 
         // Get the BER/DER serialization of the content bytes, as described in <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
         let log_id = TrustAnchorID(log_id_relative_oid.as_bytes().to_vec());

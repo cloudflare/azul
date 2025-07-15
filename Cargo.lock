@@ -438,7 +438,7 @@ dependencies = [
  "tlog_tiles",
  "url",
  "worker",
- "x509-verify",
+ "x509-cert",
  "x509_util",
 ]
 
@@ -515,8 +515,7 @@ dependencies = [
 [[package]]
 name = "der"
 version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
+source = "git+https://github.com/lukevalenta/formats?branch=relative-oid-tag-v0.7.10#895775339c03f7dc42529c131d578751406870a4"
 dependencies = [
  "const-oid",
  "der_derive",
@@ -1407,7 +1406,7 @@ dependencies = [
  "signed_note",
  "thiserror 2.0.12",
  "tlog_tiles",
- "x509-verify",
+ "x509-cert",
  "x509_util",
 ]
 
@@ -1417,6 +1416,7 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
+ "der",
  "ed25519-dalek",
  "futures-executor",
  "futures-util",
@@ -1440,7 +1440,7 @@ dependencies = [
  "tlog_tiles",
  "url",
  "worker",
- "x509-verify",
+ "x509-cert",
  "x509_util",
 ]
 
@@ -2326,6 +2326,7 @@ dependencies = [
  "signed_note",
  "thiserror 2.0.12",
  "tlog_tiles",
+ "x509-cert",
  "x509-verify",
  "x509_util",
 ]
@@ -2487,6 +2488,27 @@ dependencies = [
  "signed_note",
  "thiserror 2.0.12",
  "url",
+]
+
+[[package]]
+name = "tls_codec"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0de2e01245e2bb89d6f05801c564fa27624dbd7b1846859876c7dad82e90bf6b"
+dependencies = [
+ "tls_codec_derive",
+ "zeroize",
+]
+
+[[package]]
+name = "tls_codec_derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d2e76690929402faae40aebdda620a2c0e25dd6d3b9afe48867dfd95991f4bd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -3073,6 +3095,7 @@ dependencies = [
  "const-oid",
  "der",
  "spki",
+ "tls_codec",
 ]
 
 [[package]]
@@ -3120,7 +3143,7 @@ name = "x509_util"
 version = "0.2.0"
 dependencies = [
  "der",
- "x509-verify",
+ "x509-cert",
 ]
 
 [[package]]
@@ -3193,6 +3216,20 @@ name = "zeroize"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce36e65b0d2999d2aafac989fb249189a141aee1f53c612c1f37d72631959f69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"

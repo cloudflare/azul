@@ -11,4 +11,4 @@ description.workspace = true
 
 [dependencies]
 der.workspace = true
-x509-verify.workspace = true
+x509-cert.workspace = true
