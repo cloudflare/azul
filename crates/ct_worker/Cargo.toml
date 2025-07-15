@@ -29,7 +29,7 @@ jsonschema.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 url.workspace = true
-x509-verify.workspace = true
+x509-cert.workspace = true
 
 [dev-dependencies]
 rand = { workspace = true, features = ["small_rng"] }
@@ -55,7 +55,7 @@ static_ct_api.workspace = true
 signed_note.workspace = true
 tlog_tiles.workspace = true
 worker.workspace = true
-x509-verify.workspace = true
+x509-cert.workspace = true
 x509_util.workspace = true
 prometheus.workspace = true
 

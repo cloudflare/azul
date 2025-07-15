@@ -38,5 +38,6 @@ signature.workspace = true
 signed_note.workspace = true
 thiserror.workspace = true
 tlog_tiles.workspace = true
+x509-cert.workspace = true
 x509-verify.workspace = true
 x509_util.workspace = true

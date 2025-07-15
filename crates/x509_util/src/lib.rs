@@ -1,6 +1,6 @@
 use der::{Encode, Error as DerError};
 use std::collections::HashMap;
-use x509_verify::x509_cert::{
+use x509_cert::{
     ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier},
     Certificate,
 };

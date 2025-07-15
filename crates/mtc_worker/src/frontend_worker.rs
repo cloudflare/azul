@@ -6,6 +6,10 @@
 use std::{str::FromStr, sync::LazyLock, time::Duration};
 
 use crate::{load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CONFIG, ROOTS};
+use der::{
+    asn1::{SetOfVec, UtcTime},
+    Any, Tag,
+};
 use futures_util::future::try_join_all;
 use generic_log_worker::{
     get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
@@ -13,7 +17,7 @@ use generic_log_worker::{
     ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
-use mtc_api::{AddEntryRequest, AddEntryResponse, ID_RDNA_TRUSTANCHOR_ID};
+use mtc_api::{AddEntryRequest, AddEntryResponse, RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
@@ -21,17 +25,10 @@ use sha2::{Digest, Sha256};
 use tlog_tiles::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
-use x509_verify::{
-    der::{
-        asn1::{SetOfVec, UtcTime},
-        Any,
-    },
-    spki::ObjectIdentifier,
-    x509_cert::{
-        attr::AttributeTypeAndValue,
-        name::{RdnSequence, RelativeDistinguishedName},
-        time::{Time, Validity},
-    },
+use x509_cert::{
+    attr::AttributeTypeAndValue,
+    name::{RdnSequence, RelativeDistinguishedName},
+    time::{Time, Validity},
 };
 
 const UNKNOWN_LOG_MSG: &str = "unknown log";
@@ -143,8 +140,11 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let issuer = RdnSequence::from(vec![RelativeDistinguishedName(
         SetOfVec::from_iter([AttributeTypeAndValue {
             oid: ID_RDNA_TRUSTANCHOR_ID,
-            // TODO: switch to RelativeOidRef after https://github.com/RustCrypto/formats/issues/1875
-            value: Any::from(ObjectIdentifier::from_str(&params.log_id).unwrap()),
+            value: Any::new(
+                Tag::RelativeOid,
+                RelativeOid::from_str(&params.log_id).unwrap().as_bytes(),
+            )
+            .map_err(|e| e.to_string())?,
         }])
         .unwrap(),
     )]);

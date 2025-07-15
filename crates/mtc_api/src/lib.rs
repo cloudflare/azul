@@ -1,13 +1,15 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
+mod relative_oid;
 mod subtree_cosignature;
-use byteorder::{BigEndian, ReadBytesExt};
+pub use relative_oid::*;
 pub use subtree_cosignature::*;
 
 use anyhow::{anyhow, bail, ensure};
+use byteorder::{BigEndian, ReadBytesExt};
 use der::{
-    asn1::BitString,
+    asn1::{BitString, OctetString},
     oid::{db::rfc5280, ObjectIdentifier},
     Decode, Encode, Sequence, ValueOrd,
 };
@@ -18,26 +20,24 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     io::Read,
+    num::ParseIntError,
 };
 use thiserror::Error;
 use tlog_tiles::{
     Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, SequenceMetadata, TlogError,
     TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
 };
-use x509_util::CertPool;
-use x509_verify::{
-    der::asn1::OctetString,
-    x509_cert::{
-        certificate::Version,
-        ext::{
-            pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages},
-            Extension,
-        },
-        name::RdnSequence,
-        time::Validity,
-        Certificate, TbsCertificate,
+use x509_cert::{
+    certificate::Version,
+    ext::{
+        pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages},
+        Extension,
     },
+    name::RdnSequence,
+    time::Validity,
+    Certificate, TbsCertificate,
 };
+use x509_util::CertPool;
 
 // The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
 // as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
@@ -133,8 +133,12 @@ pub enum MtcError {
     Der(#[from] der::Error),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    ParseInt(#[from] ParseIntError),
     #[error("empty chain")]
     EmptyChain,
+    #[error("invalid relative OID")]
+    InvalidRelativeOID,
     #[error("unknown entry type")]
     UnknownEntryType,
 }
@@ -488,7 +492,7 @@ pub fn validate_chain(
 mod tests {
     use der::asn1::UtcTime;
     use std::time::Duration;
-    use x509_verify::x509_cert::{time::Time, Certificate};
+    use x509_cert::{time::Time, Certificate};
 
     use super::*;
 

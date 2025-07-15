@@ -9,7 +9,7 @@ use serde_json::from_str;
 use std::env;
 use std::fs;
 use url::Url;
-use x509_verify::x509_cert::Certificate;
+use x509_cert::Certificate;
 
 fn main() {
     let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());

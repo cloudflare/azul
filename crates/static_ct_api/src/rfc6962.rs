@@ -33,18 +33,16 @@ use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use tlog_tiles::UnixTimestamp;
-use x509_util::CertPool;
-use x509_verify::{
-    x509_cert::{
-        der::{Decode, Encode},
-        ext::{
-            pkix::{AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage},
-            Extension,
-        },
-        impl_newtype, Certificate, TbsCertificate,
+use x509_cert::{
+    der::{Decode, Encode},
+    ext::{
+        pkix::{AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage},
+        Extension,
     },
-    VerifyingKey,
+    impl_newtype, Certificate, TbsCertificate,
 };
+use x509_util::CertPool;
+use x509_verify::VerifyingKey;
 
 // Data structures for the [Static CT Submission APIs](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#submission-apis),
 // a subset of the APIs from [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962).

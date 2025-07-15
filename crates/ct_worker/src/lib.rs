@@ -11,8 +11,8 @@ use std::sync::{LazyLock, OnceLock};
 use tlog_tiles::{LookupKey, SequenceMetadata};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+use x509_cert::Certificate;
 use x509_util::CertPool;
-use x509_verify::x509_cert::Certificate;
 
 mod batcher_do;
 mod frontend_worker;
