@@ -19,6 +19,7 @@ use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::str::FromStr;
@@ -148,7 +149,7 @@ pub async fn put_cache_entry_metadata<L: PendingLogEntry>(
 
 trait CacheWrite {
     /// Put the provided sequenced entries into the cache. This does NOT overwrite existing entries.
-    async fn put_entries(&mut self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()>;
+    async fn put_entries(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()>;
 }
 
 trait CacheRead {
@@ -163,7 +164,7 @@ struct DedupCache {
 
 impl CacheWrite for DedupCache {
     /// Write entries to both the short-term deduplication cache and its backup in DO Storage.
-    async fn put_entries(&mut self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
+    async fn put_entries(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -194,7 +195,7 @@ impl DedupCache {
     }
 
     // Load batches of cache entries from DO storage into the in-memory cache.
-    async fn load(&mut self) -> Result<()> {
+    async fn load(&self) -> Result<()> {
         let head = self
             .storage
             .get::<usize>(Self::FIFO_HEAD_KEY)
@@ -216,7 +217,7 @@ impl DedupCache {
     }
 
     // Store a batch of cache entries in DO storage.
-    async fn store(&mut self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
+    async fn store(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
         let head = self
             .storage
             .get::<usize>(Self::FIFO_HEAD_KEY)
@@ -272,8 +273,8 @@ fn deserialize_entries(buf: &[u8]) -> Result<Vec<(LookupKey, SequenceMetadata)>>
 // A fixed-size in-memory FIFO cache.
 struct MemoryCache {
     max_size: usize,
-    map: HashMap<LookupKey, SequenceMetadata>,
-    fifo: VecDeque<LookupKey>,
+    map: RefCell<HashMap<LookupKey, SequenceMetadata>>,
+    fifo: RefCell<VecDeque<LookupKey>>,
 }
 
 impl MemoryCache {
@@ -281,29 +282,31 @@ impl MemoryCache {
         assert_ne!(max_size, 0);
         Self {
             max_size,
-            fifo: VecDeque::with_capacity(max_size),
-            map: HashMap::with_capacity(max_size),
+            fifo: RefCell::new(VecDeque::with_capacity(max_size)),
+            map: RefCell::new(HashMap::with_capacity(max_size)),
         }
     }
 
     // Get an entry from the in-memory cache.
     fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
-        self.map.get(key).copied()
+        self.map.borrow().get(key).copied()
     }
 
     // Put a batch of entries into the in-memory cache,
     // evicting old entries to make room if necessary.
-    fn put_entries(&mut self, entries: &[(LookupKey, SequenceMetadata)]) {
+    fn put_entries(&self, entries: &[(LookupKey, SequenceMetadata)]) {
+        let mut map = self.map.borrow_mut();
+        let mut fifo = self.fifo.borrow_mut();
         for (key, value) in entries {
-            if self.map.contains_key(key) {
+            if map.contains_key(key) {
                 continue;
             }
-            if self.map.len() == self.max_size {
+            if map.len() == self.max_size {
                 // Evict oldest entry to make room.
-                self.map.remove(&self.fifo.pop_front().unwrap());
+                map.remove(&fifo.pop_front().unwrap());
             }
-            self.fifo.push_back(*key);
-            self.map.insert(*key, *value);
+            fifo.push_back(*key);
+            map.insert(*key, *value);
         }
     }
 }

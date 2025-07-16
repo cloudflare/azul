@@ -407,7 +407,7 @@ pub fn open_checkpoint(
 }
 
 /// A transparency log tree with a timestamp.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct TreeWithTimestamp {
     size: u64,
     hash: Hash,
