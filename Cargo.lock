@@ -435,6 +435,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "static_ct_api",
+ "thiserror 2.0.12",
  "tlog_tiles",
  "url",
  "worker",

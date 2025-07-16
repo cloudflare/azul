@@ -55,7 +55,12 @@
                         "Batcher"
                     ]
                 }
-            ]
+            ],
+            "triggers": {
+                "crons": [
+                    "* * * * *"
+                ]
+            }
         },
         "cftest": {
             "build": {

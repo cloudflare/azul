@@ -50,7 +50,9 @@ use worker::Error as WorkerError;
 const DATA_TILE_LEVEL_KEY: u8 = u8::MAX;
 /// Same as above, anything above 63 is fine to use as the level key.
 const UNHASHED_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
-const CHECKPOINT_KEY: &str = "checkpoint";
+/// Path used to store checkpoints, both in the object storage and lock backends.
+pub const CHECKPOINT_KEY: &str = "checkpoint";
+/// Path used to store staging bundles in the lock backend.
 const STAGING_KEY: &str = "staging";
 
 // Limit on the number of entries per batch. Tune this parameter to avoid
