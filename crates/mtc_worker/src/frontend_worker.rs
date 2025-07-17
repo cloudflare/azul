@@ -14,7 +14,7 @@ use futures_util::future::try_join_all;
 use generic_log_worker::{
     get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
     log_ops::UploadOptions, put_cache_entry_metadata, util::now_millis, ObjectBackend,
-    ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    ObjectBucket, ProveInclusionQuery, ENTRY_ENDPOINT, METRICS_ENDPOINT, PROVE_INCLUSION_ENDPOINT,
 };
 use log::{debug, info, warn};
 use mtc_api::{AddEntryRequest, AddEntryResponse, RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
@@ -67,6 +67,21 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     router
         .post_async("/logs/:log/add-entry", |req, ctx| async move {
             add_entry(req, &ctx.env, valid_log_name(&ctx)?).await
+        })
+        .get_async("/logs/:log/prove-inclusion", |req, ctx| async move {
+            let name = valid_log_name(&ctx)?;
+            let stub = get_durable_object_stub(
+                &ctx.env,
+                name,
+                None,
+                "SEQUENCER",
+                CONFIG.logs[name].location_hint.as_deref(),
+            )?;
+            let ProveInclusionQuery { leaf_index } = req.query()?;
+            stub.fetch_with_str(&format!(
+                "http://fake_url.com{PROVE_INCLUSION_ENDPOINT}?leaf_index={leaf_index}"
+            ))
+            .await
         })
         .get("/logs/:log/metadata", |_req, ctx| {
             let name = valid_log_name(&ctx)?;
