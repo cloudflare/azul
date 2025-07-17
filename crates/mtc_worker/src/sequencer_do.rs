@@ -3,14 +3,13 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 
-use crate::{load_signing_key, load_witness_key, CONFIG};
+use crate::{load_checkpoint_signers, CONFIG};
 use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
-use mtc_api::{BootstrapMtcLogEntry, MTCSubtreeCosigner, RelativeOid, TrustAnchorID};
+use mtc_api::BootstrapMtcLogEntry;
 use prometheus::Registry;
 use signed_note::KeyName;
-use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -45,25 +44,7 @@ impl DurableObject for Sequencer {
         // We don't use checkpoint extensions for MTC.
         let checkpoint_extension = Box::new(|_| vec![]);
 
-        // Parse the log ID, an ASN.1 `RELATIVE OID` in decimal-dotted string form.
-        let log_id_relative_oid = RelativeOid::from_str(&params.log_id).unwrap();
-
-        // Get the BER/DER serialization of the content bytes, as described in <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
-        let log_id = TrustAnchorID(log_id_relative_oid.as_bytes().to_vec());
-
-        // TODO should the CA cosigner have a different ID than the log itself?
-        let cosigner_id = log_id.clone();
-
-        let checkpoint_signers: Vec<Box<dyn CheckpointSigner>> = {
-            let signing_key = load_signing_key(&env, name).unwrap().clone();
-            let witness_key = load_witness_key(&env, name).unwrap().clone();
-
-            // Make the checkpoint signers from the secret keys and put them in a vec.
-            let signer = MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key);
-            let witness = CosignatureV1CheckpointSigner::new(origin.clone(), witness_key);
-
-            vec![Box::new(signer), Box::new(witness)]
-        };
+        let checkpoint_signers = load_checkpoint_signers(&env, name);
         let bucket = load_public_bucket(&env, name).unwrap();
         let registry = Registry::new();
 
