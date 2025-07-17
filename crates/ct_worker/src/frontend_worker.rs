@@ -300,7 +300,7 @@ fn batcher_id_from_lookup_key(key: &LookupKey, num_batchers: u8) -> u8 {
 }
 
 fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
-    let mut h = Headers::new();
+    let h = Headers::new();
     if let Some(hdr) = meta.cache_control {
         h.append("Cache-Control", &hdr).unwrap();
     }

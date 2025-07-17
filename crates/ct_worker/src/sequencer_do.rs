@@ -17,7 +17,6 @@ use worker::*;
 #[durable_object]
 struct Sequencer(GenericSequencer<StaticCTLogEntry>);
 
-#[durable_object]
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
         // Find the Durable Object name by enumerating all possibilities.
@@ -77,11 +76,11 @@ impl DurableObject for Sequencer {
         Sequencer(GenericSequencer::new(config, state, bucket, registry))
     }
 
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
         self.0.fetch(req).await
     }
 
-    async fn alarm(&mut self) -> Result<Response> {
+    async fn alarm(&self) -> Result<Response> {
         self.0.alarm().await
     }
 }

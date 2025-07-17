@@ -10,6 +10,7 @@ use crate::{LookupKey, SequenceMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     time::Duration,
 };
@@ -23,9 +24,9 @@ pub struct GenericBatcher<E: PendingLogEntry> {
     config: BatcherConfig,
     kv: Option<KvStore>,
     sequencer: Stub,
-    batch: Batch<E>,
-    in_flight: usize,
-    processed: usize,
+    batch: RefCell<Batch<E>>,
+    in_flight: RefCell<usize>,
+    processed: RefCell<usize>,
 }
 
 pub struct BatcherConfig {
@@ -59,9 +60,9 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
             config,
             kv,
             sequencer,
-            batch: Batch::default(),
-            in_flight: 0,
-            processed: 0,
+            batch: RefCell::new(Batch::default()),
+            in_flight: RefCell::new(0),
+            processed: RefCell::new(0),
         }
     }
 
@@ -73,26 +74,26 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
     ///
     /// Returns an error if the request cannot be parsed or response cannot be
     /// constructed.
-    pub async fn fetch(&mut self, mut req: Request) -> Result<Response> {
+    pub async fn fetch(&self, mut req: Request) -> Result<Response> {
         match req.path().as_str() {
             ENTRY_ENDPOINT => {
                 let entry: E = req.json().await?;
                 let key = entry.lookup_key();
 
-                self.in_flight += 1;
-                self.processed += 1;
+                *self.in_flight.borrow_mut() += 1;
+                *self.processed.borrow_mut() += 1;
 
                 // Add entry to the current pending batch if it isn't already present.
                 // Rely on the Sequencer to deduplicate entries across batches.
-                if !self.batch.by_hash.contains(&key) {
-                    self.batch.by_hash.insert(key);
-                    self.batch.entries.push(entry);
+                if !self.batch.borrow().by_hash.contains(&key) {
+                    self.batch.borrow_mut().by_hash.insert(key);
+                    self.batch.borrow_mut().entries.push(entry);
                 }
 
-                let mut recv = self.batch.done.subscribe();
+                let mut recv = self.batch.borrow().done.subscribe();
 
                 // Submit the current pending batch if it's full.
-                if self.batch.entries.len() >= self.config.max_batch_entries {
+                if self.batch.borrow().entries.len() >= self.config.max_batch_entries {
                     if let Err(e) = self.submit_batch().await {
                         log::warn!("{} failed to submit full batch: {e}", self.config.name);
                     }
@@ -112,7 +113,7 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
                         }
                         Either::Right(((), batch_done)) => {
                             // Batch timeout reached; submit this entry's batch if no-one has already.
-                            if self.batch.by_hash.contains(&key) {
+                            if self.batch.borrow().by_hash.contains(&key) {
                                 if let Err(e) = self.submit_batch().await {
                                     log::warn!(
                                         "{} failed to submit timed-out batch: {e}",
@@ -140,7 +141,7 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
                     // submitting the batch or rate limiting at the Sequencer.
                     Response::error("rate limited", 429)
                 };
-                self.in_flight -= 1;
+                *self.in_flight.borrow_mut() -= 1;
 
                 resp
             }
@@ -156,16 +157,16 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
     ///
     /// Returns an error if there are issues constructing or sending requests to
     /// the sequencer or deduplication cache.
-    pub async fn submit_batch(&mut self) -> Result<()> {
+    pub async fn submit_batch(&self) -> Result<()> {
         // Take the current pending batch and replace it with a new one.
-        let batch = std::mem::take(&mut self.batch);
+        let batch = std::mem::take(&mut *self.batch.borrow_mut());
 
         log::debug!(
             "{} submitting batch: leaves={} inflight={} processed={}",
             self.config.name,
             batch.entries.len(),
-            self.in_flight,
-            self.processed,
+            self.in_flight.borrow(),
+            self.processed.borrow(),
         );
 
         // Submit the batch, and wait for it to be sequenced.
