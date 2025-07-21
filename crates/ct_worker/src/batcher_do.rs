@@ -1,11 +1,10 @@
 use crate::CONFIG;
 use generic_log_worker::{get_durable_object_stub, load_cache_kv, BatcherConfig, GenericBatcher};
-use static_ct_api::StaticCTPendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-#[durable_object]
-struct Batcher(GenericBatcher<StaticCTPendingLogEntry>);
+#[durable_object(fetch)]
+struct Batcher(GenericBatcher);
 
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {

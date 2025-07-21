@@ -12,7 +12,7 @@ use static_ct_api::StaticCTLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-#[durable_object]
+#[durable_object(alarm)]
 struct Sequencer(GenericSequencer<StaticCTLogEntry>);
 
 impl DurableObject for Sequencer {

@@ -21,6 +21,14 @@ pub type LeafIndex = u64;
 /// from the sequencing backend to the frontend to return to the caller.
 pub type SequenceMetadata = (LeafIndex, UnixTimestamp);
 
+/// An opaque `PendingLogEntry` that can be passed around without requiring full
+/// deserialization.
+#[derive(Serialize, Deserialize)]
+pub struct PendingLogEntryBlob {
+    pub lookup_key: LookupKey,
+    pub data: Vec<u8>,
+}
+
 /// The functionality exposed by any data type that can be included in a Merkle tree
 pub trait PendingLogEntry: core::fmt::Debug + Clone + Serialize + DeserializeOwned {
     /// The path to write data tiles in the object store, which is 'entries' for tlog-tiles.

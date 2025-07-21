@@ -13,7 +13,7 @@ use signed_note::KeyName;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-#[durable_object]
+#[durable_object(alarm)]
 struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
 
 impl DurableObject for Sequencer {

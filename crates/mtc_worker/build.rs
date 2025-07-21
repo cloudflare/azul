@@ -7,7 +7,6 @@ use config::AppConfig;
 use der::{asn1::SetOfVec, Any, Tag};
 use mtc_api::RelativeOid;
 use mtc_api::ID_RDNA_TRUSTANCHOR_ID;
-use serde_json::from_str;
 use std::env;
 use std::fs;
 use std::str::FromStr;
@@ -26,10 +25,10 @@ fn main() {
     });
 
     // Validate the config json against the schema.
-    let json = from_str(config_contents).unwrap_or_else(|e| {
+    let json = serde_json::from_str(config_contents).unwrap_or_else(|e| {
         panic!("failed to deserialize JSON config '{config_file}': {e}");
     });
-    let schema = from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
+    let schema = serde_json::from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
         panic!("failed to deserialize JSON schema 'config.schema.json': {e}");
     });
     jsonschema::validate(&schema, &json).unwrap_or_else(|e| {

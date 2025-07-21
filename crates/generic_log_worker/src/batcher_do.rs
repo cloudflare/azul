@@ -6,7 +6,7 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{LookupKey, SequenceMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT};
+use crate::{deserialize, serialize, LookupKey, SequenceMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use std::{
@@ -14,17 +14,17 @@ use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
-use tlog_tiles::PendingLogEntry;
+use tlog_tiles::PendingLogEntryBlob;
 use tokio::sync::watch::{self, Sender};
 use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-pub struct GenericBatcher<E: PendingLogEntry> {
+pub struct GenericBatcher {
     config: BatcherConfig,
     kv: Option<KvStore>,
     sequencer: Stub,
-    batch: RefCell<Batch<E>>,
+    batch: RefCell<Batch>,
     in_flight: RefCell<usize>,
     processed: RefCell<usize>,
 }
@@ -36,13 +36,13 @@ pub struct BatcherConfig {
 }
 
 // A batch of entries to be submitted to the Sequencer together.
-struct Batch<E: PendingLogEntry> {
-    entries: Vec<E>,
+struct Batch {
+    entries: Vec<PendingLogEntryBlob>,
     by_hash: HashSet<LookupKey>,
     done: Sender<HashMap<LookupKey, SequenceMetadata>>,
 }
 
-impl<E: PendingLogEntry> Default for Batch<E> {
+impl Default for Batch {
     /// Returns a batch initialized with a watch channel.
     fn default() -> Self {
         Self {
@@ -53,7 +53,7 @@ impl<E: PendingLogEntry> Default for Batch<E> {
     }
 }
 
-impl<E: PendingLogEntry> GenericBatcher<E> {
+impl GenericBatcher {
     /// Returns a new batcher with the given config.
     pub fn new(config: BatcherConfig, kv: Option<KvStore>, sequencer: Stub) -> Self {
         Self {
@@ -77,8 +77,8 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
     pub async fn fetch(&self, mut req: Request) -> Result<Response> {
         match req.path().as_str() {
             ENTRY_ENDPOINT => {
-                let entry: E = req.json().await?;
-                let key = entry.lookup_key();
+                let entry: PendingLogEntryBlob = deserialize(&req.bytes().await?)?;
+                let key = entry.lookup_key;
 
                 *self.in_flight.borrow_mut() += 1;
                 *self.processed.borrow_mut() += 1;
@@ -135,7 +135,7 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
 
                 let resp = if let Some(value) = recv.borrow().get(&key) {
                     // The entry has been sequenced!
-                    Response::from_json(&value)
+                    Response::from_bytes(serialize(&value)?)
                 } else {
                     // Failed to sequence this entry, either due to an error
                     // submitting the batch or rate limiting at the Sequencer.
@@ -150,7 +150,7 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
     }
 }
 
-impl<E: PendingLogEntry> GenericBatcher<E> {
+impl GenericBatcher {
     /// Submit the current pending batch to be sequenced.
     ///
     /// # Errors
@@ -174,16 +174,19 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
             &format!("http://fake_url.com{BATCH_ENDPOINT}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&batch.entries)?.into()),
+                body: Some(serialize(&batch.entries)?.into()),
                 ..Default::default()
             },
         )?;
-        let sequenced_entries: HashMap<LookupKey, SequenceMetadata> = self
-            .sequencer
-            .fetch_with_request(req)
-            .await?
-            .json::<Vec<(LookupKey, SequenceMetadata)>>()
-            .await?
+        let sequenced_entries: HashMap<LookupKey, SequenceMetadata> =
+            deserialize::<Vec<(LookupKey, SequenceMetadata)>>(
+                &self
+                    .sequencer
+                    .fetch_with_request(req)
+                    .await?
+                    .bytes()
+                    .await?,
+            )?
             .into_iter()
             .collect();
 
@@ -204,5 +207,14 @@ impl<E: PendingLogEntry> GenericBatcher<E> {
             join_all(futures).await;
         }
         Ok(())
+    }
+}
+
+/// Return a batcher ID to which the provided entry should be assigned.
+pub fn batcher_id_from_lookup_key(key: &LookupKey, num_batchers: u8) -> Option<u8> {
+    if num_batchers > 0 {
+        Some(key[0] % num_batchers)
+    } else {
+        None
     }
 }

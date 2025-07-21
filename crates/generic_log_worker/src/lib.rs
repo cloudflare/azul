@@ -17,6 +17,7 @@ use byteorder::{BigEndian, WriteBytesExt};
 use log::Level;
 use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -51,6 +52,28 @@ pub fn init_logging(level: Option<&str>) {
     INIT_LOGGING.call_once(|| {
         console_log::init_with_level(level).expect("error initializing logger");
     });
+}
+
+/// Wrapper around `bitcode::serialize`.
+///
+/// # Errors
+/// Will return a `worker::Error` wrapping any serialization errors.
+pub fn serialize<T>(t: &T) -> Result<Vec<u8>>
+where
+    T: Serialize + ?Sized,
+{
+    bitcode::serialize(t).map_err(|e| Error::RustError(e.to_string()))
+}
+
+/// Wrapper around `bitcode::deserialize`.
+///
+/// # Errors
+/// Will return a `worker::Error` wrapping any deserialization errors.
+pub fn deserialize<'de, T>(bytes: &'de [u8]) -> Result<T>
+where
+    T: Deserialize<'de>,
+{
+    bitcode::deserialize::<T>(bytes).map_err(|e| Error::RustError(e.to_string()))
 }
 
 /// Retrieve a Durable Object stub for the given parameters.
@@ -110,10 +133,8 @@ pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
 /// Returns an error if there are issues retrieving the metadata.
 pub async fn get_cached_metadata(
     kv: &KvStore,
-    pending: &impl PendingLogEntry,
+    lookup_key: &LookupKey,
 ) -> Result<Option<SequenceMetadata>> {
-    let lookup_key = pending.lookup_key();
-
     // Query the cache and return the entry metadata if it exists
     let metadata_opt = kv
         .get(&BASE64_STANDARD.encode(lookup_key))
