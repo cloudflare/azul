@@ -67,7 +67,7 @@ fn main() {
     let roots =
         Certificate::load_pem_chain(&fs::read(roots_file).expect("failed to read roots file"))
             .expect("unable to decode certificates");
-    assert!(!roots.is_empty(), "Roots file is empty");
+    assert!(roots.len() > 50, "Roots file has too few entries");
 
     // Copy to OUT_DIR.
     let out_dir = env::var("OUT_DIR").unwrap();
