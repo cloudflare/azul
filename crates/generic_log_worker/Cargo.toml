@@ -22,6 +22,7 @@ static_ct_api.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+bitcode.workspace = true
 byteorder.workspace = true
 console_error_panic_hook.workspace = true
 console_log.workspace = true
@@ -35,7 +36,6 @@ rand.workspace = true
 serde-wasm-bindgen.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
-serde_json.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
 thiserror.workspace = true

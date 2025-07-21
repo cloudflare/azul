@@ -10,7 +10,7 @@ use signed_note::KeyName;
 use static_ct_api::StaticCTCheckpointSigner;
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, LookupKey, SequenceMetadata};
+use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, SequenceMetadata};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::Certificate;

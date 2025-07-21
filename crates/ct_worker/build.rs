@@ -5,7 +5,6 @@
 
 use chrono::Months;
 use config::AppConfig;
-use serde_json::from_str;
 use std::env;
 use std::fs;
 use url::Url;
@@ -19,10 +18,10 @@ fn main() {
     });
 
     // Validate the config json against the schema.
-    let json = from_str(config_contents).unwrap_or_else(|e| {
+    let json = serde_json::from_str(config_contents).unwrap_or_else(|e| {
         panic!("failed to deserialize JSON config '{config_file}': {e}");
     });
-    let schema = from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
+    let schema = serde_json::from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
         panic!("failed to deserialize JSON schema 'config.schema.json': {e}");
     });
     jsonschema::validate(&schema, &json).unwrap_or_else(|e| {

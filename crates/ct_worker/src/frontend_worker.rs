@@ -5,12 +5,13 @@
 
 use std::sync::LazyLock;
 
-use crate::{load_signing_key, LookupKey, SequenceMetadata, CONFIG, ROOTS};
+use crate::{load_signing_key, SequenceMetadata, CONFIG, ROOTS};
 use config::TemporalInterval;
 use futures_util::future::try_join_all;
 use generic_log_worker::{
-    get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
-    log_ops::UploadOptions, put_cache_entry_metadata, ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
+    batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
+    init_logging, load_cache_kv, load_public_bucket, log_ops::UploadOptions,
+    put_cache_entry_metadata, serialize, ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
     METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
@@ -19,7 +20,7 @@ use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
-use tlog_tiles::{LogEntry, PendingLogEntry};
+use tlog_tiles::{LogEntry, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -176,7 +177,6 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
 }
 
-#[allow(clippy::too_many_lines)]
 async fn add_chain_or_pre_chain(
     mut req: Request,
     env: &Env,
@@ -215,8 +215,7 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     if params.enable_dedup {
-        if let Some(metadata) =
-            get_cached_metadata(&load_cache_kv(env, name)?, &pending_entry).await?
+        if let Some(metadata) = get_cached_metadata(&load_cache_kv(env, name)?, &lookup_key).await?
         {
             debug!("{name}: Entry is cached");
             let entry = StaticCTLogEntry::new(pending_entry, metadata);
@@ -242,30 +241,31 @@ async fn add_chain_or_pre_chain(
 
     // Submit entry to be sequenced, either via a batcher or directly to the
     // sequencer.
-    let stub = if params.num_batchers > 0 {
-        let batcher_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
+    let stub = {
+        let shard_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
         get_durable_object_stub(
             env,
             name,
-            Some(batcher_id),
-            "BATCHER",
-            params.location_hint.as_deref(),
-        )?
-    } else {
-        get_durable_object_stub(
-            env,
-            name,
-            None,
-            "SEQUENCER",
+            shard_id,
+            if shard_id.is_some() {
+                "BATCHER"
+            } else {
+                "SEQUENCER"
+            },
             params.location_hint.as_deref(),
         )?
     };
+
+    let serialized = serialize(&PendingLogEntryBlob {
+        lookup_key,
+        data: serialize(&pending_entry)?,
+    })?;
     let mut response = stub
         .fetch_with_request(Request::new_with_init(
             &format!("http://fake_url.com{ENTRY_ENDPOINT}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&pending_entry)?.into()),
+                body: Some(serialized.into()),
                 ..Default::default()
             },
         )?)
@@ -274,7 +274,7 @@ async fn add_chain_or_pre_chain(
         // Return the response from the sequencing directly to the client.
         return Ok(response);
     }
-    let metadata = response.json::<SequenceMetadata>().await?;
+    let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
     if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
@@ -293,10 +293,6 @@ async fn add_chain_or_pre_chain(
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
     Response::from_json(&sct)
-}
-
-fn batcher_id_from_lookup_key(key: &LookupKey, num_batchers: u8) -> u8 {
-    key[0] % num_batchers
 }
 
 fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {

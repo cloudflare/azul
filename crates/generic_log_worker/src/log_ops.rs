@@ -1114,7 +1114,7 @@ async fn apply_staged_uploads(
     if staged_size != size || staged_hash != hash {
         bail!("staging bundle does not match current tree");
     }
-    let uploads: Vec<UploadAction> = serde_json::from_slice(&staged_uploads[8 + HASH_SIZE..])?;
+    let uploads = bitcode::deserialize::<Vec<UploadAction>>(&staged_uploads[8 + HASH_SIZE..])?;
     let upload_futures: Vec<_> = uploads
         .iter()
         .map(|u| object.upload(&u.key, &u.data, &u.opts))
@@ -1339,7 +1339,7 @@ fn marshal_staged_uploads(
         .to_be_bytes()
         .into_iter()
         .chain(hash.0.iter().copied())
-        .chain(serde_json::to_vec(uploads)?)
+        .chain(bitcode::serialize(uploads)?)
         .collect::<Vec<_>>())
 }
 

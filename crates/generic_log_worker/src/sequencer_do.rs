@@ -6,8 +6,10 @@
 use std::{cell::RefCell, time::Duration};
 
 use crate::{
+    deserialize,
     log_ops::{self, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
+    serialize,
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
     ENTRY_ENDPOINT, METRICS_ENDPOINT,
@@ -19,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use signed_note::KeyName;
-use tlog_tiles::{CheckpointSigner, LeafIndex, LogEntry, PendingLogEntry, UnixTimestamp};
+use tlog_tiles::{CheckpointSigner, LeafIndex, LogEntry, PendingLogEntryBlob, UnixTimestamp};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
@@ -116,18 +118,18 @@ impl<L: LogEntry> GenericSequencer<L> {
         let resp = match path.as_str() {
             METRICS_ENDPOINT => self.fetch_metrics(),
             ENTRY_ENDPOINT => {
-                let pending_entry: L::Pending = req.json().await?;
-                let lookup_key = pending_entry.lookup_key();
-                let result = self.add_batch(vec![pending_entry]).await;
+                let pending_entry = deserialize::<PendingLogEntryBlob>(&req.bytes().await?)?;
+                let lookup_key = pending_entry.lookup_key;
+                let result = self.add_batch(vec![pending_entry]).await?;
                 if result.is_empty() || result[0].0 != lookup_key {
                     Response::error("rate limited", 429)
                 } else {
-                    Response::from_json(&result[0].1)
+                    Response::from_bytes(serialize(&result[0].1)?)
                 }
             }
             BATCH_ENDPOINT => {
-                let pending_entries: Vec<L::Pending> = req.json().await?;
-                Response::from_json(&self.add_batch(pending_entries).await)
+                let pending_entries: Vec<PendingLogEntryBlob> = deserialize(&req.bytes().await?)?;
+                Response::from_bytes(serialize(&self.add_batch(pending_entries).await?)?)
             }
             _ => {
                 endpoint = "unknown";
@@ -225,13 +227,14 @@ impl<L: LogEntry> GenericSequencer<L> {
     // omitted.
     async fn add_batch(
         &self,
-        pending_entries: Vec<L::Pending>,
-    ) -> Vec<(LookupKey, SequenceMetadata)> {
+        pending_entries: Vec<PendingLogEntryBlob>,
+    ) -> Result<Vec<(LookupKey, SequenceMetadata)>, WorkerError> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());
-        for pending_entry in pending_entries {
-            lookup_keys.push(pending_entry.lookup_key());
+        for pending_entry_blob in pending_entries {
+            lookup_keys.push(pending_entry_blob.lookup_key);
+            let pending_entry = deserialize(&pending_entry_blob.data)?;
 
             let add_leaf_result = log_ops::add_leaf_to_pool(
                 &self.pool_state,
@@ -251,11 +254,11 @@ impl<L: LogEntry> GenericSequencer<L> {
 
         // Zip the cache keys with the cache values, filtering out entries that
         // were not sequenced (e.g., due to rate limiting).
-        lookup_keys
+        Ok(lookup_keys
             .into_iter()
             .zip(entries_metadata.iter())
             .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>())
     }
 
     fn fetch_metrics(&self) -> Result<Response, WorkerError> {

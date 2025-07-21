@@ -32,6 +32,7 @@ debug = 1
 [workspace.dependencies]
 anyhow = "1.0"
 base64 = "0.22"
+bitcode = { version = "0.6.6", features = ["serde"] }
 byteorder = "1.5"
 chrono = { version = "0.4", features = ["serde"] }
 console_error_panic_hook = "0.1.1"

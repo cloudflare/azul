@@ -3,11 +3,9 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use std::{str::FromStr, sync::LazyLock, time::Duration};
-
 use crate::{
-    load_checkpoint_signers, load_origin, load_signing_key, load_witness_key, LookupKey,
-    SequenceMetadata, CONFIG, ROOTS,
+    load_checkpoint_signers, load_origin, load_signing_key, load_witness_key, SequenceMetadata,
+    CONFIG, ROOTS,
 };
 use der::{
     asn1::{SetOfVec, UtcTime},
@@ -15,9 +13,10 @@ use der::{
 };
 use futures_util::future::try_join_all;
 use generic_log_worker::{
-    get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
+    batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
+    init_logging, load_cache_kv, load_public_bucket,
     log_ops::{prove_inclusion, UploadOptions, CHECKPOINT_KEY},
-    put_cache_entry_metadata,
+    put_cache_entry_metadata, serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ProveInclusionQuery, ProveInclusionResponse, ENTRY_ENDPOINT,
     METRICS_ENDPOINT,
@@ -29,7 +28,8 @@ use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use signed_note::{NoteVerifier, VerifierList};
-use tlog_tiles::{open_checkpoint, PendingLogEntry};
+use std::{str::FromStr, sync::LazyLock, time::Duration};
+use tlog_tiles::{open_checkpoint, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::{
@@ -216,15 +216,13 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     // Check if entry is cached and return right away if so.
     if params.enable_dedup {
-        if let Some(metadata) =
-            get_cached_metadata(&load_cache_kv(env, name)?, &pending_entry).await?
+        if let Some(metadata) = get_cached_metadata(&load_cache_kv(env, name)?, &lookup_key).await?
         {
             debug!("{name}: Entry is cached");
-            let resp = AddEntryResponse {
+            return Response::from_json(&AddEntryResponse {
                 leaf_index: metadata.0,
                 timestamp: metadata.1,
-            };
-            return Response::from_json(&resp);
+            });
         }
     }
 
@@ -244,30 +242,30 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     // Submit entry to be sequenced, either via a batcher or directly to the
     // sequencer.
-    let stub = if params.num_batchers > 0 {
-        let batcher_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
+    let stub = {
+        let shard_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
         get_durable_object_stub(
             env,
             name,
-            Some(batcher_id),
-            "BATCHER",
-            params.location_hint.as_deref(),
-        )?
-    } else {
-        get_durable_object_stub(
-            env,
-            name,
-            None,
-            "SEQUENCER",
+            shard_id,
+            if shard_id.is_some() {
+                "BATCHER"
+            } else {
+                "SEQUENCER"
+            },
             params.location_hint.as_deref(),
         )?
     };
+    let serialized = serialize(&PendingLogEntryBlob {
+        lookup_key,
+        data: serialize(&pending_entry)?,
+    })?;
     let mut response = stub
         .fetch_with_request(Request::new_with_init(
             &format!("http://fake_url.com{ENTRY_ENDPOINT}"),
             &RequestInit {
                 method: Method::Post,
-                body: Some(serde_json::to_string(&pending_entry)?.into()),
+                body: Some(serialized.into()),
                 ..Default::default()
             },
         )?)
@@ -276,7 +274,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         // Return the response from the sequencing directly to the client.
         return Ok(response);
     }
-    let metadata = response.json::<SequenceMetadata>().await?;
+    let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
     if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
@@ -287,11 +285,10 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
             warn!("{name}: Failed to write entry to deduplication cache");
         }
     }
-    let resp = AddEntryResponse {
+    Response::from_json(&AddEntryResponse {
         leaf_index: metadata.0,
         timestamp: metadata.1,
-    };
-    Response::from_json(&resp)
+    })
 }
 
 fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
@@ -304,10 +301,6 @@ fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
     } else {
         Err("missing 'log' route param".into())
     }
-}
-
-fn batcher_id_from_lookup_key(key: &LookupKey, num_batchers: u8) -> u8 {
-    key[0] % num_batchers
 }
 
 fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
