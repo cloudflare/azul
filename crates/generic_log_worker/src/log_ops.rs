@@ -38,10 +38,11 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    prove_record, tlog, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile,
-    TileHashReader, TileIterator, TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp,
-    UnixTimestamp, HASH_SIZE,
+    prove_record, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileHashReader,
+    TileIterator, TileReader, TlogError, TlogTile, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
+#[cfg(test)]
+use tlog_tiles::{tlog, TreeProof};
 use tokio::sync::watch::{channel, Receiver, Sender};
 use worker::Error as WorkerError;
 
@@ -50,7 +51,7 @@ use worker::Error as WorkerError;
 const DATA_TILE_LEVEL_KEY: u8 = u8::MAX;
 /// Same as above, anything above 63 is fine to use as the level key.
 const UNHASHED_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
-const CHECKPOINT_KEY: &str = "checkpoint";
+pub const CHECKPOINT_KEY: &str = "checkpoint";
 const STAGING_KEY: &str = "staging";
 
 // Limit on the number of entries per batch. Tune this parameter to avoid
@@ -555,6 +556,7 @@ impl SequenceState {
     }
 
     /// Proves inclusion of the last leaf in the current tree.
+    #[cfg(test)]
     pub(crate) fn prove_inclusion_of_last_elem(&self) -> RecordProof {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
@@ -572,6 +574,7 @@ impl SequenceState {
     /// # Errors
     /// Errors when the last tree was size 0. We cannot prove consistency with
     /// respect to an empty tree
+    #[cfg(test)]
     pub(crate) fn prove_consistency_of_single_append(&self) -> Result<TreeProof, TlogError> {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
@@ -580,62 +583,58 @@ impl SequenceState {
         };
         tlog::prove_tree(tree_size, tree_size - 1, &reader)
     }
+}
 
-    /// Returns an inclusion proof for the given leaf index
-    ///
-    /// # Errors
-    /// Errors when the leaf index equals or exceeds the number of leaves, or
-    /// the desired tiles do not exist as bucket objects.
-    pub async fn prove_inclusion(
-        &self,
-        object: &impl ObjectBackend,
-        leaf_index: u64,
-    ) -> Result<RecordProof, WorkerError> {
-        // Get the size of the tree
-        let num_leaves = self.tree.size();
-        let tree_hash = *self.tree.hash();
-
-        if leaf_index >= num_leaves {
-            return Err(WorkerError::RustError(
-                "leaf index exceeds number of leaves in the tree".to_string(),
-            ));
-        }
-
-        let mut all_tile_data = HashMap::new();
-
-        // Make a fake proof using ProofPreparer to get all the tiles we need
-        // TODO: This seems useful. We can probably move this into the tlog_tiles crate
-        let tiles_to_fetch = {
-            let tile_reader = ProofPreparer::default();
-            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
-            // ProofPreparer is guaranteed to make prove_record return a BadMath
-            // error. This is fine, because it already collected the data we
-            // needed
-            let _ = prove_record(num_leaves, leaf_index, &hash_reader);
-            tile_reader.0.into_inner()
-        };
-
-        // Fetch all the tiles we need for a proof
-        for tile in tiles_to_fetch {
-            let Some(tile_data) = object.fetch(&tile.path()).await? else {
-                return Err(WorkerError::RustError(format!(
-                    "missing tile for inclusion proof {}",
-                    tile.path()
-                )));
-            };
-            all_tile_data.insert(tile, tile_data);
-        }
-
-        // Now make the proof
-        let proof = {
-            // Put the recorded tiles into the appropriate Reader structs for prove_record()
-            let tile_reader = SimpleTlogTileReader(all_tile_data);
-            let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
-            prove_record(num_leaves, leaf_index, &hash_reader)
-                .map_err(|e| WorkerError::RustError(e.to_string()))?
-        };
-        Ok(proof)
+/// Returns an inclusion proof for the given leaf index, tree size, and root hash.
+///
+/// # Errors
+/// Errors when the leaf index equals or exceeds the number of leaves, or
+/// the desired tiles do not exist as bucket objects.
+pub async fn prove_inclusion(
+    num_leaves: u64,
+    tree_hash: Hash,
+    leaf_index: u64,
+    object: &impl ObjectBackend,
+) -> Result<RecordProof, WorkerError> {
+    if leaf_index >= num_leaves {
+        return Err(WorkerError::RustError(
+            "leaf index exceeds number of leaves in the tree".to_string(),
+        ));
     }
+
+    let mut all_tile_data = HashMap::new();
+
+    // Make a fake proof using ProofPreparer to get all the tiles we need
+    // TODO: This seems useful. We can probably move this into the tlog_tiles crate
+    let tiles_to_fetch = {
+        let tile_reader = ProofPreparer::default();
+        let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
+        // ProofPreparer is guaranteed to make prove_record return a BadMath
+        // error. This is fine, because it already collected the data we
+        // needed.
+        let _ = prove_record(num_leaves, leaf_index, &hash_reader);
+        tile_reader.0.into_inner()
+    };
+
+    // Fetch all the tiles we need for a proof
+    for tile in tiles_to_fetch {
+        let Some(tile_data) = object.fetch(&tile.path()).await? else {
+            return Err(WorkerError::RustError(format!(
+                "missing tile for inclusion proof {}",
+                tile.path()
+            )));
+        };
+        all_tile_data.insert(tile, tile_data);
+    }
+
+    // Now make the proof
+    let proof = {
+        // Put the recorded tiles into the appropriate Reader structs for prove_record()
+        let tile_reader = SimpleTlogTileReader(all_tile_data);
+        let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
+        prove_record(num_leaves, leaf_index, &hash_reader).map_err(|e| e.to_string())?
+    };
+    Ok(proof)
 }
 
 /// Result of an [`add_leaf_to_pool`] request containing either a cached log
@@ -1455,7 +1454,13 @@ mod tests {
         let tree_hash = *sequence_state.tree.hash();
         for i in 0..n {
             // Compute the inclusion proof for leaf i
-            let proof = block_on(sequence_state.prove_inclusion(&log.object, i)).unwrap();
+            let proof = block_on(prove_inclusion(
+                sequence_state.tree.size(),
+                *sequence_state.tree.hash(),
+                i,
+                &log.object,
+            ))
+            .unwrap();
             // Verify the inclusion proof. We need the leaf hash
             let leaf_hash = {
                 // Get the tile the leaf belongs to, and correct the width by getting the 0th parent

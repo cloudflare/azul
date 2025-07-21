@@ -5,7 +5,10 @@
 
 use std::{str::FromStr, sync::LazyLock, time::Duration};
 
-use crate::{load_signing_key, load_witness_key, LookupKey, SequenceMetadata, CONFIG, ROOTS};
+use crate::{
+    load_checkpoint_signers, load_origin, load_signing_key, load_witness_key, LookupKey,
+    SequenceMetadata, CONFIG, ROOTS,
+};
 use der::{
     asn1::{SetOfVec, UtcTime},
     Any, Tag,
@@ -13,8 +16,11 @@ use der::{
 use futures_util::future::try_join_all;
 use generic_log_worker::{
     get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
-    log_ops::UploadOptions, put_cache_entry_metadata, util::now_millis, ObjectBackend,
-    ObjectBucket, ProveInclusionQuery, ENTRY_ENDPOINT, METRICS_ENDPOINT, PROVE_INCLUSION_ENDPOINT,
+    log_ops::{prove_inclusion, UploadOptions, CHECKPOINT_KEY},
+    put_cache_entry_metadata,
+    util::now_millis,
+    ObjectBackend, ObjectBucket, ProveInclusionQuery, ProveInclusionResponse, ENTRY_ENDPOINT,
+    METRICS_ENDPOINT,
 };
 use log::{debug, info, warn};
 use mtc_api::{AddEntryRequest, AddEntryResponse, RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
@@ -22,7 +28,8 @@ use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use tlog_tiles::PendingLogEntry;
+use signed_note::{NoteVerifier, VerifierList};
+use tlog_tiles::{open_checkpoint, PendingLogEntry};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::{
@@ -70,18 +77,38 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .get_async("/logs/:log/prove-inclusion", |req, ctx| async move {
             let name = valid_log_name(&ctx)?;
-            let stub = get_durable_object_stub(
-                &ctx.env,
-                name,
-                None,
-                "SEQUENCER",
-                CONFIG.logs[name].location_hint.as_deref(),
-            )?;
+            let bucket = load_public_bucket(&ctx.env, name)?;
             let ProveInclusionQuery { leaf_index } = req.query()?;
-            stub.fetch_with_str(&format!(
-                "http://fake_url.com{PROVE_INCLUSION_ENDPOINT}?leaf_index={leaf_index}"
-            ))
-            .await
+            let object_backend = ObjectBucket::new(bucket);
+            let checkpoint_bytes = object_backend
+                .fetch(CHECKPOINT_KEY)
+                .await?
+                .ok_or("no checkpoint in object storage".to_string())?;
+            let origin = &load_origin(name);
+            let verifiers = &VerifierList::new(
+                load_checkpoint_signers(&ctx.env, name)
+                    .iter()
+                    .map(|s| s.verifier())
+                    .collect::<Vec<Box<dyn NoteVerifier>>>(),
+            );
+            let checkpoint =
+                open_checkpoint(origin.as_str(), verifiers, now_millis(), &checkpoint_bytes)
+                    .map_err(|e| e.to_string())?
+                    .0;
+            if leaf_index >= checkpoint.size() {
+                return Response::error("Leaf index is greater than current log size.", 422);
+            }
+            let proof = prove_inclusion(
+                checkpoint.size(),
+                *checkpoint.hash(),
+                leaf_index,
+                &object_backend,
+            )
+            .await?;
+            let proof_bytestrings = proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
+            Response::from_json(&ProveInclusionResponse {
+                proof: proof_bytestrings,
+            })
         })
         .get("/logs/:log/metadata", |_req, ctx| {
             let name = valid_log_name(&ctx)?;

@@ -10,7 +10,7 @@ use crate::{
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
-    ENTRY_ENDPOINT, METRICS_ENDPOINT, PROVE_INCLUSION_ENDPOINT,
+    ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use futures_util::future::join_all;
 use log::{info, warn};
@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use signed_note::KeyName;
-use tlog_tiles::{
-    CheckpointSigner, LeafIndex, LogEntry, PendingLogEntry, RecordProof, UnixTimestamp,
-};
+use tlog_tiles::{CheckpointSigner, LeafIndex, LogEntry, PendingLogEntry, UnixTimestamp};
 use tokio::sync::Mutex;
 use worker::{Bucket, Error as WorkerError, Request, Response, State};
 
@@ -117,18 +115,6 @@ impl<L: LogEntry> GenericSequencer<L> {
         let mut endpoint = path.trim_start_matches('/');
         let resp = match path.as_str() {
             METRICS_ENDPOINT => self.fetch_metrics(),
-            PROVE_INCLUSION_ENDPOINT => {
-                let ProveInclusionQuery { leaf_index } = req.query()?;
-                // Construct the proof and convert the hashes to Vec<u8>
-                let proof = self
-                    .prove_inclusion(leaf_index)
-                    .await
-                    .map_err(|e| WorkerError::RustError(e.to_string()))?;
-                let proof_bytestrings = proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
-                Response::from_json(&ProveInclusionResponse {
-                    proof: proof_bytestrings,
-                })
-            }
             ENTRY_ENDPOINT => {
                 let pending_entry: L::Pending = req.json().await?;
                 let lookup_key = pending_entry.lookup_key();
@@ -270,39 +256,6 @@ impl<L: LogEntry> GenericSequencer<L> {
             .zip(entries_metadata.iter())
             .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
             .collect::<Vec<_>>()
-    }
-
-    /// Returns an inclusion proof for the given leaf index, fetching tiles from
-    /// object storage as needed.
-    ///
-    /// # Errors
-    /// Errors when the leaf index equals or exceeds the number of leaves or
-    /// when the desired tiles do not exist as bucket objects.
-    pub async fn prove_inclusion(&self, leaf_index: u64) -> Result<RecordProof, anyhow::Error> {
-        let sequence_state = self.sequence_state.borrow().clone();
-        sequence_state
-            .prove_inclusion(&self.public_bucket, leaf_index)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
-    /// Proves inclusion of the last leaf in the current tree. This is
-    /// guaranteed not to fail since the necessary 'right edge' tiles are cached
-    /// in the sequence state.
-    pub fn prove_inclusion_of_last_elem(&self) -> RecordProof {
-        self.sequence_state.borrow().prove_inclusion_of_last_elem()
-    }
-
-    /// Proves that this tree of size n is compatible with the subtree of size
-    /// n-1. In other words, prove that we appended 1 element to the tree.
-    ///
-    /// # Errors
-    /// Errors if the tree is empty.
-    pub fn prove_consistency_of_single_append(&self) -> Result<RecordProof, WorkerError> {
-        self.sequence_state
-            .borrow()
-            .prove_consistency_of_single_append()
-            .map_err(|e| format!("consistency proof failed: {e}").into())
     }
 
     fn fetch_metrics(&self) -> Result<Response, WorkerError> {
