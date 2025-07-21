@@ -212,7 +212,7 @@ impl<E: PendingLogEntry> PoolState<E> {
 }
 
 // State owned by the sequencing loop.
-#[derive(Debug)]
+#[derive(Default, Debug, Clone)]
 pub(crate) struct SequenceState {
     tree: TreeWithTimestamp,
     checkpoint: Vec<u8>,
@@ -554,7 +554,7 @@ impl SequenceState {
         &self.checkpoint
     }
 
-    /// Proves inclusion of the last leaf in the current tree
+    /// Proves inclusion of the last leaf in the current tree.
     pub(crate) fn prove_inclusion_of_last_elem(&self) -> RecordProof {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
@@ -562,7 +562,7 @@ impl SequenceState {
             overlay: &HashMap::default(),
         };
         // We can unwrap because edge_tiles is guaranteed to contain the tiles
-        // necessary to prove this
+        // necessary to prove this.
         tlog::prove_record(tree_size, tree_size - 1, &reader).unwrap()
     }
 
@@ -693,12 +693,13 @@ pub(crate) enum PendingSource {
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
 pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
-    state: &mut PoolState<E>,
+    state: &RefCell<PoolState<E>>,
     cache: &impl CacheRead,
     config: &SequencerConfig,
     entry: E,
 ) -> AddLeafResult {
     let hash = entry.lookup_key();
+    let mut state = state.borrow_mut();
 
     if !config.enable_dedup {
         // Bypass deduplication and rate limit checks.
@@ -715,55 +716,25 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
     }
 }
 
-/// Returns the given `SequenceState` if it's defined. If not, it loads the
-/// sequence state and then returns it.
-///
-/// # Errors
-/// Errors when the log has not been created, or if recovery fails.
-pub(crate) async fn unwrap_or_load_sequence_state<'a, L: LogEntry>(
-    state: &'a mut Option<SequenceState>,
-    config: &SequencerConfig,
-    object: &impl ObjectBackend,
-    lock: &impl LockBackend,
-    metrics: &SequencerMetrics,
-) -> Result<&'a mut SequenceState, anyhow::Error> {
-    if let Some(s) = state {
-        Ok(s)
-    } else {
-        match SequenceState::load::<L>(config, object, lock).await {
-            Ok(s) => Ok(state.insert(s)),
-            Err(e) => {
-                metrics.seq_count.with_label_values(&["fatal"]).inc();
-                error!("{}: Fatal sequencing error {e}", config.name);
-                bail!(e);
-            }
-        }
-    }
-}
-
 /// Sequences the current pool of pending entries in the ephemeral state.
 pub(crate) async fn sequence<L: LogEntry>(
-    pool_state: &mut PoolState<L::Pending>,
-    sequence_state: &mut Option<SequenceState>,
+    pool_state: &RefCell<PoolState<L::Pending>>,
+    sequence_state: &RefCell<SequenceState>,
     config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &mut impl CacheWrite,
+    cache: &impl CacheWrite,
     metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
-    // Retrieve old sequencing state.
-    let old =
-        unwrap_or_load_sequence_state::<L>(sequence_state, config, object, lock, metrics).await?;
-
     // Add the log's initial entry if needed.
-    if old.tree.size() == 0 {
+    if sequence_state.borrow().tree.size() == 0 {
         if let Some(entry) = L::initial_entry() {
-            pool_state.add(entry.lookup_key(), entry);
+            pool_state.borrow_mut().add(entry.lookup_key(), entry);
         }
     }
 
-    let Some(entries) = pool_state.take(
-        old.tree.size(),
+    let Some(entries) = pool_state.borrow_mut().take(
+        sequence_state.borrow().tree.size(),
         config.max_sequence_skips,
         config.sequence_skip_threshold_millis,
     ) else {
@@ -774,31 +745,39 @@ pub(crate) async fn sequence<L: LogEntry>(
 
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
-    let result =
-        match sequence_entries::<L>(old, config, object, lock, cache, entries, metrics).await {
-            Ok(()) => {
-                metrics.seq_count.with_label_values(&["ok"]).inc();
-                Ok(())
-            }
-            Err(SequenceError::Fatal(e)) => {
-                // Clear ephemeral sequencing state, as it may no longer be valid.
-                // It will be loaded again the next time sequence is called.
-                metrics.seq_count.with_label_values(&["fatal"]).inc();
-                error!("{}: Fatal sequencing error {e}", config.name);
-                *sequence_state = None;
-                Err(anyhow!(e))
-            }
-            Err(SequenceError::NonFatal(e)) => {
-                metrics.seq_count.with_label_values(&["non-fatal"]).inc();
-                error!("{}: Non-fatal sequencing error {e}", config.name);
-                Ok(())
-            }
-        };
+    let result = match sequence_entries::<L>(
+        sequence_state,
+        config,
+        object,
+        lock,
+        cache,
+        entries,
+        metrics,
+    )
+    .await
+    {
+        Ok(()) => {
+            metrics.seq_count.with_label_values(&["ok"]).inc();
+            Ok(())
+        }
+        Err(SequenceError::Fatal(e)) => {
+            // Reload sequencing state, as the existing state may no longer be valid.
+            metrics.seq_count.with_label_values(&["fatal"]).inc();
+            error!("{}: Fatal sequencing error {e}", config.name);
+            *sequence_state.borrow_mut() = SequenceState::load::<L>(config, object, lock).await?;
+            Err(anyhow!(e))
+        }
+        Err(SequenceError::NonFatal(e)) => {
+            metrics.seq_count.with_label_values(&["non-fatal"]).inc();
+            error!("{}: Non-fatal sequencing error {e}", config.name);
+            Ok(())
+        }
+    };
 
     // Once [`sequence_entries`] returns, the entries are either in the deduplication
     // cache or finalized with an error. In the latter case, we don't want
     // a resubmit to deduplicate against the failed sequencing.
-    pool_state.reset();
+    pool_state.borrow_mut().reset();
 
     result
 }
@@ -818,23 +797,25 @@ enum SequenceError {
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
 async fn sequence_entries<L: LogEntry>(
-    sequence_state: &mut SequenceState,
+    sequence_state: &RefCell<SequenceState>,
     config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &mut impl CacheWrite,
+    cache: &impl CacheWrite,
     entries: Vec<(L::Pending, Sender<SequenceMetadata>)>,
     metrics: &SequencerMetrics,
 ) -> Result<(), SequenceError> {
     let name = &config.name;
 
-    let old_size = sequence_state.tree.size();
-    let old_time = sequence_state.tree.time();
+    let old = (*sequence_state.borrow()).clone();
+
+    let old_size = old.tree.size();
+    let old_time = old.tree.time();
     let timestamp = now_millis();
 
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
-    let mut edge_tiles = sequence_state.edge_tiles.clone();
+    let mut edge_tiles = old.edge_tiles.clone();
     let mut data_tile = Vec::new();
     if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY) {
         if t.tile.width() < TlogTile::FULL_WIDTH {
@@ -965,47 +946,50 @@ async fn sequence_entries<L: LogEntry>(
         tile_uploads.push(action);
     }
 
-    let tree = TreeWithTimestamp::from_hash_reader(
-        n,
-        &HashReaderWithOverlay {
-            edge_tiles: &edge_tiles,
-            overlay: &overlay,
-        },
-        timestamp,
-    )
-    .map_err(|e| SequenceError::NonFatal(format!("couldn't compute tree head: {e}")))?;
+    // Construct the new sequence state.
+    let new = {
+        let tree = TreeWithTimestamp::from_hash_reader(
+            n,
+            &HashReaderWithOverlay {
+                edge_tiles: &edge_tiles,
+                overlay: &overlay,
+            },
+            timestamp,
+        )
+        .map_err(|e| SequenceError::NonFatal(format!("couldn't compute tree head: {e}")))?;
+        let dyn_signers = config
+            .checkpoint_signers
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>();
+        let extensions = (config.checkpoint_extension)(timestamp);
+        let checkpoint = tree
+            .sign(
+                config.origin.as_str(),
+                &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
+                &dyn_signers,
+                &mut rand::thread_rng(),
+            )
+            .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
+        SequenceState {
+            tree,
+            checkpoint,
+            edge_tiles,
+        }
+    };
 
     // Upload tiles to staging, where they can be recovered by [SequenceState::load] if we
     // crash right after updating DO storage.
-    let staged_uploads = marshal_staged_uploads(&tile_uploads, tree.size(), tree.hash())
+    let staged_uploads = marshal_staged_uploads(&tile_uploads, new.tree.size(), new.tree.hash())
         .map_err(|e| SequenceError::NonFatal(format!("couldn't marshal staged uploads: {e}")))?;
     lock.put_multipart(STAGING_KEY, &staged_uploads)
         .await
         .map_err(|e| SequenceError::NonFatal(format!("couldn't upload staged tiles: {e}")))?;
 
-    // Make references to all the signer objects
-    let dyn_signers = config
-        .checkpoint_signers
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>();
-
-    // Construct the checkpoint extensions
-    let extensions = (config.checkpoint_extension)(timestamp);
-
-    let new_checkpoint = tree
-        .sign(
-            config.origin.as_str(),
-            &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
-            &dyn_signers,
-            &mut rand::thread_rng(),
-        )
-        .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
-
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, sequence_state.checkpoint(), &new_checkpoint)
+    lock.swap(CHECKPOINT_KEY, old.checkpoint(), new.checkpoint())
         .await
         .map_err(|e| {
             SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
@@ -1015,30 +999,21 @@ async fn sequence_entries<L: LogEntry>(
     // durable storage (in staging) and the checkpoint was committed to the
     // database. If we were to crash after this, recovery would be clean from
     // database and object storage.
-    *sequence_state = SequenceState {
-        tree,
-        checkpoint: new_checkpoint,
-        edge_tiles,
-    };
+    *sequence_state.borrow_mut() = new.clone();
 
     // Use apply_staged_uploads instead of going over tile_uploads directly, to exercise the same
     // code path as LoadLog.
     // An error here is fatal, since we can't continue leaving behind missing tiles. The next
     // run of sequence would not upload them again, while LoadLog will retry uploading them
     // from the staging bundle.
-    apply_staged_uploads(
-        object,
-        &staged_uploads,
-        sequence_state.tree.size(),
-        sequence_state.tree.hash(),
-    )
-    .await
-    .map_err(|e| SequenceError::Fatal(format!("couldn't upload a tile: {e}")))?;
+    apply_staged_uploads(object, &staged_uploads, new.tree.size(), new.tree.hash())
+        .await
+        .map_err(|e| SequenceError::Fatal(format!("couldn't upload a tile: {e}")))?;
 
     // If we fail to upload, return an error so that we don't produce SCTs that, although
     // safely serialized, wouldn't be part of a publicly visible tree.
     object
-        .upload(CHECKPOINT_KEY, &sequence_state.checkpoint, &OPTS_CHECKPOINT)
+        .upload(CHECKPOINT_KEY, new.checkpoint(), &OPTS_CHECKPOINT)
         .await
         .map_err(|e| {
             SequenceError::NonFatal(format!("couldn't upload checkpoint to object storage: {e}"))
@@ -1060,7 +1035,7 @@ async fn sequence_entries<L: LogEntry>(
         );
     }
 
-    for tile in &sequence_state.edge_tiles {
+    for tile in new.edge_tiles {
         trace!("{name}: Edge tile: {tile:?}");
     }
     info!(
@@ -1435,7 +1410,7 @@ mod tests {
     fn sequence_one_leaf(n: u64) {
         let mut log = TestLog::new();
         for i in 0..n {
-            let old_tree_hash = log.sequence_state.as_ref().map(|s| *s.tree.hash());
+            let old_tree_hash = *log.sequence_state.borrow().tree.hash();
 
             let res = log.add_certificate();
             log.sequence().unwrap();
@@ -1445,7 +1420,7 @@ mod tests {
             log.check(i + 1).unwrap();
 
             // Check we can make proofs
-            let sequence_state = log.sequence_state.as_ref().unwrap();
+            let sequence_state = log.sequence_state.borrow();
             let new_tree_hash = *sequence_state.tree.hash();
             let tree_size = i + 1;
             let inc_proof = sequence_state.prove_inclusion_of_last_elem();
@@ -1467,7 +1442,7 @@ mod tests {
                     tree_size,
                     new_tree_hash,
                     tree_size - 1,
-                    old_tree_hash.unwrap(),
+                    old_tree_hash,
                 )
                 .unwrap();
             }
@@ -1476,7 +1451,7 @@ mod tests {
         log.check(n).unwrap();
 
         // Check that we can make an inclusion proof for every leaf in the tree
-        let sequence_state = log.sequence_state.as_ref().unwrap();
+        let sequence_state = log.sequence_state.borrow();
         let tree_hash = *sequence_state.tree.hash();
         for i in 0..n {
             // Compute the inclusion proof for leaf i
@@ -1520,19 +1495,15 @@ mod tests {
                     precert_opt: None,
                     chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
                 };
-                add_leaf_to_pool(&mut log.pool_state, &log.cache, &log.config, leaf);
+                add_leaf_to_pool(&log.pool_state, &log.cache, &log.config, leaf);
             }
             log.sequence().unwrap();
 
             // Check we can make proofs
-            log.sequence_state
-                .as_ref()
-                .unwrap()
-                .prove_inclusion_of_last_elem();
+            log.sequence_state.borrow().prove_inclusion_of_last_elem();
             // We're batch-adding, so there's no chance tree_size - 1 is 0
             log.sequence_state
-                .as_ref()
-                .unwrap()
+                .borrow()
                 .prove_consistency_of_single_append()
                 .unwrap();
             // It's annoying to verify these proofs right here. See
@@ -1747,14 +1718,12 @@ mod tests {
             log.sequence().unwrap();
             log.check(i + 1).unwrap();
 
-            log.sequence_state = Some(
-                block_on(SequenceState::load::<StaticCTLogEntry>(
-                    &log.config,
-                    &log.object,
-                    &log.lock,
-                ))
-                .unwrap(),
-            );
+            *log.sequence_state.borrow_mut() = block_on(SequenceState::load::<StaticCTLogEntry>(
+                &log.config,
+                &log.object,
+                &log.lock,
+            ))
+            .unwrap();
             log.sequence().unwrap();
             log.check(i + 1).unwrap();
         }
@@ -1763,14 +1732,12 @@ mod tests {
     #[test]
     fn test_reload_wrong_origin() {
         let mut log = TestLog::new();
-        log.sequence_state = Some(
-            block_on(SequenceState::load::<StaticCTLogEntry>(
-                &log.config,
-                &log.object,
-                &log.lock,
-            ))
-            .unwrap(),
-        );
+        *log.sequence_state.borrow_mut() = block_on(SequenceState::load::<StaticCTLogEntry>(
+            &log.config,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap();
 
         log.config.origin = KeyName::new("wrong".to_string()).unwrap();
         block_on(SequenceState::load::<StaticCTLogEntry>(
@@ -1784,14 +1751,12 @@ mod tests {
     #[test]
     fn test_reload_wrong_key() {
         let mut log = TestLog::new();
-        log.sequence_state = Some(
-            block_on(SequenceState::load::<StaticCTLogEntry>(
-                &log.config,
-                &log.object,
-                &log.lock,
-            ))
-            .unwrap(),
-        );
+        *log.sequence_state.borrow_mut() = block_on(SequenceState::load::<StaticCTLogEntry>(
+            &log.config,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap();
 
         // Try to load the checkpoint with two randomly generated checkpoint signers. These should fail
         let checkpoint_signer = StaticCTCheckpointSigner::new(
@@ -1842,14 +1807,12 @@ mod tests {
         log.check(1).unwrap();
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
-        log.sequence_state = Some(
-            block_on(SequenceState::load::<StaticCTLogEntry>(
-                &log.config,
-                &log.object,
-                &log.lock,
-            ))
-            .unwrap(),
-        );
+        *log.sequence_state.borrow_mut() = block_on(SequenceState::load::<StaticCTLogEntry>(
+            &log.config,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap();
         log.check(1).unwrap();
 
         // First, cause the exact same staging bundle to be uploaded.
@@ -1902,14 +1865,12 @@ mod tests {
         log.check(2).unwrap();
 
         *log.lock.mode.borrow_mut() = StorageMode::Ok;
-        log.sequence_state = Some(
-            block_on(SequenceState::load::<StaticCTLogEntry>(
-                &log.config,
-                &log.object,
-                &log.lock,
-            ))
-            .unwrap(),
-        );
+        *log.sequence_state.borrow_mut() = block_on(SequenceState::load::<StaticCTLogEntry>(
+            &log.config,
+            &log.object,
+            &log.lock,
+        ))
+        .unwrap();
         log.add_certificate();
         log.sequence().unwrap();
         log.check(3).unwrap();
@@ -2044,14 +2005,13 @@ mod tests {
                                 *log.object.mode.borrow_mut() = StorageMode::Ok;
                                 *log.lock.mode.borrow_mut() = StorageMode::Ok;
                             }
-                            log.sequence_state = Some(
+                            *log.sequence_state.borrow_mut() =
                                 block_on(SequenceState::load::<StaticCTLogEntry>(
                                     &log.config,
                                     &log.object,
                                     &log.lock,
                                 ))
-                                .unwrap(),
-                            );
+                                .unwrap();
                             if broken {
                                 *log.object.mode.borrow_mut() = $object_mode;
                                 *log.lock.mode.borrow_mut() = $lock_mode;
@@ -2309,24 +2269,25 @@ mod tests {
         }
     }
 
-    struct TestCacheBackend(HashMap<LookupKey, SequenceMetadata>);
+    struct TestCacheBackend(RefCell<HashMap<LookupKey, SequenceMetadata>>);
 
     impl CacheRead for TestCacheBackend {
         fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
-            self.0.get(key).copied()
+            self.0.borrow().get(key).copied()
         }
     }
 
     impl CacheWrite for TestCacheBackend {
         async fn put_entries(
-            &mut self,
+            &self,
             entries: &[(LookupKey, SequenceMetadata)],
         ) -> worker::Result<()> {
+            let mut map = self.0.borrow_mut();
             for (key, value) in entries {
-                if self.0.contains_key(key) {
+                if map.contains_key(key) {
                     continue;
                 }
-                self.0.insert(*key, *value);
+                map.insert(*key, *value);
             }
             Ok(())
         }
@@ -2389,8 +2350,8 @@ mod tests {
 
     struct TestLog {
         config: SequencerConfig,
-        pool_state: PoolState<StaticCTPendingLogEntry>,
-        sequence_state: Option<SequenceState>,
+        pool_state: RefCell<PoolState<StaticCTPendingLogEntry>>,
+        sequence_state: RefCell<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
         cache: TestCacheBackend,
@@ -2401,7 +2362,7 @@ mod tests {
         fn new() -> Self {
             let mut rng = OsRng;
 
-            let cache = TestCacheBackend(HashMap::new());
+            let cache = TestCacheBackend(RefCell::new(HashMap::new()));
             let object = TestObjectBackend::new();
             let lock = TestLockBackend::new();
             let origin = KeyName::new("example.com/TestLog".to_string()).unwrap();
@@ -2433,13 +2394,19 @@ mod tests {
                 enable_dedup: true,
                 sequence_skip_threshold_millis: None,
             };
-            let pool_state = PoolState::default();
-            let metrics = SequencerMetrics::new(&Registry::new());
+            let pool_state = RefCell::new(PoolState::default());
             block_on(create_log(&config, &object, &lock)).unwrap();
+            let sequence_state = RefCell::new(
+                block_on(SequenceState::load::<StaticCTLogEntry>(
+                    &config, &object, &lock,
+                ))
+                .unwrap(),
+            );
+            let metrics = SequencerMetrics::new(&Registry::new());
             Self {
                 config,
                 pool_state,
-                sequence_state: None,
+                sequence_state,
                 lock,
                 object,
                 cache,
@@ -2448,31 +2415,20 @@ mod tests {
         }
         fn sequence(&mut self) -> Result<(), anyhow::Error> {
             block_on(sequence::<StaticCTLogEntry>(
-                &mut self.pool_state,
-                &mut self.sequence_state,
+                &self.pool_state,
+                &self.sequence_state,
                 &self.config,
                 &self.object,
                 &self.lock,
-                &mut self.cache,
+                &self.cache,
                 &self.metrics,
             ))
         }
-        fn sequence_start(&mut self) -> Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)> {
-            let sequence_state: &mut SequenceState =
-                if let Some(state) = self.sequence_state.as_mut() {
-                    state
-                } else {
-                    let state = block_on(SequenceState::load::<StaticCTLogEntry>(
-                        &self.config,
-                        &self.object,
-                        &self.lock,
-                    ))
-                    .unwrap();
-                    self.sequence_state.insert(state)
-                };
+        fn sequence_start(&self) -> Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)> {
             self.pool_state
+                .borrow_mut()
                 .take(
-                    sequence_state.tree.size(),
+                    self.sequence_state.borrow().tree.size(),
                     self.config.max_sequence_skips,
                     self.config.sequence_skip_threshold_millis,
                 )
@@ -2483,16 +2439,16 @@ mod tests {
             entries: Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)>,
         ) {
             block_on(sequence_entries::<StaticCTLogEntry>(
-                self.sequence_state.as_mut().unwrap(),
+                &self.sequence_state,
                 &self.config,
                 &self.object,
                 &self.lock,
-                &mut self.cache,
+                &self.cache,
                 entries,
                 &self.metrics,
             ))
             .unwrap();
-            self.pool_state.reset();
+            self.pool_state.borrow_mut().reset();
         }
         fn add_certificate(&mut self) -> AddLeafResult {
             self.add_certificate_with_seed(rand::thread_rng().next_u64())
@@ -2528,7 +2484,7 @@ mod tests {
 
             block_on(upload_issuers(&self.object, issuers, &self.config.name)).unwrap();
 
-            add_leaf_to_pool(&mut self.pool_state, &self.cache, &self.config, leaf)
+            add_leaf_to_pool(&self.pool_state, &self.cache, &self.config, leaf)
         }
 
         fn check(&self, size: u64) -> anyhow::Result<u64> {

@@ -7,7 +7,6 @@ use worker::*;
 #[durable_object]
 struct Batcher(GenericBatcher<StaticCTPendingLogEntry>);
 
-#[durable_object]
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
         // Find the Durable Object name by enumerating all possibilities.
@@ -52,7 +51,7 @@ impl DurableObject for Batcher {
         Batcher(GenericBatcher::new(config, kv, sequencer))
     }
 
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
         self.0.fetch(req).await
     }
 }

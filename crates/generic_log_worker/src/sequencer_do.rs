@@ -3,10 +3,10 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use std::time::Duration;
+use std::{cell::RefCell, time::Duration};
 
 use crate::{
-    log_ops::{self, unwrap_or_load_sequence_state, CreateError, PoolState, SequenceState},
+    log_ops::{self, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
@@ -35,9 +35,9 @@ pub struct GenericSequencer<L: LogEntry> {
     public_bucket: ObjectBucket, // implements ObjectBackend
     cache: DedupCache,           // implements CacheRead, CacheWrite
     config: SequencerConfig,
-    sequence_state: Option<SequenceState>,
-    pool_state: PoolState<L::Pending>,
-    initialized: bool,
+    sequence_state: RefCell<SequenceState>,
+    pool_state: RefCell<PoolState<L::Pending>>,
+    initialized: RefCell<bool>,
     init_mux: Mutex<()>,
     registry: Registry,
     metrics: SequencerMetrics,
@@ -89,9 +89,9 @@ impl<L: LogEntry> GenericSequencer<L> {
             public_bucket,
             cache,
             config,
-            sequence_state: None,
-            pool_state: PoolState::default(),
-            initialized: false,
+            sequence_state: RefCell::new(SequenceState::default()),
+            pool_state: RefCell::new(PoolState::default()),
+            initialized: RefCell::new(false),
             init_mux: Mutex::new(()),
             registry,
             metrics,
@@ -104,8 +104,8 @@ impl<L: LogEntry> GenericSequencer<L> {
     /// # Errors
     ///
     /// Returns an error if the request cannot be parsed.
-    pub async fn fetch(&mut self, mut req: Request) -> Result<Response, WorkerError> {
-        if !self.initialized {
+    pub async fn fetch(&self, mut req: Request) -> Result<Response, WorkerError> {
+        if !*self.initialized.borrow() {
             info!("{}: Initializing log from fetch handler", self.config.name);
             self.initialize().await?;
         }
@@ -163,8 +163,8 @@ impl<L: LogEntry> GenericSequencer<L> {
     /// # Errors
     ///
     /// Returns an error if there are issues scheduling the next alarm.
-    pub async fn alarm(&mut self) -> Result<Response, WorkerError> {
-        if !self.initialized {
+    pub async fn alarm(&self) -> Result<Response, WorkerError> {
+        if !*self.initialized.borrow() {
             info!("{}: Initializing log from alarm handler", self.config.name);
             self.initialize().await?;
         }
@@ -177,12 +177,12 @@ impl<L: LogEntry> GenericSequencer<L> {
             .await?;
 
         if let Err(e) = log_ops::sequence::<L>(
-            &mut self.pool_state,
-            &mut self.sequence_state,
+            &self.pool_state,
+            &self.sequence_state,
             &self.config,
             &self.public_bucket,
             &self.do_state,
-            &mut self.cache,
+            &self.cache,
             &self.metrics,
         )
         .await
@@ -196,12 +196,12 @@ impl<L: LogEntry> GenericSequencer<L> {
 
 impl<L: LogEntry> GenericSequencer<L> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
-    async fn initialize(&mut self) -> Result<(), WorkerError> {
+    async fn initialize(&self) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
         let name = &self.config.name;
 
-        if self.initialized {
+        if *self.initialized.borrow() {
             return Ok(());
         }
 
@@ -217,13 +217,19 @@ impl<L: LogEntry> GenericSequencer<L> {
             Ok(()) => {}
         }
 
+        // Load sequencing state.
+        *self.sequence_state.borrow_mut() =
+            SequenceState::load::<L>(&self.config, &self.public_bucket, &self.do_state)
+                .await
+                .map_err(|e| e.to_string())?;
+
         // Start sequencing loop (OK if alarm is already scheduled).
         self.do_state
             .storage()
             .set_alarm(self.config.sequence_interval)
             .await?;
 
-        self.initialized = true;
+        *self.initialized.borrow_mut() = true;
 
         Ok(())
     }
@@ -232,7 +238,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     // entries. Entries that fail to be added (e.g., due to rate limiting) are
     // omitted.
     async fn add_batch(
-        &mut self,
+        &self,
         pending_entries: Vec<L::Pending>,
     ) -> Vec<(LookupKey, SequenceMetadata)> {
         // Safe to unwrap config here as the log must be initialized.
@@ -242,7 +248,7 @@ impl<L: LogEntry> GenericSequencer<L> {
             lookup_keys.push(pending_entry.lookup_key());
 
             let add_leaf_result = log_ops::add_leaf_to_pool(
-                &mut self.pool_state,
+                &self.pool_state,
                 &self.cache,
                 &self.config,
                 pending_entry,
@@ -266,89 +272,37 @@ impl<L: LogEntry> GenericSequencer<L> {
             .collect::<Vec<_>>()
     }
 
-    /// Loads the sequence state if it's not already loaded.
-    ///
-    /// # Errors
-    /// Errors when the log has not been created, or if recovery fails.
-    pub async fn load_sequence_state(&mut self) -> Result<(), anyhow::Error> {
-        unwrap_or_load_sequence_state::<L>(
-            &mut self.sequence_state,
-            &self.config,
-            &self.public_bucket,
-            &self.do_state,
-            &self.metrics,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Returns the latest checkpoint. This may only be called after the
-    /// sequencer state has been loaded, i.e., after the first `alarm()` has
-    /// triggered.
-    ///
-    /// # Errors
-    /// Errors when sequencer state has not been loaded
-    pub fn checkpoint(&self) -> Result<&[u8], WorkerError> {
-        if let Some(s) = self.sequence_state.as_ref() {
-            Ok(s.checkpoint())
-        } else {
-            Err(WorkerError::RustError(
-                "cannot get checkpoint of a sequencer with no sequence state".to_string(),
-            ))
-        }
-    }
-
-    /// Returns an inclusion proof for the given leaf index
+    /// Returns an inclusion proof for the given leaf index, fetching tiles from
+    /// object storage as needed.
     ///
     /// # Errors
     /// Errors when the leaf index equals or exceeds the number of leaves or
     /// when the desired tiles do not exist as bucket objects.
-    pub async fn prove_inclusion(&mut self, leaf_index: u64) -> Result<RecordProof, anyhow::Error> {
-        let sequence_state = unwrap_or_load_sequence_state::<L>(
-            &mut self.sequence_state,
-            &self.config,
-            &self.public_bucket,
-            &self.do_state,
-            &self.metrics,
-        )
-        .await?;
-
+    pub async fn prove_inclusion(&self, leaf_index: u64) -> Result<RecordProof, anyhow::Error> {
+        let sequence_state = self.sequence_state.borrow().clone();
         sequence_state
             .prove_inclusion(&self.public_bucket, leaf_index)
             .await
             .map_err(anyhow::Error::from)
     }
 
-    /// Proves inclusion of the last leaf in the current tree. This may only be
-    /// called after the sequencer state has been loaded, i.e., after the first
-    /// `alarm()` has triggered.
-    ///
-    /// # Errors
-    /// Errors when sequencer state has not been loaded
-    pub fn prove_inclusion_of_last_elem(&self) -> Result<RecordProof, WorkerError> {
-        if let Some(s) = self.sequence_state.as_ref() {
-            Ok(s.prove_inclusion_of_last_elem())
-        } else {
-            Err(WorkerError::RustError(
-                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
-            ))
-        }
+    /// Proves inclusion of the last leaf in the current tree. This is
+    /// guaranteed not to fail since the necessary 'right edge' tiles are cached
+    /// in the sequence state.
+    pub fn prove_inclusion_of_last_elem(&self) -> RecordProof {
+        self.sequence_state.borrow().prove_inclusion_of_last_elem()
     }
 
     /// Proves that this tree of size n is compatible with the subtree of size
     /// n-1. In other words, prove that we appended 1 element to the tree.
     ///
     /// # Errors
-    /// Errors when this sequencer has not been used to sequence anything yet.
+    /// Errors if the tree is empty.
     pub fn prove_consistency_of_single_append(&self) -> Result<RecordProof, WorkerError> {
-        if let Some(s) = self.sequence_state.as_ref() {
-            s.prove_consistency_of_single_append()
-                .map_err(|e| WorkerError::RustError(format!("consistency proof failed: {e}")))
-        } else {
-            Err(WorkerError::RustError(
-                "cannot prove inclusion in a sequencer with no sequence state".to_string(),
-            ))
-        }
+        self.sequence_state
+            .borrow()
+            .prove_consistency_of_single_append()
+            .map_err(|e| format!("consistency proof failed: {e}").into())
     }
 
     fn fetch_metrics(&self) -> Result<Response, WorkerError> {
