@@ -22,7 +22,7 @@ After persisting log state, the Sequencer returns sequenced entry metadata (7) t
 
 ## Test logs
 
-Two prototype logs are available for testing, with configuration in `wrangler.jsonc` and `config.cftest.json` and roots from `default_roots.pem`.
+Two prototype logs are available for testing, with configuration in `wrangler.jsonc` and `config.cftest.json` and roots from `roots.default.pem`.
 
     curl -s https://static-ct.cloudflareresearch.com/logs/cftest2025h1a/metadata | jq
     {
@@ -150,7 +150,7 @@ Follow these instructions to deploy to a custom domain, suitable for running a p
 
 1.  Create a file `config.${ENV}.json` with the configuration for the log shards.
 
-1.  (Optional) Create a file `roots.${ENV}.pem` with any custom accepted roots for the log shards. By default, `default_roots.pem` will be used. All logs shards deployed within the same Worker script use the same set of roots. Roots can be updated later.
+1.  (Optional) Create a file `roots.${ENV}.pem` with any custom accepted roots for the log shards. By default, `roots.default.pem` will be used. All logs shards deployed within the same Worker script use the same set of roots. Roots can be updated later.
 
 1.  First set environment variables to specify the log shard name and deployment environment as below and then follow the [instructions above](#deployment-to-a-workersdev-subdomain) to create resources for each log shard.
 

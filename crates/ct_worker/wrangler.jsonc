@@ -13,7 +13,10 @@
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
                 "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
             },
-            "workers_dev": true,
+            "route": {
+                "pattern": "static-ct-dev.cloudflareresearch.com",
+                "custom_domain": true
+            },
             "kv_namespaces": [
                 {
                     "id": "3a23691917c844d59aea47fdf964850f", // REPLACE ME

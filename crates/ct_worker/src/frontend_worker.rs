@@ -157,7 +157,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                                 "Use {} for monitoring API",
                                 CONFIG.logs[name].monitoring_url
                             ),
-                            403,
+                            404,
                         )
                     }
                 })
@@ -184,7 +184,13 @@ async fn add_chain_or_pre_chain(
     expect_precert: bool,
 ) -> Result<Response> {
     let params = &CONFIG.logs[name];
-    let req: AddChainRequest = req.json().await?;
+    let req: AddChainRequest = match req.json().await {
+        Ok(req) => req,
+        Err(e) => {
+            debug!("{name}: Invalid JSON in add-(pre)chain request: {e}");
+            return Response::error("Invalid JSON in add-[pre-]chain request", 400);
+        }
+    };
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
     let pending_entry = match static_ct_api::validate_chain(

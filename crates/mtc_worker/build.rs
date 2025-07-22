@@ -65,10 +65,10 @@ fn main() {
         }
     }
 
-    // Get and validate roots. Use 'default_roots.pem' if no environment-specific roots file is found.
+    // Get and validate roots. Use 'roots.default.pem' if no environment-specific roots file is found.
     let mut roots_file: &str = &format!("roots.{env}.pem");
     if !fs::exists(roots_file).expect("failed to check if file exists") {
-        roots_file = "default_roots.pem";
+        roots_file = "roots.default.pem";
     }
     let roots =
         Certificate::load_pem_chain(&fs::read(roots_file).expect("failed to read roots file"))
