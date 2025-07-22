@@ -75,13 +75,13 @@
                         "batch_timeout_millis": {
                             "type": "integer",
                             "minimum": 100,
-                            "default": 1000,
+                            "default": 100,
                             "description": "The maximum duration to wait before submitting a batch to the sequencer, in milliseconds."
                         },
                         "max_batch_entries": {
                             "type": "integer",
                             "minimum": 1,
-                            "default": 1000,
+                            "default": 256,
                             "description": "The maximum number of entries per batch."
                         },
                         "enable_dedup": {
