@@ -40,6 +40,8 @@ pub struct LogParams {
     pub max_batch_entries: usize,
     #[serde(default = "default_bool::<true>")]
     pub enable_dedup: bool,
+    #[serde(default = "default_bool::<true>")]
+    pub enable_ccadb_roots: bool,
 }
 
 fn default_bool<const V: bool>() -> bool {

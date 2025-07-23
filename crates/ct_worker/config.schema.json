@@ -108,6 +108,11 @@
                             "type": "boolean",
                             "default": true,
                             "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disabled for tests and benchmarks. If disabled, `kv_namespaces` can be omitted from `wrangler.jsonc`."
+                        },
+                        "enable_ccadb_roots": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Enables loading root store trusted roots from the CCADB list, in addition to any roots configured in `roots.<env>.pem`. If enabled, requires a KV namespace with the binding `ccadb_roots` to be configured in `wrangler.jsonc`, as well as a cron trigger so that the CCADB list auto-updates."
                         }
                     },
                     "required": [

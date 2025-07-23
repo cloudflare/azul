@@ -5,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-use crate::{load_signing_key, SequenceMetadata, CONFIG, ROOTS};
+use crate::{load_roots, load_signing_key, SequenceMetadata, CONFIG};
 use config::TemporalInterval;
 use futures_util::future::try_join_all;
 use generic_log_worker::{
@@ -84,9 +84,12 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             // Now that we've validated the log name, use an inner router to
             // handle the request.
             Router::with_data(name)
-                .get("/logs/:log/ct/v1/get-roots", |_req, _ctx| {
+                .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
                     Response::from_json(&GetRootsResponse {
-                        certificates: x509_util::certs_to_bytes(&ROOTS.certs).unwrap(),
+                        certificates: x509_util::certs_to_bytes(
+                            &load_roots(&ctx.env, ctx.data).await?.certs,
+                        )
+                        .unwrap(),
                     })
                 })
                 .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {
@@ -195,7 +198,7 @@ async fn add_chain_or_pre_chain(
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
     let pending_entry = match static_ct_api::validate_chain(
         &req.chain,
-        &ROOTS,
+        &load_roots(env, name).await?,
         Some(
             u64::try_from(params.temporal_interval.start_inclusive.timestamp_millis())
                 .unwrap_or_default(),

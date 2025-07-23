@@ -6,6 +6,11 @@
     "build": {
         "command": "echo 'Default environment not configured. Please specify an environment with the \"-e\" flag.' && exit 1"
     },
+    "triggers": {
+        "crons": [
+            "23 4 * * *"
+        ]
+    },
     "env": {
         "dev": {
             "build": {
@@ -19,11 +24,15 @@
             },
             "kv_namespaces": [
                 {
-                    "id": "3a23691917c844d59aea47fdf964850f", // REPLACE ME
+                    "id": "e4aab0c89ebe492c9c81c444c78a31ff",
+                    "binding": "ccadb_roots"
+                },
+                {
+                    "id": "3a23691917c844d59aea47fdf964850f",
                     "binding": "cache_dev2025h1a"
                 },
                 {
-                    "id": "38045c90369140b091b3b68451dc6c29", // REPLACE ME
+                    "id": "38045c90369140b091b3b68451dc6c29",
                     "binding": "cache_dev2025h2a"
                 }
             ],
@@ -71,6 +80,10 @@
                 "custom_domain": true
             },
             "kv_namespaces": [
+                {
+                    "id": "e4aab0c89ebe492c9c81c444c78a31ff",
+                    "binding": "ccadb_roots"
+                },
                 {
                     "id": "252e2e33dda544ce9660ca16d48afd50",
                     "binding": "cache_cftest2025h1a"

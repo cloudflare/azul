@@ -150,7 +150,7 @@ Follow these instructions to deploy to a custom domain, suitable for running a p
 
 1.  Create a file `config.${ENV}.json` with the configuration for the log shards.
 
-1.  (Optional) Create a file `roots.${ENV}.pem` with any custom accepted roots for the log shards. By default, `roots.default.pem` will be used. All logs shards deployed within the same Worker script use the same set of roots. Roots can be updated later.
+1.  (Optional) Create a file `roots.${ENV}.pem` with any custom accepted roots for the log shards, in PEM format. If `enable_ccadb_roots` is set to true, these roots are used in addition to roots auto-pulled from the CCADB list. If `enable_ccadb_roots` is set to false for any logs in the deployment, `roots.${ENV}.pem` is required to exist and contain at least one certificate. All logs shards deployed within the same Worker script use the same set of additional roots. Roots can be updated later, but roots should generally not be removed once added.
 
 1.  First set environment variables to specify the log shard name and deployment environment as below and then follow the [instructions above](#deployment-to-a-workersdev-subdomain) to create resources for each log shard.
 
