@@ -44,6 +44,15 @@ async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 /// Update CCADB roots at each of the provided keys. Roots are never removed
 /// once added.
 ///
+/// SAFETY: In theory it's possible for multiple instances of this job to be
+/// running concurrently, such that the result written by one job is overwritten
+/// by the other, possibly removing roots that were just added to the list. This
+/// isn't an integrity violation for the log (it's fine to have entries chaining
+/// to roots that aren't currently served by get-roots, since each entry stores
+/// the `chain_fingerprints` for its chain). Further, the chance of this job
+/// running concurrently is slim given that the cron job runs only once per day.
+/// If this turns out to be an issue we can add a lock.
+///
 /// # Errors
 /// Will return an error if the latest CCADB roots cannot be fetched or if there
 /// are issues getting or putting records into the KV store.
