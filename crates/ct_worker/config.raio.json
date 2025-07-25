@@ -1,0 +1,70 @@
+{
+    "logging_level": "info",
+    "logs": {
+        "raio2025h2a": {
+            "description": "Cloudflare 'Raio2025h2a' log",
+            "submission_url": "https://ct.cloudflare.com/logs/raio2025h2a/",
+            "monitoring_url": "https://raio2025h2a.ct.cloudflare.com/",
+            "temporal_interval": {
+                "start_inclusive": "2025-07-01T00:00:00Z",
+                "end_exclusive": "2026-01-01T00:00:00Z"
+            },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
+            "location_hint": "wnam"
+        },
+        "raio2026h1a": {
+            "description": "Cloudflare 'Raio2026h1a' log",
+            "submission_url": "https://ct.cloudflare.com/logs/raio2026h1a/",
+            "monitoring_url": "https://raio2026h1a.ct.cloudflare.com/",
+            "temporal_interval": {
+                "start_inclusive": "2026-01-01T00:00:00Z",
+                "end_exclusive": "2026-07-01T00:00:00Z"
+            },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
+            "location_hint": "wnam"
+        },
+        "raio2026h2a": {
+            "description": "Cloudflare 'Raio2026h2a' log",
+            "submission_url": "https://ct.cloudflare.com/logs/raio2026h2a/",
+            "monitoring_url": "https://raio2026h2a.ct.cloudflare.com/",
+            "temporal_interval": {
+                "start_inclusive": "2026-07-01T00:00:00Z",
+                "end_exclusive": "2027-01-01T00:00:00Z"
+            },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
+            "location_hint": "wnam"
+        },
+        "raio2027h1a": {
+            "description": "Cloudflare 'Raio2027h1a' log",
+            "submission_url": "https://ct.cloudflare.com/logs/raio2027h1a/",
+            "monitoring_url": "https://raio2027h1a.ct.cloudflare.com/",
+            "temporal_interval": {
+                "start_inclusive": "2027-01-01T00:00:00Z",
+                "end_exclusive": "2027-07-01T00:00:00Z"
+            },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
+            "location_hint": "wnam"
+        },
+        "raio2027h2a": {
+            "description": "Cloudflare 'Raio2027h2a' log",
+            "submission_url": "https://ct.cloudflare.com/logs/raio2027h2a/",
+            "monitoring_url": "https://raio2027h2a.ct.cloudflare.com/",
+            "temporal_interval": {
+                "start_inclusive": "2027-07-01T00:00:00Z",
+                "end_exclusive": "2028-01-01T00:00:00Z"
+            },
+            "max_sequence_skips": 1,
+            "sequence_interval_millis": 750,
+            "sequence_skip_threshold_millis": 250,
+            "location_hint": "wnam"
+        }
+    }
+}

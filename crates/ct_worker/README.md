@@ -109,7 +109,7 @@ Follow these instructions to spin up a CT log on your local machine using the `d
 
 Follow these instructions to deploy a CT log with the `dev` configuration to Cloudflare's network.
 
-Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to configure resources.
+Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to configure resources (or use `scripts/create-log.sh`):
 
 1.  Set log shard name and deployment environment.
 
