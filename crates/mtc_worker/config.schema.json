@@ -88,6 +88,12 @@
                             "type": "boolean",
                             "default": true,
                             "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disabled for tests and benchmarks. If disabled, `kv_namespaces` can be omitted from `wrangler.jsonc`."
+                        },
+                        "clean_interval_secs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 60,
+                            "description": "How long to wait in between runs of the partial tile cleaner."
                         }
                     },
                     "required": [

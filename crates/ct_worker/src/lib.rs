@@ -18,6 +18,7 @@ use crate::ccadb_roots_cron::update_ccadb_roots;
 
 mod batcher_do;
 mod ccadb_roots_cron;
+mod cleaner_do;
 mod frontend_worker;
 mod sequencer_do;
 

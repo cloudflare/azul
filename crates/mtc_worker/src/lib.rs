@@ -18,6 +18,7 @@ use x509_cert::Certificate;
 use x509_util::CertPool;
 
 mod batcher_do;
+mod cleaner_do;
 mod frontend_worker;
 mod sequencer_do;
 

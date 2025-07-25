@@ -28,7 +28,7 @@ use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
-use signed_note::{NoteVerifier, VerifierList};
+use signed_note::VerifierList;
 use std::collections::HashMap;
 use std::{
     cell::RefCell,
@@ -51,7 +51,9 @@ use worker::Error as WorkerError;
 const DATA_TILE_LEVEL_KEY: u8 = u8::MAX;
 /// Same as above, anything above 63 is fine to use as the level key.
 const UNHASHED_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
+/// Path used to store checkpoints, both in the object storage and lock backends.
 pub const CHECKPOINT_KEY: &str = "checkpoint";
+/// Path used to store staging bundles in the lock backend.
 const STAGING_KEY: &str = "staging";
 
 // Limit on the number of entries per batch. Tune this parameter to avoid
@@ -409,14 +411,13 @@ impl SequenceState {
         );
 
         // Construct the VerifierList containing the signing and witness pubkeys
-        let verifiers = {
-            let vs: Vec<Box<dyn NoteVerifier>> = config
+        let verifiers = VerifierList::new(
+            config
                 .checkpoint_signers
                 .iter()
                 .map(|s| s.verifier())
-                .collect();
-            VerifierList::new(vs)
-        };
+                .collect(),
+        );
 
         let (c, timestamp) = tlog_tiles::open_checkpoint(
             config.origin.as_str(),
@@ -1053,7 +1054,7 @@ async fn sequence_entries<L: LogEntry>(
         .observe(millis_diff_as_secs(old_time, timestamp) - config.sequence_interval.as_secs_f64());
     metrics.seq_tiles.inc_by(tile_uploads.len().as_f64());
     metrics.tree_size.set(n.as_f64());
-    metrics.tree_time.set(timestamp.as_f64());
+    metrics.tree_time.set(timestamp.as_f64() / 1000.0);
 
     Ok(())
 }
@@ -2398,6 +2399,7 @@ mod tests {
                 max_sequence_skips: 0,
                 enable_dedup: true,
                 sequence_skip_threshold_millis: None,
+                location_hint: None,
             };
             let pool_state = RefCell::new(PoolState::default());
             block_on(create_log(&config, &object, &lock)).unwrap();

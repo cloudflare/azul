@@ -59,7 +59,6 @@ tlog_tiles.workspace = true
 worker.workspace = true
 x509-cert.workspace = true
 x509_util.workspace = true
-prometheus.workspace = true
 mtc_api.workspace = true
 
 [lints.rust]

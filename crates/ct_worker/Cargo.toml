@@ -57,7 +57,6 @@ tlog_tiles.workspace = true
 worker.workspace = true
 x509-cert.workspace = true
 x509_util.workspace = true
-prometheus.workspace = true
 chrono.workspace = true
 base64ct.workspace = true
 csv.workspace = true
