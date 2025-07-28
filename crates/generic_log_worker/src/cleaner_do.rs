@@ -125,7 +125,7 @@ impl GenericCleaner {
             log::warn!("{name}: Error cleaning log: {e}");
         } else {
             log::info!(
-                "{name}: Cleaned log (cleaned_size={} current_size={}",
+                "{name}: Cleaned log (cleaned_size={} current_size={})",
                 self.cleaned_size.borrow(),
                 self.current_size.borrow()
             );
