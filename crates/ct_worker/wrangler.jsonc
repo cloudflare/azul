@@ -13,6 +13,7 @@
     },
     "env": {
         "dev": {
+            "account_id": "022362f27de5264a50ce60cb23293c9f",
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
@@ -80,6 +81,7 @@
             ]
         },
         "cftest": {
+            "account_id": "022362f27de5264a50ce60cb23293c9f",
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
@@ -147,6 +149,7 @@
             ]
         },
         "raio": {
+            "account_id": "0b7358d77426ae6413d56c1cc0499b4f",
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
