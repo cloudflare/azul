@@ -42,6 +42,8 @@ pub struct LogParams {
     pub enable_dedup: bool,
     #[serde(default = "default_bool::<true>")]
     pub enable_ccadb_roots: bool,
+    #[serde(default = "default_u64::<60>")]
+    pub clean_interval_secs: u64,
 }
 
 fn default_bool<const V: bool>() -> bool {

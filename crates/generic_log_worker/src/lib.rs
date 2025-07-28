@@ -5,12 +5,14 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 
 pub mod batcher_do;
+pub mod cleaner_do;
 pub mod log_ops;
 mod metrics;
 pub mod sequencer_do;
 pub mod util;
 
 pub use batcher_do::*;
+pub use cleaner_do::*;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
@@ -30,6 +32,10 @@ use util::now_millis;
 use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+
+pub const SEQUENCER_BINDING: &str = "SEQUENCER";
+pub const BATCHER_BINDING: &str = "BATCHER";
+pub const CLEANER_BINDING: &str = "CLEANER";
 
 const BATCH_ENDPOINT: &str = "/add_batch";
 pub const ENTRY_ENDPOINT: &str = "/add_entry";
@@ -74,6 +80,40 @@ where
     T: Deserialize<'de>,
 {
     bitcode::deserialize::<T>(bytes).map_err(|e| Error::RustError(e.to_string()))
+}
+
+/// Get the name for this Durable Object enumerating all possibilities.
+///
+/// # Panics
+/// Panics if the name can't be found (e.g., if the wrong binding is used).
+pub fn get_durable_object_name<'a>(
+    env: &Env,
+    state: &State,
+    binding: &str,
+    name_shard_tuples: &mut impl Iterator<Item = (&'a str, u8)>,
+) -> &'a str {
+    let id = state.id();
+    let namespace = env.durable_object(binding).unwrap();
+
+    let (name, _) = name_shard_tuples
+        .find(|(name, num_shards)| {
+            if *num_shards > 0 {
+                for shard_id in 0..*num_shards {
+                    if id
+                        == namespace
+                            .id_from_name(&format!("{name}_{shard_id:x}"))
+                            .unwrap()
+                    {
+                        return true;
+                    }
+                }
+                false
+            } else {
+                id == namespace.id_from_name(name).unwrap()
+            }
+        })
+        .expect("unable to find durable object name");
+    name
 }
 
 /// Retrieve a Durable Object stub for the given parameters.

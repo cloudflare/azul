@@ -5,11 +5,11 @@
 
 use std::time::Duration;
 
-use crate::{load_checkpoint_signers, CONFIG};
-use generic_log_worker::{load_public_bucket, GenericSequencer, SequencerConfig};
+use crate::{load_checkpoint_signers, load_origin, CONFIG};
+use generic_log_worker::{
+    get_durable_object_name, GenericSequencer, SequencerConfig, SEQUENCER_BINDING,
+};
 use mtc_api::BootstrapMtcLogEntry;
-use prometheus::Registry;
-use signed_note::KeyName;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -18,48 +18,27 @@ struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
-        // Find the Durable Object name by enumerating all possibilities.
-        // TODO after update to worker > 0.6.0 use ObjectId::equals for comparison.
-        let id = state.id().to_string();
-        let namespace = env.durable_object("SEQUENCER").unwrap();
-        let (name, params) = CONFIG
-            .logs
-            .iter()
-            .find(|(name, _)| id == namespace.id_from_name(name).unwrap().to_string())
-            .expect("unable to find sequencer name");
-
-        // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#checkpoints
-        // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
-        let origin = KeyName::new(
-            params
-                .submission_url
-                .trim_start_matches("http://")
-                .trim_start_matches("https://")
-                .trim_end_matches('/')
-                .to_string(),
-        )
-        .expect("invalid origin name");
-        let sequence_interval = Duration::from_millis(params.sequence_interval_millis);
-
-        // We don't use checkpoint extensions for MTC.
-        let checkpoint_extension = Box::new(|_| vec![]);
-
-        let checkpoint_signers = load_checkpoint_signers(&env, name);
-        let bucket = load_public_bucket(&env, name).unwrap();
-        let registry = Registry::new();
+        let name = get_durable_object_name(
+            &env,
+            &state,
+            SEQUENCER_BINDING,
+            &mut CONFIG.logs.keys().map(|name| (name.as_str(), 0)),
+        );
+        let params = &CONFIG.logs[name];
 
         let config = SequencerConfig {
             name: name.to_string(),
-            origin,
-            checkpoint_signers,
-            checkpoint_extension,
-            sequence_interval,
+            origin: load_origin(name),
+            checkpoint_signers: load_checkpoint_signers(&env, name),
+            checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extension for MTC
+            sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
             enable_dedup: params.enable_dedup,
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
+            location_hint: params.location_hint.clone(),
         };
 
-        Sequencer(GenericSequencer::new(config, state, bucket, registry))
+        Sequencer(GenericSequencer::new(state, env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

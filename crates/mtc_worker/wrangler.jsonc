@@ -33,6 +33,10 @@
                     {
                         "name": "BATCHER",
                         "class_name": "Batcher"
+                    },
+                    {
+                        "name": "CLEANER",
+                        "class_name": "Cleaner"
                     }
                 ]
             },
@@ -43,6 +47,12 @@
                     "new_sqlite_classes": [
                         "Sequencer",
                         "Batcher"
+                    ]
+                },
+                {
+                    "tag": "v2",
+                    "new_sqlite_classes": [
+                        "Cleaner"
                     ]
                 }
             ]

@@ -1,5 +1,5 @@
 use crate::CONFIG;
-use generic_log_worker::{get_durable_object_stub, load_cache_kv, BatcherConfig, GenericBatcher};
+use generic_log_worker::{get_durable_object_name, BatcherConfig, GenericBatcher, BATCHER_BINDING};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -8,46 +8,24 @@ struct Batcher(GenericBatcher);
 
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
-        // Find the Durable Object name by enumerating all possibilities.
-        // TODO after update to worker > 0.6.0 use ObjectId::equals for comparison.
-        let id = state.id().to_string();
-        let namespace = env.durable_object("BATCHER").unwrap();
-        let (name, params) = CONFIG
-            .logs
-            .iter()
-            .find(|(name, params)| {
-                for shard_id in 0..params.num_batchers {
-                    if id
-                        == namespace
-                            .id_from_name(&format!("{name}_{shard_id:x}"))
-                            .unwrap()
-                            .to_string()
-                    {
-                        return true;
-                    }
-                }
-                false
-            })
-            .expect("unable to find batcher name");
-        let kv = if params.enable_dedup {
-            Some(load_cache_kv(&env, name).unwrap())
-        } else {
-            None
-        };
-        let sequencer = get_durable_object_stub(
+        let name = get_durable_object_name(
             &env,
-            name,
-            None,
-            "SEQUENCER",
-            params.location_hint.as_deref(),
-        )
-        .unwrap();
+            &state,
+            BATCHER_BINDING,
+            &mut CONFIG
+                .logs
+                .iter()
+                .map(|(name, params)| (name.as_str(), params.num_batchers)),
+        );
+        let params = &CONFIG.logs[name];
         let config = BatcherConfig {
             name: name.to_string(),
             max_batch_entries: params.max_batch_entries,
             batch_timeout_millis: params.batch_timeout_millis,
+            enable_dedup: params.enable_dedup,
+            location_hint: params.location_hint.clone(),
         };
-        Batcher(GenericBatcher::new(config, kv, sequencer))
+        Batcher(GenericBatcher::new(&env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

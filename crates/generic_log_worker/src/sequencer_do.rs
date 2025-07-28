@@ -6,13 +6,13 @@
 use std::{cell::RefCell, time::Duration};
 
 use crate::{
-    deserialize,
+    deserialize, get_durable_object_stub, load_public_bucket,
     log_ops::{self, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     serialize,
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
-    ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    CLEANER_BINDING, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use futures_util::future::join_all;
 use log::{info, warn};
@@ -23,7 +23,7 @@ use serde_with::serde_as;
 use signed_note::KeyName;
 use tlog_tiles::{CheckpointSigner, LeafIndex, LogEntry, PendingLogEntryBlob, UnixTimestamp};
 use tokio::sync::Mutex;
-use worker::{Bucket, Error as WorkerError, Request, Response, State};
+use worker::{Env, Error as WorkerError, Request, Response, State};
 
 // The number of entries in the short-term deduplication cache.
 // This cache provides a secondary deduplication layer to bridge the gap in KV's eventual consistency.
@@ -31,6 +31,7 @@ use worker::{Bucket, Error as WorkerError, Request, Response, State};
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
 pub struct GenericSequencer<L: LogEntry> {
+    env: Env,
     do_state: State,             // implements LockBackend
     public_bucket: ObjectBucket, // implements ObjectBackend
     cache: DedupCache,           // implements CacheRead, CacheWrite
@@ -55,6 +56,7 @@ pub struct SequencerConfig {
     pub max_sequence_skips: usize,
     pub sequence_skip_threshold_millis: Option<u64>,
     pub enable_dedup: bool,
+    pub location_hint: Option<String>,
 }
 
 /// GET query structure for the sequencer's `/prove_inclusion` endpoint
@@ -73,10 +75,15 @@ pub struct ProveInclusionResponse {
 
 impl<L: LogEntry> GenericSequencer<L> {
     /// Return a new sequencer with the given config.
-    pub fn new(config: SequencerConfig, state: State, bucket: Bucket, registry: Registry) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if we can't get a handle for the public bucket.
+    pub fn new(state: State, env: Env, config: SequencerConfig) -> Self {
+        let registry = Registry::new();
         let metrics = SequencerMetrics::new(&registry);
         let public_bucket = ObjectBucket {
-            bucket,
+            bucket: load_public_bucket(&env, &config.name).unwrap(),
             metrics: Some(ObjectMetrics::new(&registry)),
         };
         let cache = DedupCache {
@@ -85,6 +92,7 @@ impl<L: LogEntry> GenericSequencer<L> {
         };
 
         Self {
+            env,
             do_state: state,
             public_bucket,
             cache,
@@ -203,6 +211,31 @@ impl<L: LogEntry> GenericSequencer<L> {
                 return Err(format!("{name}: failed to create: {msg}").into())
             }
             Ok(()) => {}
+        }
+
+        // Start the cleaner, if configured.
+        match get_durable_object_stub(
+            &self.env,
+            name,
+            None,
+            CLEANER_BINDING,
+            self.config.location_hint.as_deref(),
+        ) {
+            Ok(stub) => match stub.fetch_with_str("http://fake_url.com/start").await {
+                Ok(resp) => {
+                    if resp.status_code() == 200 {
+                        log::debug!("Started cleaner");
+                    } else {
+                        log::warn!("Failed to start cleaner: non-200 response");
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to start cleaner: {e}");
+                }
+            },
+            Err(e) => {
+                log::debug!("Failed to get cleaner DO stub: {e}");
+            }
         }
 
         // Load sequencing state.

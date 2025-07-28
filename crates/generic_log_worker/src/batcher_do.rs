@@ -6,7 +6,10 @@
 //!
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
-use crate::{deserialize, serialize, LookupKey, SequenceMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT};
+use crate::{
+    deserialize, get_durable_object_stub, load_cache_kv, serialize, LookupKey, SequenceMetadata,
+    BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
+};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use std::{
@@ -33,6 +36,8 @@ pub struct BatcherConfig {
     pub name: String,
     pub max_batch_entries: usize,
     pub batch_timeout_millis: u64,
+    pub enable_dedup: bool,
+    pub location_hint: Option<String>,
 }
 
 // A batch of entries to be submitted to the Sequencer together.
@@ -55,7 +60,25 @@ impl Default for Batch {
 
 impl GenericBatcher {
     /// Returns a new batcher with the given config.
-    pub fn new(config: BatcherConfig, kv: Option<KvStore>, sequencer: Stub) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if we can't get a handle for the sequencer or KV store.
+    pub fn new(env: &Env, config: BatcherConfig) -> Self {
+        let kv = if config.enable_dedup {
+            Some(load_cache_kv(env, &config.name).unwrap())
+        } else {
+            None
+        };
+        let sequencer = get_durable_object_stub(
+            env,
+            &config.name,
+            None,
+            SEQUENCER_BINDING,
+            config.location_hint.as_deref(),
+        )
+        .unwrap();
+
         Self {
             config,
             kv,
