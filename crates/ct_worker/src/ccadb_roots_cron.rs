@@ -143,10 +143,7 @@ async fn ccadb_roots() -> Result<Vec<Certificate>> {
             continue;
         }
 
-        // One certificate (CN=Baltimore CyberTrust Root; OU=CyberTrust;
-        // O=Baltimore; C=IE) has extra trailing spaces after each of the PEM
-        // lines, which causes the `der` crate's PEM decoding to fail.
-        match Certificate::from_pem(pem.replace(" \n", "\n")) {
+        match Certificate::from_pem(pem) {
             Ok(cert) => certificates.push(cert),
             Err(e) => log::warn!("failed to parse CCADB certificate: {e}:\n{record:?}"),
         }
