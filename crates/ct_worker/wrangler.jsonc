@@ -145,6 +145,95 @@
                     ]
                 }
             ]
+        },
+        "raio": {
+            "build": {
+                // Change '--release' to '--dev' to compile with debug symbols.
+                // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
+                "command": "cargo install -q worker-build && DEPLOY_ENV=raio worker-build --release"
+            },
+            "routes": [
+                "https://ct.cloudflare.com/logs/raio2025h2a/*",
+                "https://ct.cloudflare.com/logs/raio2026h1a/*",
+                "https://ct.cloudflare.com/logs/raio2026h2a/*",
+                "https://ct.cloudflare.com/logs/raio2027h1a/*",
+                "https://ct.cloudflare.com/logs/raio2027h2a/*"
+            ],
+            "kv_namespaces": [
+                {
+                    "id": "12fa8928b30541d6b5c26ddf173c9acd",
+                    "binding": "ccadb_roots"
+                },
+                {
+                    "id": "180000ea656e4f4987bcfe9d47b8525e",
+                    "binding": "cache_raio2025h2a"
+                },
+                {
+                    "id": "0a8eba39d36f4dd9bbb8fb9cb734b236",
+                    "binding": "cache_raio2026h1a"
+                },
+                {
+                    "id": "6faa76b0b42844e3abf6ca2ba3197174",
+                    "binding": "cache_raio2026h2a"
+                },
+                {
+                    "id": "e384a380de7841fd8491a5c381f90b6a",
+                    "binding": "cache_raio2027h1a"
+                },
+                {
+                    "id": "52a50301b7c24d3a950354d8e658bb28",
+                    "binding": "cache_raio2027h2a"
+                }
+            ],
+            "r2_buckets": [
+                {
+                    "bucket_name": "static-ct-public-raio2025h2a",
+                    "binding": "public_raio2025h2a"
+                },
+                {
+                    "bucket_name": "static-ct-public-raio2026h1a",
+                    "binding": "public_raio2026h1a"
+                },
+                {
+                    "bucket_name": "static-ct-public-raio2026h2a",
+                    "binding": "public_raio2026h2a"
+                },
+                {
+                    "bucket_name": "static-ct-public-raio2027h1a",
+                    "binding": "public_raio2027h1a"
+                },
+                {
+                    "bucket_name": "static-ct-public-raio2027h2a",
+                    "binding": "public_raio2027h2a"
+                }
+            ],
+            "durable_objects": {
+                "bindings": [
+                    {
+                        "name": "SEQUENCER",
+                        "class_name": "Sequencer"
+                    },
+                    {
+                        "name": "BATCHER",
+                        "class_name": "Batcher"
+                    },
+                    {
+                        "name": "CLEANER",
+                        "class_name": "Cleaner"
+                    }
+                ]
+            },
+            "migrations": [
+                {
+                    // tag should be unique for each entry
+                    "tag": "v1",
+                    "new_sqlite_classes": [
+                        "Sequencer",
+                        "Batcher",
+                        "Cleaner"
+                    ]
+                }
+            ]
         }
     }
 }
