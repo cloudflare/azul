@@ -112,7 +112,7 @@
                         "enable_ccadb_roots": {
                             "type": "boolean",
                             "default": true,
-                            "description": "Enables loading root store trusted roots from the CCADB list, in addition to any roots configured in `roots.<env>.pem`. If enabled, requires a KV namespace with the binding `ccadb_roots` to be configured in `wrangler.jsonc`, as well as a cron trigger so that the CCADB list auto-updates."
+                            "description": "Enables loading root store trusted roots from the CCADB list, in addition to any roots configured in `roots.<env>.pem`. If enabled, requires a KV namespace with the binding `ccadb_roots` to be configured in `wrangler.jsonc`, as well as a cron trigger so that the CCADB list auto-updates. The CCADB cron job only ever appends roots to the list, but manual changes can be made if necessary."
                         },
                         "clean_interval_secs": {
                             "type": "integer",
