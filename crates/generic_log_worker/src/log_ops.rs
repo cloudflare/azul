@@ -38,11 +38,10 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    prove_record, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileHashReader,
-    TileIterator, TileReader, TlogError, TlogTile, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    prove_record, prove_tree, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile,
+    TileHashReader, TileIterator, TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp,
+    UnixTimestamp, HASH_SIZE,
 };
-#[cfg(test)]
-use tlog_tiles::{tlog, TreeProof};
 use tokio::sync::watch::{channel, Receiver, Sender};
 use worker::Error as WorkerError;
 
@@ -566,7 +565,7 @@ impl SequenceState {
         };
         // We can unwrap because edge_tiles is guaranteed to contain the tiles
         // necessary to prove this.
-        tlog::prove_record(tree_size, tree_size - 1, &reader).unwrap()
+        tlog_tiles::tlog::prove_record(tree_size, tree_size - 1, &reader).unwrap()
     }
 
     /// Proves that this tree of size n is compatible with the subtree of size
@@ -582,7 +581,7 @@ impl SequenceState {
             edge_tiles: &self.edge_tiles,
             overlay: &HashMap::default(),
         };
-        tlog::prove_tree(tree_size, tree_size - 1, &reader)
+        tlog_tiles::tlog::prove_tree(tree_size, tree_size - 1, &reader)
     }
 }
 
@@ -634,6 +633,57 @@ pub async fn prove_inclusion(
         let tile_reader = SimpleTlogTileReader(all_tile_data);
         let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
         prove_record(num_leaves, leaf_index, &hash_reader).map_err(|e| e.to_string())?
+    };
+    Ok(proof)
+}
+
+/// Returns a consistency proof, proving the tree with `cur_num_leaves` and hash `cur_tree_hash` is
+/// an extension of the tree with `prev_num_leaves`. It MUST be the case that `1 <= prev_num_leaves
+/// <= cur_num_leaves`.
+///
+/// # Errors
+/// Errors when the desired tiles do not exist as bucket objects, or it's not the case that `1 <=
+/// prev_num_leaves <= cur_num_leaves`.
+pub async fn prove_consistency(
+    cur_tree_hash: Hash,
+    cur_num_leaves: u64,
+    prev_num_leaves: u64,
+    object: &impl ObjectBackend,
+) -> Result<TreeProof, WorkerError> {
+    // This function operates almost identically to prove_inclusion. The only difference is the use
+    // of prove_tree versus prove_record
+    let mut all_tile_data = HashMap::new();
+
+    // Make a fake proof using ProofPreparer to get all the tiles we need
+    // TODO: This seems useful. We can probably move this into the tlog_tiles crate
+    let tiles_to_fetch = {
+        let tile_reader = ProofPreparer::default();
+        let hash_reader = TileHashReader::new(cur_num_leaves, Hash::default(), &tile_reader);
+        // ProofPreparer is guaranteed to make prove_record return a BadMath
+        // error. This is fine, because it already collected the data we
+        // needed.
+        let _ = prove_tree(cur_num_leaves, prev_num_leaves, &hash_reader);
+        tile_reader.0.into_inner()
+    };
+
+    // Fetch all the tiles we need for a proof
+    for tile in tiles_to_fetch {
+        let Some(tile_data) = object.fetch(&tile.path()).await? else {
+            return Err(WorkerError::RustError(format!(
+                "missing tile for inclusion proof {}",
+                tile.path()
+            )));
+        };
+        all_tile_data.insert(tile, tile_data);
+    }
+
+    // Now make the proof
+    let proof = {
+        // Put the recorded tiles into the appropriate Reader structs for prove_tree()
+        let tile_reader = SimpleTlogTileReader(all_tile_data);
+        let hash_reader = TileHashReader::new(cur_num_leaves, cur_tree_hash, &tile_reader);
+        tlog_tiles::tlog::prove_tree(cur_num_leaves, prev_num_leaves, &hash_reader)
+            .map_err(|e| e.to_string())?
     };
     Ok(proof)
 }
@@ -1385,7 +1435,7 @@ mod tests {
     use prometheus::Registry;
     use rand::{
         rngs::{OsRng, SmallRng},
-        Rng, RngCore, SeedableRng,
+        thread_rng, Rng, RngCore, SeedableRng,
     };
     use sha2::{Digest, Sha256};
     use signed_note::{KeyName, Note, VerifierList};
@@ -1409,6 +1459,10 @@ mod tests {
 
     fn sequence_one_leaf(n: u64) {
         let mut log = TestLog::new();
+
+        // For testing, keep the root hashes of all the intermediate trees we create
+        let mut tree_hashes = vec![*log.sequence_state.borrow().tree.hash()];
+        // Add n certs to the tree one by one
         for i in 0..n {
             let old_tree_hash = *log.sequence_state.borrow().tree.hash();
 
@@ -1432,6 +1486,9 @@ mod tests {
             };
             check_record(&inc_proof, tree_size, new_tree_hash, leaf_index, last_hash).unwrap();
 
+            // Save the tree hash
+            tree_hashes.push(new_tree_hash);
+
             // Make a consistency proof. Just can't do it with a size-0 subtree
             if i > 0 {
                 let consistency_proof =
@@ -1445,6 +1502,15 @@ mod tests {
                     old_tree_hash,
                 )
                 .unwrap();
+                // Check that the other way of constructing the consistency proof is the same
+                let consistency_proof2 = block_on(prove_consistency(
+                    new_tree_hash,
+                    tree_size,
+                    tree_size - 1,
+                    &log.object,
+                ))
+                .unwrap();
+                assert_eq!(consistency_proof, consistency_proof2);
             }
         }
         // Check that the static CT log is valid
@@ -1479,6 +1545,28 @@ mod tests {
             };
             // Verify the inclusion proof
             check_record(&proof, n, tree_hash, i, leaf_hash).unwrap();
+        }
+
+        // Check that we can make a consistency proof for random spans in the tree
+        let mut rng = thread_rng();
+        for _ in 0..100 {
+            let prev_tree_size = rng.gen_range(1..n);
+            let new_tree_size = rng.gen_range(prev_tree_size + 1..=n);
+            let consistency_proof = block_on(prove_consistency(
+                tree_hashes[new_tree_size as usize],
+                new_tree_size,
+                prev_tree_size,
+                &log.object,
+            ))
+            .unwrap();
+            check_tree(
+                &consistency_proof,
+                new_tree_size,
+                tree_hashes[new_tree_size as usize],
+                prev_tree_size,
+                tree_hashes[prev_tree_size as usize],
+            )
+            .unwrap();
         }
     }
 
