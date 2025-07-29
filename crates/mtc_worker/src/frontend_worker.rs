@@ -70,97 +70,136 @@ fn start() {
 /// Panics if there are issues parsing route parameters, which should never happen.
 #[event(fetch, respond_with_errors)]
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let router = Router::new();
-    router
-        .post_async("/logs/:log/add-entry", |req, ctx| async move {
-            add_entry(req, &ctx.env, valid_log_name(&ctx)?).await
-        })
-        .get_async("/logs/:log/prove-inclusion", |req, ctx| async move {
-            let name = valid_log_name(&ctx)?;
-            let bucket = load_public_bucket(&ctx.env, name)?;
-            let ProveInclusionQuery { leaf_index } = req.query()?;
-            let object_backend = ObjectBucket::new(bucket);
-            let checkpoint_bytes = object_backend
-                .fetch(CHECKPOINT_KEY)
-                .await?
-                .ok_or("no checkpoint in object storage".to_string())?;
-            let origin = &load_origin(name);
-            let verifiers = &VerifierList::new(
-                load_checkpoint_signers(&ctx.env, name)
-                    .iter()
-                    .map(|s| s.verifier())
-                    .collect::<Vec<Box<dyn NoteVerifier>>>(),
-            );
-            let checkpoint =
-                open_checkpoint(origin.as_str(), verifiers, now_millis(), &checkpoint_bytes)
+    // Use an outer router as middleware to check that the log name is valid.
+    Router::new()
+        .or_else_any_method_async("/logs/:log/*route", |req, ctx| async move {
+            let name = if let Some(name) = ctx.param("log") {
+                if CONFIG.logs.contains_key(name) {
+                    &name.clone()
+                } else {
+                    return Err(UNKNOWN_LOG_MSG.into());
+                }
+            } else {
+                return Err("missing 'log' route param".into());
+            };
+
+            // Now that we've validated the log name, use an inner router to
+            // handle the request.
+            Router::with_data(name)
+                .post_async("/logs/:log/add-entry", |req, ctx| async move {
+                    add_entry(req, &ctx.env, ctx.data).await
+                })
+                .get_async("/logs/:log/prove-inclusion", |req, ctx| async move {
+                    let name = ctx.data;
+                    let bucket = load_public_bucket(&ctx.env, name)?;
+                    let ProveInclusionQuery { leaf_index } = req.query()?;
+                    let object_backend = ObjectBucket::new(bucket);
+                    let checkpoint_bytes = object_backend
+                        .fetch(CHECKPOINT_KEY)
+                        .await?
+                        .ok_or("no checkpoint in object storage".to_string())?;
+                    let origin = &load_origin(name);
+                    let verifiers = &VerifierList::new(
+                        load_checkpoint_signers(&ctx.env, name)
+                            .iter()
+                            .map(|s| s.verifier())
+                            .collect::<Vec<Box<dyn NoteVerifier>>>(),
+                    );
+                    let checkpoint = open_checkpoint(
+                        origin.as_str(),
+                        verifiers,
+                        now_millis(),
+                        &checkpoint_bytes,
+                    )
                     .map_err(|e| e.to_string())?
                     .0;
-            if leaf_index >= checkpoint.size() {
-                return Response::error("Leaf index is greater than current log size.", 422);
-            }
-            let proof = prove_inclusion(
-                checkpoint.size(),
-                *checkpoint.hash(),
-                leaf_index,
-                &object_backend,
-            )
-            .await?;
-            let proof_bytestrings = proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
-            Response::from_json(&ProveInclusionResponse {
-                proof: proof_bytestrings,
-            })
-        })
-        .get("/logs/:log/metadata", |_req, ctx| {
-            let name = valid_log_name(&ctx)?;
-            let params = &CONFIG.logs[name];
-            let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-            let key = verifying_key
-                .to_public_key_der()
-                .map_err(|e| e.to_string())?;
-            let witness_key = load_witness_key(&ctx.env, name)?;
-            let witness_key = witness_key
-                .verifying_key()
-                .to_public_key_der()
-                .map_err(|e| e.to_string())?;
-            Response::from_json(&MetadataResponse {
-                description: &params.description,
-                key: key.as_bytes(),
-                witness_key: witness_key.as_bytes(),
-                submission_url: &params.submission_url,
-                monitoring_url: if params.monitoring_url.is_empty() {
-                    &params.submission_url
-                } else {
-                    &params.monitoring_url
-                },
-            })
-        })
-        .get_async("/logs/:log/metrics", |_req, ctx| async move {
-            let name = valid_log_name(&ctx)?;
-            let stub = get_durable_object_stub(
-                &ctx.env,
-                name,
-                None,
-                "SEQUENCER",
-                CONFIG.logs[name].location_hint.as_deref(),
-            )?;
-            stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
-                .await
-        })
-        .get_async("/logs/:log/*key", |_req, ctx| async move {
-            let name = valid_log_name(&ctx)?;
-            let key = ctx.param("key").unwrap();
+                    if leaf_index >= checkpoint.size() {
+                        return Response::error(
+                            "Leaf index is greater than current log size.",
+                            422,
+                        );
+                    }
+                    let proof = prove_inclusion(
+                        checkpoint.size(),
+                        *checkpoint.hash(),
+                        leaf_index,
+                        &object_backend,
+                    )
+                    .await?;
+                    let proof_bytestrings =
+                        proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
+                    Response::from_json(&ProveInclusionResponse {
+                        proof: proof_bytestrings,
+                    })
+                })
+                .get("/logs/:log/metadata", |_req, ctx| {
+                    let name = ctx.data;
+                    let params = &CONFIG.logs[name];
+                    let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
+                    let key = verifying_key
+                        .to_public_key_der()
+                        .map_err(|e| e.to_string())?;
+                    let witness_key = load_witness_key(&ctx.env, name)?;
+                    let witness_key = witness_key
+                        .verifying_key()
+                        .to_public_key_der()
+                        .map_err(|e| e.to_string())?;
+                    Response::from_json(&MetadataResponse {
+                        description: &params.description,
+                        key: key.as_bytes(),
+                        witness_key: witness_key.as_bytes(),
+                        submission_url: &params.submission_url,
+                        monitoring_url: if params.monitoring_url.is_empty() {
+                            &params.submission_url
+                        } else {
+                            &params.monitoring_url
+                        },
+                    })
+                })
+                .get_async("/logs/:log/metrics", |_req, ctx| async move {
+                    let name = ctx.data;
+                    let stub = get_durable_object_stub(
+                        &ctx.env,
+                        name,
+                        None,
+                        "SEQUENCER",
+                        CONFIG.logs[name].location_hint.as_deref(),
+                    )?;
+                    stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
+                        .await
+                })
+                .get_async("/logs/:log/*key", |_req, ctx| async move {
+                    let name = ctx.data;
+                    let key = ctx.param("key").unwrap();
 
-            let bucket = load_public_bucket(&ctx.env, name)?;
-            if let Some(obj) = bucket.get(key).execute().await? {
-                Response::from_body(
-                    obj.body()
-                        .ok_or("R2 object missing body")?
-                        .response_body()?,
-                )
-                .map(|r| r.with_headers(headers_from_http_metadata(obj.http_metadata())))
-            } else {
-                Response::error("Not found", 404)
-            }
+                    // Enable direct access to the bucket via the Worker if
+                    // monitoring_url is unspecified.
+                    if CONFIG.logs[name].monitoring_url.is_empty() {
+                        let bucket = load_public_bucket(&ctx.env, name)?;
+                        if let Some(obj) = bucket.get(key).execute().await? {
+                            Response::from_body(
+                                obj.body()
+                                    .ok_or("R2 object missing body")?
+                                    .response_body()?,
+                            )
+                            .map(|r| {
+                                r.with_headers(headers_from_http_metadata(obj.http_metadata()))
+                            })
+                        } else {
+                            Response::error("Not found", 404)
+                        }
+                    } else {
+                        Response::error(
+                            format!(
+                                "Use {} for monitoring API",
+                                CONFIG.logs[name].monitoring_url
+                            ),
+                            404,
+                        )
+                    }
+                })
+                .run(req, ctx.env)
+                .await
         })
         .run(req, env)
         .await
@@ -289,18 +328,6 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         leaf_index: metadata.0,
         timestamp: metadata.1,
     })
-}
-
-fn valid_log_name(ctx: &RouteContext<()>) -> Result<&str> {
-    if let Some(name) = ctx.param("log") {
-        if CONFIG.logs.contains_key(name) {
-            Ok(name)
-        } else {
-            Err(UNKNOWN_LOG_MSG.into())
-        }
-    } else {
-        Err("missing 'log' route param".into())
-    }
 }
 
 fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
