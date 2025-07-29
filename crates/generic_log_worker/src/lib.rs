@@ -29,9 +29,10 @@ use std::str::FromStr;
 use std::sync::Once;
 use tlog_tiles::{LookupKey, PendingLogEntry, SequenceMetadata};
 use util::now_millis;
-use worker::kv::KvStore;
-#[allow(clippy::wildcard_imports)]
-use worker::*;
+use worker::{
+    js_sys, kv, kv::KvStore, wasm_bindgen, Bucket, Env, Error, HttpMetadata, Result, State,
+    Storage, Stub,
+};
 
 pub const SEQUENCER_BINDING: &str = "SEQUENCER";
 pub const BATCHER_BINDING: &str = "BATCHER";

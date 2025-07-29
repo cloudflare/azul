@@ -1553,7 +1553,7 @@ mod tests {
             let prev_tree_size = rng.gen_range(1..n);
             let new_tree_size = rng.gen_range(prev_tree_size + 1..=n);
             let consistency_proof = block_on(prove_consistency(
-                tree_hashes[new_tree_size as usize],
+                tree_hashes[usize::try_from(new_tree_size).unwrap()],
                 new_tree_size,
                 prev_tree_size,
                 &log.object,
@@ -1562,9 +1562,9 @@ mod tests {
             check_tree(
                 &consistency_proof,
                 new_tree_size,
-                tree_hashes[new_tree_size as usize],
+                tree_hashes[usize::try_from(new_tree_size).unwrap()],
                 prev_tree_size,
-                tree_hashes[prev_tree_size as usize],
+                tree_hashes[usize::try_from(prev_tree_size).unwrap()],
             )
             .unwrap();
         }
