@@ -24,9 +24,9 @@ use worker::kv::KvStore;
 use worker::*;
 
 pub struct GenericBatcher {
+    env: Env,
     config: BatcherConfig,
     kv: Option<KvStore>,
-    sequencer: Stub,
     batch: RefCell<Batch>,
     in_flight: RefCell<usize>,
     processed: RefCell<usize>,
@@ -64,25 +64,17 @@ impl GenericBatcher {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the sequencer or KV store.
-    pub fn new(env: &Env, config: BatcherConfig) -> Self {
+    pub fn new(env: Env, config: BatcherConfig) -> Self {
         let kv = if config.enable_dedup {
-            Some(load_cache_kv(env, &config.name).unwrap())
+            Some(load_cache_kv(&env, &config.name).unwrap())
         } else {
             None
         };
-        let sequencer = get_durable_object_stub(
-            env,
-            &config.name,
-            None,
-            SEQUENCER_BINDING,
-            config.location_hint.as_deref(),
-        )
-        .unwrap();
 
         Self {
+            env,
             config,
             kv,
-            sequencer,
             batch: RefCell::new(Batch::default()),
             in_flight: RefCell::new(0),
             processed: RefCell::new(0),
@@ -203,12 +195,17 @@ impl GenericBatcher {
         )?;
         let sequenced_entries: HashMap<LookupKey, SequenceMetadata> =
             deserialize::<Vec<(LookupKey, SequenceMetadata)>>(
-                &self
-                    .sequencer
-                    .fetch_with_request(req)
-                    .await?
-                    .bytes()
-                    .await?,
+                &get_durable_object_stub(
+                    &self.env,
+                    &self.config.name,
+                    None,
+                    SEQUENCER_BINDING,
+                    self.config.location_hint.as_deref(),
+                )?
+                .fetch_with_request(req)
+                .await?
+                .bytes()
+                .await?,
             )?
             .into_iter()
             .collect();
