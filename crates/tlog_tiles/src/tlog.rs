@@ -291,7 +291,7 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
     if n == 0 {
         return Ok(EMPTY_HASH);
     }
-    let indexes = subtree_indices(0, n, vec![]);
+    let indexes = subtree_indexes(0, n, vec![]);
     let hashes = r.read_hashes(&indexes)?;
     assert_eq!(
         hashes.len(),
@@ -310,12 +310,12 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-pub fn subtree_indices(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
+pub fn subtree_indexes(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
     // See subtree_hash below for commentary.
     let mut lo = lo;
     while lo < hi {
         let (k, level) = maxpow2(hi - lo + 1);
-        assert!(lo & (k - 1) == 0, "bad math in subtree_indices");
+        assert!(lo & (k - 1) == 0, "bad math in subtree_indexes");
         need.push(stored_hash_index(level, lo >> level));
         lo += k;
     }
@@ -324,7 +324,7 @@ pub fn subtree_indices(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
 
 /// Computes the hash for the subtree containing records [lo, hi), assuming that
 /// hashes are the hashes corresponding to the indexes returned by
-/// `subtree_indices(lo, hi)`.  It returns any leftover hashes.
+/// `subtree_indexes(lo, hi)`.  It returns any leftover hashes.
 ///
 /// May panic if there are internal math errors.
 fn subtree_hash(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
@@ -351,9 +351,9 @@ fn subtree_hash(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
     (h, hashes[num_tree..].to_vec())
 }
 
-/// A `RecordProof` is a verifiable proof that a particular log root contains a particular record.
+/// A `InclusionProof` is a verifiable proof that a particular log root contains a particular record.
 /// RFC 6962 calls this a “Merkle audit path.”
-pub type RecordProof = Vec<Hash>;
+pub type InclusionProof = Vec<Hash>;
 
 /// Returns the proof that the tree of size `t` contains the record with index `n`.
 ///
@@ -365,7 +365,7 @@ pub type RecordProof = Vec<Hash>;
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_inclusion<R: HashReader>(t: u64, n: u64, r: &R) -> Result<RecordProof, TlogError> {
+pub fn prove_inclusion<R: HashReader>(t: u64, n: u64, r: &R) -> Result<InclusionProof, TlogError> {
     prove_subtree_inclusion(0, t, n, r)
 }
 
@@ -385,11 +385,11 @@ pub fn prove_subtree_inclusion<R: HashReader>(
     hi: u64,
     n: u64,
     r: &R,
-) -> Result<RecordProof, TlogError> {
+) -> Result<InclusionProof, TlogError> {
     if n >= hi {
         return Err(TlogError::InvalidInput("n >= t".into()));
     }
-    let indexes = inclusion_proof_indices(lo, hi, n, vec![]);
+    let indexes = inclusion_proof_indexes(lo, hi, n, vec![]);
     if indexes.is_empty() {
         return Ok(vec![]);
     }
@@ -412,20 +412,21 @@ pub fn prove_subtree_inclusion<R: HashReader>(
 /// It appends those indexes to need and returns the result.
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.1>.
 ///
+/// # Panics
 /// May panic if there are internal math errors.
-fn inclusion_proof_indices(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
+pub fn inclusion_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
     // See inclusion_proof below for commentary.
-    assert!(lo <= n && n < hi, "bad math in inclusion_proof_indices");
+    assert!(lo <= n && n < hi, "bad math in inclusion_proof_indexes");
     if lo + 1 == hi {
         return need;
     }
     let (k, _) = maxpow2(hi - lo);
     if n < lo + k {
-        need = inclusion_proof_indices(lo, lo + k, n, need);
-        need = subtree_indices(lo + k, hi, need);
+        need = inclusion_proof_indexes(lo, lo + k, n, need);
+        need = subtree_indexes(lo + k, hi, need);
     } else {
-        need = subtree_indices(lo, lo + k, need);
-        need = inclusion_proof_indices(lo + k, hi, n, need);
+        need = subtree_indexes(lo, lo + k, need);
+        need = inclusion_proof_indexes(lo + k, hi, n, need);
     }
     need
 }
@@ -435,7 +436,7 @@ fn inclusion_proof_indices(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.1>.
 ///
 /// May panic if there are internal math errors.
-fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (RecordProof, Vec<Hash>) {
+fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (InclusionProof, Vec<Hash>) {
     // We must have lo <= n < hi or else the code here has a bug.
     assert!(lo <= n && n < hi, "bad math in inclusion_proof");
 
@@ -448,7 +449,7 @@ fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (RecordPr
 
     // Walk down the tree toward n.
     // Record the hash of the path not taken (needed for verifying the proof).
-    let mut proof: RecordProof;
+    let mut proof: InclusionProof;
     let th: Hash;
     let (k, _) = maxpow2(hi - lo);
     if n < lo + k {
@@ -475,6 +476,8 @@ pub enum TlogError {
     InvalidTile,
     #[error("bad math")]
     BadMath,
+    #[error("recorded but did not read tiles")]
+    RecordedTilesOnly,
     #[error("downloaded inconsistent tile")]
     InconsistentTile,
     #[error("indexes not in tree")]
@@ -510,7 +513,7 @@ pub enum TlogError {
 ///
 /// Panics if there are internal math errors.
 pub fn check_inclusion(
-    p: &RecordProof,
+    p: &InclusionProof,
     t: u64,
     th: Hash,
     n: u64,
@@ -535,7 +538,7 @@ pub fn check_inclusion(
 ///
 /// Panics if there are internal math errors.
 fn run_inclusion_proof(
-    p: &RecordProof,
+    p: &InclusionProof,
     lo: u64,
     hi: u64,
     n: u64,
@@ -568,10 +571,10 @@ fn run_inclusion_proof(
     }
 }
 
-/// A `TreeProof` is a verifiable proof that a particular log tree contains
+/// A `ConsistencyProof` is a verifiable proof that a particular log tree contains
 /// as a prefix all records present in an earlier tree.
 /// RFC 6962 calls this a “Merkle consistency proof.”
-pub type TreeProof = Vec<Hash>;
+pub type ConsistencyProof = Vec<Hash>;
 
 /// Returns the proof that the tree of size `t` contains
 /// as a prefix all the records from the tree of smaller size `n`.
@@ -584,11 +587,15 @@ pub type TreeProof = Vec<Hash>;
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_consistency<R: HashReader>(t: u64, n: u64, h: &R) -> Result<TreeProof, TlogError> {
+pub fn prove_consistency<R: HashReader>(
+    t: u64,
+    n: u64,
+    h: &R,
+) -> Result<ConsistencyProof, TlogError> {
     if !(1..=t).contains(&n) {
         return Err(TlogError::InvalidInput("1 <= n <= t".into()));
     }
-    let indexes = consistency_proof_indices(0, t, n, vec![]);
+    let indexes = consistency_proof_indexes(0, t, n, vec![]);
     if indexes.is_empty() {
         return Ok(vec![]);
     }
@@ -613,27 +620,27 @@ pub fn prove_consistency<R: HashReader>(t: u64, n: u64, h: &R) -> Result<TreePro
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-fn consistency_proof_indices(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
+pub fn consistency_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
     // See treeProof below for commentary.
     assert!(
         (lo + 1..=hi).contains(&n),
-        "bad math in consistency_proof_indices"
+        "bad math in consistency_proof_indexes"
     );
 
     if n == hi {
         if lo == 0 {
             return need;
         }
-        return subtree_indices(lo, hi, need);
+        return subtree_indexes(lo, hi, need);
     }
 
     let (k, _) = maxpow2(hi - lo);
     if n <= lo + k {
-        need = consistency_proof_indices(lo, lo + k, n, need);
-        need = subtree_indices(lo + k, hi, need);
+        need = consistency_proof_indexes(lo, lo + k, n, need);
+        need = subtree_indexes(lo + k, hi, need);
     } else {
-        need = subtree_indices(lo, lo + k, need);
-        need = consistency_proof_indices(lo + k, hi, n, need);
+        need = subtree_indexes(lo, lo + k, need);
+        need = consistency_proof_indexes(lo + k, hi, n, need);
     }
     need
 }
@@ -643,7 +650,12 @@ fn consistency_proof_indices(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Ve
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.2>.
 ///
 /// May panic if there are internal math errors.
-fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (TreeProof, Vec<Hash>) {
+fn consistency_proof(
+    lo: u64,
+    hi: u64,
+    n: u64,
+    mut hashes: Vec<Hash>,
+) -> (ConsistencyProof, Vec<Hash>) {
     assert!((lo + 1..=hi).contains(&n), "bad math in consistency_proof");
 
     // Reached common ground.
@@ -659,7 +671,7 @@ fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (TreePr
 
     // Interior node for the proof.
     // Decide whether to walk down the left or right side.
-    let mut p: TreeProof;
+    let mut p: ConsistencyProof;
     let th: Hash;
     let (k, _) = maxpow2(hi - lo);
     if n <= lo + k {
@@ -686,7 +698,7 @@ fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (TreePr
 ///
 /// Panics if there are internal math errors.
 pub fn check_consistency(
-    p: &TreeProof,
+    p: &ConsistencyProof,
     t: u64,
     th: Hash,
     n: u64,
@@ -712,7 +724,7 @@ pub fn check_consistency(
 ///
 /// Panics if there are internal math errors.
 fn run_consistency_proof(
-    p: &TreeProof,
+    p: &ConsistencyProof,
     lo: u64,
     hi: u64,
     n: u64,

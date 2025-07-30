@@ -11,25 +11,21 @@ use der::{
     asn1::{SetOfVec, UtcTime},
     Any, Tag,
 };
-use futures_util::future::try_join_all;
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket,
-    log_ops::{prove_inclusion, UploadOptions, CHECKPOINT_KEY},
+    log_ops::{prove_inclusion, CHECKPOINT_KEY},
     put_cache_entry_metadata, serialize,
     util::now_millis,
-    ObjectBackend, ObjectBucket, ProveInclusionQuery, ProveInclusionResponse, ENTRY_ENDPOINT,
-    METRICS_ENDPOINT,
+    ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
-use log::{debug, info, warn};
 use mtc_api::{AddEntryRequest, AddEntryResponse, RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
 use p256::pkcs8::EncodePublicKey;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
-use sha2::{Digest, Sha256};
 use signed_note::{NoteVerifier, VerifierList};
-use std::{str::FromStr, sync::LazyLock, time::Duration};
-use tlog_tiles::{open_checkpoint, PendingLogEntry, PendingLogEntryBlob};
+use std::{str::FromStr, time::Duration};
+use tlog_tiles::{open_checkpoint, LeafIndex, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::{
@@ -51,6 +47,20 @@ struct MetadataResponse<'a> {
     witness_key: &'a [u8],
     submission_url: &'a str,
     monitoring_url: &'a str,
+}
+
+/// GET query structure for the `/prove_inclusion` endpoint
+#[derive(Serialize, Deserialize)]
+pub struct ProveInclusionQuery {
+    pub leaf_index: LeafIndex,
+}
+
+/// GET response structure for the `/prove_inclusion` endpoint
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct ProveInclusionResponse {
+    #[serde_as(as = "Vec<Base64>")]
+    pub proof: Vec<Vec<u8>>,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -208,7 +218,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 Response::error("Unknown log", 400)
             }
             _ => {
-                warn!("Internal error: {e}");
+                log::warn!("Internal error: {e}");
                 Response::error("Internal error", 500)
             }
         })
@@ -244,7 +254,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let pending_entry = match mtc_api::validate_chain(&req.chain, &ROOTS, issuer, validity) {
         Ok(v) => v,
         Err(e) => {
-            debug!("{name}: Bad request: {e}");
+            log::debug!("{name}: Bad request: {e}");
             return Response::error("Bad request", 400);
         }
     };
@@ -257,7 +267,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     if params.enable_dedup {
         if let Some(metadata) = get_cached_metadata(&load_cache_kv(env, name)?, &lookup_key).await?
         {
-            debug!("{name}: Entry is cached");
+            log::debug!("{name}: Entry is cached");
             return Response::from_json(&AddEntryResponse {
                 leaf_index: metadata.0,
                 timestamp: metadata.1,
@@ -269,7 +279,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     // First persist issuers.
     let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-    upload_issuers(
+    generic_log_worker::upload_issuers(
         &public_bucket,
         &req.chain[1..]
             .iter()
@@ -321,7 +331,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
             .await
             .is_err()
         {
-            warn!("{name}: Failed to write entry to deduplication cache");
+            log::warn!("{name}: Failed to write entry to deduplication cache");
         }
     }
     Response::from_json(&AddEntryResponse {
@@ -342,51 +352,4 @@ fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
         h.append("Content-Type", &hdr).unwrap();
     }
     h
-}
-
-/// Options for uploading issuers.
-static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
-    content_type: Some("application/pkix-cert".to_string()),
-    immutable: true,
-});
-
-/// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
-pub(crate) async fn upload_issuers(
-    object: &ObjectBucket,
-    issuers: &[&[u8]],
-    name: &str,
-) -> worker::Result<()> {
-    let issuer_futures: Vec<_> = issuers
-        .iter()
-        .map(|issuer| async move {
-            let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
-            let path = format!("issuer/{}", hex::encode(fingerprint));
-
-            if let Some(old) = object.fetch(&path).await? {
-                if old != *issuer {
-                    return Err(worker::Error::RustError(format!(
-                        "invalid existing issuer: {}",
-                        hex::encode(old)
-                    )));
-                }
-                Ok(None)
-            } else {
-                object.upload(&path, issuer, &OPTS_ISSUER).await?;
-                Ok(Some(path))
-            }
-        })
-        .collect();
-
-    for path in try_join_all(issuer_futures)
-        .await?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-    {
-        {
-            info!("{name}: Observed new issuer; path={path}");
-        }
-    }
-
-    Ok(())
 }

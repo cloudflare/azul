@@ -13,6 +13,7 @@ pub mod util;
 
 pub use batcher_do::*;
 pub use cleaner_do::*;
+pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
@@ -474,10 +475,29 @@ impl LockBackend for State {
 }
 
 pub trait ObjectBackend {
+    /// Upload the object with the given key and data to the object backend,
+    /// adding additional HTTP metadata headers based on the provided options.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if the put operation fails.
     #[allow(async_fn_in_trait)]
-    async fn upload(&self, key: &str, data: &[u8], opts: &UploadOptions) -> Result<()>;
+    async fn upload<S: AsRef<str>, D: Into<Vec<u8>>>(
+        &self,
+        key: S,
+        data: D,
+        opts: &UploadOptions,
+    ) -> Result<()>;
+
+    /// Fetch the object with the given key from the object backend. Returns the
+    /// object body bytes if the object exists, or otherwise None.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if bucket get operation fails or if the returned
+    /// object is missing a body.
     #[allow(async_fn_in_trait)]
-    async fn fetch(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn fetch<S: AsRef<str>>(&self, key: S) -> Result<Option<Vec<u8>>>;
 }
 
 pub struct ObjectBucket {
@@ -495,7 +515,12 @@ impl ObjectBucket {
 }
 
 impl ObjectBackend for ObjectBucket {
-    async fn upload(&self, key: &str, data: &[u8], opts: &UploadOptions) -> Result<()> {
+    async fn upload<S: AsRef<str>, D: Into<Vec<u8>>>(
+        &self,
+        key: S,
+        data: D,
+        opts: &UploadOptions,
+    ) -> Result<()> {
         let start = now_millis();
         let mut metadata = HttpMetadata::default();
         if let Some(content_type) = &opts.content_type {
@@ -508,11 +533,12 @@ impl ObjectBackend for ObjectBucket {
         } else {
             metadata.cache_control = Some("no-store".into());
         }
+        let value: Vec<u8> = data.into();
         self.metrics
             .as_ref()
-            .inspect(|&m| m.upload_size_bytes.observe(data.len().as_f64()));
+            .inspect(|&m| m.upload_size_bytes.observe(value.len().as_f64()));
         self.bucket
-            .put(key, data.to_vec())
+            .put(key.as_ref(), value)
             .http_metadata(metadata)
             .execute()
             .await
@@ -529,13 +555,13 @@ impl ObjectBackend for ObjectBucket {
         Ok(())
     }
 
-    async fn fetch(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn fetch<S: AsRef<str>>(&self, key: S) -> Result<Option<Vec<u8>>> {
         let start = now_millis();
-        let res = match self.bucket.get(key).execute().await? {
+        let res = match self.bucket.get(key.as_ref()).execute().await? {
             Some(obj) => {
                 let body = obj
                     .body()
-                    .ok_or_else(|| format!("missing object body: {key}"))?;
+                    .ok_or_else(|| format!("missing object body: {}", key.as_ref()))?;
                 let bytes = body.bytes().await.inspect_err(|_| {
                     self.metrics.as_ref().inspect(|&m| {
                         m.errors.with_label_values(&["get"]).inc();

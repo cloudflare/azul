@@ -65,13 +65,13 @@ mod tests {
     }
 
     #[derive(Deserialize)]
-    struct CtRecordProof {
+    struct CtInclusionProof {
         #[serde(rename = "audit_path")]
         proof: Vec<Hash>,
     }
 
     #[derive(Deserialize)]
-    struct CtTreeProof {
+    struct CtConsistencyProof {
         consistency: Vec<Hash>,
     }
 
@@ -110,14 +110,14 @@ mod tests {
             root.size,
             form_urlencoded::byte_serialize(hash.to_string().as_bytes()).collect::<String>()
         );
-        let rp: CtRecordProof = http_get(&url);
+        let rp: CtInclusionProof = http_get(&url);
 
         tlog::check_inclusion(&rp.proof, root.size, root.hash, 10000, hash)?;
 
         let url = format!(
         "http://ct.googleapis.com/logs/argon2020/ct/v1/get-sth-consistency?first=3654490&second={}",
         root.size);
-        let tp: CtTreeProof = http_get(&url);
+        let tp: CtConsistencyProof = http_get(&url);
 
         let oh = Hash::parse_hash("AuIZ5V6sDUj1vn3Y1K85oOaQ7y+FJJKtyRTl1edIKBQ=")?;
         tlog::check_consistency(&tp.consistency, root.size, root.hash, 3_654_490, oh)?;

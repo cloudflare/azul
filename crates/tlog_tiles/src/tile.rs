@@ -16,7 +16,7 @@
 //! - [tile_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/tile_test.go)
 
 use crate::tlog::{
-    node_hash, split_stored_hash_index, stored_hash_index, subtree_indices, Hash, HashReader,
+    node_hash, split_stored_hash_index, stored_hash_index, subtree_indexes, Hash, HashReader,
     TlogError, HASH_SIZE,
 };
 use std::cmp::max;
@@ -547,26 +547,29 @@ impl<'a> TileHashReader<'a> {
 }
 
 impl HashReader for TileHashReader<'_> {
-    /// Implements [`HashReader::read_hashes`] by returning the hashes with the given stored hash
-    /// indexes in a tiled tree.
+    /// Implements [`HashReader::read_hashes`] by returning the hashes with the
+    /// given stored hash indexes in a tiled tree. It may fetch additional tiles
+    /// in order to authenticate all tiles against `self.tree_hash`.
     ///
     /// # Errors
     ///
-    /// Returns an error if unable to read hashes for all of the requested indexes.
+    /// Returns an error if unable to read hashes for all of the requested
+    /// indexes.
     ///
     /// # Panics
     ///
-    /// Panics if any calls to `Tile::parent` fail to find a parent tile. This differs from the Go
-    /// implementation which returns an empty Tile{} when it fails to find a parent.
+    /// Panics if any calls to `Tile::parent` fail to find a parent tile. This
+    /// differs from the Go implementation which returns an empty Tile{} when it
+    /// fails to find a parent.
     fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, TlogError> {
         let h = self.tr.height();
 
         let mut tile_order = HashMap::new(); // tile_order[tileKey(tiles[i])] = i
         let mut tiles = Vec::new();
 
-        // Plan to fetch tiles necessary to recompute tree hash.
-        // If it matches, those tiles are authenticated.
-        let stx = subtree_indices(0, self.tree_size, vec![]);
+        // Plan to fetch tiles necessary to recompute tree hash. If it matches,
+        // those tiles are authenticated.
+        let stx = subtree_indexes(0, self.tree_size, vec![]);
         let mut stx_tile_order = vec![0; stx.len()];
 
         for (i, &x) in stx.iter().enumerate() {
@@ -580,10 +583,9 @@ impl HashReader for TileHashReader<'_> {
             }
         }
 
-        // Plan to fetch tiles containing the indexes,
-        // along with any parent tiles needed
-        // for authentication. For most calls,
-        // the parents are being fetched anyway.
+        // Plan to fetch tiles containing the indexes, along with any parent
+        // tiles needed for authentication. For most calls, the parents are
+        // being fetched anyway.
         let mut index_tile_order = vec![0; indexes.len()];
         for (i, &x) in indexes.iter().enumerate() {
             if x >= stored_hash_index(0, self.tree_size) {
@@ -606,10 +608,9 @@ impl HashReader for TileHashReader<'_> {
                 k += 1;
             }
 
-            // Walk back down recording child tiles after parents.
-            // This loop ends by revisiting the tile for this index
-            // (tile.parent(0, r.tree.N)) unless k == 0, in which
-            // case the previous loop did it.
+            // Walk back down recording child tiles after parents. This loop
+            // ends by revisiting the tile for this index (tile.parent(0,
+            // r.tree.N)) unless k == 0, in which case the previous loop did it.
             for k in (0..k).rev() {
                 let p = tile.parent(k, self.tree_size).unwrap();
                 if p.w != (1 << p.h) {

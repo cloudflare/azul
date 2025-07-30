@@ -17,11 +17,8 @@ use crate::{
 use futures_util::future::join_all;
 use log::{info, warn};
 use prometheus::{Registry, TextEncoder};
-use serde::{Deserialize, Serialize};
-use serde_with::base64::Base64;
-use serde_with::serde_as;
 use signed_note::KeyName;
-use tlog_tiles::{CheckpointSigner, LeafIndex, LogEntry, PendingLogEntryBlob, UnixTimestamp};
+use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntryBlob, UnixTimestamp};
 use tokio::sync::Mutex;
 use worker::{Env, Error as WorkerError, Request, Response, State};
 
@@ -57,20 +54,6 @@ pub struct SequencerConfig {
     pub sequence_skip_threshold_millis: Option<u64>,
     pub enable_dedup: bool,
     pub location_hint: Option<String>,
-}
-
-/// GET query structure for the sequencer's `/prove_inclusion` endpoint
-#[derive(Serialize, Deserialize)]
-pub struct ProveInclusionQuery {
-    pub leaf_index: LeafIndex,
-}
-
-/// GET response structure for the sequencer's `/prove_inclusion` endpoint
-#[serde_as]
-#[derive(Serialize, Deserialize)]
-pub struct ProveInclusionResponse {
-    #[serde_as(as = "Vec<Base64>")]
-    pub proof: Vec<Vec<u8>>,
 }
 
 impl<L: LogEntry> GenericSequencer<L> {
