@@ -38,9 +38,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    prove_record, prove_tree, Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile,
-    TileHashReader, TileIterator, TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp,
-    UnixTimestamp, HASH_SIZE,
+    Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileHashReader, TileIterator,
+    TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 use worker::Error as WorkerError;
@@ -565,7 +564,7 @@ impl SequenceState {
         };
         // We can unwrap because edge_tiles is guaranteed to contain the tiles
         // necessary to prove this.
-        tlog_tiles::tlog::prove_record(tree_size, tree_size - 1, &reader).unwrap()
+        tlog_tiles::prove_inclusion(tree_size, tree_size - 1, &reader).unwrap()
     }
 
     /// Proves that this tree of size n is compatible with the subtree of size
@@ -581,7 +580,7 @@ impl SequenceState {
             edge_tiles: &self.edge_tiles,
             overlay: &HashMap::default(),
         };
-        tlog_tiles::tlog::prove_tree(tree_size, tree_size - 1, &reader)
+        tlog_tiles::prove_consistency(tree_size, tree_size - 1, &reader)
     }
 }
 
@@ -612,7 +611,7 @@ pub async fn prove_inclusion(
         // ProofPreparer is guaranteed to make prove_record return a BadMath
         // error. This is fine, because it already collected the data we
         // needed.
-        let _ = prove_record(num_leaves, leaf_index, &hash_reader);
+        let _ = tlog_tiles::prove_inclusion(num_leaves, leaf_index, &hash_reader);
         tile_reader.0.into_inner()
     };
 
@@ -632,7 +631,8 @@ pub async fn prove_inclusion(
         // Put the recorded tiles into the appropriate Reader structs for prove_record()
         let tile_reader = SimpleTlogTileReader(all_tile_data);
         let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
-        prove_record(num_leaves, leaf_index, &hash_reader).map_err(|e| e.to_string())?
+        tlog_tiles::prove_inclusion(num_leaves, leaf_index, &hash_reader)
+            .map_err(|e| e.to_string())?
     };
     Ok(proof)
 }
@@ -662,7 +662,7 @@ pub async fn prove_consistency(
         // ProofPreparer is guaranteed to make prove_record return a BadMath
         // error. This is fine, because it already collected the data we
         // needed.
-        let _ = prove_tree(cur_num_leaves, prev_num_leaves, &hash_reader);
+        let _ = tlog_tiles::prove_consistency(cur_num_leaves, prev_num_leaves, &hash_reader);
         tile_reader.0.into_inner()
     };
 
@@ -682,7 +682,7 @@ pub async fn prove_consistency(
         // Put the recorded tiles into the appropriate Reader structs for prove_tree()
         let tile_reader = SimpleTlogTileReader(all_tile_data);
         let hash_reader = TileHashReader::new(cur_num_leaves, cur_tree_hash, &tile_reader);
-        tlog_tiles::tlog::prove_tree(cur_num_leaves, prev_num_leaves, &hash_reader)
+        tlog_tiles::prove_consistency(cur_num_leaves, prev_num_leaves, &hash_reader)
             .map_err(|e| e.to_string())?
     };
     Ok(proof)
@@ -1221,7 +1221,7 @@ async fn read_and_verify_tiles(
 
     // Plan to fetch tiles necessary to recompute tree hash.
     // If it matches, those tiles are authenticated.
-    let stx = tlog_tiles::sub_tree_index(0, tree_size, vec![]);
+    let stx = tlog_tiles::subtree_indices(0, tree_size, vec![]);
     let mut stx_tile_order = vec![0; stx.len()];
     for (i, &x) in stx.iter().enumerate() {
         let tile = TlogTile::from_index(x);
@@ -1442,9 +1442,7 @@ mod tests {
     use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
     use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
     use std::{cell::RefCell, time::Duration};
-    use tlog_tiles::{
-        check_record, check_tree, Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile,
-    };
+    use tlog_tiles::{Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile};
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -1484,7 +1482,14 @@ mod tests {
                 let leaf_edge = &sequence_state.edge_tiles.get(&0u8).unwrap().b;
                 Hash(leaf_edge[leaf_edge.len() - HASH_SIZE..].try_into().unwrap())
             };
-            check_record(&inc_proof, tree_size, new_tree_hash, leaf_index, last_hash).unwrap();
+            tlog_tiles::check_inclusion(
+                &inc_proof,
+                tree_size,
+                new_tree_hash,
+                leaf_index,
+                last_hash,
+            )
+            .unwrap();
 
             // Save the tree hash
             tree_hashes.push(new_tree_hash);
@@ -1494,7 +1499,7 @@ mod tests {
                 let consistency_proof =
                     sequence_state.prove_consistency_of_single_append().unwrap();
                 // Verify the proof
-                check_tree(
+                tlog_tiles::check_consistency(
                     &consistency_proof,
                     tree_size,
                     new_tree_hash,
@@ -1544,7 +1549,7 @@ mod tests {
                 )
             };
             // Verify the inclusion proof
-            check_record(&proof, n, tree_hash, i, leaf_hash).unwrap();
+            tlog_tiles::check_inclusion(&proof, n, tree_hash, i, leaf_hash).unwrap();
         }
 
         // Check that we can make a consistency proof for random spans in the tree
@@ -1559,7 +1564,7 @@ mod tests {
                 &log.object,
             ))
             .unwrap();
-            check_tree(
+            tlog_tiles::check_consistency(
                 &consistency_proof,
                 new_tree_size,
                 tree_hashes[usize::try_from(new_tree_size).unwrap()],
