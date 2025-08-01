@@ -16,7 +16,7 @@
 //! - [tile_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/tile_test.go)
 
 use crate::tlog::{
-    node_hash, split_stored_hash_index, stored_hash_index, sub_tree_index, Hash, HashReader,
+    node_hash, split_stored_hash_index, stored_hash_index, subtree_indices, Hash, HashReader,
     TlogError, HASH_SIZE,
 };
 use std::cmp::max;
@@ -566,7 +566,7 @@ impl HashReader for TileHashReader<'_> {
 
         // Plan to fetch tiles necessary to recompute tree hash.
         // If it matches, those tiles are authenticated.
-        let stx = sub_tree_index(0, self.tree_size, vec![]);
+        let stx = subtree_indices(0, self.tree_size, vec![]);
         let mut stx_tile_order = vec![0; stx.len()];
 
         for (i, &x) in stx.iter().enumerate() {

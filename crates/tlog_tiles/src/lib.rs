@@ -112,7 +112,7 @@ mod tests {
         );
         let rp: CtRecordProof = http_get(&url);
 
-        tlog::check_record(&rp.proof, root.size, root.hash, 10000, hash)?;
+        tlog::check_inclusion(&rp.proof, root.size, root.hash, 10000, hash)?;
 
         let url = format!(
         "http://ct.googleapis.com/logs/argon2020/ct/v1/get-sth-consistency?first=3654490&second={}",
@@ -120,7 +120,7 @@ mod tests {
         let tp: CtTreeProof = http_get(&url);
 
         let oh = Hash::parse_hash("AuIZ5V6sDUj1vn3Y1K85oOaQ7y+FJJKtyRTl1edIKBQ=")?;
-        tlog::check_tree(&tp.consistency, root.size, root.hash, 3_654_490, oh)?;
+        tlog::check_consistency(&tp.consistency, root.size, root.hash, 3_654_490, oh)?;
 
         Ok(())
     }
