@@ -19,6 +19,7 @@ use crate::tlog::{
     node_hash, split_stored_hash_index, stored_hash_index, subtree_indexes, Hash, HashReader,
     TlogError, HASH_SIZE,
 };
+use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::fmt;
@@ -677,6 +678,100 @@ impl HashReader for TileHashReader<'_> {
 
         Ok(hashes)
     }
+}
+
+/// A fake `TileReader` that just records the tiles that are requested, but
+/// doesn't actually read the tile data.
+#[derive(Default)]
+pub struct TlogTileRecorder(pub RefCell<Vec<TlogTile>>);
+
+impl TileReader for TlogTileRecorder {
+    fn height(&self) -> u8 {
+        TlogTile::HEIGHT
+    }
+
+    /// Records the requested tree tiles without actually reading them, and
+    /// always returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Will return a `TlogError::InvalidInput` if any of the requested tiles is
+    /// not a valid `TlogTile`. Otherwise, always returns a
+    /// `TlogError::RecordedTilesOnly` in compliance with the `TileReader`
+    /// contract.
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+        // Record the tiles we're meant to read. Convert them to tlog tiles,
+        // ensuring their height is always 8
+        *self.0.borrow_mut() = tiles
+            .iter()
+            .map(|t| {
+                if t.height() == TlogTile::HEIGHT {
+                    Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
+                } else {
+                    Err(TlogError::InvalidInput(
+                        "TlogTileRecorder cannot read tiles of height not equal to 8".to_string(),
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>, TlogError>>()?;
+
+        // Return an error since we did not actually read the tiles.
+        Err(TlogError::RecordedTilesOnly)
+    }
+
+    // Do nothing; we only use this struct to record tiles.
+    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
+}
+
+/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements
+/// `TileReader` so we can use it within `TileHashReader::read_tiles` to read
+/// and verify tiles.
+pub struct PreloadedTlogTileReader(pub HashMap<TlogTile, Vec<u8>>);
+
+impl TileReader for PreloadedTlogTileReader {
+    fn height(&self) -> u8 {
+        TlogTile::HEIGHT
+    }
+
+    /// Converts the given tiles into tlog tiles, then reads them from the
+    /// internal hashmap.
+    ///
+    /// # Errors
+    /// Errors if any of given tiles hash height != 8, or is a data tile. Also
+    /// errors if the hash map is missing tiles from the input here.
+    fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+        let mut buf = Vec::with_capacity(HASH_SIZE * TlogTile::FULL_WIDTH as usize);
+
+        for tile in tiles {
+            // Convert the tile to a tlog-tile, ie one where height=8 and data=false
+            if tile.height() != TlogTile::HEIGHT {
+                return Err(TlogError::InvalidInput(
+                    "PreloadedTlogTileReader cannot read tiles of height not equal to 8"
+                        .to_string(),
+                ));
+            }
+            if tile.is_data() {
+                return Err(TlogError::InvalidInput(
+                    "PreloadedTlogTileReader cannot read data tiles".to_string(),
+                ));
+            }
+            let tlog_tile = TlogTile::new(tile.level(), tile.level_index(), tile.width(), None);
+
+            // Record the tile's contents
+            let Some(contents) = self.0.get(&tlog_tile) else {
+                return Err(TlogError::InvalidInput(format!(
+                    "PreloadedTlogTileReader cannot find {}",
+                    tlog_tile.path()
+                )));
+            };
+            buf.push(contents.clone());
+        }
+
+        Ok(buf)
+    }
+
+    /// Do nothing; we only use this struct to read tiles.
+    fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
 }
 
 #[cfg(test)]
