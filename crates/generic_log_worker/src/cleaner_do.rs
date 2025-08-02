@@ -196,12 +196,13 @@ impl GenericCleaner {
         for tile in TlogTile::new_tiles(pending_cleaned_size, pending_cleaned_size + STEP) {
             // Full tiles only. If the full tile exists, the corresponding
             // partial tiles can be deleted.
-            //
-            // TODO: We infer the existence of a full tile based on the tree
-            // size of the latest checkpoint. For extra safety, we could
-            // additionally fetch the full tile from the bucket before deleting
-            // the corresponding partials.
             if tile.width() == TlogTile::FULL_WIDTH {
+                // SAFETY: Check that at least the level-0 tile exists.
+                self.checked_add_subrequests(1)?;
+                if self.bucket.head(tile.path()).await?.is_none() {
+                    return Err(format!("tile does not exist: {}", tile.path()).into());
+                }
+
                 prefixes.push(format!("{}.p/", tile.path()));
                 if tile.level() == 0 {
                     // For level-0 tree tiles, also delete the corresponding
