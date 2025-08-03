@@ -200,11 +200,6 @@
 //!             *byte = 0;
 //!         }
 //!     }
-//!
-//!     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-//!         self.fill_bytes(dest);
-//!         Ok(())
-//!     }
 //! }
 //!
 //! impl rand_core::CryptoRng for ZeroRng {}
@@ -698,6 +693,7 @@ mod tests {
 
     use super::*;
     use rand::rngs::OsRng;
+    use rand_core::TryRngCore;
     use std::sync::LazyLock;
 
     static NAME: LazyLock<KeyName> = LazyLock::new(|| KeyName::new("EnochRoot".into()).unwrap());
@@ -718,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_generate_key() {
-        let (skey, vkey) = generate_encoded_ed25519_key(&mut OsRng, &NAME);
+        let (skey, vkey) = generate_encoded_ed25519_key(&mut OsRng.unwrap_err(), &NAME);
 
         let signer = Ed25519NoteSigner::new_from_encoded_key(&skey).unwrap();
         let verifier = Ed25519NoteVerifier::new_from_encoded_key(&vkey).unwrap();
@@ -728,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_from_ed25519() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng.unwrap_err());
 
         let pubkey = [
             &[SignatureType::Ed25519 as u8],

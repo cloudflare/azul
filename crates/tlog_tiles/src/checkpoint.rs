@@ -487,13 +487,13 @@ impl TreeWithTimestamp {
 /// Clients MUST ignore unknown signatures, and including some "grease" ones
 /// ensures they do.
 fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature> {
-    let mut g1 = vec![0u8; 5 + rng.gen_range(0..100)];
+    let mut g1 = vec![0u8; 5 + rng.random_range(0..100)];
     rng.fill(&mut g1[..]);
 
-    let mut g2 = vec![0u8; 5 + rng.gen_range(0..100)];
+    let mut g2 = vec![0u8; 5 + rng.random_range(0..100)];
     let mut hasher = Sha256::new();
     hasher.update(b"grease\n");
-    hasher.update([rng.gen()]);
+    hasher.update([rng.random()]);
     let h = hasher.finalize();
     g2[..4].copy_from_slice(&h[..4]);
     rng.fill(&mut g2[4..]);
@@ -526,7 +526,7 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 
 #[cfg(test)]
 mod tests {
-    use rand::rngs::OsRng;
+    use rand::{rngs::OsRng, TryRngCore};
 
     use super::*;
     use crate::tlog::record_hash;
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_sign_verify() {
-        let mut rng = OsRng;
+        let mut rng = OsRng.unwrap_err();
 
         let origin = "example.com/origin";
         let timestamp = 100;

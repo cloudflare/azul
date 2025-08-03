@@ -6,7 +6,7 @@ use ed25519_dalek::{
     Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
     VerifyingKey as Ed25519VerifyingKey,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// [`Ed25519NoteVerifier`] is the verifier for the ordinary (non-timestamped) Ed25519 signature type defined in <https://c2sp.org/signed-note>.
 #[derive(Clone)]
@@ -196,7 +196,7 @@ impl Ed25519NoteSigner {
 
 /// Generates a signer and verifier key pair for a named server.
 /// The signer key skey is private and must be kept secret.
-pub fn generate_encoded_ed25519_key<R: CryptoRngCore + ?Sized>(
+pub fn generate_encoded_ed25519_key<R: CryptoRng + ?Sized>(
     csprng: &mut R,
     name: &KeyName,
 ) -> (String, String) {

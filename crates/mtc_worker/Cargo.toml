@@ -45,15 +45,12 @@ config = { path = "./config", package = "mtc_worker_config" }
 der.workspace = true
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
-futures-util.workspace = true
-getrandom.workspace = true
-hex.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
 log.workspace = true
 p256.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
-sha2.workspace = true
 signed_note.workspace = true
 tlog_tiles.workspace = true
 worker.workspace = true

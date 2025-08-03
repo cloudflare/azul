@@ -21,6 +21,8 @@ pub enum StaticCTError {
     Der(#[from] der::Error),
     #[error(transparent)]
     X509(#[from] x509_verify::spki::Error),
+    #[error(transparent)]
+    Spki(#[from] p256::pkcs8::spki::Error),
     #[error("unexpected extension")]
     UnexpectedExtension,
     #[error("malformed")]
