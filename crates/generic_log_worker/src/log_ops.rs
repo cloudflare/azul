@@ -384,7 +384,7 @@ pub(crate) async fn create_log(
             config.origin.as_str(),
             &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
             &dyn_signers,
-            &mut rand::thread_rng(),
+            &mut rand::rng(),
         )
         .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
     lock.put(CHECKPOINT_KEY, &sth)
@@ -1021,7 +1021,7 @@ async fn sequence_entries<L: LogEntry>(
                 config.origin.as_str(),
                 &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
                 &dyn_signers,
-                &mut rand::thread_rng(),
+                &mut rand::rng(),
             )
             .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
         SequenceState {
@@ -1347,7 +1347,7 @@ mod tests {
     use prometheus::Registry;
     use rand::{
         rngs::{OsRng, SmallRng},
-        thread_rng, Rng, RngCore, SeedableRng,
+        Rng, RngCore, SeedableRng, TryRngCore,
     };
     use signed_note::{KeyName, Note};
     use static_ct_api::{
@@ -1465,10 +1465,10 @@ mod tests {
         }
 
         // Check that we can make a consistency proof for random spans in the tree
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..100 {
-            let prev_tree_size = rng.gen_range(1..n);
-            let new_tree_size = rng.gen_range(prev_tree_size + 1..=n);
+            let prev_tree_size = rng.random_range(1..n);
+            let new_tree_size = rng.random_range(prev_tree_size + 1..=n);
             let consistency_proof = block_on(prove_consistency(
                 tree_hashes[usize::try_from(new_tree_size).unwrap()],
                 new_tree_size,
@@ -1656,11 +1656,11 @@ mod tests {
 
     fn test_duplicates(is_precert: bool) {
         let mut log = TestLog::new();
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 1
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 2
+        log.add_with_seed(is_precert, rand::rng().next_u64()); // 1
+        log.add_with_seed(is_precert, rand::rng().next_u64()); // 2
         log.sequence().unwrap();
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 3
-        log.add_with_seed(is_precert, rand::thread_rng().next_u64()); // 4
+        log.add_with_seed(is_precert, rand::rng().next_u64()); // 3
+        log.add_with_seed(is_precert, rand::rng().next_u64()); // 4
 
         // Two pairs of duplicates from the pending pool.
         let res01 = log.add_with_seed(is_precert, 0); // 5
@@ -1761,6 +1761,7 @@ mod tests {
 
     #[test]
     fn test_reload_wrong_key() {
+        let mut rng = OsRng.unwrap_err();
         let mut log = TestLog::new();
         *log.sequence_state.borrow_mut() = block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
@@ -1772,7 +1773,7 @@ mod tests {
         // Try to load the checkpoint with two randomly generated checkpoint signers. These should fail
         let checkpoint_signer = StaticCTCheckpointSigner::new(
             log.config.origin.clone(),
-            EcdsaSigningKey::random(&mut OsRng),
+            EcdsaSigningKey::random(&mut rng),
         )
         .unwrap();
         log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
@@ -1785,7 +1786,7 @@ mod tests {
 
         let checkpoint_signer = Ed25519CheckpointSigner::new(
             log.config.origin.clone(),
-            Ed25519SigningKey::generate(&mut OsRng),
+            Ed25519SigningKey::generate(&mut rng),
         )
         .unwrap();
         log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
@@ -2371,7 +2372,7 @@ mod tests {
 
     impl TestLog {
         fn new() -> Self {
-            let mut rng = OsRng;
+            let mut rng = OsRng.unwrap_err();
 
             let cache = TestCacheBackend(RefCell::new(HashMap::new()));
             let object = TestObjectBackend::new();
@@ -2463,22 +2464,22 @@ mod tests {
             self.pool_state.borrow_mut().reset();
         }
         fn add_certificate(&mut self) -> AddLeafResult {
-            self.add_certificate_with_seed(rand::thread_rng().next_u64())
+            self.add_certificate_with_seed(rand::rng().next_u64())
         }
         fn add_certificate_with_seed(&mut self, seed: u64) -> AddLeafResult {
             self.add_with_seed(false, seed)
         }
         fn add(&mut self, is_precert: bool) -> AddLeafResult {
-            self.add_with_seed(is_precert, rand::thread_rng().next_u64())
+            self.add_with_seed(is_precert, rand::rng().next_u64())
         }
         fn add_with_seed(&mut self, is_precert: bool, seed: u64) -> AddLeafResult {
             let mut rng = SmallRng::seed_from_u64(seed);
-            let mut certificate = vec![0; rng.gen_range(8..12)];
+            let mut certificate = vec![0; rng.random_range(8..12)];
             rng.fill(&mut certificate[..]);
             let precert_opt: Option<PrecertData> = if is_precert {
                 let mut issuer_key_hash = [0; 32];
                 rng.fill(&mut issuer_key_hash);
-                let mut pre_certificate = vec![0; rng.gen_range(1..5)];
+                let mut pre_certificate = vec![0; rng.random_range(1..5)];
                 rng.fill(&mut pre_certificate[..]);
                 Some(PrecertData {
                     issuer_key_hash,
@@ -2487,7 +2488,7 @@ mod tests {
             } else {
                 None
             };
-            let issuers = CHAINS[rng.gen_range(0..CHAINS.len())];
+            let issuers = CHAINS[rng.random_range(0..CHAINS.len())];
             let leaf = StaticCTPendingLogEntry {
                 certificate,
                 precert_opt,

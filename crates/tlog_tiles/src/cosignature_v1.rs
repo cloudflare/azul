@@ -144,12 +144,12 @@ mod tests {
     use crate::{open_checkpoint, record_hash, TreeWithTimestamp};
 
     use super::*;
-    use rand::rngs::OsRng;
+    use rand::{rngs::OsRng, TryRngCore};
     use signed_note::VerifierList;
 
     #[test]
     fn test_cosignature_v1_sign_verify() {
-        let mut rng = OsRng;
+        let mut rng = OsRng.unwrap_err();
 
         let origin = "example.com/origin";
         let timestamp = 100;
