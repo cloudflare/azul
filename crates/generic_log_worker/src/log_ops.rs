@@ -28,6 +28,7 @@ use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use signed_note::VerifierList;
 use std::collections::HashMap;
 use std::{
@@ -38,8 +39,9 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, HashReader, LogEntry, PendingLogEntry, RecordProof, Tile, TileHashReader, TileIterator,
-    TileReader, TlogError, TlogTile, TreeProof, TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    ConsistencyProof, Hash, HashReader, InclusionProof, LogEntry, PendingLogEntry, Tile,
+    TileHashReader, TileIterator, TileReader, TlogError, TlogTile, TreeWithTimestamp,
+    UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 use worker::Error as WorkerError;
@@ -228,15 +230,25 @@ struct TileWithBytes {
     b: Vec<u8>,
 }
 
-/// A fake `TileReader` that just accumulates the tiles that we'll need for a proof
+/// A fake `TileReader` that just records the tiles that are requested, but
+/// doesn't actually read the tile data.
 #[derive(Default)]
-struct ProofPreparer(RefCell<Vec<TlogTile>>);
+struct TlogTileRecorder(RefCell<Vec<TlogTile>>);
 
-impl TileReader for ProofPreparer {
+impl TileReader for TlogTileRecorder {
     fn height(&self) -> u8 {
         TlogTile::HEIGHT
     }
 
+    /// Records the requested tree tiles without actually reading them, and
+    /// always returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Will return a `TlogError::InvalidInput` if any of the requested tiles is
+    /// not a valid `TlogTile`. Otherwise, always returns a
+    /// `TlogError::RecordedTilesOnly` in compliance with the `TileReader`
+    /// contract.
     fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
         // Record the tiles we're meant to read. Convert them to tlog tiles,
         // ensuring their height is always 8
@@ -247,27 +259,26 @@ impl TileReader for ProofPreparer {
                     Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
                 } else {
                     Err(TlogError::InvalidInput(
-                        "SimpleTlogTileReader cannot read tiles of height not equal to 8"
-                            .to_string(),
+                        "TlogTileRecorder cannot read tiles of height not equal to 8".to_string(),
                     ))
                 }
             })
             .collect::<Result<Vec<_>, TlogError>>()?;
 
-        // Make a dummy return. This is guaranteed to trigger TlogError::BadMath
-        // in prove_records
-        Ok(Vec::new())
+        // Return an error since we did not actually read the tiles.
+        Err(TlogError::RecordedTilesOnly)
     }
 
-    // Do nothing; we only use this struct to record tiles
+    // Do nothing; we only use this struct to record tiles.
     fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
 }
 
-/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements `TileReader`
-/// so we can use it for producing inclusion proofs.
-struct SimpleTlogTileReader(HashMap<TlogTile, Vec<u8>>);
+/// A thin wrapper around a map of tlog tile ⇒ bytestring. Implements
+/// `TileReader` so we can use it within `TileHashReader::read_tiles` to read
+/// and verify tiles.
+struct PreloadedTlogTileReader(HashMap<TlogTile, Vec<u8>>);
 
-impl TileReader for SimpleTlogTileReader {
+impl TileReader for PreloadedTlogTileReader {
     fn height(&self) -> u8 {
         TlogTile::HEIGHT
     }
@@ -285,12 +296,13 @@ impl TileReader for SimpleTlogTileReader {
             // Convert the tile to a tlog-tile, ie one where height=8 and data=false
             if tile.height() != TlogTile::HEIGHT {
                 return Err(TlogError::InvalidInput(
-                    "SimpleTlogTileReader cannot read tiles of height not equal to 8".to_string(),
+                    "PreloadedTlogTileReader cannot read tiles of height not equal to 8"
+                        .to_string(),
                 ));
             }
             if tile.is_data() {
                 return Err(TlogError::InvalidInput(
-                    "SimpleTlogTileReader cannot read data tiles".to_string(),
+                    "PreloadedTlogTileReader cannot read data tiles".to_string(),
                 ));
             }
             let tlog_tile = TlogTile::new(tile.level(), tile.level_index(), tile.width(), None);
@@ -298,7 +310,7 @@ impl TileReader for SimpleTlogTileReader {
             // Record the tile's contents
             let Some(contents) = self.0.get(&tlog_tile) else {
                 return Err(TlogError::InvalidInput(format!(
-                    "SimpleTlogTileReader cannot find {}",
+                    "PreloadedTlogTileReader cannot find {}",
                     tlog_tile.path()
                 )));
             };
@@ -308,7 +320,7 @@ impl TileReader for SimpleTlogTileReader {
         Ok(buf)
     }
 
-    // Do nothing; we only use this struct to read tiles
+    /// Do nothing; we only use this struct to read tiles.
     fn save_tiles(&self, _tiles: &[Tile], _data: &[Vec<u8>]) {}
 }
 
@@ -379,7 +391,7 @@ pub(crate) async fn create_log(
         .await
         .map_err(|e| anyhow!("failed to upload checkpoint to lock backend: {}", e))?;
     object
-        .upload(CHECKPOINT_KEY, &sth, &OPTS_CHECKPOINT)
+        .upload(CHECKPOINT_KEY, sth, &OPTS_CHECKPOINT)
         .await
         .map_err(|e| anyhow!("failed to upload checkpoint to object backend: {}", e))?;
 
@@ -473,8 +485,7 @@ impl SequenceState {
         // Fetch the tiles on the right edge, and verify them against the checkpoint.
         let mut edge_tiles = HashMap::new();
         if c.size() > 0 {
-            // Fetch the right-most tree tiles by reading the last leaf. TileHashReader will fetch
-            // and verify the right tiles as a side-effect.
+            // Fetch the right-most tree tiles.
             edge_tiles = read_edge_tiles(object, c.size(), c.hash()).await?;
 
             // Fetch the right-most data tile.
@@ -556,7 +567,7 @@ impl SequenceState {
 
     /// Proves inclusion of the last leaf in the current tree.
     #[cfg(test)]
-    pub(crate) fn prove_inclusion_of_last_elem(&self) -> RecordProof {
+    pub(crate) fn prove_inclusion_of_last_elem(&self) -> InclusionProof {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
             edge_tiles: &self.edge_tiles,
@@ -574,7 +585,7 @@ impl SequenceState {
     /// Errors when the last tree was size 0. We cannot prove consistency with
     /// respect to an empty tree
     #[cfg(test)]
-    pub(crate) fn prove_consistency_of_single_append(&self) -> Result<TreeProof, TlogError> {
+    pub(crate) fn prove_consistency_of_single_append(&self) -> Result<ConsistencyProof, TlogError> {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
             edge_tiles: &self.edge_tiles,
@@ -590,102 +601,94 @@ impl SequenceState {
 /// Errors when the leaf index equals or exceeds the number of leaves, or
 /// the desired tiles do not exist as bucket objects.
 pub async fn prove_inclusion(
-    num_leaves: u64,
+    tree_size: u64,
     tree_hash: Hash,
     leaf_index: u64,
     object: &impl ObjectBackend,
-) -> Result<RecordProof, WorkerError> {
-    if leaf_index >= num_leaves {
+) -> Result<InclusionProof, WorkerError> {
+    if leaf_index >= tree_size {
         return Err(WorkerError::RustError(
             "leaf index exceeds number of leaves in the tree".to_string(),
         ));
     }
 
-    let mut all_tile_data = HashMap::new();
+    // Fetch the tiles needed for the proof.
+    let indexes = tlog_tiles::inclusion_proof_indexes(0, tree_size, leaf_index, Vec::new());
+    let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // Make a fake proof using ProofPreparer to get all the tiles we need
-    // TODO: This seems useful. We can probably move this into the tlog_tiles crate
-    let tiles_to_fetch = {
-        let tile_reader = ProofPreparer::default();
-        let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
-        // ProofPreparer is guaranteed to make prove_record return a BadMath
-        // error. This is fine, because it already collected the data we
-        // needed.
-        let _ = tlog_tiles::prove_inclusion(num_leaves, leaf_index, &hash_reader);
-        tile_reader.0.into_inner()
-    };
-
-    // Fetch all the tiles we need for a proof
-    for tile in tiles_to_fetch {
-        let Some(tile_data) = object.fetch(&tile.path()).await? else {
-            return Err(WorkerError::RustError(format!(
-                "missing tile for inclusion proof {}",
-                tile.path()
-            )));
-        };
-        all_tile_data.insert(tile, tile_data);
-    }
-
-    // Now make the proof
-    let proof = {
-        // Put the recorded tiles into the appropriate Reader structs for prove_record()
-        let tile_reader = SimpleTlogTileReader(all_tile_data);
-        let hash_reader = TileHashReader::new(num_leaves, tree_hash, &tile_reader);
-        tlog_tiles::prove_inclusion(num_leaves, leaf_index, &hash_reader)
-            .map_err(|e| e.to_string())?
-    };
-    Ok(proof)
+    // Verify the proof.
+    let hash_reader = TileHashReader::new(tree_size, tree_hash, &tile_reader);
+    tlog_tiles::prove_inclusion(tree_size, leaf_index, &hash_reader)
+        .map_err(|e| WorkerError::RustError(e.to_string()))
 }
 
-/// Returns a consistency proof, proving the tree with `cur_num_leaves` and hash `cur_tree_hash` is
-/// an extension of the tree with `prev_num_leaves`. It MUST be the case that `1 <= prev_num_leaves
-/// <= cur_num_leaves`.
+/// Returns a consistency proof, proving the tree with `cur_tree_size` and hash
+/// `cur_tree_hash` is an extension of the tree with `prev_tree_size`.
 ///
 /// # Errors
-/// Errors when the desired tiles do not exist as bucket objects, or it's not the case that `1 <=
-/// prev_num_leaves <= cur_num_leaves`.
+/// Errors when the desired tiles do not exist as bucket objects, or it's not
+/// the case that `1 <= prev_tree_size <= cur_tree_size`.
 pub async fn prove_consistency(
     cur_tree_hash: Hash,
-    cur_num_leaves: u64,
-    prev_num_leaves: u64,
+    cur_tree_size: u64,
+    prev_tree_size: u64,
     object: &impl ObjectBackend,
-) -> Result<TreeProof, WorkerError> {
-    // This function operates almost identically to prove_inclusion. The only difference is the use
-    // of prove_tree versus prove_record
-    let mut all_tile_data = HashMap::new();
+) -> Result<ConsistencyProof, WorkerError> {
+    if !(1..=cur_tree_size).contains(&prev_tree_size) {
+        return Err("condition not met: 1 <= prev_tree_size <= cur_tree_size".into());
+    }
+    // Fetch the tiles needed for the proof.
+    let indexes =
+        tlog_tiles::consistency_proof_indexes(0, cur_tree_size, prev_tree_size, Vec::new());
+    let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // Make a fake proof using ProofPreparer to get all the tiles we need
-    // TODO: This seems useful. We can probably move this into the tlog_tiles crate
+    // Verify the proof.
+    let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
+    tlog_tiles::prove_consistency(cur_tree_size, prev_tree_size, &hash_reader)
+        .map_err(|e| WorkerError::RustError(e.to_string()))
+}
+
+/// Fetch the tree tiles containing the nodes the requested indexes, as well as
+/// all tiles needed to verify those nodes.
+async fn tile_reader_for_indexes(
+    tree_size: u64,
+    indexes: &[u64],
+    object: &impl ObjectBackend,
+) -> Result<PreloadedTlogTileReader, anyhow::Error> {
+    // Record the tiles that we'll need.
     let tiles_to_fetch = {
-        let tile_reader = ProofPreparer::default();
-        let hash_reader = TileHashReader::new(cur_num_leaves, Hash::default(), &tile_reader);
-        // ProofPreparer is guaranteed to make prove_record return a BadMath
-        // error. This is fine, because it already collected the data we
-        // needed.
-        let _ = tlog_tiles::prove_consistency(cur_num_leaves, prev_num_leaves, &hash_reader);
+        let tile_reader = TlogTileRecorder::default();
+        // Pass in a dummy tree hash since 'read_hashes' doesn't use it before
+        // it short-circuits with `TlogError::RecordedTilesOnly`.
+        let hash_reader = TileHashReader::new(tree_size, Hash::default(), &tile_reader);
+
+        // `TileRecorder` is guaranteed to make `read_hashes` return a
+        // `TlogError::RecordedTilesOnly` error. This is fine, because it
+        // already collected the data we needed.
+        match hash_reader.read_hashes(indexes) {
+            Err(TlogError::RecordedTilesOnly) => {}
+            _ => bail!("expected to get a RecordedTilesOnly error"),
+        }
+
         tile_reader.0.into_inner()
     };
 
-    // Fetch all the tiles we need for a proof
+    // Fetch all the tiles needed to fetch and authenticate the nodes at the
+    // requested indexes.
+    let mut all_tile_data = HashMap::new();
     for tile in tiles_to_fetch {
         let Some(tile_data) = object.fetch(&tile.path()).await? else {
-            return Err(WorkerError::RustError(format!(
-                "missing tile for inclusion proof {}",
-                tile.path()
-            )));
+            bail!("tile not found in object backend: {}", tile.path());
         };
         all_tile_data.insert(tile, tile_data);
     }
 
-    // Now make the proof
-    let proof = {
-        // Put the recorded tiles into the appropriate Reader structs for prove_tree()
-        let tile_reader = SimpleTlogTileReader(all_tile_data);
-        let hash_reader = TileHashReader::new(cur_num_leaves, cur_tree_hash, &tile_reader);
-        tlog_tiles::prove_consistency(cur_num_leaves, prev_num_leaves, &hash_reader)
-            .map_err(|e| e.to_string())?
-    };
-    Ok(proof)
+    // Return a `PreloadedTlogTileReader` wrapping with the fetched tiles.
+    Ok(PreloadedTlogTileReader(all_tile_data))
 }
 
 /// Result of an [`add_leaf_to_pool`] request containing either a cached log
@@ -1168,7 +1171,7 @@ async fn apply_staged_uploads(
     let uploads = bitcode::deserialize::<Vec<UploadAction>>(&staged_uploads[8 + HASH_SIZE..])?;
     let upload_futures: Vec<_> = uploads
         .iter()
-        .map(|u| object.upload(&u.key, &u.data, &u.opts))
+        .map(|u| object.upload(&u.key, u.data.clone(), &u.opts))
         .collect();
     try_join_all(upload_futures).await?;
 
@@ -1181,173 +1184,29 @@ async fn read_edge_tiles(
     tree_size: u64,
     tree_hash: &Hash,
 ) -> Result<HashMap<u8, TileWithBytes>, anyhow::Error> {
-    // Ideally we would use `tlog_tiles::TileHashReader::read_hashes` to read and verify tiles
-    // (like the Go implementation does), but this doesn't work out of the box since we need
-    // async calls to retrieve tiles from object storage, and async trait support in Rust is
-    // limited.
-    // TODO: try using async-trait or block_on as a workaround.
-    let (tiles_with_bytes, _) = read_and_verify_tiles(
-        object,
-        tree_size,
-        tree_hash,
-        &[tlog_tiles::stored_hash_index(0, tree_size - 1)],
-    )
-    .await?;
+    // Fetch the right-most edge tiles by reading the last leaf. TileHashReader
+    // will fetch and verify the right tiles as a side-effect.
+    let indexes = vec![tlog_tiles::stored_hash_index(0, tree_size - 1)];
+    let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object).await?;
+
+    // Verify the leaf tile against the tree hash.
+    let hash_reader = TileHashReader::new(tree_size, *tree_hash, &tile_reader);
+    hash_reader.read_hashes(&indexes).map_err(|e| anyhow!(e))?;
 
     let mut edge_tiles: HashMap<u8, TileWithBytes> = HashMap::new();
-    for tile in tiles_with_bytes {
-        if edge_tiles.get(&tile.tile.level()).is_none_or(|t| {
-            t.tile.level_index() < tile.tile.level_index()
-                || (t.tile.level_index() == tile.tile.level_index()
-                    && t.tile.width() < tile.tile.width())
+    for (tile, b) in tile_reader.0 {
+        if edge_tiles.get(&tile.level()).is_none_or(|t| {
+            t.tile.level_index() < tile.level_index()
+                || (t.tile.level_index() == tile.level_index() && t.tile.width() < tile.width())
         }) {
-            edge_tiles.insert(tile.tile.level(), tile);
+            edge_tiles.insert(tile.level(), TileWithBytes { tile, b });
         }
     }
 
     Ok(edge_tiles)
 }
 
-/// Read and authenticate the tiles at the given indexes, returning all tiles needed for verification.
-#[allow(clippy::too_many_lines)]
-async fn read_and_verify_tiles(
-    object: &impl ObjectBackend,
-    tree_size: u64,
-    tree_hash: &Hash,
-    indexes: &[u64],
-) -> Result<(Vec<TileWithBytes>, Vec<usize>), anyhow::Error> {
-    let mut tile_order: HashMap<TlogTile, usize> = HashMap::new(); // tile_order[tileKey(tiles[i])] = i
-    let mut tiles = Vec::new();
-
-    // Plan to fetch tiles necessary to recompute tree hash.
-    // If it matches, those tiles are authenticated.
-    let stx = tlog_tiles::subtree_indices(0, tree_size, vec![]);
-    let mut stx_tile_order = vec![0; stx.len()];
-    for (i, &x) in stx.iter().enumerate() {
-        let tile = TlogTile::from_index(x);
-        let tile = tile.parent(0, tree_size).expect("missing parent");
-        if let Some(&j) = tile_order.get(&tile) {
-            stx_tile_order[i] = j;
-        } else {
-            stx_tile_order[i] = tiles.len();
-            tile_order.insert(tile, tiles.len());
-            tiles.push(tile);
-        }
-    }
-
-    // Plan to fetch tiles containing the indexes, along with any parent tiles needed
-    // for authentication. For most calls, the parents are being fetched anyway.
-    let mut index_tile_order = vec![0; indexes.len()];
-    for (i, &x) in indexes.iter().enumerate() {
-        if x >= tlog_tiles::stored_hash_index(0, tree_size) {
-            bail!("indexes not in tree");
-        }
-        let tile = TlogTile::from_index(x);
-        // Walk up parent tiles until we find one we've requested.
-        // That one will be authenticated.
-        let mut k = 0;
-        loop {
-            let p = tile.parent(k, tree_size).expect("missing parent");
-            if let Some(&j) = tile_order.get(&p) {
-                if k == 0 {
-                    index_tile_order[i] = j;
-                }
-                break;
-            }
-            k += 1;
-        }
-
-        // Walk back down recording child tiles after parents.
-        // This loop ends by revisiting the tile for this index
-        // (tile.parent(0, r.tree.N)) unless k == 0, in which
-        // case the previous loop did it.
-        for k in (0..k).rev() {
-            let p = tile.parent(k, tree_size).expect("missing parent");
-            if p.width() != (1 << p.height()) {
-                // Only full tiles have parents.
-                // This tile has a parent, so it must be full.
-                bail!("bad math: {} {} {:?}", tree_size, x, p);
-            }
-            tile_order.insert(p, tiles.len());
-            if k == 0 {
-                index_tile_order[i] = tiles.len();
-            }
-            tiles.push(p);
-        }
-    }
-
-    // Fetch all the tile data.
-    let mut data = Vec::with_capacity(tiles.len());
-    for tile in &tiles {
-        let result = object
-            .fetch(&tile.path())
-            .await?
-            .ok_or(anyhow!("no tile {} in object storage", tile.path()))?;
-        data.push(result);
-    }
-    if data.len() != tiles.len() {
-        bail!(
-            "bad result slice (len={}, want {})",
-            data.len(),
-            tiles.len()
-        );
-    }
-    for (i, tile) in tiles.iter().enumerate() {
-        if data[i].len() != tile.width() as usize * HASH_SIZE {
-            bail!(
-                "bad result slice ({} len={}, want {})",
-                tile.path(),
-                data[i].len(),
-                tile.width() as usize * HASH_SIZE
-            );
-        }
-    }
-
-    // Authenticate the initial tiles against the tree hash.
-    // They are arranged so that parents are authenticated before children.
-    // First the tiles needed for the tree hash.
-    let mut th = tiles[stx_tile_order[stx.len() - 1]]
-        .hash_at_index(&data[stx_tile_order[stx.len() - 1]], stx[stx.len() - 1])?;
-    for i in (0..stx.len() - 1).rev() {
-        let h = tiles[stx_tile_order[i]].hash_at_index(&data[stx_tile_order[i]], stx[i])?;
-        th = tlog_tiles::node_hash(h, th);
-    }
-    if th != *tree_hash {
-        bail!(TlogError::InconsistentTile.to_string());
-    }
-
-    // Authenticate full tiles against their parents.
-    for i in stx.len()..tiles.len() {
-        let tile = tiles[i];
-        let p = tile.parent(1, tree_size).expect("missing parent");
-        let j = tile_order.get(&p).ok_or(anyhow!(
-            "bad math: {} {:?}: lost parent of {:?}",
-            tree_size,
-            indexes,
-            tile
-        ))?;
-        let h = p.hash_at_index(
-            &data[*j],
-            tlog_tiles::stored_hash_index(p.level() * p.height(), tile.level_index()),
-        )?;
-        if h != Tile::subtree_hash(&data[i]) {
-            bail!(TlogError::InconsistentTile.to_string());
-        }
-    }
-
-    // Now we have all the tiles needed for the requested indexes,
-    // and we've authenticated the full tile set against the trusted tree hash.
-
-    let tiles_with_bytes: Vec<TileWithBytes> = tiles
-        .into_iter()
-        .zip(data.into_iter())
-        .map(|(tile, b)| TileWithBytes { tile, b })
-        .collect();
-
-    Ok((tiles_with_bytes, index_tile_order))
-}
-
-/// Returns hashes from `edge_tiles` of from the overlay cache.
+/// Returns hashes from `edge_tiles` or from the overlay cache.
 #[derive(Debug)]
 struct HashReaderWithOverlay<'a> {
     edge_tiles: &'a HashMap<u8, TileWithBytes>,
@@ -1422,10 +1281,63 @@ static OPTS_HASH_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions 
     immutable: true,
 });
 
+/// Content-type header for issuer cert uploads
+static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
+    content_type: Some("application/pkix-cert".to_string()),
+    immutable: true,
+});
+
+/// Uploads any newly-observed issuers to the object backend, returning the
+/// paths of those uploaded.
+///
+/// # Errors
+///
+/// Will return an error if an issuer already exists in the object backend, but
+/// with invalid contents.
+pub async fn upload_issuers(
+    object: &impl ObjectBackend,
+    issuers: &[&[u8]],
+    name: &str,
+) -> worker::Result<()> {
+    let issuer_futures: Vec<_> = issuers
+        .iter()
+        .map(|issuer| async move {
+            let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
+            let path = format!("issuer/{}", hex::encode(fingerprint));
+
+            if let Some(old) = object.fetch(&path).await? {
+                if old != *issuer {
+                    return Err(worker::Error::RustError(format!(
+                        "invalid existing issuer: {}",
+                        hex::encode(old)
+                    )));
+                }
+                Ok(None)
+            } else {
+                object.upload(&path, *issuer, &OPTS_ISSUER).await?;
+                Ok(Some(path))
+            }
+        })
+        .collect();
+
+    for path in try_join_all(issuer_futures)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+    {
+        {
+            info!("{name}: Observed new issuer; path={path}");
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{util, LookupKey, SequenceMetadata};
+    use crate::util;
 
     use anyhow::ensure;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
@@ -1437,11 +1349,11 @@ mod tests {
         rngs::{OsRng, SmallRng},
         thread_rng, Rng, RngCore, SeedableRng,
     };
-    use sha2::{Digest, Sha256};
-    use signed_note::{KeyName, Note, VerifierList};
-    use static_ct_api::{PrecertData, StaticCTCheckpointSigner};
-    use static_ct_api::{StaticCTLogEntry, StaticCTPendingLogEntry};
-    use std::{cell::RefCell, time::Duration};
+    use signed_note::{KeyName, Note};
+    use static_ct_api::{
+        PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
+    };
+    use std::time::Duration;
     use tlog_tiles::{Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile};
 
     #[test]
@@ -1525,7 +1437,7 @@ mod tests {
         let sequence_state = log.sequence_state.borrow();
         let tree_hash = *sequence_state.tree.hash();
         for i in 0..n {
-            // Compute the inclusion proof for leaf i
+            // Compute the inclusion proof for leaf `leaf_index`.
             let proof = block_on(prove_inclusion(
                 sequence_state.tree.size(),
                 *sequence_state.tree.hash(),
@@ -1533,7 +1445,7 @@ mod tests {
                 &log.object,
             ))
             .unwrap();
-            // Verify the inclusion proof. We need the leaf hash
+            // Verify the inclusion proof. We need the leaf hash.
             let leaf_hash = {
                 // Get the tile the leaf belongs to, and correct the width by getting the 0th parent
                 let leaf_tile = TlogTile::from_leaf_index(i).parent(0, n).unwrap();
@@ -2340,18 +2252,18 @@ mod tests {
     }
 
     impl ObjectBackend for TestObjectBackend {
-        async fn upload(
+        async fn upload<S: AsRef<str>, D: Into<Vec<u8>>>(
             &self,
-            key: &str,
-            data: &[u8],
+            key: S,
+            data: D,
             _opts: &super::UploadOptions,
         ) -> worker::Result<()> {
             *self.uploads.borrow_mut() += 1;
-            let (ok, persist) = self.mode.borrow().check(key);
+            let (ok, persist) = self.mode.borrow().check(key.as_ref());
             if persist {
                 self.objects
                     .borrow_mut()
-                    .insert(key.to_string(), data.to_vec());
+                    .insert(key.as_ref().to_string(), data.into());
             }
             if ok {
                 Ok(())
@@ -2359,8 +2271,8 @@ mod tests {
                 Err("upload failure".into())
             }
         }
-        async fn fetch(&self, key: &str) -> worker::Result<Option<Vec<u8>>> {
-            if let Some(data) = self.objects.borrow().get(key) {
+        async fn fetch<S: AsRef<str>>(&self, key: S) -> worker::Result<Option<Vec<u8>>> {
+            if let Some(data) = self.objects.borrow().get(key.as_ref()) {
                 Ok(Some(data.clone()))
             } else {
                 Ok(None)
@@ -2644,8 +2556,12 @@ mod tests {
                 .collect();
             // [read_tile_hashes] checks the inclusion of every hash in the provided tree,
             // so this checks the validity of the entire Merkle tree.
-            let leaf_hashes = read_tile_hashes(&self.object, c.size(), c.hash(), &indexes)
-                .map_err(|e| anyhow!(e))?;
+            let leaf_hashes = {
+                let tile_reader =
+                    block_on(tile_reader_for_indexes(c.size(), &indexes, &self.object))?;
+                let hash_reader = TileHashReader::new(c.size(), *c.hash(), &tile_reader);
+                hash_reader.read_hashes(&indexes)?
+            };
 
             let last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1))
                 .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
@@ -2695,74 +2611,6 @@ mod tests {
 
             Ok(sth_timestamp)
         }
-    }
-
-    /// Content-type header for issuer cert uploads
-    static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
-        content_type: Some("application/pkix-cert".to_string()),
-        immutable: true,
-    });
-
-    /// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
-    async fn upload_issuers(
-        object: &impl ObjectBackend,
-        issuers: &[&[u8]],
-        name: &str,
-    ) -> worker::Result<()> {
-        let issuer_futures: Vec<_> = issuers
-            .iter()
-            .map(|issuer| async move {
-                let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
-                let path = format!("issuer/{}", hex::encode(fingerprint));
-
-                if let Some(old) = object.fetch(&path).await? {
-                    if old != *issuer {
-                        return Err(worker::Error::RustError(format!(
-                            "invalid existing issuer: {}",
-                            hex::encode(old)
-                        )));
-                    }
-                    Ok(None)
-                } else {
-                    object.upload(&path, issuer, &OPTS_ISSUER).await?;
-                    Ok(Some(path))
-                }
-            })
-            .collect();
-
-        for path in try_join_all(issuer_futures)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-        {
-            {
-                info!("{name}: Observed new issuer; path={path}");
-            }
-        }
-
-        Ok(())
-    }
-
-    fn read_tile_hashes(
-        object: &impl ObjectBackend,
-        tree_size: u64,
-        tree_hash: &Hash,
-        indexes: &[u64],
-    ) -> Result<Vec<Hash>, anyhow::Error> {
-        let (tiles_with_bytes, index_tile_order) =
-            block_on(read_and_verify_tiles(object, tree_size, tree_hash, indexes))?;
-
-        let mut hashes = Vec::with_capacity(indexes.len());
-        for (i, &x) in indexes.iter().enumerate() {
-            let j = index_tile_order[i];
-            let h = tiles_with_bytes[j]
-                .tile
-                .hash_at_index(&tiles_with_bytes[j].b, x)?;
-            hashes.push(h);
-        }
-
-        Ok(hashes)
     }
 
     fn sequence_only_full_tiles(old_size: u64, pending: u64) -> (u64, u64) {

@@ -3,22 +3,16 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use std::sync::LazyLock;
-
 use crate::{load_roots, load_signing_key, SequenceMetadata, CONFIG};
 use config::TemporalInterval;
-use futures_util::future::try_join_all;
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
-    init_logging, load_cache_kv, load_public_bucket, log_ops::UploadOptions,
-    put_cache_entry_metadata, serialize, ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
-    METRICS_ENDPOINT,
+    init_logging, load_cache_kv, load_public_bucket, put_cache_entry_metadata, serialize,
+    ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
-use log::{debug, info, warn};
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
-use sha2::{Digest, Sha256};
 use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
 use tlog_tiles::{LogEntry, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
@@ -174,7 +168,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 Response::error("Unknown log", 400)
             }
             _ => {
-                warn!("Internal error: {e}");
+                log::warn!("Internal error: {e}");
                 Response::error("Internal error", 500)
             }
         })
@@ -190,7 +184,7 @@ async fn add_chain_or_pre_chain(
     let req: AddChainRequest = match req.json().await {
         Ok(req) => req,
         Err(e) => {
-            debug!("{name}: Invalid JSON in add-(pre)chain request: {e}");
+            log::debug!("{name}: Invalid JSON in add-(pre)chain request: {e}");
             return Response::error("Invalid JSON in add-[pre-]chain request", 400);
         }
     };
@@ -212,7 +206,7 @@ async fn add_chain_or_pre_chain(
     ) {
         Ok(v) => v,
         Err(e) => {
-            debug!("{name}: Bad request: {e}");
+            log::debug!("{name}: Bad request: {e}");
             return Response::error("Bad request", 400);
         }
     };
@@ -226,7 +220,7 @@ async fn add_chain_or_pre_chain(
     if params.enable_dedup {
         if let Some(metadata) = get_cached_metadata(&load_cache_kv(env, name)?, &lookup_key).await?
         {
-            debug!("{name}: Entry is cached");
+            log::debug!("{name}: Entry is cached");
             let entry = StaticCTLogEntry::new(pending_entry, metadata);
             let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
                 .map_err(|e| e.to_string())?;
@@ -238,7 +232,7 @@ async fn add_chain_or_pre_chain(
 
     // First persist issuers.
     let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-    upload_issuers(
+    generic_log_worker::upload_issuers(
         &public_bucket,
         &req.chain[1..]
             .iter()
@@ -291,7 +285,7 @@ async fn add_chain_or_pre_chain(
             .await
             .is_err()
         {
-            warn!("{name}: Failed to write entry to deduplication cache");
+            log::warn!("{name}: Failed to write entry to deduplication cache");
         }
     }
     let entry = StaticCTLogEntry {
@@ -316,51 +310,4 @@ fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
         h.append("Content-Type", &hdr).unwrap();
     }
     h
-}
-
-/// Options for uploading issuers.
-static OPTS_ISSUER: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
-    content_type: Some("application/pkix-cert".to_string()),
-    immutable: true,
-});
-
-/// Uploads any newly-observed issuers to the object backend, returning the paths of those uploaded.
-pub(crate) async fn upload_issuers(
-    object: &ObjectBucket,
-    issuers: &[&[u8]],
-    name: &str,
-) -> worker::Result<()> {
-    let issuer_futures: Vec<_> = issuers
-        .iter()
-        .map(|issuer| async move {
-            let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
-            let path = format!("issuer/{}", hex::encode(fingerprint));
-
-            if let Some(old) = object.fetch(&path).await? {
-                if old != *issuer {
-                    return Err(worker::Error::RustError(format!(
-                        "invalid existing issuer: {}",
-                        hex::encode(old)
-                    )));
-                }
-                Ok(None)
-            } else {
-                object.upload(&path, issuer, &OPTS_ISSUER).await?;
-                Ok(Some(path))
-            }
-        })
-        .collect();
-
-    for path in try_join_all(issuer_futures)
-        .await?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-    {
-        {
-            info!("{name}: Observed new issuer; path={path}");
-        }
-    }
-
-    Ok(())
 }

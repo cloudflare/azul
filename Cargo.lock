@@ -898,7 +898,6 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_bytes",
- "serde_with",
  "sha2",
  "signed_note",
  "static_ct_api",
