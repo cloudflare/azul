@@ -147,7 +147,6 @@ impl<L: LogEntry> GenericSequencer<L> {
             info!("{}: Initializing log from alarm handler", self.config.name);
             self.initialize().await?;
         }
-        let name = &self.config.name;
 
         // Schedule the next sequencing.
         self.do_state
@@ -155,7 +154,7 @@ impl<L: LogEntry> GenericSequencer<L> {
             .set_alarm(self.config.sequence_interval)
             .await?;
 
-        if let Err(e) = log_ops::sequence::<L>(
+        if log_ops::sequence::<L>(
             &self.pool_state,
             &self.sequence_state,
             &self.config,
@@ -165,8 +164,10 @@ impl<L: LogEntry> GenericSequencer<L> {
             &self.metrics,
         )
         .await
+        .is_err()
         {
-            warn!("{name}: Fatal sequencing error, log will be reloaded: {e}",);
+            // Re-initialize the log to get back into a good state.
+            *self.initialized.borrow_mut() = false;
         }
 
         Response::empty()

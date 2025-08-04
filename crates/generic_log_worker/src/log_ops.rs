@@ -676,6 +676,11 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
 }
 
 /// Sequences the current pool of pending entries in the ephemeral state.
+///
+/// # Errors
+///
+/// Will return an error if sequencing fails with an error that requires the
+/// sequencer to be re-initialized to get into a good state.
 pub(crate) async fn sequence<L: LogEntry>(
     pool_state: &RefCell<PoolState<L::Pending>>,
     sequence_state: &RefCell<SequenceState>,
@@ -720,10 +725,10 @@ pub(crate) async fn sequence<L: LogEntry>(
             Ok(())
         }
         Err(SequenceError::Fatal(e)) => {
-            // Reload sequencing state, as the existing state may no longer be valid.
+            // The ephemeral sequence state may no longer be valid. Return an
+            // error so the caller can reload the log into a good state.
             metrics.seq_count.with_label_values(&["fatal"]).inc();
             error!("{}: Fatal sequencing error {e}", config.name);
-            *sequence_state.borrow_mut() = SequenceState::load::<L>(config, object, lock).await?;
             Err(anyhow!(e))
         }
         Err(SequenceError::NonFatal(e)) => {
