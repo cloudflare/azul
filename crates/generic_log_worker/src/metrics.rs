@@ -167,9 +167,9 @@ impl ObjectMetrics {
         )
         .unwrap();
         let errors = register_counter_vec_with_registry!(
-            "object_put_errors_total",
-            "Number of failed object storage operations, by method.",
-            &["method"],
+            "object_errors_total",
+            "Number of failed object storage operations, by description.",
+            &["desc"],
             r
         )
         .unwrap();

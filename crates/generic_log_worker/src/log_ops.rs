@@ -716,7 +716,7 @@ pub(crate) async fn sequence<L: LogEntry>(
     .await
     {
         Ok(()) => {
-            metrics.seq_count.with_label_values(&["ok"]).inc();
+            metrics.seq_count.with_label_values(&["none"]).inc();
             Ok(())
         }
         Err(SequenceError::Fatal(e)) => {

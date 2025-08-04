@@ -538,15 +538,38 @@ impl ObjectBackend for ObjectBucket {
             .as_ref()
             .inspect(|&m| m.upload_size_bytes.observe(value.len().as_f64()));
         self.bucket
-            .put(key.as_ref(), value)
+            .put(key.as_ref(), value.clone())
             .http_metadata(metadata)
             .execute()
             .await
             .inspect_err(|_| {
                 self.metrics
                     .as_ref()
-                    .inspect(|&m| m.errors.with_label_values(&["put"]).inc());
+                    .inspect(|&m| m.errors.with_label_values(&["put-failed"]).inc());
             })?;
+
+        // SAFETY: immediately fetch the uploaded object to make sure that it was persisted.
+        // TODO: sentry reporting
+        if let Some(fetched) = self.fetch(key.as_ref()).await? {
+            if fetched != value {
+                self.metrics
+                    .as_ref()
+                    .inspect(|&m| m.errors.with_label_values(&["wrong-contents"]).inc());
+                return Err(Error::RustError(format!(
+                    "tile persisted with wrong contents: {}",
+                    key.as_ref()
+                )));
+            }
+        } else {
+            self.metrics
+                .as_ref()
+                .inspect(|&m| m.errors.with_label_values(&["not-persisted"]).inc());
+            return Err(Error::RustError(format!(
+                "tile not persisted: {}",
+                key.as_ref()
+            )));
+        }
+
         self.metrics.as_ref().inspect(|&m| {
             m.duration
                 .with_label_values(&["put"])
