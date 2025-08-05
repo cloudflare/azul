@@ -156,7 +156,7 @@
                 "command": "cargo install -q worker-build && DEPLOY_ENV=raio worker-build --release"
             },
             "routes": [
-                "https://ct.cloudflare.com/logs/raio2025h2a/*",
+                "https://ct.cloudflare.com/logs/raio2025h2b/*",
                 "https://ct.cloudflare.com/logs/raio2026h1a/*",
                 "https://ct.cloudflare.com/logs/raio2026h2a/*",
                 "https://ct.cloudflare.com/logs/raio2027h1a/*",
@@ -168,8 +168,8 @@
                     "binding": "ccadb_roots"
                 },
                 {
-                    "id": "180000ea656e4f4987bcfe9d47b8525e",
-                    "binding": "cache_raio2025h2a"
+                    "id": "1eb0775c277d4adc98ac7526e3e7d305",
+                    "binding": "cache_raio2025h2b"
                 },
                 {
                     "id": "0a8eba39d36f4dd9bbb8fb9cb734b236",
@@ -190,8 +190,8 @@
             ],
             "r2_buckets": [
                 {
-                    "bucket_name": "static-ct-public-raio2025h2a",
-                    "binding": "public_raio2025h2a"
+                    "bucket_name": "static-ct-public-raio2025h2b",
+                    "binding": "public_raio2025h2b"
                 },
                 {
                     "bucket_name": "static-ct-public-raio2026h1a",

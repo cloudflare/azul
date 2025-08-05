@@ -1,10 +1,10 @@
 {
     "logging_level": "info",
     "logs": {
-        "raio2025h2a": {
-            "description": "Cloudflare 'Raio2025h2a' log",
-            "submission_url": "https://ct.cloudflare.com/logs/raio2025h2a/",
-            "monitoring_url": "https://raio2025h2a.ct.cloudflare.com/",
+        "raio2025h2b": {
+            "description": "Cloudflare 'Raio2025h2b' log",
+            "submission_url": "https://ct.cloudflare.com/logs/raio2025h2b/",
+            "monitoring_url": "https://raio2025h2b.ct.cloudflare.com/",
             "temporal_interval": {
                 "start_inclusive": "2025-07-01T00:00:00Z",
                 "end_exclusive": "2026-01-01T00:00:00Z"
