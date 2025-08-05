@@ -208,8 +208,10 @@ impl<E: PendingLogEntry> PoolState<E> {
         }
     }
     // Reset the map of in-sequencing entries. This should be called after
-    // sequencing completes.
-    fn reset(&mut self) {
+    // sequencing completes since the entries are either in the deduplication
+    // cache or finalized with an error. In the latter case, we don't want
+    // a resubmit to deduplicate against the failed sequencing.
+    fn reset_in_sequencing_dedup(&mut self) {
         self.in_sequencing_dedup.clear();
     }
 }
@@ -741,7 +743,7 @@ pub(crate) async fn sequence<L: LogEntry>(
     // Once [`sequence_entries`] returns, the entries are either in the deduplication
     // cache or finalized with an error. In the latter case, we don't want
     // a resubmit to deduplicate against the failed sequencing.
-    pool_state.borrow_mut().reset();
+    pool_state.borrow_mut().reset_in_sequencing_dedup();
 
     result
 }
@@ -2365,7 +2367,7 @@ mod tests {
                 &self.metrics,
             ))
             .unwrap();
-            self.pool_state.borrow_mut().reset();
+            self.pool_state.borrow_mut().reset_in_sequencing_dedup();
         }
         fn add_certificate(&mut self) -> AddLeafResult {
             self.add_certificate_with_seed(rand::thread_rng().next_u64())
