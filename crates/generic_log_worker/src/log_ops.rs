@@ -50,7 +50,7 @@ use worker::Error as WorkerError;
 /// the special level for data tiles. The Go implementation uses -1.
 const DATA_TILE_LEVEL_KEY: u8 = u8::MAX;
 /// Same as above, anything above 63 is fine to use as the level key.
-const UNHASHED_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
+const AUX_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
 /// Path used to store checkpoints, both in the object storage and lock backends.
 pub const CHECKPOINT_KEY: &str = "checkpoint";
 /// Path used to store staging bundles in the lock backend.
@@ -441,7 +441,7 @@ impl SequenceState {
                     .ok_or(anyhow!("no auxiliary tile in object storage"))?;
 
                 edge_tiles.insert(
-                    UNHASHED_TILE_LEVEL_KEY,
+                    AUX_TILE_LEVEL_KEY,
                     TileWithBytes {
                         tile: aux_tile,
                         b: aux_tile_bytes,
@@ -771,15 +771,18 @@ async fn sequence_entries<L: LogEntry>(
 ) -> Result<(), SequenceError> {
     let name = &config.name;
 
-    let old = (*sequence_state.borrow()).clone();
+    let SequenceState {
+        tree: old_tree,
+        checkpoint: old_checkpoint,
+        mut edge_tiles,
+    } = (*sequence_state.borrow()).clone();
 
-    let old_size = old.tree.size();
-    let old_time = old.tree.time();
+    let old_size = old_tree.size();
+    let old_time = old_tree.time();
     let timestamp = now_millis();
 
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
-    let mut edge_tiles = old.edge_tiles.clone();
     let mut data_tile = Vec::new();
     if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY) {
         if t.tile.width() < TlogTile::FULL_WIDTH {
@@ -790,7 +793,7 @@ async fn sequence_entries<L: LogEntry>(
     // Load the current partial auxiliary tile, if configured.
     let mut aux_tile = Vec::new();
     if L::Pending::AUX_TILE_PATH.is_some() {
-        if let Some(t) = edge_tiles.get(&UNHASHED_TILE_LEVEL_KEY) {
+        if let Some(t) = edge_tiles.get(&AUX_TILE_LEVEL_KEY) {
             if t.tile.width() < TlogTile::FULL_WIDTH {
                 aux_tile.clone_from(&t.b);
             }
@@ -953,7 +956,7 @@ async fn sequence_entries<L: LogEntry>(
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, old.checkpoint(), new.checkpoint())
+    lock.swap(CHECKPOINT_KEY, &old_checkpoint, new.checkpoint())
         .await
         .map_err(|e| {
             SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
@@ -1050,7 +1053,7 @@ fn stage_data_tile<L: LogEntry>(
         let tile =
             TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1)).with_data_path(path_elem);
         edge_tiles.insert(
-            UNHASHED_TILE_LEVEL_KEY,
+            AUX_TILE_LEVEL_KEY,
             TileWithBytes {
                 tile,
                 b: aux_tile.clone(),
@@ -1080,10 +1083,9 @@ async fn apply_staged_uploads(
         bail!("staging bundle does not match current tree");
     }
     let uploads = bitcode::deserialize::<Vec<UploadAction>>(&staged_uploads[8 + HASH_SIZE..])?;
-    let upload_futures: Vec<_> = uploads
+    let upload_futures = uploads
         .iter()
-        .map(|u| object.upload(&u.key, u.data.clone(), &u.opts))
-        .collect();
+        .map(|u| object.upload(&u.key, u.data.clone(), &u.opts));
     try_join_all(upload_futures).await?;
 
     Ok(())
@@ -1210,33 +1212,25 @@ pub async fn upload_issuers(
     issuers: &[&[u8]],
     name: &str,
 ) -> worker::Result<()> {
-    let issuer_futures: Vec<_> = issuers
-        .iter()
-        .map(|issuer| async move {
-            let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
-            let path = format!("issuer/{}", hex::encode(fingerprint));
+    let issuer_futures = issuers.iter().map(|issuer| async move {
+        let fingerprint: [u8; 32] = Sha256::digest(issuer).into();
+        let path = format!("issuer/{}", hex::encode(fingerprint));
 
-            if let Some(old) = object.fetch(&path).await? {
-                if old != *issuer {
-                    return Err(worker::Error::RustError(format!(
-                        "invalid existing issuer: {}",
-                        hex::encode(old)
-                    )));
-                }
-                Ok(None)
-            } else {
-                object.upload(&path, *issuer, &OPTS_ISSUER).await?;
-                Ok(Some(path))
+        if let Some(old) = object.fetch(&path).await? {
+            if old != *issuer {
+                return Err(worker::Error::RustError(format!(
+                    "invalid existing issuer: {}",
+                    hex::encode(old)
+                )));
             }
-        })
-        .collect();
+            Ok(None)
+        } else {
+            object.upload(&path, *issuer, &OPTS_ISSUER).await?;
+            Ok(Some(path))
+        }
+    });
 
-    for path in try_join_all(issuer_futures)
-        .await?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-    {
+    for path in try_join_all(issuer_futures).await?.iter().flatten() {
         {
             info!("{name}: Observed new issuer; path={path}");
         }

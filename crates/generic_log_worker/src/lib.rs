@@ -269,7 +269,7 @@ impl DedupCache {
             .await
             .unwrap_or_default();
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
-        let map = self.storage.get_multiple(keys.clone()).await?;
+        let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {
             let batch = serde_wasm_bindgen::from_value::<ByteBuf>(value?)?;
             self.memory
