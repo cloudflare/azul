@@ -107,7 +107,7 @@ impl<R: BufRead> Iterator for StrictLines<'_, R> {
 
 /// A Checkpoint is a tree head to be formatted according to c2sp.org/checkpoint.
 #[derive(PartialEq, Debug)]
-pub struct Checkpoint {
+pub struct CheckpointText {
     origin: String,
     size: u64,
     hash: Hash,
@@ -131,7 +131,7 @@ impl fmt::Display for MalformedCheckpointError {
     }
 }
 
-impl Checkpoint {
+impl CheckpointText {
     /// Return the checkpoint's origin.
     pub fn origin(&self) -> &str {
         &self.origin
@@ -296,7 +296,7 @@ pub trait CheckpointSigner {
     fn sign(
         &self,
         timestamp_unix_millis: UnixTimestamp,
-        checkpoint: &Checkpoint,
+        checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError>;
 
     /// Returns the verifier for this signing object.
@@ -335,7 +335,11 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
         self.v.key_id()
     }
 
-    fn sign(&self, _: UnixTimestamp, checkpoint: &Checkpoint) -> Result<NoteSignature, NoteError> {
+    fn sign(
+        &self,
+        _: UnixTimestamp,
+        checkpoint: &CheckpointText,
+    ) -> Result<NoteSignature, NoteError> {
         let msg = checkpoint.to_bytes();
         // Ed25519 signing cannot fail
         let sig = self.k.try_sign(&msg).unwrap();
@@ -365,7 +369,7 @@ pub fn open_checkpoint(
     verifiers: &VerifierList,
     current_time: UnixTimestamp,
     b: &[u8],
-) -> Result<(Checkpoint, Option<UnixTimestamp>), TlogError> {
+) -> Result<(CheckpointText, Option<UnixTimestamp>), TlogError> {
     let n = Note::from_bytes(b)?;
     let (verified_sigs, _) = n.verify(verifiers)?;
 
@@ -395,7 +399,7 @@ pub fn open_checkpoint(
     if !key_ids_to_observe.is_empty() {
         return Err(TlogError::MissingVerifierSignature);
     }
-    let checkpoint = Checkpoint::from_bytes(n.text())?;
+    let checkpoint = CheckpointText::from_bytes(n.text())?;
     if current_time < latest_timestamp.unwrap_or(0) {
         return Err(TlogError::InvalidTimestamp);
     }
@@ -467,7 +471,7 @@ impl TreeWithTimestamp {
         signers.shuffle(rng);
 
         // Construct the checkpoint with no extension lines
-        let checkpoint = Checkpoint::new(origin, self.size, self.hash, extensions)?;
+        let checkpoint = CheckpointText::new(origin, self.size, self.hash, extensions)?;
 
         // Sign the checkpoint with the given signers
         let sigs = signers
@@ -533,14 +537,14 @@ mod tests {
 
     #[test]
     fn test_parse_checkpoint() {
-        let c = Checkpoint::new(
+        let c = CheckpointText::new(
             "example.com/origin",
             123,
             record_hash(b"hello world"),
             &["abc", "def"],
         )
         .unwrap();
-        let c2 = Checkpoint::from_bytes(&c.to_bytes()).unwrap();
+        let c2 = CheckpointText::from_bytes(&c.to_bytes()).unwrap();
         assert_eq!(c, c2);
         assert_eq!(c.to_bytes(), c2.to_bytes());
         assert_eq!(
@@ -559,7 +563,7 @@ mod tests {
         ];
 
         for text in &good_checkpoints {
-            let c = Checkpoint::from_bytes(text);
+            let c = CheckpointText::from_bytes(text);
             assert!(c.is_ok());
             assert_eq!(c.unwrap().to_bytes(), *text);
         }
@@ -583,7 +587,7 @@ mod tests {
         ];
         for (i, text) in bad_checkpoints.iter().enumerate() {
             assert!(
-                Checkpoint::from_bytes(text).is_err(),
+                CheckpointText::from_bytes(text).is_err(),
                 "expected error at index {i}: {text:?}"
             );
         }
@@ -591,11 +595,11 @@ mod tests {
         // Now use from_reader
         for text in good_checkpoints {
             let mut reader = std::io::Cursor::new(text);
-            let c = Checkpoint::from_reader(&mut reader, true);
+            let c = CheckpointText::from_reader(&mut reader, true);
             assert!(c.is_ok());
             assert_eq!(c.unwrap().to_bytes(), text);
             let mut reader = std::io::Cursor::new(text);
-            let c = Checkpoint::from_reader(&mut reader, false);
+            let c = CheckpointText::from_reader(&mut reader, false);
             assert!(c.is_ok());
             assert_eq!(c.unwrap().to_bytes(), text);
         }
@@ -611,10 +615,10 @@ mod tests {
         ];
         for (i, text) in non_strict_checkpoints.iter().enumerate() {
             let mut reader = std::io::Cursor::new(text);
-            let c = Checkpoint::from_reader(&mut reader, true);
+            let c = CheckpointText::from_reader(&mut reader, true);
             assert!(c.is_err(), "expected error at index {i}: {text:?}");
             let mut reader = std::io::Cursor::new(text);
-            let c = Checkpoint::from_reader(&mut reader, false);
+            let c = CheckpointText::from_reader(&mut reader, false);
             assert!(c.is_ok());
             assert!(text.starts_with(&c.unwrap().to_bytes()));
         }

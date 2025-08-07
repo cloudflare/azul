@@ -9,7 +9,7 @@ use ed25519_dalek::{
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
-use tlog_tiles::{Checkpoint, CheckpointSigner, Hash, LeafIndex, UnixTimestamp};
+use tlog_tiles::{CheckpointText, CheckpointSigner, Hash, LeafIndex, UnixTimestamp};
 
 #[derive(Clone)]
 pub struct TrustAnchorID(pub Vec<u8>);
@@ -72,7 +72,7 @@ impl CheckpointSigner for MTCSubtreeCosigner {
     fn sign(
         &self,
         _timestamp_unix_millis: UnixTimestamp,
-        checkpoint: &tlog_tiles::Checkpoint,
+        checkpoint: &tlog_tiles::CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         let sig = self.sign_subtree(0, checkpoint.size(), checkpoint.hash())?;
         Ok(NoteSignature::new(self.name().clone(), self.key_id(), sig))
@@ -132,7 +132,7 @@ impl NoteVerifier for MTCSubtreeNoteVerifier {
 
     fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
         // The message itself should be a valid checkpoint.
-        let Ok(checkpoint) = Checkpoint::from_bytes(msg) else {
+        let Ok(checkpoint) = CheckpointText::from_bytes(msg) else {
             return false;
         };
         // Ed25519 signature (no prepended timestamp)

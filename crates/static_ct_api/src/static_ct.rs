@@ -120,7 +120,7 @@ use sha2::{Digest, Sha256};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use std::io::Read;
 use tlog_tiles::{
-    Checkpoint, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PathElem, PendingLogEntry,
+    CheckpointText, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PathElem, PendingLogEntry,
     SequenceMetadata, UnixTimestamp,
 };
 
@@ -536,7 +536,7 @@ impl NoteVerifier for RFC6962NoteVerifier {
     }
 
     fn verify(&self, msg: &[u8], mut sig: &[u8]) -> bool {
-        let Ok(checkpoint) = Checkpoint::from_bytes(msg) else {
+        let Ok(checkpoint) = CheckpointText::from_bytes(msg) else {
             return false;
         };
         if !checkpoint.extension().is_empty() {
@@ -717,7 +717,7 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
     fn sign(
         &self,
         timestamp_unix_millis: UnixTimestamp,
-        checkpoint: &Checkpoint,
+        checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         // RFC 6962-type signatures do not sign extension lines. If this checkpoint has extension lines, this is an error.
         if !checkpoint.extension().is_empty() {

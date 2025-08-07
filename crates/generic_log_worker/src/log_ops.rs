@@ -1261,7 +1261,7 @@ mod tests {
         PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
     };
     use std::time::Duration;
-    use tlog_tiles::{Checkpoint, CheckpointSigner, Ed25519CheckpointSigner, TlogTile};
+    use tlog_tiles::{CheckpointSigner, CheckpointText, Ed25519CheckpointSigner, TlogTile};
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -2421,7 +2421,7 @@ mod tests {
                 .map_err(|e| anyhow!(e))?
                 .unwrap();
 
-            let c = Checkpoint::from_bytes(n.text()).map_err(|e| anyhow!(e))?;
+            let c = CheckpointText::from_bytes(n.text()).map_err(|e| anyhow!(e))?;
 
             assert_eq!(c.origin(), "example.com/TestLog");
             assert_eq!(c.extension(), "");
@@ -2440,7 +2440,7 @@ mod tests {
                     .extract_timestamp_millis(verified_sigs[0].signature())
                     .map_err(|e| anyhow!(e))?
                     .unwrap();
-                let c1 = Checkpoint::from_bytes(n.text()).map_err(|e| anyhow!(e))?;
+                let c1 = CheckpointText::from_bytes(n.text()).map_err(|e| anyhow!(e))?;
 
                 ensure!(c1.origin() == c.origin());
                 ensure!(c1.extension() == c.extension());
