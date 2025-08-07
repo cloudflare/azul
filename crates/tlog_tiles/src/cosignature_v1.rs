@@ -7,7 +7,7 @@ use ed25519_dalek::{
 };
 use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 
-use crate::{Checkpoint, CheckpointSigner, UnixTimestamp};
+use crate::{CheckpointText, CheckpointSigner, UnixTimestamp};
 
 /// Implementation of [`CheckpointSigner`] that produces a timestamped Ed25519 cosignature/v1 (alg 0x04 from <c2sp.org/signed-note>).
 pub struct CosignatureV1CheckpointSigner {
@@ -37,7 +37,7 @@ impl CheckpointSigner for CosignatureV1CheckpointSigner {
     fn sign(
         &self,
         timestamp_unix_millis: UnixTimestamp,
-        checkpoint: &Checkpoint,
+        checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         // Timestamp is in seconds.
         let timestamp_unix_secs = timestamp_unix_millis / 1000;
@@ -108,7 +108,7 @@ impl NoteVerifier for CosignatureV1NoteVerifier {
 
     fn verify(&self, msg: &[u8], mut sig: &[u8]) -> bool {
         // The message itself should be a valid checkpoint.
-        let Ok(checkpoint) = Checkpoint::from_bytes(msg) else {
+        let Ok(checkpoint) = CheckpointText::from_bytes(msg) else {
             return false;
         };
         // timestamped_signature.timestamp
