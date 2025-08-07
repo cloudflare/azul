@@ -18,9 +18,14 @@
 //! example.com/origin
 //! 923748
 //! nND/nri//U0xuHUrYSy0HtMeal2vzD9V4k/BO79C+QeI=
-//! ```
+//! optional-extension line 1
+//! optional-extension line 2
+//! ...optional-extension line n
 //!
-//! It can be followed by extra extension lines.
+//! — PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=
+//! — EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5n2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ=
+//! ```
+//! We call everything up to and including the last extension line (including its final newline) the **checkpoint text**.
 //!
 //! This file contains code ported from the original projects [tlog](https://pkg.go.dev/golang.org/x/mod/sumdb/tlog) and [sunlight](https://github.com/FiloSottile/sunlight).
 //!
@@ -105,7 +110,8 @@ impl<R: BufRead> Iterator for StrictLines<'_, R> {
     }
 }
 
-/// A Checkpoint is a tree head to be formatted according to c2sp.org/checkpoint.
+/// A Checkpoint is a tree head to be formatted according to c2sp.org/checkpoint. This is the text
+/// part of the checkpoint, i.e., everything above the signatures.
 #[derive(PartialEq, Debug)]
 pub struct CheckpointText {
     origin: String,
@@ -116,18 +122,18 @@ pub struct CheckpointText {
     extension: String,
 }
 
-/// Maximum checkpoint size we're willing to parse.
-const MAX_CHECKPOINT_SIZE: usize = 1_000_000;
+/// Maximum checkpoint text size we're willing to parse.
+const MAX_CHECKPOINT_TEXT_SIZE: usize = 1_000_000;
 
 /// An error that can occur when parsing a tree.
 #[derive(Debug)]
-pub struct MalformedCheckpointError;
+pub struct MalformedCheckpointTextError;
 
-impl std::error::Error for MalformedCheckpointError {}
+impl std::error::Error for MalformedCheckpointTextError {}
 
-impl fmt::Display for MalformedCheckpointError {
+impl fmt::Display for MalformedCheckpointTextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "malformed checkpoint")
+        write!(f, "malformed checkpoint text")
     }
 }
 
@@ -147,13 +153,14 @@ impl CheckpointText {
         &self.hash
     }
 
-    /// Return the checkpoint's extensions.
+    /// Return the checkpoint's extensions. This is empty or a sequence of non-empty lines, each
+    /// terminated by a newline character.
     pub fn extension(&self) -> &str {
         &self.extension
     }
 
-    /// Return a new checkpoint with the given arguments. The items in
-    /// `extensions` MUST NOT be empty or contain a newline.
+    /// Return a new checkpoint text with the given arguments. `origin` MUST be nonempty, and items
+    /// in `extensions` MUST be nonempty and free of newlines.
     ///
     /// # Errors
     ///
@@ -164,13 +171,13 @@ impl CheckpointText {
         size: u64,
         hash: Hash,
         extensions: &[&str],
-    ) -> Result<Self, MalformedCheckpointError> {
+    ) -> Result<Self, MalformedCheckpointTextError> {
         if origin.is_empty() {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         }
 
         if extensions.iter().any(|e| e.is_empty() || e.contains('\n')) {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         }
 
         let extension = if extensions.is_empty() {
@@ -187,29 +194,29 @@ impl CheckpointText {
         })
     }
 
-    /// Parse a checkpoint from encoded bytes.
+    /// Parse a checkpoint text from encoded bytes.
     ///
     /// # Errors
     ///
-    /// Returns an error if the checkpoint is malformed.
-    pub fn from_bytes(text: &[u8]) -> Result<Self, MalformedCheckpointError> {
+    /// Returns an error if the checkpoint text is malformed.
+    pub fn from_bytes(text: &[u8]) -> Result<Self, MalformedCheckpointTextError> {
         let mut reader = std::io::Cursor::new(text);
 
         Self::from_reader(&mut reader, true)
     }
 
-    /// Parse a checkpoint from encoded bytes reader.
+    /// Parse a checkpoint text from encoded bytes reader.
     /// If `strict` is set to true, the `reader` should exactly match a checkpoint.
     /// Otherwise, read until we encounter a blank line (only a newline).
     ///
     /// # Errors
     ///
-    /// Returns an error if the checkpoint is malformed.
+    /// Returns an error if the checkpoint text is malformed.
     pub fn from_reader<R: BufRead>(
         reader: &mut R,
         strict: bool,
-    ) -> Result<Self, MalformedCheckpointError> {
-        let mut reader = reader.take(MAX_CHECKPOINT_SIZE as u64);
+    ) -> Result<Self, MalformedCheckpointTextError> {
+        let mut reader = reader.take(MAX_CHECKPOINT_TEXT_SIZE as u64);
         let mut lines: Box<dyn Iterator<Item = Result<String, std::io::Error>>> = if strict {
             Box::new(StrictLines::new(&mut reader))
         } else {
@@ -217,13 +224,13 @@ impl CheckpointText {
         };
 
         let Some(Ok(origin)) = lines.next() else {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         };
         let Some(Ok(n_str)) = lines.next() else {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         };
         let Some(Ok(h_str)) = lines.next() else {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         };
 
         let mut extensions = vec![];
@@ -238,28 +245,28 @@ impl CheckpointText {
         }
         // last line is not empty
         if next_line.is_none() && strict {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         }
         if let Some(line) = next_line {
             match line {
                 Ok(line) => {
                     if line != "\n" && strict {
-                        return Err(MalformedCheckpointError);
+                        return Err(MalformedCheckpointTextError);
                     }
                 }
-                Err(_) => return Err(MalformedCheckpointError),
+                Err(_) => return Err(MalformedCheckpointTextError),
             }
         }
 
         let Ok(n) = n_str.parse::<u64>() else {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         };
         if n_str != n.to_string() {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         }
 
         let Ok(hash) = Hash::parse_hash(&h_str) else {
-            return Err(MalformedCheckpointError);
+            return Err(MalformedCheckpointTextError);
         };
 
         Self::new(
@@ -270,7 +277,7 @@ impl CheckpointText {
         )
     }
 
-    /// Returns an encoded checkpoint.
+    /// Returns encoded checkpoint text.
     pub fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{}\n{}\n{}\n{}",
@@ -288,7 +295,7 @@ pub trait CheckpointSigner {
     /// Returns the key ID.
     fn key_id(&self) -> u32;
 
-    /// Signs a checkpoint using the given timestamp
+    /// Signs a checkpoint text using the given timestamp
     ///
     /// # Errors
     ///
@@ -338,9 +345,9 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
     fn sign(
         &self,
         _: UnixTimestamp,
-        checkpoint: &CheckpointText,
+        checkpoint_text: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
-        let msg = checkpoint.to_bytes();
+        let msg = checkpoint_text.to_bytes();
         // Ed25519 signing cannot fail
         let sig = self.k.try_sign(&msg).unwrap();
 
@@ -358,8 +365,7 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 }
 
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
-/// [Checkpoint] and the latest timestamp of any of its cosignatures (if
-/// defined).
+/// [CheckpointText] and the latest timestamp of any of its cosignatures (if defined).
 ///
 /// # Errors
 ///
@@ -368,9 +374,10 @@ pub fn open_checkpoint(
     origin: &str,
     verifiers: &VerifierList,
     current_time: UnixTimestamp,
-    b: &[u8],
+    checkpoint_bytes: &[u8],
 ) -> Result<(CheckpointText, Option<UnixTimestamp>), TlogError> {
-    let n = Note::from_bytes(b)?;
+    // A checkpoint is a signed note whose text is a CheckpointText
+    let n = Note::from_bytes(checkpoint_bytes)?;
     let (verified_sigs, _) = n.verify(verifiers)?;
 
     // Go through the signatures and make sure we find all the key IDs in our verifiers list
@@ -399,15 +406,15 @@ pub fn open_checkpoint(
     if !key_ids_to_observe.is_empty() {
         return Err(TlogError::MissingVerifierSignature);
     }
-    let checkpoint = CheckpointText::from_bytes(n.text())?;
+    let checkpoint_text = CheckpointText::from_bytes(n.text())?;
     if current_time < latest_timestamp.unwrap_or(0) {
         return Err(TlogError::InvalidTimestamp);
     }
-    if checkpoint.origin() != origin {
+    if checkpoint_text.origin() != origin {
         return Err(TlogError::OriginMismatch);
     }
 
-    Ok((checkpoint, latest_timestamp))
+    Ok((checkpoint_text, latest_timestamp))
 }
 
 /// A transparency log tree with a timestamp.
@@ -454,7 +461,8 @@ impl TreeWithTimestamp {
         self.time
     }
 
-    /// Signs the tree and returns a [checkpoint](c2sp.org/tlog-checkpoint).
+    /// Signs the tree and returns an encoded [checkpoint](c2sp.org/tlog-checkpoint) containing the
+    /// tree data and signatures.
     ///
     /// # Errors
     ///
@@ -471,18 +479,18 @@ impl TreeWithTimestamp {
         signers.shuffle(rng);
 
         // Construct the checkpoint with no extension lines
-        let checkpoint = CheckpointText::new(origin, self.size, self.hash, extensions)?;
+        let checkpoint_text = CheckpointText::new(origin, self.size, self.hash, extensions)?;
 
         // Sign the checkpoint with the given signers
         let sigs = signers
             .iter()
-            .map(|s| s.sign(self.time, &checkpoint))
+            .map(|s| s.sign(self.time, &checkpoint_text))
             .collect::<Result<Vec<_>, NoteError>>()?;
         // Generate some fake signatures as grease
         let grease_sigs = gen_grease_signatures(origin, rng);
 
-        // Make a new signed note from the checkpoint and serialize it
-        let signed_note = Note::new(&checkpoint.to_bytes(), &[grease_sigs, sigs].concat())?;
+        // Make a new signed note from the checkpoint text and sigs and serialize it
+        let signed_note = Note::new(&checkpoint_text.to_bytes(), &[grease_sigs, sigs].concat())?;
         Ok(signed_note.to_bytes())
     }
 }
@@ -553,7 +561,7 @@ mod tests {
         );
 
         // Check valid checkpoints.
-        let good_checkpoints: Vec<&[u8]> = vec![
+        let good_checkpoint_texts: Vec<&[u8]> = vec![
             // valid with extension
             b"example.com/origin\n123\nTszzRgjTG6xce+z2AG31kAXYKBgQVtCSCE40HmuwBb0=\nabc\ndef\n",
             // valid without extension
@@ -562,14 +570,14 @@ mod tests {
             b"e\n123\nTszzRgjTG6xce+z2AG31kAXYKBgQVtCSCE40HmuwBb0=\nabc\ndef\n",
         ];
 
-        for text in &good_checkpoints {
+        for text in &good_checkpoint_texts {
             let c = CheckpointText::from_bytes(text);
             assert!(c.is_ok());
             assert_eq!(c.unwrap().to_bytes(), *text);
         }
 
         // Check invalid checkpoints.
-        let bad_checkpoints: Vec<&[u8]> = vec![
+        let bad_checkpoint_texts: Vec<&[u8]> = vec![
             // empty origin
             b"\n123\nTszzRgjTG6xce+z2AG31kAXYKBgQVtCSCE40HmuwBb0=\nabc\ndef\n",
             // invalid tree size
@@ -585,7 +593,7 @@ mod tests {
             // non-newline-terminated extension line
             b"example.com/origin\n123\nTszzRgjTG6xce+z2AG31kAXYKBgQVtCSCE40HmuwBb0=\nabc\ndef",
         ];
-        for (i, text) in bad_checkpoints.iter().enumerate() {
+        for (i, text) in bad_checkpoint_texts.iter().enumerate() {
             assert!(
                 CheckpointText::from_bytes(text).is_err(),
                 "expected error at index {i}: {text:?}"
@@ -593,7 +601,7 @@ mod tests {
         }
 
         // Now use from_reader
-        for text in good_checkpoints {
+        for text in good_checkpoint_texts {
             let mut reader = std::io::Cursor::new(text);
             let c = CheckpointText::from_reader(&mut reader, true);
             assert!(c.is_ok());
@@ -605,7 +613,7 @@ mod tests {
         }
 
         // Check buffer which fail strict validation. When strict, the buffer has to be an exact match
-        let non_strict_checkpoints: Vec<&[u8]> = vec![
+        let non_strict_checkpoint_texts: Vec<&[u8]> = vec![
             // empty extension line
             b"example.com/origin\n123\nTszzRgjTG6xce+z2AG31kAXYKBgQVtCSCE40HmuwBb0=\nabc\n\n",
             // valid with extension and something after
@@ -613,7 +621,7 @@ mod tests {
             // valid without extension and something after
             b"example.com/origin\n123\nTszzRgjTG6xce+z2AG31kAXYKBgQVtCSCE40HmuwBb0=\n\nHello world",
         ];
-        for (i, text) in non_strict_checkpoints.iter().enumerate() {
+        for (i, text) in non_strict_checkpoint_texts.iter().enumerate() {
             let mut reader = std::io::Cursor::new(text);
             let c = CheckpointText::from_reader(&mut reader, true);
             assert!(c.is_err(), "expected error at index {i}: {text:?}");
@@ -640,7 +648,7 @@ mod tests {
         };
         let checkpoint = tree.sign(origin, &[], &[&signer], &mut rng).unwrap();
 
-        // Now verify the signed checkpoint
+        // Now verify the checkpoint
         let verifier = signer.verifier();
         open_checkpoint(
             origin,

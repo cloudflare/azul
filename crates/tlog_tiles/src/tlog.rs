@@ -495,7 +495,7 @@ pub enum TlogError {
     #[error(transparent)]
     Note(#[from] signed_note::NoteError),
     #[error(transparent)]
-    MalformedCheckpoint(#[from] crate::MalformedCheckpointError),
+    MalformedCheckpoint(#[from] crate::MalformedCheckpointTextError),
     #[error(transparent)]
     InvalidBase64(#[from] base64::DecodeError),
     #[error(transparent)]
