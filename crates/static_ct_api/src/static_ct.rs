@@ -120,8 +120,8 @@ use sha2::{Digest, Sha256};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use std::io::Read;
 use tlog_tiles::{
-    CheckpointText, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PathElem, PendingLogEntry,
-    SequenceMetadata, UnixTimestamp,
+    CheckpointSigner, CheckpointText, Hash, LeafIndex, LogEntry, LookupKey, PathElem,
+    PendingLogEntry, SequenceMetadata, UnixTimestamp,
 };
 
 #[repr(u16)]

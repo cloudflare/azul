@@ -14,12 +14,15 @@ use der::{
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket,
-    log_ops::{prove_inclusion, CHECKPOINT_KEY},
+    log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
     put_cache_entry_metadata, serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
-use mtc_api::{AddEntryRequest, AddEntryResponse, RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
+use mtc_api::{
+    serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
+    LandmarkSequence, RelativeOid, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
+};
 use p256::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
@@ -49,18 +52,23 @@ struct MetadataResponse<'a> {
     monitoring_url: &'a str,
 }
 
-/// GET query structure for the `/prove_inclusion` endpoint
-#[derive(Serialize, Deserialize)]
-pub struct ProveInclusionQuery {
-    pub leaf_index: LeafIndex,
-}
-
-/// GET response structure for the `/prove_inclusion` endpoint
+// POST body structure for the `/get-certificate` endpoint
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct ProveInclusionResponse {
-    #[serde_as(as = "Vec<Base64>")]
-    pub proof: Vec<Vec<u8>>,
+pub struct GetCertificateRequest {
+    pub leaf_index: LeafIndex,
+
+    #[serde_as(as = "Base64")]
+    pub spki_der: Vec<u8>,
+}
+
+/// GET response structure for the `/get-certificate` endpoint
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct GetCertificateResponse {
+    #[serde_as(as = "Base64")]
+    pub data: Vec<u8>,
+    pub landmark_id: usize,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -99,11 +107,18 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .post_async("/logs/:log/add-entry", |req, ctx| async move {
                     add_entry(req, &ctx.env, ctx.data).await
                 })
-                .get_async("/logs/:log/prove-inclusion", |req, ctx| async move {
+                .post_async("/logs/:log/get-certificate", |mut req, ctx| async move {
                     let name = ctx.data;
-                    let bucket = load_public_bucket(&ctx.env, name)?;
-                    let ProveInclusionQuery { leaf_index } = req.query()?;
-                    let object_backend = ObjectBucket::new(bucket);
+                    let params = &CONFIG.logs[name];
+                    let object_backend = ObjectBucket::new(load_public_bucket(&ctx.env, name)?);
+
+                    let GetCertificateRequest {
+                        leaf_index,
+                        spki_der,
+                    } = req.json().await?;
+
+                    // Fetch the current checkpoint to know which tiles to fetch
+                    // (full or partials).
                     let checkpoint_bytes = object_backend
                         .fetch(CHECKPOINT_KEY)
                         .await?
@@ -124,23 +139,80 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     .map_err(|e| e.to_string())?
                     .0;
                     if leaf_index >= checkpoint.size() {
-                        return Response::error(
-                            "Leaf index is greater than current log size.",
-                            422,
-                        );
+                        return Response::error("Leaf index is not in log", 422);
                     }
-                    let proof = prove_inclusion(
+
+                    let seq = if let Some(bytes) = object_backend.fetch(LANDMARK_KEY).await? {
+                        let max_landmarks = params
+                            .max_certificate_lifetime_secs
+                            .div_ceil(params.landmark_interval_secs)
+                            + 1;
+                        LandmarkSequence::deserialize(&bytes, max_landmarks)
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        return Err("failed to get landmark sequence".into());
+                    };
+                    if leaf_index < seq.first_index() {
+                        return Response::error("Leaf index is before first active landmark", 422);
+                    }
+                    let Some((landmark_id, landmark_subtree)) = seq.subtree_for_index(leaf_index)
+                    else {
+                        // The leaf index might be between the latest landmark
+                        // and the current tree size. Set Retry-After to the
+                        // expected time for the next landmark so the client can
+                        // try again later.
+                        let headers = Headers::new();
+                        let i = params.landmark_interval_secs as u64;
+                        headers
+                            .set("Retry-After", &format!("{}", i - (now_millis() / 1000) % i))?;
+                        return Response::error("Leaf index will be covered by next landmark", 503)
+                            .map(|r| r.with_headers(headers));
+                    };
+
+                    // Fetch the log entry for the leaf index.
+                    let log_entry = read_leaf::<BootstrapMtcLogEntry>(
+                        &object_backend,
+                        leaf_index,
+                        checkpoint.size(),
+                        checkpoint.hash(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                    // Calculate and verify the inclusion proof.
+                    let inclusion_proof = match prove_subtree_inclusion(
                         checkpoint.size(),
                         *checkpoint.hash(),
+                        landmark_subtree.lo(),
+                        landmark_subtree.hi(),
                         leaf_index,
                         &object_backend,
                     )
-                    .await?;
-                    let proof_bytestrings =
-                        proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
-                    Response::from_json(&ProveInclusionResponse {
-                        proof: proof_bytestrings,
-                    })
+                    .await
+                    {
+                        Ok(p) => p,
+                        Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
+                        Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+                    };
+
+                    // Construct the signatureless certificate.
+                    let data = match serialize_signatureless_cert(
+                        &log_entry,
+                        leaf_index,
+                        &spki_der,
+                        &landmark_subtree,
+                        inclusion_proof,
+                    ) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            return Response::error(
+                                format!("Failed to serialize signatureless cert: {e}"),
+                                422,
+                            )
+                        }
+                    };
+
+                    Response::from_json(&GetCertificateResponse { data, landmark_id })
                 })
                 .get("/logs/:log/metadata", |_req, ctx| {
                     let name = ctx.data;
@@ -245,7 +317,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         not_before: Time::UtcTime(UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?),
         not_after: Time::UtcTime(
             UtcTime::from_unix_duration(
-                now + Duration::from_secs(params.validity_interval_seconds),
+                now + Duration::from_secs(params.max_certificate_lifetime_secs as u64),
             )
             .map_err(|e| e.to_string())?,
         ),

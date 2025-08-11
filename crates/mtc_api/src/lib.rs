@@ -1,17 +1,19 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
+mod landmark;
 mod relative_oid;
 mod subtree_cosignature;
+pub use landmark::*;
 pub use relative_oid::*;
 pub use subtree_cosignature::*;
 
 use anyhow::{anyhow, bail, ensure};
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{
     asn1::{BitString, OctetString},
     oid::{db::rfc5280, ObjectIdentifier},
-    Decode, Encode, Sequence, ValueOrd,
+    Any, Decode, Encode, Sequence, ValueOrd,
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use serde::{Deserialize, Serialize};
@@ -24,8 +26,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, SequenceMetadata, TlogError,
-    TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
+    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, SequenceMetadata, Subtree,
+    TlogError, TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
 };
 use x509_cert::{
     certificate::Version,
@@ -34,6 +36,8 @@ use x509_cert::{
         Extension,
     },
     name::RdnSequence,
+    serial_number::SerialNumber,
+    spki::{AlgorithmIdentifier, SubjectPublicKeyInfo},
     time::Validity,
     Certificate, TbsCertificate,
 };
@@ -43,6 +47,65 @@ use x509_util::CertPool;
 // as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
 pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.1");
+
+// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.6.TBD"
+// as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+pub const ID_ALG_MTCPROOF: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.0");
+
+// MTCSignature from <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+struct MtcSignature {
+    cosigner_id: TrustAnchorID,
+    signature: Vec<u8>,
+}
+
+impl MtcSignature {
+    fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer
+            .write_length_prefixed(&self.cosigner_id.0, 1)
+            .unwrap();
+        buffer.write_length_prefixed(&self.signature, 2).unwrap();
+        buffer
+    }
+}
+
+// MTCProof from <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+struct MtcProof {
+    start: u64,
+    end: u64,
+    inclusion_proof: Proof,
+    signatures: Vec<MtcSignature>,
+}
+
+impl MtcProof {
+    fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.write_u64::<BigEndian>(self.start).unwrap();
+        buffer.write_u64::<BigEndian>(self.end).unwrap();
+        buffer
+            .write_length_prefixed(
+                &self
+                    .inclusion_proof
+                    .iter()
+                    .flat_map(|h| h.0.to_vec())
+                    .collect::<Vec<u8>>(),
+                2,
+            )
+            .unwrap();
+        buffer
+            .write_length_prefixed(
+                &self
+                    .signatures
+                    .iter()
+                    .flat_map(MtcSignature::serialize)
+                    .collect::<Vec<u8>>(),
+                2,
+            )
+            .unwrap();
+        buffer
+    }
+}
 
 /// Add-entry request. Chain is a certificate from which to bootstrap the
 /// request in the same format as RFC6962 add-chain requests.
@@ -123,6 +186,61 @@ impl LogEntry for BootstrapMtcLogEntry {
     }
 }
 
+/// Return the serialized DER-encoded bytes of a signatureless certificate.
+///
+/// # Errors
+///
+/// Will return an error if the hash of `spki` does not match that in the log
+/// entry, or if there are any serialization errors.
+pub fn serialize_signatureless_cert(
+    log_entry: &BootstrapMtcLogEntry,
+    leaf_index: LeafIndex,
+    spki_der: &[u8],
+    subtree: &Subtree,
+    inclusion_proof: Proof,
+) -> Result<Vec<u8>, anyhow::Error> {
+    let entry = match MerkleTreeCertEntry::decode(&log_entry.0.inner.data)? {
+        MerkleTreeCertEntry::TbsCertEntry(entry) => entry,
+        MerkleTreeCertEntry::NullEntry => bail!("no tbs cert entry for null entry"),
+    };
+    let spki: SubjectPublicKeyInfo<Any, BitString> = SubjectPublicKeyInfo::from_der(spki_der)?;
+    let spki_hash = OctetString::new(Sha256::digest(spki_der).as_slice())?;
+    if spki_hash != entry.subject_public_key_info_hash {
+        bail!("spki hash mismatch");
+    }
+    let signature_algorithm = AlgorithmIdentifier {
+        oid: ID_ALG_MTCPROOF,
+        parameters: None,
+    };
+
+    let tbs_certificate = TbsCertificate {
+        version: entry.version,
+        serial_number: SerialNumber::new(&leaf_index.to_be_bytes()).map_err(|e| anyhow!(e))?,
+        signature: signature_algorithm.clone(),
+        issuer: entry.issuer,
+        validity: entry.validity,
+        subject: entry.subject,
+        subject_public_key_info: spki,
+        issuer_unique_id: entry.issuer_unique_id,
+        subject_unique_id: entry.subject_unique_id,
+        extensions: entry.extensions,
+    };
+    let certificate = Certificate {
+        tbs_certificate,
+        signature_algorithm,
+        signature: BitString::from_bytes(
+            &MtcProof {
+                start: subtree.lo(),
+                end: subtree.hi(),
+                inclusion_proof,
+                signatures: Vec::new(),
+            }
+            .serialize(),
+        )?,
+    };
+    certificate.to_der().map_err(|e| anyhow!(e))
+}
+
 #[derive(Debug, Error)]
 pub enum MtcError {
     #[error(transparent)]
@@ -135,6 +253,8 @@ pub enum MtcError {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     ParseInt(#[from] ParseIntError),
+    #[error("overlap in validity with bootstrap chain is empty")]
+    Validity,
     #[error("empty chain")]
     EmptyChain,
     #[error("invalid relative OID")]
@@ -449,7 +569,17 @@ pub fn validate_chain(
         .map(|x| Certificate::from_der(x))
         .collect::<Result<Vec<Certificate>, der::Error>>()?;
 
+    // Adjust the validity bound to the overlapping part of validity periods of
+    // all certificates in the chain.
     for cert in std::iter::once(&leaf).chain(&chain) {
+        if validity.not_before.to_unix_duration().lt(&cert
+            .tbs_certificate
+            .validity
+            .not_before
+            .to_unix_duration())
+        {
+            validity.not_before = cert.tbs_certificate.validity.not_before;
+        }
         if validity.not_after.to_unix_duration().gt(&cert
             .tbs_certificate
             .validity
@@ -457,6 +587,15 @@ pub fn validate_chain(
             .to_unix_duration())
         {
             validity.not_after = cert.tbs_certificate.validity.not_after;
+        }
+        // Check that we still have a non-empty validity period.
+        if validity
+            .not_after
+            .to_unix_duration()
+            .le(&validity.not_before.to_unix_duration())
+        {
+            // There is no remaining validity period.
+            return Err(MtcError::Validity);
         }
     }
 

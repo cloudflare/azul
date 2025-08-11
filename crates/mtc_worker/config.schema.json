@@ -30,10 +30,16 @@
                             "type": "string",
                             "description": "The log name (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
                         },
-                        "validity_interval_seconds": {
+                        "max_certificate_lifetime_secs": {
                             "type": "integer",
                             "default": 604800,
-                            "description": "The maximum validity interval for issued certificates. The actual validity window could be less, for example, to fit within the bootstrap certificate's validity."
+                            "description": "The maximum lifetime for issued certificates. The actual lifetime could be less, for example, to fit within the bootstrap certificate's validity window."
+                        },
+                        "landmark_interval_secs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 3600,
+                            "description": "The time between publishing landmarks. This is used to calculate `max_landmarks` as `ceil(max_certificate_timetime_secs / landmark_interval_secs) + 1`."
                         },
                         "submission_url": {
                             "type": "string",
