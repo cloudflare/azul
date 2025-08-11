@@ -365,7 +365,7 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 }
 
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
-/// [CheckpointText] and the latest timestamp of any of its cosignatures (if defined).
+/// [`CheckpointText`] and the latest timestamp of any of its cosignatures (if defined).
 ///
 /// # Errors
 ///
