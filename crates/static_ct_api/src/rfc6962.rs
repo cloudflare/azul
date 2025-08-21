@@ -137,6 +137,11 @@ pub fn validate_chain(
         .map(|v| parse_certificate(v))
         .collect::<Result<_, _>>()?;
 
+    let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
+        .iter()
+        .map(|issuer| Sha256::digest(issuer).into())
+        .collect();
+
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
@@ -172,6 +177,7 @@ pub fn validate_chain(
         }
         if is_link_valid(to_verify, &roots.certs[idx]) {
             intermediates.push(roots.certs[idx].clone());
+            chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
             found = true;
             break;
         }
@@ -217,11 +223,6 @@ pub fn validate_chain(
         precert_opt = None;
         certificate = leaf.to_der()?;
     }
-
-    let chain_fingerprints = raw_chain[1..]
-        .iter()
-        .map(|issuer| Sha256::digest(issuer).into())
-        .collect();
 
     Ok(StaticCTPendingLogEntry {
         certificate,
@@ -437,7 +438,7 @@ mod tests {
     );
 
     macro_rules! test_validate_chain {
-        ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $expect_precert:expr; $require_server_auth_eku:expr; $want_err:expr) => {
+        ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $expect_precert:expr; $require_server_auth_eku:expr; $want_err:expr; $want_chain_len:expr) => {
             #[test]
             fn $name() {
                 let mut roots = Vec::new();
@@ -449,28 +450,32 @@ mod tests {
                     chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
                 )*
 
-                assert_eq!(validate_chain(
+                let result = validate_chain(
                         &x509_util::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
                         $not_after_start,
                         $not_after_end,
                         $expect_precert,
                         $require_server_auth_eku,
-                    )
-                    .is_err(), $want_err);
+                    );
+                assert_eq!(result.is_err(), $want_err);
+
+                if let Ok(pending_entry) = result {
+                    assert_eq!(pending_entry.chain_fingerprints.len(), $want_chain_len);
+                }
             }
         };
     }
 
     macro_rules! test_validate_chain_success {
-        ($name:ident, $($chain_file:expr),+) => {
-            test_validate_chain!($name; "../tests/fake-ca-cert.pem", "../tests/fake-root-ca-cert.pem", "../tests/ca-cert.pem", "../tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; false; false);
+        ($name:ident, $want_chain_len:expr, $($chain_file:expr),+) => {
+            test_validate_chain!($name; "../tests/fake-ca-cert.pem", "../tests/fake-root-ca-cert.pem", "../tests/ca-cert.pem", "../tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; false; false; $want_chain_len);
         };
     }
 
     macro_rules! test_validate_chain_fail {
         ($name:ident, $($chain_file:expr),+) => {
-            test_validate_chain!($name; "../tests/fake-ca-cert.pem", "../tests/fake-root-ca-cert.pem", "../tests/ca-cert.pem", "../tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; false; true);
+            test_validate_chain!($name; "../tests/fake-ca-cert.pem", "../tests/fake-root-ca-cert.pem", "../tests/ca-cert.pem", "../tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; false; true; 0);
         };
     }
 
@@ -501,31 +506,36 @@ mod tests {
     );
     test_validate_chain_success!(
         valid_chain,
+        2,
         "../tests/leaf-signed-by-fake-intermediate-cert.pem",
         "../tests/fake-intermediate-cert.pem"
     );
     test_validate_chain_success!(
         valid_chain_with_policy_constraints,
+        2,
         "../tests/leaf-cert.pem",
         "../tests/fake-intermediate-with-policy-constraints-cert.pem"
     );
     test_validate_chain_success!(
         valid_chain_with_policy_constraints_inc_root,
+        2,
         "../tests/leaf-cert.pem",
         "../tests/fake-intermediate-with-policy-constraints-cert.pem",
         "../tests/fake-root-ca-cert.pem"
     );
     test_validate_chain_success!(
         valid_chain_with_name_constraints,
+        2,
         "../tests/leaf-cert.pem",
         "../tests/fake-intermediate-with-name-constraints-cert.pem"
     );
     test_validate_chain_success!(
         valid_chain_with_invalid_name_constraints,
+        2,
         "../tests/leaf-cert.pem",
         "../tests/fake-intermediate-with-invalid-name-constraints-cert.pem"
     );
-    test_validate_chain_success!(valid_chain_of_len_4, "../tests/subleaf.chain");
+    test_validate_chain_success!(valid_chain_of_len_4, 3, "../tests/subleaf.chain");
     test_validate_chain_fail!(
         misordered_chain_of_len_4,
         "../tests/subleaf.misordered.chain"
@@ -537,16 +547,16 @@ mod tests {
 
     macro_rules! test_not_after {
         ($name:ident; $start:expr; $end:expr; $want_err:expr) => {
-            test_validate_chain!($name; "../tests/fake-ca-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem", "../tests/fake-intermediate-cert.pem"; $start; $end; false; true; $want_err);
+            test_validate_chain!($name; "../tests/fake-ca-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem", "../tests/fake-intermediate-cert.pem"; $start; $end; false; true; $want_err; 2);
         };
     }
     test_not_after!(not_after_no_range; None; None; false);
     test_not_after!(not_after_valid_range; Some(parse_datetime("2018-01-01T00:00:00Z")); Some(parse_datetime("2020-07-01T00:00:00Z")); false);
     test_not_after!(not_after_before_start; Some(parse_datetime("2020-01-01T00:00:00Z")); None; true);
     test_not_after!(not_after_after_end; None; Some(parse_datetime("1999-01-01T00:00:00Z")); true);
-    test_validate_chain!(missing_server_auth_eku_not_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; false; false);
-    test_validate_chain!(missing_server_auth_eku_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; true; true);
-    test_validate_chain!(preissuer_chain; "../tests/test-roots.pem"; "../tests/preissuer-chain.pem"; None; None; true; true; false);
+    test_validate_chain!(missing_server_auth_eku_not_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; false; false; 3);
+    test_validate_chain!(missing_server_auth_eku_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; true; true; 0);
+    test_validate_chain!(preissuer_chain; "../tests/test-roots.pem"; "../tests/preissuer-chain.pem"; None; None; true; true; false; 3);
 
     #[test]
     fn test_build_precert_tbs() {
