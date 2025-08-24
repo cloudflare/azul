@@ -39,9 +39,9 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    ConsistencyProof, Hash, HashReader, InclusionProof, LogEntry, PendingLogEntry,
-    PreloadedTlogTileReader, TileHashReader, TileIterator, TlogError, TlogTile, TlogTileRecorder,
-    TreeWithTimestamp, UnixTimestamp, HASH_SIZE,
+    Hash, HashReader, LogEntry, PendingLogEntry, PreloadedTlogTileReader, Proof, TileHashReader,
+    TileIterator, TlogError, TlogTile, TlogTileRecorder, TreeWithTimestamp, UnixTimestamp,
+    HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 use worker::Error as WorkerError;
@@ -475,7 +475,7 @@ impl SequenceState {
 
     /// Proves inclusion of the last leaf in the current tree.
     #[cfg(test)]
-    pub(crate) fn prove_inclusion_of_last_elem(&self) -> InclusionProof {
+    pub(crate) fn prove_inclusion_of_last_elem(&self) -> Proof {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
             edge_tiles: &self.edge_tiles,
@@ -493,7 +493,7 @@ impl SequenceState {
     /// Errors when the last tree was size 0. We cannot prove consistency with
     /// respect to an empty tree
     #[cfg(test)]
-    pub(crate) fn prove_consistency_of_single_append(&self) -> Result<ConsistencyProof, TlogError> {
+    pub(crate) fn prove_consistency_of_single_append(&self) -> Result<Proof, TlogError> {
         let tree_size = self.tree.size();
         let reader = HashReaderWithOverlay {
             edge_tiles: &self.edge_tiles,
@@ -513,7 +513,7 @@ pub async fn prove_inclusion(
     tree_hash: Hash,
     leaf_index: u64,
     object: &impl ObjectBackend,
-) -> Result<InclusionProof, WorkerError> {
+) -> Result<Proof, WorkerError> {
     if leaf_index >= tree_size {
         return Err(WorkerError::RustError(
             "leaf index exceeds number of leaves in the tree".to_string(),
@@ -543,7 +543,7 @@ pub async fn prove_consistency(
     cur_tree_size: u64,
     prev_tree_size: u64,
     object: &impl ObjectBackend,
-) -> Result<ConsistencyProof, WorkerError> {
+) -> Result<Proof, WorkerError> {
     if !(1..=cur_tree_size).contains(&prev_tree_size) {
         return Err("condition not met: 1 <= prev_tree_size <= cur_tree_size".into());
     }

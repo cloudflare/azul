@@ -31,6 +31,10 @@ pub const HASH_SIZE: usize = 32;
 #[derive(Copy, Clone, Default, PartialEq)]
 pub struct Hash(pub [u8; HASH_SIZE]);
 
+/// A `Proof` is a verifiable Merkle Tree (subtree) inclusion or consistency
+/// proof.
+pub type Proof = Vec<Hash>;
+
 impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", BASE64_STANDARD.encode(self.0))?;
@@ -351,10 +355,6 @@ fn subtree_hash(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
     (h, hashes[num_tree..].to_vec())
 }
 
-/// A `InclusionProof` is a verifiable proof that a particular log root contains a particular record.
-/// RFC 6962 calls this a “Merkle audit path.”
-pub type InclusionProof = Vec<Hash>;
-
 /// Returns the proof that the tree of size `t` contains the record with index `n`.
 ///
 /// # Errors
@@ -365,7 +365,7 @@ pub type InclusionProof = Vec<Hash>;
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_inclusion<R: HashReader>(t: u64, n: u64, r: &R) -> Result<InclusionProof, TlogError> {
+pub fn prove_inclusion<R: HashReader>(t: u64, n: u64, r: &R) -> Result<Proof, TlogError> {
     prove_subtree_inclusion(0, t, n, r)
 }
 
@@ -385,7 +385,7 @@ pub fn prove_subtree_inclusion<R: HashReader>(
     hi: u64,
     n: u64,
     r: &R,
-) -> Result<InclusionProof, TlogError> {
+) -> Result<Proof, TlogError> {
     if n >= hi {
         return Err(TlogError::InvalidInput("n >= t".into()));
     }
@@ -436,7 +436,7 @@ pub fn inclusion_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> 
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.1>.
 ///
 /// May panic if there are internal math errors.
-fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (InclusionProof, Vec<Hash>) {
+fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof, Vec<Hash>) {
     // We must have lo <= n < hi or else the code here has a bug.
     assert!(lo <= n && n < hi, "bad math in inclusion_proof");
 
@@ -449,7 +449,7 @@ fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Inclusio
 
     // Walk down the tree toward n.
     // Record the hash of the path not taken (needed for verifying the proof).
-    let mut proof: InclusionProof;
+    let mut proof: Proof;
     let th: Hash;
     let (k, _) = maxpow2(hi - lo);
     if n < lo + k {
@@ -512,13 +512,7 @@ pub enum TlogError {
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-pub fn check_inclusion(
-    p: &InclusionProof,
-    t: u64,
-    th: Hash,
-    n: u64,
-    h: Hash,
-) -> Result<(), TlogError> {
+pub fn check_inclusion(p: &Proof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), TlogError> {
     if n >= t {
         return Err(TlogError::InvalidInput("n >= t".into()));
     }
@@ -538,7 +532,7 @@ pub fn check_inclusion(
 ///
 /// Panics if there are internal math errors.
 fn run_inclusion_proof(
-    p: &InclusionProof,
+    p: &Proof,
     lo: u64,
     hi: u64,
     n: u64,
@@ -571,11 +565,6 @@ fn run_inclusion_proof(
     }
 }
 
-/// A `ConsistencyProof` is a verifiable proof that a particular log tree contains
-/// as a prefix all records present in an earlier tree.
-/// RFC 6962 calls this a “Merkle consistency proof.”
-pub type ConsistencyProof = Vec<Hash>;
-
 /// Returns the proof that the tree of size `t` contains
 /// as a prefix all the records from the tree of smaller size `n`.
 ///
@@ -587,11 +576,7 @@ pub type ConsistencyProof = Vec<Hash>;
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_consistency<R: HashReader>(
-    t: u64,
-    n: u64,
-    h: &R,
-) -> Result<ConsistencyProof, TlogError> {
+pub fn prove_consistency<R: HashReader>(t: u64, n: u64, h: &R) -> Result<Proof, TlogError> {
     if !(1..=t).contains(&n) {
         return Err(TlogError::InvalidInput("1 <= n <= t".into()));
     }
@@ -650,12 +635,7 @@ pub fn consistency_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.2>.
 ///
 /// May panic if there are internal math errors.
-fn consistency_proof(
-    lo: u64,
-    hi: u64,
-    n: u64,
-    mut hashes: Vec<Hash>,
-) -> (ConsistencyProof, Vec<Hash>) {
+fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof, Vec<Hash>) {
     assert!((lo + 1..=hi).contains(&n), "bad math in consistency_proof");
 
     // Reached common ground.
@@ -671,7 +651,7 @@ fn consistency_proof(
 
     // Interior node for the proof.
     // Decide whether to walk down the left or right side.
-    let mut p: ConsistencyProof;
+    let mut p: Proof;
     let th: Hash;
     let (k, _) = maxpow2(hi - lo);
     if n <= lo + k {
@@ -697,13 +677,7 @@ fn consistency_proof(
 ///# Panics
 ///
 /// Panics if there are internal math errors.
-pub fn check_consistency(
-    p: &ConsistencyProof,
-    t: u64,
-    th: Hash,
-    n: u64,
-    h: Hash,
-) -> Result<(), TlogError> {
+pub fn check_consistency(p: &Proof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), TlogError> {
     if !(1..=t).contains(&n) {
         return Err(TlogError::InvalidInput("1 <= n <= t".into()));
     }
@@ -724,7 +698,7 @@ pub fn check_consistency(
 ///
 /// Panics if there are internal math errors.
 fn run_consistency_proof(
-    p: &ConsistencyProof,
+    p: &Proof,
     lo: u64,
     hi: u64,
     n: u64,
