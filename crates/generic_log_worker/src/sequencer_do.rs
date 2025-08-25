@@ -3,7 +3,7 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, future::Future, pin::Pin, time::Duration};
 
 use crate::{
     deserialize, get_durable_object_stub, load_public_bucket,
@@ -54,6 +54,7 @@ pub struct SequencerConfig {
     pub sequence_skip_threshold_millis: Option<u64>,
     pub enable_dedup: bool,
     pub location_hint: Option<String>,
+    pub checkpoint_callback: CheckpointCallbacker,
 }
 
 impl<L: LogEntry> GenericSequencer<L> {
@@ -286,4 +287,28 @@ impl<L: LogEntry> GenericSequencer<L> {
             .unwrap();
         Response::ok(buffer)
     }
+}
+
+/// A callback function that gets called each time the sequencer updates the
+/// checkpoint. Currently, this is used only to update the landmark checkpoint
+/// sequence for MTC, but could be extended in the future to collect
+/// cosignatures or perform other application-specific actions.
+pub type CheckpointCallbacker = Box<
+    dyn Fn(
+            u64,
+            UnixTimestamp,
+            UnixTimestamp,
+        ) -> Pin<Box<dyn Future<Output = Result<(), WorkerError>> + 'static>>
+        + 'static,
+>;
+
+/// A no-op checkpoint callback that can be used in applications like CT that
+/// don't need to perform any action after the checkpoint is updated.
+pub fn empty_checkpoint_callback() -> CheckpointCallbacker {
+    Box::new(
+        move |_tree_size: u64, _old_time: UnixTimestamp, _new_time: UnixTimestamp| {
+            Box::pin(async move { Ok(()) })
+                as Pin<Box<dyn Future<Output = Result<(), WorkerError>>>>
+        },
+    )
 }

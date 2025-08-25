@@ -13,7 +13,9 @@
             "log_id": "13335.2",
             "submission_url": "http://localhost:8787/logs/dev2/",
             "location_hint": "enam",
-            "enable_dedup": false
+            "enable_dedup": false,
+            "max_certificate_lifetime_secs": 100,
+            "landmark_interval_secs": 10
         }
     }
 }
