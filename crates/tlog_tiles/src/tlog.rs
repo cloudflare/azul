@@ -24,6 +24,42 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
+#[derive(Error, Debug)]
+pub enum TlogError {
+    #[error("invalid transparency proof")]
+    InvalidProof,
+    #[error("malformed hash")]
+    MalformedHash,
+    #[error("invalid tile")]
+    InvalidTile,
+    #[error("bad math")]
+    BadMath,
+    #[error("recorded but did not read tiles")]
+    RecordedTilesOnly,
+    #[error("downloaded inconsistent tile")]
+    InconsistentTile,
+    #[error("indexes not in tree")]
+    IndexesNotInTree,
+    #[error("indexes out of order")]
+    IndexesOutOfOrder,
+    #[error("unmet input condition: {0}")]
+    InvalidInput(String),
+    #[error("missing verifier signature")]
+    MissingVerifierSignature,
+    #[error("timestamp is after current time")]
+    InvalidTimestamp,
+    #[error("checkpoint origin does not match")]
+    OriginMismatch,
+    #[error(transparent)]
+    Note(#[from] signed_note::NoteError),
+    #[error(transparent)]
+    MalformedCheckpoint(#[from] crate::MalformedCheckpointTextError),
+    #[error(transparent)]
+    InvalidBase64(#[from] base64::DecodeError),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+}
+
 /// `HashSize` is the size of a Hash in bytes.
 pub const HASH_SIZE: usize = 32;
 
@@ -355,7 +391,8 @@ fn subtree_hash(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
     (h, hashes[num_tree..].to_vec())
 }
 
-/// Returns the proof that the tree of size `t` contains the record with index `n`.
+/// Returns the proof that the tree of size `n` contains the record with
+/// index `leaf_index`.
 ///
 /// # Errors
 ///
@@ -365,31 +402,11 @@ fn subtree_hash(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_inclusion<R: HashReader>(t: u64, n: u64, r: &R) -> Result<Proof, TlogError> {
-    prove_subtree_inclusion(0, t, n, r)
-}
-
-/// Returns the proof that the subtree with leaves [lo, hi) contains the record
-/// with index `n`.
-///
-/// # Errors
-///
-/// Returns an error if `read_hashes` fails to read hashes.
-///
-/// # Panics
-///
-/// Panics if `read_hashes` returns a slice of hashes that is not the same
-/// length as the requested indexes, or if there are internal math errors.
-pub fn prove_subtree_inclusion<R: HashReader>(
-    lo: u64,
-    hi: u64,
-    n: u64,
-    r: &R,
-) -> Result<Proof, TlogError> {
-    if n >= hi {
-        return Err(TlogError::InvalidInput("n >= t".into()));
+pub fn inclusion_proof<R: HashReader>(n: u64, leaf_index: u64, r: &R) -> Result<Proof, TlogError> {
+    if leaf_index >= n {
+        return Err(TlogError::InvalidInput("leaf_index < n".into()));
     }
-    let indexes = inclusion_proof_indexes(lo, hi, n, vec![]);
+    let indexes = inclusion_proof_indexes_recursion(0, n, leaf_index, vec![]);
     if indexes.is_empty() {
         return Ok(vec![]);
     }
@@ -399,12 +416,26 @@ pub fn prove_subtree_inclusion<R: HashReader>(
         indexes.len(),
         "bad read_hashes implementation"
     );
-    let (proof, remaining_hashes) = inclusion_proof(lo, hi, n, hashes);
+    let (proof, remaining_hashes) = inclusion_proof_recursion(0, n, leaf_index, hashes);
     assert!(
         remaining_hashes.is_empty(),
-        "bad index math in prove_subtree_inclusion"
+        "bad index math in consistency_proof"
     );
     Ok(proof)
+}
+
+/// Returns the indexes required for the proof that the tree of size `n`
+/// contains the record with index `leaf_index`.
+///
+/// # Errors
+///
+/// Returns an error if the `[lo, hi)` is not a valid subtree, or if
+/// `leaf_index` is not in that subtree.
+pub fn inclusion_proof_indexes(n: u64, leaf_index: u64) -> Result<Vec<u64>, TlogError> {
+    if leaf_index >= n {
+        return Err(TlogError::InvalidInput("leaf_index < n".into()));
+    }
+    Ok(inclusion_proof_indexes_recursion(0, n, leaf_index, vec![]))
 }
 
 /// Builds the list of indexes needed to construct the proof
@@ -414,7 +445,7 @@ pub fn prove_subtree_inclusion<R: HashReader>(
 ///
 /// # Panics
 /// May panic if there are internal math errors.
-pub fn inclusion_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
+fn inclusion_proof_indexes_recursion(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
     // See inclusion_proof below for commentary.
     assert!(lo <= n && n < hi, "bad math in inclusion_proof_indexes");
     if lo + 1 == hi {
@@ -422,11 +453,11 @@ pub fn inclusion_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> 
     }
     let (k, _) = maxpow2(hi - lo);
     if n < lo + k {
-        need = inclusion_proof_indexes(lo, lo + k, n, need);
+        need = inclusion_proof_indexes_recursion(lo, lo + k, n, need);
         need = subtree_indexes(lo + k, hi, need);
     } else {
         need = subtree_indexes(lo, lo + k, need);
-        need = inclusion_proof_indexes(lo + k, hi, n, need);
+        need = inclusion_proof_indexes_recursion(lo + k, hi, n, need);
     }
     need
 }
@@ -436,7 +467,12 @@ pub fn inclusion_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> 
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.1>.
 ///
 /// May panic if there are internal math errors.
-fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof, Vec<Hash>) {
+fn inclusion_proof_recursion(
+    lo: u64,
+    hi: u64,
+    n: u64,
+    mut hashes: Vec<Hash>,
+) -> (Proof, Vec<Hash>) {
     // We must have lo <= n < hi or else the code here has a bug.
     assert!(lo <= n && n < hi, "bad math in inclusion_proof");
 
@@ -454,52 +490,16 @@ fn inclusion_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof, V
     let (k, _) = maxpow2(hi - lo);
     if n < lo + k {
         // n is on left side
-        (proof, hashes) = inclusion_proof(lo, lo + k, n, hashes);
+        (proof, hashes) = inclusion_proof_recursion(lo, lo + k, n, hashes);
         (th, hashes) = subtree_hash(lo + k, hi, &hashes);
     } else {
         // n is on right side
         (th, hashes) = subtree_hash(lo, lo + k, &hashes);
-        (proof, hashes) = inclusion_proof(lo + k, hi, n, hashes);
+        (proof, hashes) = inclusion_proof_recursion(lo + k, hi, n, hashes);
     }
 
     proof.push(th);
     (proof, hashes)
-}
-
-#[derive(Error, Debug)]
-pub enum TlogError {
-    #[error("invalid transparency proof")]
-    InvalidProof,
-    #[error("malformed hash")]
-    MalformedHash,
-    #[error("invalid tile")]
-    InvalidTile,
-    #[error("bad math")]
-    BadMath,
-    #[error("recorded but did not read tiles")]
-    RecordedTilesOnly,
-    #[error("downloaded inconsistent tile")]
-    InconsistentTile,
-    #[error("indexes not in tree")]
-    IndexesNotInTree,
-    #[error("indexes out of order")]
-    IndexesOutOfOrder,
-    #[error("unmet input condition: {0}")]
-    InvalidInput(String),
-    #[error("missing verifier signature")]
-    MissingVerifierSignature,
-    #[error("timestamp is after current time")]
-    InvalidTimestamp,
-    #[error("checkpoint origin does not match")]
-    OriginMismatch,
-    #[error(transparent)]
-    Note(#[from] signed_note::NoteError),
-    #[error(transparent)]
-    MalformedCheckpoint(#[from] crate::MalformedCheckpointTextError),
-    #[error(transparent)]
-    InvalidBase64(#[from] base64::DecodeError),
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
 }
 
 /// Verifies that `p` is a valid proof that the tree of size `t` with hash `th` has an `n`'th
@@ -512,7 +512,13 @@ pub enum TlogError {
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-pub fn check_inclusion(p: &Proof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), TlogError> {
+pub fn verify_inclusion_proof(
+    p: &Proof,
+    t: u64,
+    th: Hash,
+    n: u64,
+    h: Hash,
+) -> Result<(), TlogError> {
     if n >= t {
         return Err(TlogError::InvalidInput("n >= t".into()));
     }
@@ -565,37 +571,52 @@ fn run_inclusion_proof(
     }
 }
 
-/// Returns the proof that the tree of size `t` contains
-/// as a prefix all the records from the tree of smaller size `n`.
+/// Returns the proof that the tree of size `n` contains as a prefix all the
+/// records from the tree of smaller size `m`.
 ///
 /// # Errors
 ///
-/// Returns an error if the inputs or proof are invalid or if `read_hashes` fails to read hashes.
+/// Returns an error if the inputs or proof are invalid or if `read_hashes`
+/// fails to read hashes.
 ///
 /// # Panics
 ///
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
-pub fn prove_consistency<R: HashReader>(t: u64, n: u64, h: &R) -> Result<Proof, TlogError> {
-    if !(1..=t).contains(&n) {
-        return Err(TlogError::InvalidInput("1 <= n <= t".into()));
+pub fn consistency_proof<R: HashReader>(n: u64, m: u64, r: &R) -> Result<Proof, TlogError> {
+    if !(1..=n).contains(&m) {
+        return Err(TlogError::InvalidInput("1 <= m <= n".into()));
     }
-    let indexes = consistency_proof_indexes(0, t, n, vec![]);
+    let indexes = consistency_proof_indexes_recursion(0, n, m, vec![]);
     if indexes.is_empty() {
         return Ok(vec![]);
     }
-    let hashes = h.read_hashes(&indexes)?;
+    let hashes = r.read_hashes(&indexes)?;
     assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
-    let (p, remaining_hashes) = consistency_proof(0, t, n, hashes);
+    let (p, remaining_hashes) = consistency_proof_recursion(0, n, m, hashes);
     assert!(
         remaining_hashes.is_empty(),
-        "bad index math in prove_consistency"
+        "bad index math in consistency_proof"
     );
     Ok(p)
+}
+
+/// Builds the list of indexes needed to construct the proof that
+/// the tree of size `n` contains as a prefix all the records from the tree of
+/// smaller size `m`.
+///
+/// # Errors
+///
+/// Will return an error if the parameters are invalid.
+pub fn consistency_proof_indexes(n: u64, m: u64) -> Result<Vec<u64>, TlogError> {
+    if !(0 < m && m < n) {
+        return Err(TlogError::InvalidInput("0 < m < n".into()));
+    }
+    Ok(consistency_proof_indexes_recursion(0, n, m, vec![]))
 }
 
 /// Builds the list of indexes needed to construct
@@ -605,7 +626,7 @@ pub fn prove_consistency<R: HashReader>(t: u64, n: u64, h: &R) -> Result<Proof, 
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-pub fn consistency_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
+fn consistency_proof_indexes_recursion(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
     // See treeProof below for commentary.
     assert!(
         (lo + 1..=hi).contains(&n),
@@ -621,11 +642,11 @@ pub fn consistency_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -
 
     let (k, _) = maxpow2(hi - lo);
     if n <= lo + k {
-        need = consistency_proof_indexes(lo, lo + k, n, need);
+        need = consistency_proof_indexes_recursion(lo, lo + k, n, need);
         need = subtree_indexes(lo + k, hi, need);
     } else {
         need = subtree_indexes(lo, lo + k, need);
-        need = consistency_proof_indexes(lo + k, hi, n, need);
+        need = consistency_proof_indexes_recursion(lo + k, hi, n, need);
     }
     need
 }
@@ -635,7 +656,12 @@ pub fn consistency_proof_indexes(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1.2>.
 ///
 /// May panic if there are internal math errors.
-fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof, Vec<Hash>) {
+fn consistency_proof_recursion(
+    lo: u64,
+    hi: u64,
+    n: u64,
+    mut hashes: Vec<Hash>,
+) -> (Proof, Vec<Hash>) {
     assert!((lo + 1..=hi).contains(&n), "bad math in consistency_proof");
 
     // Reached common ground.
@@ -656,12 +682,12 @@ fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof,
     let (k, _) = maxpow2(hi - lo);
     if n <= lo + k {
         // m is on left side
-        (p, hashes) = consistency_proof(lo, lo + k, n, hashes);
+        (p, hashes) = consistency_proof_recursion(lo, lo + k, n, hashes);
         (th, hashes) = subtree_hash(lo + k, hi, &hashes);
     } else {
         // m is on right side
         (th, hashes) = subtree_hash(lo, lo + k, &hashes);
-        (p, hashes) = consistency_proof(lo + k, hi, n, hashes);
+        (p, hashes) = consistency_proof_recursion(lo + k, hi, n, hashes);
     }
     p.push(th);
     (p, hashes)
@@ -677,7 +703,13 @@ fn consistency_proof(lo: u64, hi: u64, n: u64, mut hashes: Vec<Hash>) -> (Proof,
 ///# Panics
 ///
 /// Panics if there are internal math errors.
-pub fn check_consistency(p: &Proof, t: u64, th: Hash, n: u64, h: Hash) -> Result<(), TlogError> {
+pub fn verify_consistency_proof(
+    p: &Proof,
+    t: u64,
+    th: Hash,
+    n: u64,
+    h: Hash,
+) -> Result<(), TlogError> {
     if !(1..=t).contains(&n) {
         return Err(TlogError::InvalidInput("1 <= n <= t".into()));
     }
@@ -801,6 +833,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn test_tree() {
         const TEST_H: u8 = 2;
@@ -866,14 +899,21 @@ mod tests {
 
             // Check that inclusion proofs work, for all trees and leaves so far.
             for j in 0..=i {
-                let mut p = prove_inclusion(i + 1, j, &storage).unwrap();
-                check_inclusion(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()]).unwrap();
+                let mut p = inclusion_proof(i + 1, j, &storage).unwrap();
+                verify_inclusion_proof(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()])
+                    .unwrap();
 
                 for k in 0..p.len() {
                     p[k].0[0] ^= 1;
                     assert!(
-                        check_inclusion(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()])
-                            .is_err(),
+                        verify_inclusion_proof(
+                            &p,
+                            i + 1,
+                            th,
+                            j,
+                            leafhashes[usize::try_from(j).unwrap()]
+                        )
+                        .is_err(),
                         "check_record({}, {j}) succeeded with corrupt proof hash #{k}!",
                         i + 1
                     );
@@ -893,8 +933,9 @@ mod tests {
                 assert_eq!(h[0], leafhashes[usize::try_from(j).unwrap()], "wrong hash");
 
                 // Even though reading the hash suffices, check we can generate the proof too.
-                let p = prove_inclusion(i + 1, j, &thr).unwrap();
-                check_inclusion(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()]).unwrap();
+                let p = inclusion_proof(i + 1, j, &thr).unwrap();
+                verify_inclusion_proof(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()])
+                    .unwrap();
             }
             assert_eq!(tile_storage.unsaved.get(), 0, "did not save tiles");
 
@@ -912,14 +953,20 @@ mod tests {
                 assert_eq!(h, trees[usize::try_from(j).unwrap()]);
 
                 // Even though computing the subtree hash suffices, check that we can generate the proof too.
-                let mut p = prove_consistency(i + 1, j + 1, &thr).unwrap();
-                check_consistency(&p, i + 1, th, j + 1, trees[usize::try_from(j).unwrap()])
+                let mut p = consistency_proof(i + 1, j + 1, &thr).unwrap();
+                verify_consistency_proof(&p, i + 1, th, j + 1, trees[usize::try_from(j).unwrap()])
                     .unwrap();
                 for k in 0..p.len() {
                     p[k].0[0] ^= 1;
                     assert!(
-                        check_inclusion(&p, i + 1, th, j + 1, trees[usize::try_from(j).unwrap()])
-                            .is_err(),
+                        verify_inclusion_proof(
+                            &p,
+                            i + 1,
+                            th,
+                            j + 1,
+                            trees[usize::try_from(j).unwrap()]
+                        )
+                        .is_err(),
                         "check_record({}, {j}) succeeded with corrupt proof hash #{k}!",
                         i + 1
                     );
