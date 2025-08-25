@@ -1143,7 +1143,7 @@ mod tests {
                             leafhashes[usize::try_from(j).unwrap()]
                         )
                         .is_err(),
-                        "check_record({}, {j}) succeeded with corrupt proof hash #{k}!",
+                        "verify_inclusion_proof({}, {j}) succeeded with corrupt proof hash #{k}!",
                         i + 1
                     );
                     p[k].0[0] ^= 1;
@@ -1188,7 +1188,7 @@ mod tests {
                 for k in 0..p.len() {
                     p[k].0[0] ^= 1;
                     assert!(
-                        verify_inclusion_proof(
+                        verify_consistency_proof(
                             &p,
                             i + 1,
                             th,
@@ -1196,7 +1196,7 @@ mod tests {
                             trees[usize::try_from(j).unwrap()]
                         )
                         .is_err(),
-                        "check_record({}, {j}) succeeded with corrupt proof hash #{k}!",
+                        "verify_consistency_proof({}, {j}) succeeded with corrupt proof hash #{k}!",
                         i + 1
                     );
                     p[k].0[0] ^= 1;
