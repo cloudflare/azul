@@ -345,26 +345,7 @@ pub fn tree_hash_indexes(n: u64) -> Vec<u64> {
 /// Returns the storage indexes needed to compute the hash for the subtree.
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1>.
 pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
-    subtree_indexes_internal(n.lo, n.hi, vec![])
-}
-
-/// Returns the storage indexes needed to compute the hash for the subtree containing records [lo,
-/// hi), appending them to need and returning the result.  See
-/// <https://tools.ietf.org/html/rfc6962#section-2.1>.
-///
-/// # Panics
-///
-/// Panics if there are internal math errors.
-fn subtree_indexes_internal(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
-    // See subtree_hash below for commentary.
-    let mut lo = lo;
-    while lo < hi {
-        let (k, level) = maxpow2(hi - lo + 1);
-        assert!(lo & (k - 1) == 0, "bad math in subtree_indexes");
-        need.push(stored_hash_index(level, lo >> level));
-        lo += k;
-    }
-    need
+    n.hash_indexes()
 }
 
 /// Computes the hash for the root of the subtree `[lo, hi)`, using the
@@ -383,45 +364,16 @@ fn subtree_indexes_internal(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
 pub fn subtree_hash<R: HashReader>(n: &Subtree, r: &R) -> Result<Hash, TlogError> {
-    let indexes = subtree_indexes_internal(n.lo, n.hi, vec![]);
-    let hashes = r.read_hashes(&indexes)?;
+    let indexes = n.hash_indexes();
+    let mut hashes = r.read_hashes(&indexes)?;
     assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
-    let (hash, remaining_hashes) = subtree_hash_internal(n.lo, n.hi, &hashes);
-    assert!(remaining_hashes.is_empty(), "bad math in tree_hash");
+    let hash = n.hash(&mut hashes);
+    assert!(hashes.is_empty(), "bad math in subtree_hash");
     Ok(hash)
-}
-
-/// Computes the hash for the subtree containing records [lo, hi), assuming that
-/// hashes are the hashes corresponding to the indexes returned by
-/// `subtree_indexes(lo, hi)`.  It returns any leftover hashes.
-///
-/// May panic if there are internal math errors.
-fn subtree_hash_internal(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
-    // Repeatedly partition the tree into a left side with 2^level nodes,
-    // for as large a level as possible, and a right side with the fringe.
-    // The left hash is stored directly and can be read from storage.
-    // The right side needs further computation.
-    let mut num_tree = 0;
-    let mut lo = lo;
-    while lo < hi {
-        let (k, _) = maxpow2(hi - lo + 1);
-        assert!(lo & (k - 1) == 0 && lo < hi, "bad math in subtree_hash");
-        num_tree += 1;
-        lo += k;
-    }
-
-    assert!(hashes.len() >= num_tree, "bad index math in subtree_hash");
-
-    // Reconstruct hash.
-    let mut h = hashes[num_tree - 1];
-    for i in (0..num_tree - 1).rev() {
-        h = node_hash(hashes[i], h);
-    }
-    (h, hashes[num_tree..].to_vec())
 }
 
 /// Returns the proof that the tree of size `n` contains the record with
@@ -436,23 +388,48 @@ fn subtree_hash_internal(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>)
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
 pub fn inclusion_proof<R: HashReader>(n: u64, leaf_index: u64, r: &R) -> Result<Proof, TlogError> {
-    if leaf_index >= n {
-        return Err(TlogError::InvalidInput("leaf_index < n".into()));
+    subtree_inclusion_proof(&Subtree::new(0, n)?, leaf_index, r)
+}
+
+/// Returns the subproof that the subtree `n` contains the record with index
+/// `leaf_index`.
+///
+/// # Errors
+///
+/// Returns an error if `read_hashes` fails to read hashes.
+///
+/// # Panics
+///
+/// Panics if `read_hashes` returns a slice of hashes that is not the same
+/// length as the requested indexes, or if there are internal math errors.
+pub fn subtree_inclusion_proof<R: HashReader>(
+    n: &Subtree,
+    leaf_index: u64,
+    r: &R,
+) -> Result<Proof, TlogError> {
+    if !n.contains(leaf_index) {
+        return Err(TlogError::InvalidInput("`lo <= leaf_index < hi`".into()));
     }
-    let indexes = inclusion_proof_indexes_recursion(0, n, leaf_index, vec![]);
+
+    let m = &Subtree::new(leaf_index, leaf_index + 1)?;
+
+    // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
+    let indexes = n.subproof_indexes(m, true)?;
+
     if indexes.is_empty() {
         return Ok(vec![]);
     }
-    let hashes = r.read_hashes(&indexes)?;
+    let mut hashes = r.read_hashes(&indexes)?;
     assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
-    let (proof, remaining_hashes) = inclusion_proof_recursion(0, n, leaf_index, hashes);
+    // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
+    let proof = n.subproof(m, &mut hashes, true)?;
     assert!(
-        remaining_hashes.is_empty(),
-        "bad index math in consistency_proof"
+        hashes.is_empty(),
+        "bad index math in prove_subtree_inclusion"
     );
     Ok(proof)
 }
@@ -465,74 +442,22 @@ pub fn inclusion_proof<R: HashReader>(n: u64, leaf_index: u64, r: &R) -> Result<
 /// Returns an error if the `[lo, hi)` is not a valid subtree, or if
 /// `leaf_index` is not in that subtree.
 pub fn inclusion_proof_indexes(n: u64, leaf_index: u64) -> Result<Vec<u64>, TlogError> {
-    if leaf_index >= n {
-        return Err(TlogError::InvalidInput("leaf_index < n".into()));
-    }
-    Ok(inclusion_proof_indexes_recursion(0, n, leaf_index, vec![]))
+    subtree_inclusion_proof_indexes(&Subtree::new(0, n)?, leaf_index)
 }
 
-/// Builds the list of indexes needed to construct the proof
-/// that leaf n is contained in the subtree with leaves [lo, hi).
-/// It appends those indexes to need and returns the result.
-/// See <https://tools.ietf.org/html/rfc6962#section-2.1.1>.
+/// Returns the indexes required for the proof that the subtree `[lo, hi)`
+/// contains the record with index `leaf_index`.
 ///
-/// # Panics
-/// May panic if there are internal math errors.
-fn inclusion_proof_indexes_recursion(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
-    // See inclusion_proof below for commentary.
-    assert!(lo <= n && n < hi, "bad math in inclusion_proof_indexes");
-    if lo + 1 == hi {
-        return need;
-    }
-    let (k, _) = maxpow2(hi - lo);
-    if n < lo + k {
-        need = inclusion_proof_indexes_recursion(lo, lo + k, n, need);
-        need = subtree_indexes_internal(lo + k, hi, need);
-    } else {
-        need = subtree_indexes_internal(lo, lo + k, need);
-        need = inclusion_proof_indexes_recursion(lo + k, hi, n, need);
-    }
-    need
-}
-
-/// Constructs the proof that leaf n is contained in the subtree with leaves [lo, hi).
-/// It returns any leftover hashes as well.
-/// See <https://tools.ietf.org/html/rfc6962#section-2.1.1>.
+/// # Errors
 ///
-/// May panic if there are internal math errors.
-fn inclusion_proof_recursion(
-    lo: u64,
-    hi: u64,
-    n: u64,
-    mut hashes: Vec<Hash>,
-) -> (Proof, Vec<Hash>) {
-    // We must have lo <= n < hi or else the code here has a bug.
-    assert!(lo <= n && n < hi, "bad math in inclusion_proof");
-
-    if lo + 1 == hi {
-        // n == lo
-        // Reached the leaf node.
-        // The verifier knows what the leaf hash is, so we don't need to send it.
-        return (vec![], hashes);
-    }
-
-    // Walk down the tree toward n.
-    // Record the hash of the path not taken (needed for verifying the proof).
-    let mut proof: Proof;
-    let th: Hash;
-    let (k, _) = maxpow2(hi - lo);
-    if n < lo + k {
-        // n is on left side
-        (proof, hashes) = inclusion_proof_recursion(lo, lo + k, n, hashes);
-        (th, hashes) = subtree_hash_internal(lo + k, hi, &hashes);
-    } else {
-        // n is on right side
-        (th, hashes) = subtree_hash_internal(lo, lo + k, &hashes);
-        (proof, hashes) = inclusion_proof_recursion(lo + k, hi, n, hashes);
-    }
-
-    proof.push(th);
-    (proof, hashes)
+/// Returns an error if the `[lo, hi)` is not a valid subtree, or if
+/// `leaf_index` is not in that subtree.
+pub fn subtree_inclusion_proof_indexes(
+    n: &Subtree,
+    leaf_index: u64,
+) -> Result<Vec<u64>, TlogError> {
+    // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
+    n.subproof_indexes(&Subtree::new(leaf_index, leaf_index + 1)?, true)
 }
 
 /// Verify an inclusion proof that the tree of size `tree_size` with root hash
@@ -619,25 +544,48 @@ pub fn verify_subtree_inclusion_proof(
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
 pub fn consistency_proof<R: HashReader>(n: u64, m: u64, r: &R) -> Result<Proof, TlogError> {
-    if !(1..=n).contains(&m) {
-        return Err(TlogError::InvalidInput("1 <= m <= n".into()));
+    // SUBTREE_PROOF(0, end, D_n) = PROOF(end, D_n)
+    subtree_consistency_proof(n, &Subtree::new(0, m)?, r)
+}
+
+/// Returns the proof that the tree of size `tree_size` is consistent with the
+///  subtree `m` following
+/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.2>.
+///
+/// # Errors
+///
+/// Returns an error if the inputs or proof are invalid or if `read_hashes`
+/// fails to read hashes.
+///
+/// # Panics
+///
+/// Panics if `read_hashes` returns a slice of hashes that is not the same
+/// length as the requested indexes, or if there are internal math errors.
+pub fn subtree_consistency_proof<R: HashReader>(
+    tree_size: u64,
+    m: &Subtree,
+    r: &R,
+) -> Result<Proof, TlogError> {
+    let n = Subtree::new(0, tree_size)?;
+    if !n.contains_subtree(m) {
+        return Err(TlogError::InvalidInput(format!("{n} does not contain {m}")));
     }
-    let indexes = consistency_proof_indexes_recursion(0, n, m, vec![]);
+    let indexes = n.subproof_indexes(m, true)?;
     if indexes.is_empty() {
         return Ok(vec![]);
     }
-    let hashes = r.read_hashes(&indexes)?;
+    let mut hashes = r.read_hashes(&indexes)?;
     assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
-    let (p, remaining_hashes) = consistency_proof_recursion(0, n, m, hashes);
+    let proof = n.subproof(m, &mut hashes, true)?;
     assert!(
-        remaining_hashes.is_empty(),
-        "bad index math in consistency_proof"
+        hashes.is_empty(),
+        "bad index math in subtree_consistency_proof"
     );
-    Ok(p)
+    Ok(proof)
 }
 
 /// Builds the list of indexes needed to construct the proof that
@@ -648,84 +596,20 @@ pub fn consistency_proof<R: HashReader>(n: u64, m: u64, r: &R) -> Result<Proof, 
 ///
 /// Will return an error if the parameters are invalid.
 pub fn consistency_proof_indexes(n: u64, m: u64) -> Result<Vec<u64>, TlogError> {
-    if !(0 < m && m < n) {
-        return Err(TlogError::InvalidInput("0 < m < n".into()));
-    }
-    Ok(consistency_proof_indexes_recursion(0, n, m, vec![]))
+    subtree_consistency_proof_indexes(n, &Subtree::new(0, m)?)
 }
 
-/// Builds the list of indexes needed to construct
-/// the sub-proof related to the subtree containing records [lo, hi).
-/// See <https://tools.ietf.org/html/rfc6962#section-2.1.2>.
+/// Builds the list of indexes needed to construct the proof that the tree of
+/// size `tree_size` is consistent with the subtree `m`.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if there are internal math errors.
-fn consistency_proof_indexes_recursion(lo: u64, hi: u64, n: u64, mut need: Vec<u64>) -> Vec<u64> {
-    // See treeProof below for commentary.
-    assert!(
-        (lo + 1..=hi).contains(&n),
-        "bad math in consistency_proof_indexes"
-    );
-
-    if n == hi {
-        if lo == 0 {
-            return need;
-        }
-        return subtree_indexes_internal(lo, hi, need);
-    }
-
-    let (k, _) = maxpow2(hi - lo);
-    if n <= lo + k {
-        need = consistency_proof_indexes_recursion(lo, lo + k, n, need);
-        need = subtree_indexes_internal(lo + k, hi, need);
-    } else {
-        need = subtree_indexes_internal(lo, lo + k, need);
-        need = consistency_proof_indexes_recursion(lo + k, hi, n, need);
-    }
-    need
-}
-
-/// Constructs the sub-proof related to the subtree containing records [lo, hi).
-/// It returns any leftover hashes as well.
-/// See <https://tools.ietf.org/html/rfc6962#section-2.1.2>.
-///
-/// May panic if there are internal math errors.
-fn consistency_proof_recursion(
-    lo: u64,
-    hi: u64,
-    n: u64,
-    mut hashes: Vec<Hash>,
-) -> (Proof, Vec<Hash>) {
-    assert!((lo + 1..=hi).contains(&n), "bad math in consistency_proof");
-
-    // Reached common ground.
-    if n == hi {
-        if lo == 0 {
-            // This subtree corresponds exactly to the old tree.
-            // The verifier knows that hash, so we don't need to send it.
-            return (vec![], hashes);
-        }
-        let (th, hashes) = subtree_hash_internal(lo, hi, &hashes);
-        return (vec![th], hashes);
-    }
-
-    // Interior node for the proof.
-    // Decide whether to walk down the left or right side.
-    let mut p: Proof;
-    let th: Hash;
-    let (k, _) = maxpow2(hi - lo);
-    if n <= lo + k {
-        // m is on left side
-        (p, hashes) = consistency_proof_recursion(lo, lo + k, n, hashes);
-        (th, hashes) = subtree_hash_internal(lo + k, hi, &hashes);
-    } else {
-        // m is on right side
-        (th, hashes) = subtree_hash_internal(lo, lo + k, &hashes);
-        (p, hashes) = consistency_proof_recursion(lo + k, hi, n, hashes);
-    }
-    p.push(th);
-    (p, hashes)
+/// Will return an error if the parameters are invalid.
+pub fn subtree_consistency_proof_indexes(
+    tree_size: u64,
+    m: &Subtree,
+) -> Result<Vec<u64>, TlogError> {
+    Subtree::new(0, tree_size)?.subproof_indexes(m, true)
 }
 
 /// Verify a consistency proof that the tree of size `n` with hash `root_hash`
@@ -910,6 +794,208 @@ impl Subtree {
             ));
         }
         Ok(Self { lo, hi })
+    }
+    /// Return whether or not the subtree contains the given leaf index.
+    fn contains(&self, leaf_index: u64) -> bool {
+        (self.lo..self.hi).contains(&leaf_index)
+    }
+    /// Return whether or not the subtree contains the given subtree.
+    fn contains_subtree(&self, other: &Subtree) -> bool {
+        (self.lo..self.hi).contains(&other.lo) && (self.lo + 1..=self.hi).contains(&other.hi)
+    }
+    /// Return left and right children.
+    fn children(&self) -> (Self, Self) {
+        let (k, _) = maxpow2(self.hi - self.lo);
+        (
+            Self {
+                lo: self.lo,
+                hi: self.lo + k,
+            },
+            Self {
+                lo: self.lo + k,
+                hi: self.hi,
+            },
+        )
+    }
+}
+
+// Strategy used for combining items in `walk_subproof`.
+#[derive(Clone, Copy)]
+enum CombinationStrategy {
+    /// For subproofs of indexes. Order is [sibling, recursive] on
+    /// right-recursion in order to preserve index ordering.
+    Index,
+    /// For subproofs of hashes. Order is always [recursive, sibling].
+    Hash,
+}
+
+impl Subtree {
+    /// Helper function to compute the `MTH` traversal logic from
+    /// <https://datatracker.ietf.org/doc/html/rfc9162#section-2.1.1>.
+    ///
+    /// Repeatedly partition the tree into a left side with 2^level nodes, for
+    /// as large a level as possible, and a right side with the fringe and call
+    /// `f` to update some state for each level.
+    ///
+    /// This function is generic over:
+    /// - `F`: The type of closure that performs the action.
+    fn walk_hash<F>(&self, f: &mut F)
+    where
+        F: FnMut(u8, u64),
+    {
+        let mut lo = self.lo;
+        while lo < self.hi {
+            let (k, level) = maxpow2(self.hi - lo + 1);
+            assert!(lo & (k - 1) == 0 && lo < self.hi, "bad math in walk_hash");
+            f(level, lo);
+            lo += k;
+        }
+    }
+
+    /// Returns the storage indexes needed to compute the subtree's root hash.
+    /// See <https://tools.ietf.org/html/rfc6962#section-2.1>.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are internal math errors.
+    fn hash_indexes(&self) -> Vec<u64> {
+        let mut need = Vec::new();
+        let mut get_indexes = |level: u8, lo: u64| {
+            need.push(stored_hash_index(level, lo >> level));
+        };
+        self.walk_hash(&mut get_indexes);
+
+        need
+    }
+
+    /// Computes the subtree's root hash, assuming that `hashes` are the hashes
+    /// corresponding to the indexes returned by `hash_indexes`.  It consumes
+    /// the requisite hashes from `hashes`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are internal math errors.
+    fn hash(&self, hashes: &mut Vec<Hash>) -> Hash {
+        let mut num_hashes = 0;
+        let mut get_hash = |_: u8, _: u64| {
+            num_hashes += 1;
+        };
+        self.walk_hash(&mut get_hash);
+
+        assert!(
+            hashes.len() >= num_hashes,
+            "not enough hashes for reconstruction"
+        );
+
+        // The indexes are sorted in increasing order. In order to compute the
+        // root hash, start from the rightmost index and hash up.
+        let root_hash = hashes
+            .drain(0..num_hashes)
+            .rev()
+            .reduce(|fringe, sibling| node_hash(sibling, fringe))
+            // This expect is safe because the loop to calculate num_tree ensures
+            // it's > 0 if the subtree has a non-zero range.
+            .expect("num_tree must be positive for a valid subtree range");
+
+        root_hash
+    }
+
+    /// Helper function to implement the `SUBTREE_SUBPROOF` traversal logic from
+    /// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.3.1>.
+    ///
+    /// This can used to construct (sub)tree inclusion proofs and (sub)tree
+    /// consistency proofs. This implementation of the algorithm uses absolute
+    /// indexes as opposed to the relative indexes described in the spec.
+    ///
+    /// In order to calculate either the storage hash indexes needed for the
+    /// subproof or the subproof hashes, this function is generic over:
+    /// - `T`: The type of item to be collected (`u64` or `Hash`).
+    /// - `F`: The type of the closure that performs the action.
+    ///
+    /// When computing indexes, `strategy` indicates how to combine items.
+    /// Indexes are kept in increasing order as that may make retrieval from
+    /// backend storage more efficient, but for hashes the sibling node's hash
+    /// is always appended to the recursive proof according to the spec.
+    fn walk_subproof<T, F>(
+        &self,
+        m: &Subtree,
+        known: bool,
+        f: &mut F,
+        strategy: CombinationStrategy,
+    ) -> Result<Vec<T>, TlogError>
+    where
+        F: FnMut(&Subtree) -> Vec<T>,
+    {
+        if !self.contains_subtree(m) {
+            return Err(TlogError::InvalidInput(format!(
+                "{self} does not contain {m}"
+            )));
+        }
+        // Base case: the subtrees are equal.
+        if m == self {
+            // If the subtree was one of the inputs it is `known` and there is
+            // no need to return it.
+            return if known { Ok(vec![]) } else { Ok(f(self)) };
+        }
+
+        // Recursive step: traverse the children.
+        let (left, right) = self.children();
+        if left.contains_subtree(m) {
+            // Recurse on the left, fully include the right.
+            let (mut recursive_proof, mut sibling) =
+                (left.walk_subproof(m, known, f, strategy)?, f(&right));
+            recursive_proof.append(&mut sibling);
+            Ok(recursive_proof)
+        } else {
+            let (mut sibling, mut recursive_proof) = if right.contains_subtree(m) {
+                // Fully include the left, recurse on the right.
+                (f(&left), right.walk_subproof(m, known, f, strategy)?)
+            } else {
+                // `m` is split across children. Fully include the left, recurse
+                // on right child of `m` with `known` set to false as the right
+                // child of `m` was not one of the inputs to the algorithm.
+                assert!(m.lo == self.lo, "bad math in subproof walk");
+                let m_right = m.children().1;
+                (f(&left), right.walk_subproof(&m_right, false, f, strategy)?)
+            };
+
+            match strategy {
+                CombinationStrategy::Hash => {
+                    // Always append the sibling to the end of the recursive proof.
+                    recursive_proof.append(&mut sibling);
+                    Ok(recursive_proof)
+                }
+                CombinationStrategy::Index => {
+                    // Prepend the indexes needed to compute the sibling in
+                    // order to keep the indexes in increasing order.
+                    sibling.append(&mut recursive_proof);
+                    Ok(sibling)
+                }
+            }
+        }
+    }
+
+    /// Returns only the storage hash indexes needed for the subproof.
+    fn subproof_indexes(&self, m: &Subtree, known: bool) -> Result<Vec<u64>, TlogError> {
+        // Get all hash indexes for a given subtree.
+        let mut get_indexes = |t: &Subtree| -> Vec<u64> { t.hash_indexes() };
+
+        self.walk_subproof(m, known, &mut get_indexes, CombinationStrategy::Index)
+    }
+
+    /// Returns the hashes for the subproof.
+    fn subproof(
+        &self,
+        m: &Subtree,
+        hashes: &mut Vec<Hash>,
+        known: bool,
+    ) -> Result<Proof, TlogError> {
+        // Reconstruct a single hash for a subtree and wrap it in a Vec.
+        // The closure captures the mutable `hashes` vector to pass it to `reconstruct_hash`.
+        let mut get_hash = |t: &Subtree| -> Vec<Hash> { vec![t.hash(hashes)] };
+
+        // The closure's error type is Infallible, so we can safely unwrap.
+        self.walk_subproof(m, known, &mut get_hash, CombinationStrategy::Hash)
     }
 }
 
