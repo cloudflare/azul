@@ -502,73 +502,75 @@ fn inclusion_proof_recursion(
     (proof, hashes)
 }
 
-/// Verifies that `p` is a valid proof that the tree of size `t` with hash `th` has an `n`'th
-/// record with hash `h`.
+/// Verify an inclusion proof that the tree of size `tree_size` with root hash
+/// `root_hash` contains a leaf at index `leaf_index` with hash `hash`. This
+/// follows <https://www.rfc-editor.org/rfc/rfc9162#section-2.1.3.2>.
 ///
 /// # Errors
 ///
-/// Returns an error if the inputs or proof are invalid.
-///
-/// # Panics
-///
-/// Panics if there are internal math errors.
+/// Will return an error if proof verification fails.
 pub fn verify_inclusion_proof(
-    p: &Proof,
-    t: u64,
-    th: Hash,
-    n: u64,
-    h: Hash,
+    proof: &Proof,
+    tree_size: u64,
+    root_hash: Hash,
+    leaf_index: u64,
+    leaf_hash: Hash,
 ) -> Result<(), TlogError> {
-    if n >= t {
-        return Err(TlogError::InvalidInput("n >= t".into()));
+    // 1. Compare leaf_index from the inclusion_proof_v2 structure against tree_size. If leaf_index is greater than or equal to tree_size, then fail the proof verification.
+    if leaf_index >= tree_size {
+        return Err(TlogError::InvalidProof);
     }
-    let th2 = run_inclusion_proof(p, 0, t, n, h)?;
-    if th2 == th {
+    // 2. Set fn to leaf_index and sn to tree_size - 1.
+    let mut f_n = leaf_index;
+    let mut s_n = tree_size - 1;
+    // 3. Set r to hash.
+    let mut r = leaf_hash;
+    // 4. For each value p in the inclusion_path array:
+    for p in proof {
+        // a. If sn is 0, then stop the iteration and fail the proof verification.
+        if s_n == 0 {
+            return Err(TlogError::InvalidProof);
+        }
+        // b. If LSB(fn) is set, or if fn is equal to sn, then:
+        if lsb_set(f_n) || f_n == s_n {
+            // i. Set r to HASH(0x01 || p || r).
+            r = node_hash(*p, r);
+            // ii. If LSB(fn) is not set, then right-shift both fn and sn equally until either LSB(fn) is set or fn is 0.
+            while !lsb_set(f_n) || f_n == 0 {
+                f_n >>= 1;
+                s_n >>= 1;
+            }
+        } else {
+            // i. Set r to HASH(0x01 || r || p).
+            r = node_hash(r, *p);
+        }
+        // c. Finally, right-shift both fn and sn one time.
+        f_n >>= 1;
+        s_n >>= 1;
+    }
+    // 5. Compare sn to 0. Compare r against the root_hash. If sn is equal to 0 and r and the root_hash are equal, then the log has proven the inclusion of hash. Otherwise, fail the proof verification.
+    if s_n == 0 && r == root_hash {
         Ok(())
     } else {
         Err(TlogError::InvalidProof)
     }
 }
 
-/// Runs the proof p that leaf n is contained in the subtree with leaves [lo, hi).
-/// Running the proof means constructing and returning the implied hash of that
-/// subtree.
+/// Verify the proof that a leaf at index `leaf_index` and hash `leaf_hash` is
+/// included in the subtree `[n_lo, n_hi)` with hash `n_hash`, following
+/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.2>.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if there are internal math errors.
-fn run_inclusion_proof(
-    p: &Proof,
-    lo: u64,
-    hi: u64,
-    n: u64,
+/// Will return an error if proof verification fails.
+pub fn verify_subtree_inclusion_proof(
+    proof: &Proof,
+    n: &Subtree,
+    n_hash: Hash,
+    leaf_index: u64,
     leaf_hash: Hash,
-) -> Result<Hash, TlogError> {
-    // We must have lo <= n < hi or else the code here has a bug.
-    assert!((lo..hi).contains(&n), "bad math in run_inclusion_proof");
-
-    if lo + 1 == hi {
-        // m == lo
-        // Reached the leaf node.
-        // The proof must not have any unnecessary hashes.
-        if !p.is_empty() {
-            return Err(TlogError::InvalidProof);
-        }
-        return Ok(leaf_hash);
-    }
-
-    if p.is_empty() {
-        return Err(TlogError::InvalidProof);
-    }
-
-    let (k, _) = maxpow2(hi - lo);
-    if n < lo + k {
-        let th = run_inclusion_proof(&p[..p.len() - 1].to_vec(), lo, lo + k, n, leaf_hash)?;
-        Ok(node_hash(th, p[p.len() - 1]))
-    } else {
-        let th = run_inclusion_proof(&p[..p.len() - 1].to_vec(), lo + k, hi, n, leaf_hash)?;
-        Ok(node_hash(p[p.len() - 1], th))
-    }
+) -> Result<(), TlogError> {
+    verify_inclusion_proof(proof, n.hi - n.lo, n_hash, leaf_index - n.lo, leaf_hash)
 }
 
 /// Returns the proof that the tree of size `n` contains as a prefix all the
@@ -693,80 +695,188 @@ fn consistency_proof_recursion(
     (p, hashes)
 }
 
-/// Verifies that `p` is a valid proof that the tree of size `t` with hash `th`
-/// contains as a prefix the tree of size `n` with hash `h`.
+/// Verify a consistency proof that the tree of size `n` with hash `root_hash`
+/// contains the tree of size `m` with hash `m_hash` as a prefix. This follows
+/// <https://www.rfc-editor.org/rfc/rfc9162#section-2.1.4.2>.
 ///
 /// # Errors
 ///
-/// Returns an error if the consistency proof is invalid.
-///
-///# Panics
-///
-/// Panics if there are internal math errors.
+/// Will return an error if proof verification fails.
 pub fn verify_consistency_proof(
-    p: &Proof,
-    t: u64,
-    th: Hash,
+    proof: &Proof,
     n: u64,
-    h: Hash,
+    root_hash: Hash,
+    m: u64,
+    m_hash: Hash,
 ) -> Result<(), TlogError> {
-    if !(1..=t).contains(&n) {
-        return Err(TlogError::InvalidInput("1 <= n <= t".into()));
+    verify_subtree_consistency_proof(proof, n, root_hash, &Subtree::new(0, m)?, m_hash)
+}
+
+/// Verify a subtree consistency proof that the tree of size `n` with hash
+/// `root_hash` is consistent with the subtree `m` with hash
+/// `subtree_hash`. This follows
+/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.3.2>.
+///
+/// # Errors
+///
+/// Will return an error if proof verification fails.
+pub fn verify_subtree_consistency_proof(
+    proof: &Proof,
+    n: u64,
+    root_hash: Hash,
+    m: &Subtree,
+    subtree_hash: Hash,
+) -> Result<(), TlogError> {
+    let Subtree { lo: start, hi: end } = *m;
+    // 1. If end is n, run the following:
+    if end == n {
+        // 1. Set fn to start and sn to end - 1.
+        let mut f_n = start;
+        let mut s_n = end - 1;
+        // 2. Set r to node_hash.
+        let mut r = subtree_hash;
+        // 3. Right-shift fn and sn equally until LSB(fn) is set or sn is zero.
+        while !(lsb_set(f_n) || s_n == 0) {
+            f_n >>= 1;
+            s_n >>= 1;
+        }
+        // 4. For each value p in the proof array:
+        for p in proof {
+            // 1. If sn is 0, then stop iteration and fail the proof verification.
+            if s_n == 0 {
+                return Err(TlogError::InvalidProof);
+            }
+            // 2. Set r to HASH(0x01, || p || r).
+            r = node_hash(*p, r);
+            // 3. If LSB(sn) is not set, the right-shift sn until either LSB(sn) is set or sn is zero.
+            while !(lsb_set(s_n) || s_n == 0) {
+                s_n >>= 1;
+            }
+            // 4. Right-shift once more.
+            s_n >>= 1;
+        }
+        // 5. Check sn is 0 and r is root_hash. If either is not equal, fail the proof verification. If all are equal, accept the proof.
+        if s_n == 0 && r == root_hash {
+            Ok(())
+        } else {
+            Err(TlogError::InvalidProof)
+        }
     }
-    let (h2, th2) = run_consistency_proof(p, 0, t, n, h)?;
-    if th2 == th && h2 == h {
-        Ok(())
-    } else {
-        Err(TlogError::InvalidProof)
+    // 2. Otherwise, run the following:
+    else {
+        // 1. If proof is an empty array, stop and fail verification.
+        if proof.is_empty() {
+            return Err(TlogError::InvalidProof);
+        }
+        // 2. If end - start is an exact power of 2, prepend node_hash to the proof array.
+        let mut proof = proof.clone();
+        if (end - start).is_power_of_two() {
+            proof.insert(0, subtree_hash);
+        }
+        // 3. Set fn to start, sn to end - 1, and tn to n - 1.
+        let mut f_n = start;
+        let mut s_n = end - 1;
+        let mut t_n = n - 1;
+        // 4. Right-shift fn, sn, and tn equally until LSB(sn) is not set or fn = sn.
+        while lsb_set(s_n) && f_n != s_n {
+            f_n >>= 1;
+            s_n >>= 1;
+            t_n >>= 1;
+        }
+        // 5. Set both fr and sr to the first value in the proof array.
+        let mut f_r = proof[0];
+        let mut s_r = proof[0];
+        // 6. For each subsequent value c in the proof array:
+        for c in proof.into_iter().skip(1) {
+            // 1. If tn is 0, then stop the iteration and fail the proof verification.
+            if t_n == 0 {
+                return Err(TlogError::InvalidProof);
+            }
+            // 2. If LSB(sn) is set, or if sn is equal to tn, then:
+            if lsb_set(s_n) || s_n == t_n {
+                // 1. If fn < sn, set fr to HASH(0x01 || c || fr).
+                if f_n < s_n {
+                    f_r = node_hash(c, f_r);
+                }
+                // 2. Set sr to HASH(0x01 || c || sr).
+                s_r = node_hash(c, s_r);
+                // 3. If LSB(sn) is not set, then right-shift each of fn, sn, and tn equally until either LSB(sn) is set or sn is 0.
+                while !lsb_set(s_n) {
+                    f_n >>= 1;
+                    s_n >>= 1;
+                    t_n >>= 1;
+                    if s_n == 0 {
+                        break;
+                    }
+                }
+            }
+            // 3. Otherwise:
+            else {
+                // 1. Set sr to HASH(0x01 || sr || c).
+                s_r = node_hash(s_r, c);
+            }
+            // 4. Finally, right-shift each of fn, sn, and tn one time.
+            f_n >>= 1;
+            s_n >>= 1;
+            t_n >>= 1;
+        }
+        // 7. Check tn is 0, fr is node_hash, and sr is root_hash. If any are not equal, fail the proof verification. If all are equal, accept the proof.
+        if t_n == 0 && f_r == subtree_hash && s_r == root_hash {
+            Ok(())
+        } else {
+            Err(TlogError::InvalidProof)
+        }
     }
 }
 
-/// Runs the sub-proof p related to the subtree containing records [lo, hi),
-/// where old is the hash of the old tree with n records.
-/// Running the proof means constructing and returning the implied hashes of that
-/// subtree in both the old and new tree.
-///
-/// # Panics
-///
-/// Panics if there are internal math errors.
-fn run_consistency_proof(
-    p: &Proof,
+// Return whether LSB(i) is set.
+fn lsb_set(i: u64) -> bool {
+    (i & 1) == 1
+}
+
+/// A subtree of a Merkle Tree of size `n` is defined by two integers `lo` and `hi` such that:
+/// - 0 ≤ lo < hi ≤ n
+/// - if `s` is the smallest power of two `≥ hi - lo`, `lo` is a multple of `s`
+#[derive(Debug, PartialEq, Eq)]
+pub struct Subtree {
     lo: u64,
     hi: u64,
-    n: u64,
-    old: Hash,
-) -> Result<(Hash, Hash), TlogError> {
-    assert!(
-        (lo + 1..=hi).contains(&n),
-        "bad math in run_consistency_proof"
-    );
+}
 
-    // Reached common ground.
-    if n == hi {
-        if lo == 0 {
-            if !p.is_empty() {
-                return Err(TlogError::InvalidProof);
+impl fmt::Display for Subtree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}, {})", self.lo, self.hi)
+    }
+}
+
+impl Subtree {
+    /// Returns a subtree for the given range.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if `[lo, hi)` is not a valid subtree.
+    pub fn new(lo: u64, hi: u64) -> Result<Self, TlogError> {
+        if lo >= hi {
+            return Err(TlogError::InvalidInput("`lo < hi`".into()));
+        }
+        // `s` is the smallest power of 2 that is greater than or equal
+        // to `lo - hi`.
+        let s = {
+            let n = hi - lo;
+            let l = n.ilog2();
+            // If n is not already a power of two, round up.
+            if n > 1 << l {
+                1 << (l + 1)
+            } else {
+                1 << l
             }
-            return Ok((old, old));
+        };
+        if lo & (s - 1) != 0 {
+            return Err(TlogError::InvalidInput(
+                "`lo` must be a multiple of the smallest power of two ≥ `hi - lo`".into(),
+            ));
         }
-        if p.len() != 1 {
-            return Err(TlogError::InvalidProof);
-        }
-        return Ok((p[0], p[0]));
-    }
-
-    if p.is_empty() {
-        return Err(TlogError::InvalidProof);
-    }
-
-    // Interior node for the proof.
-    let (k, _) = maxpow2(hi - lo);
-    if n <= lo + k {
-        let (oh, th) = run_consistency_proof(&p[..p.len() - 1].to_vec(), lo, lo + k, n, old)?;
-        Ok((oh, node_hash(th, p[p.len() - 1])))
-    } else {
-        let (oh, th) = run_consistency_proof(&p[..p.len() - 1].to_vec(), lo + k, hi, n, old)?;
-        Ok((node_hash(p[p.len() - 1], oh), node_hash(p[p.len() - 1], th)))
+        Ok(Self { lo, hi })
     }
 }
 
@@ -990,8 +1100,19 @@ mod tests {
     }
 
     #[test]
+    fn test_new_subtree() {
+        // Valid subtrees.
+        assert!(Subtree::new(0, 1).is_ok());
+        assert!(Subtree::new(36, 39).is_ok());
+
+        // Invalid subtrees.
+        assert!(Subtree::new(39, 36).is_err());
+        assert!(Subtree::new(123, 456).is_err());
+        assert!(Subtree::new(0, 0).is_err());
+    }
+
+    #[test]
     fn test_empty_tree() {
-        let h = tree_hash(0, &TestHashStorage::new()).unwrap();
-        assert_eq!(h, EMPTY_HASH);
+        assert_eq!(tree_hash(0, &TestHashStorage::new()).unwrap(), EMPTY_HASH);
     }
 }
