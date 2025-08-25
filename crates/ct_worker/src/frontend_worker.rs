@@ -17,6 +17,7 @@ use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
 use tlog_tiles::{LogEntry, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+use x509_cert::der::Encode;
 
 // The Maximum Merge Delay (MMD) of a log indicates the maximum period of time
 // between when a SCT is issued and the corresponding entry is sequenced in the
@@ -174,6 +175,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn add_chain_or_pre_chain(
     mut req: Request,
     env: &Env,
@@ -190,9 +192,10 @@ async fn add_chain_or_pre_chain(
     };
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
+    let roots = &load_roots(env, name).await?;
     let pending_entry = match static_ct_api::validate_chain(
         &req.chain,
-        &load_roots(env, name).await?,
+        roots,
         Some(
             u64::try_from(params.temporal_interval.start_inclusive.timestamp_millis())
                 .unwrap_or_default(),
@@ -232,15 +235,25 @@ async fn add_chain_or_pre_chain(
 
     // First persist issuers.
     let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-    generic_log_worker::upload_issuers(
-        &public_bucket,
-        &req.chain[1..]
-            .iter()
-            .map(Vec::as_slice)
-            .collect::<Vec<&[u8]>>(),
-        name,
-    )
-    .await?;
+    let mut issuers = req.chain[1..]
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<&[u8]>>();
+
+    // Make sure the root is persisted as well.
+    let root_hash = pending_entry
+        .chain_fingerprints
+        .last()
+        .ok_or("chain fingerprints is empty")?;
+    let Some(root_cert) = roots.by_fingerprint(root_hash) else {
+        return Err(format!("{name}: root hash for chain is not in accepted roots").into());
+    };
+    let root_bytes = root_cert.to_der().map_err(|e| e.to_string())?;
+    if !issuers.iter().any(|issuer| *issuer == root_bytes) {
+        issuers.push(root_bytes.as_slice());
+    }
+
+    generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
 
     // Submit entry to be sequenced, either via a batcher or directly to the
     // sequencer.

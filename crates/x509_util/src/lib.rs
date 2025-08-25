@@ -119,4 +119,17 @@ impl CertPool {
             .by_fingerprint
             .contains_key::<[u8; 32]>(&Sha256::digest(cert.to_der()?).into()))
     }
+
+    /// Fetch a certificate from the pool by its fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are issues DER-encoding the certificate.
+    pub fn by_fingerprint(&self, fingerprint: &[u8; 32]) -> Option<&Certificate> {
+        if let Some(idx) = self.by_fingerprint.get(fingerprint) {
+            self.certs.get(*idx)
+        } else {
+            None
+        }
+    }
 }
