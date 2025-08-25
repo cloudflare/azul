@@ -183,6 +183,17 @@ async fn add_chain_or_pre_chain(
     expect_precert: bool,
 ) -> Result<Response> {
     let params = &CONFIG.logs[name];
+    if params.read_only {
+        return Response::error(
+            "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes.",
+            503,
+        )
+        .map(|r| {
+            let h = Headers::new();
+            h.set("Retry-After", "300").unwrap();
+            r.with_headers(h)
+        });
+    }
     let req: AddChainRequest = match req.json().await {
         Ok(req) => req,
         Err(e) => {
