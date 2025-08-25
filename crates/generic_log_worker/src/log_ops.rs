@@ -39,9 +39,9 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, HashReader, LogEntry, PendingLogEntry, PreloadedTlogTileReader, Proof, TileHashReader,
-    TileIterator, TlogError, TlogTile, TlogTileRecorder, TreeWithTimestamp, UnixTimestamp,
-    HASH_SIZE,
+    Hash, HashReader, LogEntry, PendingLogEntry, PreloadedTlogTileReader, Proof, Subtree,
+    TileHashReader, TileIterator, TlogError, TlogTile, TlogTileRecorder, TreeWithTimestamp,
+    UnixTimestamp, HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -510,53 +510,128 @@ pub enum ProofError {
     Other(#[from] anyhow::Error),
 }
 
-/// Returns an inclusion proof for the given leaf index, tree size, and root hash.
+/// Returns a verified inclusion proof that the leaf at index `leaf_index` is
+/// included in the current tree of size `cur_tree_size` with hash
+/// `cur_tree_hash`.
 ///
 /// # Errors
-/// Errors when the leaf index equals or exceeds the number of leaves, or
-/// the desired tiles do not exist as bucket objects.
+///
+/// Errors when the leaf index is not within the tree, or the desired tiles do
+/// not exist as bucket objects.
 pub async fn prove_inclusion(
-    tree_size: u64,
-    tree_hash: Hash,
+    cur_tree_size: u64,
+    cur_tree_hash: Hash,
+    leaf_index: u64,
+    object: &impl ObjectBackend,
+) -> Result<Proof, ProofError> {
+    prove_subtree_inclusion(
+        cur_tree_size,
+        cur_tree_hash,
+        0,
+        cur_tree_size,
+        leaf_index,
+        object,
+    )
+    .await
+}
+
+/// Returns a verified inclusion proof that the leaf at index `leaf_index` is
+/// included in the subtree `[start, end)`. `cur_tree_size` and `cur_tree_hash`
+/// allow us to select the correct partial tiles.
+///
+/// # Errors
+///
+/// Errors when the leaf index is not within the subtree, or the desired tiles
+/// do not exist as bucket objects.
+pub async fn prove_subtree_inclusion(
+    cur_tree_size: u64,
+    cur_tree_hash: Hash,
+    start: u64,
+    end: u64,
     leaf_index: u64,
     object: &impl ObjectBackend,
 ) -> Result<Proof, ProofError> {
     // Fetch the tiles needed for the proof.
-    let indexes = tlog_tiles::inclusion_proof_indexes(tree_size, leaf_index)?;
-    let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object).await?;
+    let n = &Subtree::new(start, end)?;
+    let mut indexes = tlog_tiles::subtree_inclusion_proof_indexes(n, leaf_index)?;
+
+    // Fetch the leaf and subtree hashes to verify the proof. These aren't
+    // needed to construct the proof, but fetch them so they're available in
+    // `tile_reader`.
+    indexes.append(&mut tlog_tiles::subtree_hash_indexes(n));
+    let leaf_shx = tlog_tiles::stored_hash_index(0, leaf_index);
+    indexes.push(leaf_shx);
+    indexes.sort_unstable();
+    indexes.dedup();
+
+    let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
+
+    // Construct the proof.
+    let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
+    let proof = tlog_tiles::subtree_inclusion_proof(n, leaf_index, &hash_reader)?;
 
     // Verify the proof.
-    let hash_reader = TileHashReader::new(tree_size, tree_hash, &tile_reader);
-    Ok(tlog_tiles::inclusion_proof(
-        tree_size,
-        leaf_index,
-        &hash_reader,
-    )?)
+    let n_hash = tlog_tiles::subtree_hash(n, &hash_reader)?;
+    let leaf_hash: Hash = hash_reader
+        .read_hashes(&[leaf_shx])?
+        .into_iter()
+        .next()
+        .ok_or(anyhow!("failed to read leaf hash"))?;
+    tlog_tiles::verify_subtree_inclusion_proof(&proof, n, n_hash, leaf_index, leaf_hash)?;
+
+    Ok(proof)
 }
 
-/// Returns a consistency proof, proving the tree with `cur_tree_size` and hash
-/// `cur_tree_hash` is an extension of the tree with `prev_tree_size`.
+/// Returns a verified consistency proof, proving the tree with `cur_tree_size`
+/// and hash `cur_tree_hash` is an extension of the tree with `prev_tree_size`.
 ///
 /// # Errors
-/// Errors when the desired tiles do not exist as bucket objects, or it's not
-/// the case that `1 <= prev_tree_size <= cur_tree_size`.
+///
+/// Errors when the desired tiles do not exist as bucket objects, or if the
+/// proof fails.
 pub async fn prove_consistency(
     cur_tree_hash: Hash,
     cur_tree_size: u64,
     prev_tree_size: u64,
     object: &impl ObjectBackend,
 ) -> Result<Proof, ProofError> {
+    prove_subtree_consistency(cur_tree_hash, cur_tree_size, 0, prev_tree_size, object).await
+}
+
+/// Returns a verified consistency proof, proving the tree with `cur_tree_size`
+/// and hash `cur_tree_hash` is consistent with the subtree `[start, end)`.
+///
+/// # Errors
+///
+/// Errors when the desired tiles do not exist as bucket objects, or if the
+/// proof fails.
+pub async fn prove_subtree_consistency(
+    cur_tree_hash: Hash,
+    cur_tree_size: u64,
+    start: u64,
+    end: u64,
+    object: &impl ObjectBackend,
+) -> Result<Proof, ProofError> {
+    let m = &Subtree::new(start, end)?;
     // Fetch the tiles needed for the proof.
-    let indexes = tlog_tiles::consistency_proof_indexes(cur_tree_size, prev_tree_size)?;
+    let mut indexes = tlog_tiles::subtree_consistency_proof_indexes(cur_tree_size, m)?;
+
+    // Fetch the subtree hash to verify the proof. These aren't
+    // needed to construct the proof, but we want to fetch them now so they're
+    // available in `tile_reader`.
+    indexes.append(&mut tlog_tiles::subtree_hash_indexes(m));
+
     let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
+    let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
+
+    // Construct the proof.
+    let proof = tlog_tiles::subtree_consistency_proof(cur_tree_size, m, &hash_reader)?;
 
     // Verify the proof.
-    let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
-    Ok(tlog_tiles::consistency_proof(
-        cur_tree_size,
-        prev_tree_size,
-        &hash_reader,
-    )?)
+    let m_hash = tlog_tiles::subtree_hash(m, &hash_reader)?;
+    tlog_tiles::verify_subtree_consistency_proof(&proof, cur_tree_size, cur_tree_hash, m, m_hash)?;
+
+    Ok(proof)
 }
 
 /// Fetch the tree tiles containing the nodes at the requested indexes, as well
