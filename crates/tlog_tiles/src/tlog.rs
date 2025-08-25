@@ -331,16 +331,21 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
     if n == 0 {
         return Ok(EMPTY_HASH);
     }
-    let indexes = subtree_indexes(0, n, vec![]);
-    let hashes = r.read_hashes(&indexes)?;
-    assert_eq!(
-        hashes.len(),
-        indexes.len(),
-        "bad read_hashes implementation"
-    );
-    let (hash, remaining_hashes) = subtree_hash(0, n, &hashes);
-    assert!(remaining_hashes.is_empty(), "bad math in tree_hash");
-    Ok(hash)
+    subtree_hash(&Subtree::new(0, n)?, r)
+}
+
+/// Computes the indexes needed to compute the hash of the tree with `n` records.
+pub fn tree_hash_indexes(n: u64) -> Vec<u64> {
+    if n == 0 {
+        return vec![];
+    }
+    Subtree { lo: 0, hi: n }.hash_indexes()
+}
+
+/// Returns the storage indexes needed to compute the hash for the subtree.
+/// See <https://tools.ietf.org/html/rfc6962#section-2.1>.
+pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
+    subtree_indexes_internal(n.lo, n.hi, vec![])
 }
 
 /// Returns the storage indexes needed to compute the hash for the subtree containing records [lo,
@@ -350,7 +355,7 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
 /// # Panics
 ///
 /// Panics if there are internal math errors.
-pub fn subtree_indexes(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
+fn subtree_indexes_internal(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
     // See subtree_hash below for commentary.
     let mut lo = lo;
     while lo < hi {
@@ -362,12 +367,40 @@ pub fn subtree_indexes(lo: u64, hi: u64, mut need: Vec<u64>) -> Vec<u64> {
     need
 }
 
+/// Computes the hash for the root of the subtree `[lo, hi)`, using the
+/// [`HashReader`] to obtain previously stored hashes (those returned by
+/// [`stored_hashes`] during the writes of those `hi-lo` records).  `tree_hash`
+/// makes a single call to [`HashReader::read_hashes`] requesting at most `1 +
+/// log₂ (hi-lo)` hashes.
+///
+/// # Errors
+///
+/// Returns an error if `read_hashes` fails to read hashes or if the subtree is
+/// invalid.
+///
+/// # Panics
+///
+/// Panics if `read_hashes` returns a slice of hashes that is not the same
+/// length as the requested indexes, or if there are internal math errors.
+pub fn subtree_hash<R: HashReader>(n: &Subtree, r: &R) -> Result<Hash, TlogError> {
+    let indexes = subtree_indexes_internal(n.lo, n.hi, vec![]);
+    let hashes = r.read_hashes(&indexes)?;
+    assert_eq!(
+        hashes.len(),
+        indexes.len(),
+        "bad read_hashes implementation"
+    );
+    let (hash, remaining_hashes) = subtree_hash_internal(n.lo, n.hi, &hashes);
+    assert!(remaining_hashes.is_empty(), "bad math in tree_hash");
+    Ok(hash)
+}
+
 /// Computes the hash for the subtree containing records [lo, hi), assuming that
 /// hashes are the hashes corresponding to the indexes returned by
 /// `subtree_indexes(lo, hi)`.  It returns any leftover hashes.
 ///
 /// May panic if there are internal math errors.
-fn subtree_hash(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
+fn subtree_hash_internal(lo: u64, hi: u64, hashes: &[Hash]) -> (Hash, Vec<Hash>) {
     // Repeatedly partition the tree into a left side with 2^level nodes,
     // for as large a level as possible, and a right side with the fringe.
     // The left hash is stored directly and can be read from storage.
@@ -454,9 +487,9 @@ fn inclusion_proof_indexes_recursion(lo: u64, hi: u64, n: u64, mut need: Vec<u64
     let (k, _) = maxpow2(hi - lo);
     if n < lo + k {
         need = inclusion_proof_indexes_recursion(lo, lo + k, n, need);
-        need = subtree_indexes(lo + k, hi, need);
+        need = subtree_indexes_internal(lo + k, hi, need);
     } else {
-        need = subtree_indexes(lo, lo + k, need);
+        need = subtree_indexes_internal(lo, lo + k, need);
         need = inclusion_proof_indexes_recursion(lo + k, hi, n, need);
     }
     need
@@ -491,10 +524,10 @@ fn inclusion_proof_recursion(
     if n < lo + k {
         // n is on left side
         (proof, hashes) = inclusion_proof_recursion(lo, lo + k, n, hashes);
-        (th, hashes) = subtree_hash(lo + k, hi, &hashes);
+        (th, hashes) = subtree_hash_internal(lo + k, hi, &hashes);
     } else {
         // n is on right side
-        (th, hashes) = subtree_hash(lo, lo + k, &hashes);
+        (th, hashes) = subtree_hash_internal(lo, lo + k, &hashes);
         (proof, hashes) = inclusion_proof_recursion(lo + k, hi, n, hashes);
     }
 
@@ -639,15 +672,15 @@ fn consistency_proof_indexes_recursion(lo: u64, hi: u64, n: u64, mut need: Vec<u
         if lo == 0 {
             return need;
         }
-        return subtree_indexes(lo, hi, need);
+        return subtree_indexes_internal(lo, hi, need);
     }
 
     let (k, _) = maxpow2(hi - lo);
     if n <= lo + k {
         need = consistency_proof_indexes_recursion(lo, lo + k, n, need);
-        need = subtree_indexes(lo + k, hi, need);
+        need = subtree_indexes_internal(lo + k, hi, need);
     } else {
-        need = subtree_indexes(lo, lo + k, need);
+        need = subtree_indexes_internal(lo, lo + k, need);
         need = consistency_proof_indexes_recursion(lo + k, hi, n, need);
     }
     need
@@ -673,7 +706,7 @@ fn consistency_proof_recursion(
             // The verifier knows that hash, so we don't need to send it.
             return (vec![], hashes);
         }
-        let (th, hashes) = subtree_hash(lo, hi, &hashes);
+        let (th, hashes) = subtree_hash_internal(lo, hi, &hashes);
         return (vec![th], hashes);
     }
 
@@ -685,10 +718,10 @@ fn consistency_proof_recursion(
     if n <= lo + k {
         // m is on left side
         (p, hashes) = consistency_proof_recursion(lo, lo + k, n, hashes);
-        (th, hashes) = subtree_hash(lo + k, hi, &hashes);
+        (th, hashes) = subtree_hash_internal(lo + k, hi, &hashes);
     } else {
         // m is on right side
-        (th, hashes) = subtree_hash(lo, lo + k, &hashes);
+        (th, hashes) = subtree_hash_internal(lo, lo + k, &hashes);
         (p, hashes) = consistency_proof_recursion(lo + k, hi, n, hashes);
     }
     p.push(th);
