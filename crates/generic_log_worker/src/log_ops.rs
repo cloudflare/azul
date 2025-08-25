@@ -1078,6 +1078,12 @@ async fn sequence_entries<L: LogEntry>(
         );
     }
 
+    // Call the checkpoint callback. This is a no-op for CT, but is used to
+    // update landmark checkpoints for MTC.
+    if let Err(e) = (config.checkpoint_callback)(n, old_time, timestamp).await {
+        warn!("{name}: Checkpoint callback failed: {e}");
+    }
+
     for tile in new.edge_tiles {
         trace!("{name}: Edge tile: {tile:?}");
     }
@@ -1318,7 +1324,7 @@ pub async fn upload_issuers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util;
+    use crate::{empty_checkpoint_callback, util};
 
     use anyhow::ensure;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
@@ -2385,6 +2391,7 @@ mod tests {
                 enable_dedup: true,
                 sequence_skip_threshold_millis: None,
                 location_hint: None,
+                checkpoint_callback: empty_checkpoint_callback(),
             };
             let pool_state = RefCell::new(PoolState::default());
             block_on(create_log(&config, &object, &lock)).unwrap();

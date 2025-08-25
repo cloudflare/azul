@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use crate::{load_checkpoint_signers, load_origin, CONFIG};
 use generic_log_worker::{
-    get_durable_object_name, GenericSequencer, SequencerConfig, SEQUENCER_BINDING,
+    empty_checkpoint_callback, get_durable_object_name, GenericSequencer, SequencerConfig,
+    SEQUENCER_BINDING,
 };
 use static_ct_api::StaticCTLogEntry;
 #[allow(clippy::wildcard_imports)]
@@ -36,6 +37,7 @@ impl DurableObject for Sequencer {
             enable_dedup: params.enable_dedup,
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
+            checkpoint_callback: empty_checkpoint_callback(),
         };
 
         Sequencer(GenericSequencer::new(state, env, config))

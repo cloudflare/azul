@@ -15,8 +15,10 @@ pub struct AppConfig {
 pub struct LogParams {
     pub description: Option<String>,
     pub log_id: String,
-    #[serde(default = "default_u64::<604_800>")]
-    pub validity_interval_seconds: u64,
+    #[serde(default = "default_usize::<604_800>")]
+    pub max_certificate_lifetime_secs: usize,
+    #[serde(default = "default_usize::<3600>")]
+    pub landmark_interval_secs: usize,
     #[serde(default)]
     pub monitoring_url: String,
     pub submission_url: String,

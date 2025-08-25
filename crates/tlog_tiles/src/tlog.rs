@@ -795,8 +795,16 @@ impl Subtree {
         }
         Ok(Self { lo, hi })
     }
+    /// Return the lower (inclusive) bound on indices in the subtree.
+    pub fn lo(&self) -> u64 {
+        self.lo
+    }
+    /// Return the upper (exclusive) bound on indices in the subtree.
+    pub fn hi(&self) -> u64 {
+        self.hi
+    }
     /// Return whether or not the subtree contains the given leaf index.
-    fn contains(&self, leaf_index: u64) -> bool {
+    pub fn contains(&self, leaf_index: u64) -> bool {
         (self.lo..self.hi).contains(&leaf_index)
     }
     /// Return whether or not the subtree contains the given subtree.
@@ -816,6 +824,32 @@ impl Subtree {
                 hi: self.hi,
             },
         )
+    }
+    /// Returns a list of one or two subtrees that efficiently cover `[lo, hi)`.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if `lo ≤ hi`.
+    pub fn split_interval(lo: u64, hi: u64) -> Result<(Self, Option<Self>), TlogError> {
+        if lo >= hi {
+            return Err(TlogError::InvalidInput("`lo < hi`".into()));
+        }
+        if hi - lo == 1 {
+            return Ok((Self { lo, hi }, None));
+        }
+        let last = hi - 1;
+        // Find where `lo` and `last`'s tree paths diverge. The two subtrees
+        // will be on either side of the split.
+        // SAFETY: `lo ^ last` is guaranteed to be non-zero, so `ilog2` won't panic.
+        let split = (lo ^ last).ilog2();
+        let mask = (1 << split) - 1;
+        let mid = last & !mask;
+        // Maximize the left endpoint. This is just before `lo`'s path leaves
+        // the right edge of its new subtree.
+        let left_split = (!lo & mask).ilog2() + 1;
+        let left = lo & !((1 << left_split) - 1);
+
+        Ok((Self { lo: left, hi: mid }, Some(Self { lo: mid, hi })))
     }
 }
 
@@ -1233,5 +1267,21 @@ mod tests {
     #[test]
     fn test_empty_tree() {
         assert_eq!(tree_hash(0, &TestHashStorage::new()).unwrap(), EMPTY_HASH);
+    }
+
+    #[test]
+    fn test_subtrees_split_interval() {
+        assert_eq!(
+            Subtree::split_interval(123, 124).unwrap(),
+            (Subtree::new(123, 124).unwrap(), None)
+        );
+
+        assert_eq!(
+            Subtree::split_interval(1200, 1300).unwrap(),
+            (
+                Subtree::new(1152, 1280).unwrap(),
+                Some(Subtree::new(1280, 1300).unwrap())
+            )
+        );
     }
 }
