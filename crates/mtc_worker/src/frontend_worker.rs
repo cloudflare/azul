@@ -14,7 +14,7 @@ use der::{
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket,
-    log_ops::{prove_inclusion, CHECKPOINT_KEY},
+    log_ops::{prove_inclusion, ProofError, CHECKPOINT_KEY},
     put_cache_entry_metadata, serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
@@ -129,13 +129,19 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                             422,
                         );
                     }
-                    let proof = prove_inclusion(
+                    let proof = match prove_inclusion(
                         checkpoint.size(),
                         *checkpoint.hash(),
                         leaf_index,
                         &object_backend,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(p) => p,
+                        Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
+                        Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+                    };
+
                     let proof_bytestrings =
                         proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
                     Response::from_json(&ProveInclusionResponse {

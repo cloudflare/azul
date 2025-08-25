@@ -44,7 +44,6 @@ use tlog_tiles::{
     HASH_SIZE,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
-use worker::Error as WorkerError;
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
@@ -483,7 +482,7 @@ impl SequenceState {
         };
         // We can unwrap because edge_tiles is guaranteed to contain the tiles
         // necessary to prove this.
-        tlog_tiles::prove_inclusion(tree_size, tree_size - 1, &reader).unwrap()
+        tlog_tiles::inclusion_proof(tree_size, tree_size - 1, &reader).unwrap()
     }
 
     /// Proves that this tree of size n is compatible with the subtree of size
@@ -499,8 +498,16 @@ impl SequenceState {
             edge_tiles: &self.edge_tiles,
             overlay: &HashMap::default(),
         };
-        tlog_tiles::prove_consistency(tree_size, tree_size - 1, &reader)
+        tlog_tiles::consistency_proof(tree_size, tree_size - 1, &reader)
     }
+}
+
+#[derive(Error, Debug)]
+pub enum ProofError {
+    #[error(transparent)]
+    Tlog(#[from] tlog_tiles::TlogError),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 /// Returns an inclusion proof for the given leaf index, tree size, and root hash.
@@ -513,23 +520,18 @@ pub async fn prove_inclusion(
     tree_hash: Hash,
     leaf_index: u64,
     object: &impl ObjectBackend,
-) -> Result<Proof, WorkerError> {
-    if leaf_index >= tree_size {
-        return Err(WorkerError::RustError(
-            "leaf index exceeds number of leaves in the tree".to_string(),
-        ));
-    }
-
+) -> Result<Proof, ProofError> {
     // Fetch the tiles needed for the proof.
-    let indexes = tlog_tiles::inclusion_proof_indexes(0, tree_size, leaf_index, Vec::new());
-    let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object)
-        .await
-        .map_err(|e| e.to_string())?;
+    let indexes = tlog_tiles::inclusion_proof_indexes(tree_size, leaf_index)?;
+    let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object).await?;
 
     // Verify the proof.
     let hash_reader = TileHashReader::new(tree_size, tree_hash, &tile_reader);
-    tlog_tiles::prove_inclusion(tree_size, leaf_index, &hash_reader)
-        .map_err(|e| WorkerError::RustError(e.to_string()))
+    Ok(tlog_tiles::inclusion_proof(
+        tree_size,
+        leaf_index,
+        &hash_reader,
+    )?)
 }
 
 /// Returns a consistency proof, proving the tree with `cur_tree_size` and hash
@@ -543,25 +545,22 @@ pub async fn prove_consistency(
     cur_tree_size: u64,
     prev_tree_size: u64,
     object: &impl ObjectBackend,
-) -> Result<Proof, WorkerError> {
-    if !(1..=cur_tree_size).contains(&prev_tree_size) {
-        return Err("condition not met: 1 <= prev_tree_size <= cur_tree_size".into());
-    }
+) -> Result<Proof, ProofError> {
     // Fetch the tiles needed for the proof.
-    let indexes =
-        tlog_tiles::consistency_proof_indexes(0, cur_tree_size, prev_tree_size, Vec::new());
-    let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object)
-        .await
-        .map_err(|e| e.to_string())?;
+    let indexes = tlog_tiles::consistency_proof_indexes(cur_tree_size, prev_tree_size)?;
+    let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
 
     // Verify the proof.
     let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
-    tlog_tiles::prove_consistency(cur_tree_size, prev_tree_size, &hash_reader)
-        .map_err(|e| WorkerError::RustError(e.to_string()))
+    Ok(tlog_tiles::consistency_proof(
+        cur_tree_size,
+        prev_tree_size,
+        &hash_reader,
+    )?)
 }
 
-/// Fetch the tree tiles containing the nodes the requested indexes, as well as
-/// all tiles needed to verify those nodes.
+/// Fetch the tree tiles containing the nodes at the requested indexes, as well
+/// as all tiles needed to verify those nodes.
 async fn tile_reader_for_indexes(
     tree_size: u64,
     indexes: &[u64],
@@ -1301,7 +1300,7 @@ mod tests {
                 let leaf_edge = &sequence_state.edge_tiles.get(&0u8).unwrap().b;
                 Hash(leaf_edge[leaf_edge.len() - HASH_SIZE..].try_into().unwrap())
             };
-            tlog_tiles::check_inclusion(
+            tlog_tiles::verify_inclusion_proof(
                 &inc_proof,
                 tree_size,
                 new_tree_hash,
@@ -1315,11 +1314,10 @@ mod tests {
 
             // Make a consistency proof. Just can't do it with a size-0 subtree
             if i > 0 {
-                let consistency_proof =
-                    sequence_state.prove_consistency_of_single_append().unwrap();
+                let proof = sequence_state.prove_consistency_of_single_append().unwrap();
                 // Verify the proof
-                tlog_tiles::check_consistency(
-                    &consistency_proof,
+                tlog_tiles::verify_consistency_proof(
+                    &proof,
                     tree_size,
                     new_tree_hash,
                     tree_size - 1,
@@ -1327,14 +1325,14 @@ mod tests {
                 )
                 .unwrap();
                 // Check that the other way of constructing the consistency proof is the same
-                let consistency_proof2 = block_on(prove_consistency(
+                let proof2 = block_on(prove_consistency(
                     new_tree_hash,
                     tree_size,
                     tree_size - 1,
                     &log.object,
                 ))
                 .unwrap();
-                assert_eq!(consistency_proof, consistency_proof2);
+                assert_eq!(proof, proof2);
             }
         }
         // Check that the static CT log is valid
@@ -1368,7 +1366,7 @@ mod tests {
                 )
             };
             // Verify the inclusion proof
-            tlog_tiles::check_inclusion(&proof, n, tree_hash, i, leaf_hash).unwrap();
+            tlog_tiles::verify_inclusion_proof(&proof, n, tree_hash, i, leaf_hash).unwrap();
         }
 
         // Check that we can make a consistency proof for random spans in the tree
@@ -1383,7 +1381,7 @@ mod tests {
                 &log.object,
             ))
             .unwrap();
-            tlog_tiles::check_consistency(
+            tlog_tiles::verify_consistency_proof(
                 &consistency_proof,
                 new_tree_size,
                 tree_hashes[usize::try_from(new_tree_size).unwrap()],
