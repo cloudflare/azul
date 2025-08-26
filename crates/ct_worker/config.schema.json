@@ -119,6 +119,11 @@
                             "minimum": 1,
                             "default": 60,
                             "description": "How long to wait in between runs of the partial tile cleaner. For static CT, the cleaner can clean 498 tiles (127,488 entries) per run before hitting the Workers limit of 1000 subrequests, so the default of once every 60 seconds should keep up with a log that grows at 2000 entries/second."
+                        },
+                        "read_only": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Disable add-(pre-)chain requests to prevent a log from accepting new submissions and issuing SCTs. This can be used to limit the blast radius of log failures."
                         }
                     },
                     "required": [
