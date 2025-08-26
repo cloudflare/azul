@@ -137,6 +137,8 @@ pub enum MtcError {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     ParseInt(#[from] ParseIntError),
+    #[error("overlap in validity with bootstrap chain is empty")]
+    Validity,
     #[error("empty chain")]
     EmptyChain,
     #[error("invalid relative OID")]
@@ -451,7 +453,17 @@ pub fn validate_chain(
         .map(|x| Certificate::from_der(x))
         .collect::<Result<Vec<Certificate>, der::Error>>()?;
 
+    // Adjust the validity bound to the overlapping part of validity periods of
+    // all certificates in the chain.
     for cert in std::iter::once(&leaf).chain(&chain) {
+        if validity.not_before.to_unix_duration().lt(&cert
+            .tbs_certificate
+            .validity
+            .not_before
+            .to_unix_duration())
+        {
+            validity.not_before = cert.tbs_certificate.validity.not_before;
+        }
         if validity.not_after.to_unix_duration().gt(&cert
             .tbs_certificate
             .validity
@@ -459,6 +471,15 @@ pub fn validate_chain(
             .to_unix_duration())
         {
             validity.not_after = cert.tbs_certificate.validity.not_after;
+        }
+        // Check that we still have a non-empty validity period.
+        if validity
+            .not_after
+            .to_unix_duration()
+            .le(&validity.not_before.to_unix_duration())
+        {
+            // There is no remaining validity period.
+            return Err(MtcError::Validity);
         }
     }
 
