@@ -1186,7 +1186,7 @@ static OPTS_CHECKPOINT: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions
     immutable: false,
 });
 /// Options for uploading data tiles.
-static OPTS_DATA_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
+pub static OPTS_DATA_TILE: LazyLock<UploadOptions> = LazyLock::new(|| UploadOptions {
     content_type: None,
     immutable: true,
 });

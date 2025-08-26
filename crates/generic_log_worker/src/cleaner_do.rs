@@ -36,9 +36,10 @@ pub struct CleanerConfig {
 }
 
 pub struct GenericCleaner {
-    config: CleanerConfig,
-    storage: Storage,
-    bucket: Bucket,
+    pub config: CleanerConfig,
+    pub env: Env,
+    pub storage: Storage,
+    pub bucket: Bucket,
     cleaned_size: RefCell<u64>,
     current_size: RefCell<u64>,
     subrequests: RefCell<usize>,
@@ -51,9 +52,10 @@ impl GenericCleaner {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the public bucket.
-    pub fn new(state: &State, env: &Env, config: CleanerConfig) -> Self {
-        let bucket = load_public_bucket(env, &config.name).unwrap();
+    pub fn new(state: &State, env: Env, config: CleanerConfig) -> Self {
+        let bucket = load_public_bucket(&env, &config.name).unwrap();
         Self {
+            env,
             storage: state.storage(),
             config,
             bucket,
@@ -108,7 +110,7 @@ impl GenericCleaner {
     ///
     /// # Errors
     /// Will return an error if initialization or cleaning fails.
-    pub async fn alarm(&self) -> Result<Response, WorkerError> {
+    pub async fn alarm(&self) -> Result<(), WorkerError> {
         // Reset the subrequest count.
         *self.subrequests.borrow_mut() = 0;
 
@@ -120,18 +122,17 @@ impl GenericCleaner {
         // Schedule the next cleaning.
         self.storage.set_alarm(self.config.clean_interval).await?;
 
-        // Clean the log.
+        // Clean partial tiles from the log.
         if let Err(e) = self.clean_log().await {
             log::warn!("{name}: Error cleaning log: {e}");
         } else {
             log::info!(
-                "{name}: Cleaned log (cleaned_size={} current_size={})",
+                "{name}: Cleaned log (cleaned_size={}, current_size={})",
                 self.cleaned_size.borrow(),
                 self.current_size.borrow()
             );
         }
-
-        Response::ok("Alarm done")
+        Ok(())
     }
 
     // Clean up partial tiles from a log, stopping either when the current log
@@ -255,8 +256,14 @@ impl GenericCleaner {
             .collect::<Vec<_>>())
     }
 
-    // Get the latest log size by retrieving the checkpoint from object storage.
-    async fn current_size(&self) -> Result<u64, WorkerError> {
+    /// Get the latest log size by retrieving the checkpoint from object
+    /// storage.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if the checkpoint cannot be retrieved or is
+    /// invalid.
+    pub async fn current_size(&self) -> Result<u64, WorkerError> {
         self.checked_add_subrequests(1)?;
         let checkpoint_bytes = self
             .bucket
@@ -280,13 +287,13 @@ impl GenericCleaner {
         Ok(checkpoint.size())
     }
 
-    // Add to the subrequest count after checking that the new subrequests will not
-    // put the worker over the limit.
-    //
-    // # Errors
-    // Will return `CleanupError::Subrequests` if the additional subreqeusts would
-    // cause the limit to be exceeded.
-    fn checked_add_subrequests(&self, new: usize) -> Result<(), WorkerError> {
+    /// Add to the subrequest count after checking that the new subrequests will not
+    /// put the worker over the limit.
+    ///
+    /// # Errors
+    /// Will return `CleanupError::Subrequests` if the additional subreqeusts would
+    /// cause the limit to be exceeded.
+    pub fn checked_add_subrequests(&self, new: usize) -> Result<(), WorkerError> {
         if *self.subrequests.borrow() + new > SUBREQUEST_LIMIT {
             return Err("reached subrequest limit".into());
         }

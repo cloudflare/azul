@@ -103,6 +103,12 @@ impl<L: LogEntry> std::iter::Iterator for TileIterator<'_, L> {
     }
 }
 
+impl<L: LogEntry> std::iter::ExactSizeIterator for TileIterator<'_, L> {
+    fn len(&self) -> usize {
+        self.size - self.count
+    }
+}
+
 impl<'a, L: LogEntry> TileIterator<'a, L> {
     /// Returns a new [`TileIterator`], which always attempts to parse exactly
     /// 'size' entries before terminating.

@@ -248,7 +248,7 @@ impl_newtype!(CTPrecertPoison, Null);
 /// root CA certificate, using the chain of intermediate CA certificates
 /// provided by the submitter.
 /// ```
-fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
+pub fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     if let Ok(key) = VerifyingKey::try_from(issuer) {
         key.verify_strict(child).is_ok()
     } else {

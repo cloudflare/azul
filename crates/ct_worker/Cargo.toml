@@ -43,11 +43,13 @@ config = { path = "./config", package = "ct_worker_config" }
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
+hex.workspace = true
 log.workspace = true
 p256.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
+sha2.workspace = true
 static_ct_api.workspace = true
 signed_note.workspace = true
 tlog_tiles.workspace = true

@@ -35,7 +35,7 @@ impl DurableObject for Cleaner {
             clean_interval: Duration::from_secs(params.clean_interval_secs),
         };
 
-        Cleaner(GenericCleaner::new(&state, &env, config))
+        Cleaner(GenericCleaner::new(&state, env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -43,6 +43,6 @@ impl DurableObject for Cleaner {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        self.0.alarm().await
+        self.0.alarm().await.and(Response::ok("Alarm done"))
     }
 }
