@@ -14,14 +14,14 @@ use der::{
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket,
-    log_ops::{prove_subtree_inclusion, ProofError, CHECKPOINT_KEY},
+    log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
     put_cache_entry_metadata, serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use mtc_api::{
-    AddEntryRequest, AddEntryResponse, LandmarkSequence, RelativeOid, ID_RDNA_TRUSTANCHOR_ID,
-    LANDMARK_KEY,
+    serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
+    LandmarkSequence, RelativeOid, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
@@ -52,18 +52,22 @@ struct MetadataResponse<'a> {
     monitoring_url: &'a str,
 }
 
-/// GET query structure for the `/prove_inclusion` endpoint
-#[derive(Serialize, Deserialize)]
-pub struct ProveInclusionQuery {
-    pub leaf_index: LeafIndex,
-}
-
-/// GET response structure for the `/prove_inclusion` endpoint
+// POST body structure for the `/get-certificate` endpoint
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct ProveInclusionResponse {
-    #[serde_as(as = "Vec<Base64>")]
-    pub proof: Vec<Vec<u8>>,
+pub struct GetCertificateRequest {
+    pub leaf_index: LeafIndex,
+
+    #[serde_as(as = "Base64")]
+    pub spki_der: Vec<u8>,
+}
+
+/// GET response structure for the `/get-certificate` endpoint
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct GetCertificateResponse {
+    #[serde_as(as = "Base64")]
+    pub data: Vec<u8>,
     pub landmark_id: usize,
 }
 
@@ -103,10 +107,13 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .post_async("/logs/:log/add-entry", |req, ctx| async move {
                     add_entry(req, &ctx.env, ctx.data).await
                 })
-                .get_async("/logs/:log/prove-inclusion", |req, ctx| async move {
+                .post_async("/logs/:log/get-certificate", |mut req, ctx| async move {
                     let name = ctx.data;
                     let params = &CONFIG.logs[name];
-                    let ProveInclusionQuery { leaf_index } = req.query()?;
+                    let GetCertificateRequest {
+                        leaf_index,
+                        spki_der,
+                    } = req.json().await?;
                     let object_backend = ObjectBucket::new(load_public_bucket(&ctx.env, name)?);
                     // Fetch the current checkpoint to know which tiles to fetch
                     // (full or partials).
@@ -160,6 +167,16 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                             .map(|r| r.with_headers(headers));
                     };
 
+                    // Fetch the log entry for the leaf index.
+                    let log_entry = read_leaf::<BootstrapMtcLogEntry>(
+                        &object_backend,
+                        leaf_index,
+                        checkpoint.size(),
+                        checkpoint.hash(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
                     // Calculate and verify the inclusion proof.
                     let proof = match prove_subtree_inclusion(
                         checkpoint.size(),
@@ -176,12 +193,24 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                         Err(ProofError::Other(e)) => return Err(e.to_string().into()),
                     };
 
-                    let proof_bytestrings =
-                        proof.into_iter().map(|h| h.0.to_vec()).collect::<Vec<_>>();
-                    Response::from_json(&ProveInclusionResponse {
-                        proof: proof_bytestrings,
-                        landmark_id,
-                    })
+                    // Construct the signatureless certificate.
+                    let data = match serialize_signatureless_cert(
+                        &log_entry,
+                        leaf_index,
+                        &spki_der,
+                        &landmark_subtree,
+                        proof,
+                    ) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            return Response::error(
+                                format!("Failed to serialize signatureless cert: {e}"),
+                                422,
+                            )
+                        }
+                    };
+
+                    Response::from_json(&GetCertificateResponse { data, landmark_id })
                 })
                 .get("/logs/:log/metadata", |_req, ctx| {
                     let name = ctx.data;

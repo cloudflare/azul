@@ -1201,6 +1201,68 @@ async fn read_edge_tiles(
     Ok(edge_tiles)
 }
 
+/// Read and verify a single log entry at `leaf_index`.
+///
+/// # Errors
+///
+/// Returns an error if the leaf is not successfully read or verified.
+pub async fn read_leaf<L: LogEntry>(
+    object: &impl ObjectBackend,
+    leaf_index: u64,
+    tree_size: u64,
+    tree_hash: &Hash,
+) -> Result<L, anyhow::Error> {
+    let leaf_shx = tlog_tiles::stored_hash_index(0, leaf_index);
+    let tile_reader = tile_reader_for_indexes(tree_size, &[leaf_shx], object).await?;
+
+    // Verify the leaf tile against the tree hash.
+    let hash_reader = TileHashReader::new(tree_size, *tree_hash, &tile_reader);
+    let hashes = hash_reader
+        .read_hashes(&[leaf_shx])
+        .map_err(|e| anyhow!(e))?;
+    let leaf_hash = hashes.first().ok_or(anyhow!("too many hashes read"))?;
+
+    // Get the level-0 tile. There will be two level-0 tiles in the reader, so get the one matching the requested hash.
+    let Some((level0_tile, level0_tile_bytes)) = tile_reader.0.into_iter().find(|(tile, b)| {
+        tile.level() == 0
+            && tile
+                .hash_at_index(b, leaf_shx)
+                .is_ok_and(|h| h == *leaf_hash)
+    }) else {
+        bail!("failed to get level-0 tile");
+    };
+
+    // Get the data tile.
+    let data_tile = level0_tile.with_data_path(L::Pending::DATA_TILE_PATH);
+    let data_tile_bytes = object
+        .fetch(&data_tile.path())
+        .await?
+        .ok_or(anyhow!("no data tile in object storage"))?;
+
+    // Verify the data tile against the level 0 tile.
+    let start = u64::from(TlogTile::FULL_WIDTH) * data_tile.level_index();
+    for (i, entry_res) in
+        TileIterator::<L>::new(&data_tile_bytes, data_tile.width() as usize).enumerate()
+    {
+        let entry = entry_res?;
+        let got = entry.merkle_tree_leaf();
+        let exp = level0_tile.hash_at_index(
+            &level0_tile_bytes,
+            tlog_tiles::stored_hash_index(0, start + i as u64),
+        )?;
+        if got != exp {
+            bail!(
+                "tile leaf entry {} hashes to {got}, level 0 hash is {exp}",
+                start + i as u64,
+            );
+        }
+        if leaf_index == start + i as u64 {
+            return Ok(entry);
+        }
+    }
+    bail!("did not find leaf")
+}
+
 /// Returns hashes from `edge_tiles` or from the overlay cache.
 #[derive(Debug)]
 struct HashReaderWithOverlay<'a> {
