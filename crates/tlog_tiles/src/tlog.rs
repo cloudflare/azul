@@ -407,10 +407,6 @@ pub fn subtree_inclusion_proof<R: HashReader>(
     leaf_index: u64,
     r: &R,
 ) -> Result<Proof, TlogError> {
-    if !n.contains(leaf_index) {
-        return Err(TlogError::InvalidInput("`lo <= leaf_index < hi`".into()));
-    }
-
     let m = &Subtree::new(leaf_index, leaf_index + 1)?;
 
     // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
@@ -567,9 +563,6 @@ pub fn subtree_consistency_proof<R: HashReader>(
     r: &R,
 ) -> Result<Proof, TlogError> {
     let n = Subtree::new(0, tree_size)?;
-    if !n.contains_subtree(m) {
-        return Err(TlogError::InvalidInput(format!("{n} does not contain {m}")));
-    }
     let indexes = n.subproof_indexes(m, true)?;
     if indexes.is_empty() {
         return Ok(vec![]);
@@ -1009,7 +1002,7 @@ impl Subtree {
         }
     }
 
-    /// Returns only the storage hash indexes needed for the subproof.
+    /// Returns the storage hash indexes needed for the subproof.
     fn subproof_indexes(&self, m: &Subtree, known: bool) -> Result<Vec<u64>, TlogError> {
         // Get all hash indexes for a given subtree.
         let mut get_indexes = |t: &Subtree| -> Vec<u64> { t.hash_indexes() };
