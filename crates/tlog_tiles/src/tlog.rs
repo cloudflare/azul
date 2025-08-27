@@ -463,6 +463,10 @@ pub fn subtree_inclusion_proof_indexes(
 /// # Errors
 ///
 /// Will return an error if proof verification fails.
+///
+/// # Panics
+///
+/// Will panic if there are internal math errors.
 pub fn verify_inclusion_proof(
     proof: &Proof,
     tree_size: u64,
@@ -490,7 +494,9 @@ pub fn verify_inclusion_proof(
             // i. Set r to HASH(0x01 || p || r).
             r = node_hash(*p, r);
             // ii. If LSB(fn) is not set, then right-shift both fn and sn equally until either LSB(fn) is set or fn is 0.
-            while !lsb_set(f_n) || f_n == 0 {
+            //
+            // NOTE: It must be the case that fn is non-zero, so we can simplify.
+            while !lsb_set(f_n) {
                 f_n >>= 1;
                 s_n >>= 1;
             }
@@ -630,6 +636,10 @@ pub fn verify_consistency_proof(
 /// # Errors
 ///
 /// Will return an error if proof verification fails.
+///
+/// # Panics
+///
+/// Will panic if there are internal math errors.
 pub fn verify_subtree_consistency_proof(
     proof: &Proof,
     n: u64,
@@ -645,8 +655,8 @@ pub fn verify_subtree_consistency_proof(
         let mut s_n = end - 1;
         // 2. Set r to node_hash.
         let mut r = subtree_hash;
-        // 3. Right-shift fn and sn equally until LSB(fn) is set or sn is zero.
-        while !(lsb_set(f_n) || s_n == 0) {
+        // 3. Until LSB(fn) is set or sn is 0, right-shift fn and sn equally.
+        while !lsb_set(f_n) && s_n != 0 {
             f_n >>= 1;
             s_n >>= 1;
         }
@@ -658,14 +668,14 @@ pub fn verify_subtree_consistency_proof(
             }
             // 2. Set r to HASH(0x01, || p || r).
             r = node_hash(*p, r);
-            // 3. If LSB(sn) is not set, the right-shift sn until either LSB(sn) is set or sn is zero.
-            while !(lsb_set(s_n) || s_n == 0) {
+            // 3. Until LSB(sn) is set, right-shift sn.
+            while !lsb_set(s_n) {
                 s_n >>= 1;
             }
-            // 4. Right-shift once more.
+            // 4. Right-shift sn once more.
             s_n >>= 1;
         }
-        // 5. Check sn is 0 and r is root_hash. If either is not equal, fail the proof verification. If all are equal, accept the proof.
+        // 5. Compare sn to 0 and r to root_hash. If either is not equal, fail the proof verification. If all are equal, accept the proof.
         if s_n == 0 && r == root_hash {
             Ok(())
         } else {
@@ -687,7 +697,7 @@ pub fn verify_subtree_consistency_proof(
         let mut f_n = start;
         let mut s_n = end - 1;
         let mut t_n = n - 1;
-        // 4. Right-shift fn, sn, and tn equally until LSB(sn) is not set or fn = sn.
+        // 4. Until LSB(sn) is not set or fn is equal to sn, right-shift fn, sn, and tn equally.
         while lsb_set(s_n) && f_n != s_n {
             f_n >>= 1;
             s_n >>= 1;
@@ -710,14 +720,11 @@ pub fn verify_subtree_consistency_proof(
                 }
                 // 2. Set sr to HASH(0x01 || c || sr).
                 s_r = node_hash(c, s_r);
-                // 3. If LSB(sn) is not set, then right-shift each of fn, sn, and tn equally until either LSB(sn) is set or sn is 0.
+                // 3. Until LSB(sn) is set, right-shift fn, sn, and tn equally.
                 while !lsb_set(s_n) {
                     f_n >>= 1;
                     s_n >>= 1;
                     t_n >>= 1;
-                    if s_n == 0 {
-                        break;
-                    }
                 }
             }
             // 3. Otherwise:
@@ -725,12 +732,12 @@ pub fn verify_subtree_consistency_proof(
                 // 1. Set sr to HASH(0x01 || sr || c).
                 s_r = node_hash(s_r, c);
             }
-            // 4. Finally, right-shift each of fn, sn, and tn one time.
+            // 4. Right-shift fn, sn, and tn once more.
             f_n >>= 1;
             s_n >>= 1;
             t_n >>= 1;
         }
-        // 7. Check tn is 0, fr is node_hash, and sr is root_hash. If any are not equal, fail the proof verification. If all are equal, accept the proof.
+        // 7. Compare tn to 0, fr to node_hash, and sr to root_hash. If any are not equal, fail the proof verification. If all are equal, accept the proof.
         if t_n == 0 && f_r == subtree_hash && s_r == root_hash {
             Ok(())
         } else {
