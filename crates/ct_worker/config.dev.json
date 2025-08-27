@@ -22,6 +22,7 @@
             "max_sequence_skips": 1,
             "sequence_interval_millis": 750,
             "sequence_skip_threshold_millis": 250,
+            "clean_interval_secs": 10,
             "location_hint": "enam"
         }
     }
