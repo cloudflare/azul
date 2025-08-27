@@ -708,7 +708,7 @@ impl TileReader for TlogTileRecorder {
                 if t.height() == TlogTile::HEIGHT {
                     Ok(TlogTile::new(t.level(), t.level_index(), t.width(), None))
                 } else {
-                    Err(TlogError::InvalidInput(
+                    Err(TlogError::ConditionNotMet(
                         "TlogTileRecorder cannot read tiles of height not equal to 8".to_string(),
                     ))
                 }
@@ -745,13 +745,13 @@ impl TileReader for PreloadedTlogTileReader {
         for tile in tiles {
             // Convert the tile to a tlog-tile, ie one where height=8 and data=false
             if tile.height() != TlogTile::HEIGHT {
-                return Err(TlogError::InvalidInput(
+                return Err(TlogError::ConditionNotMet(
                     "PreloadedTlogTileReader cannot read tiles of height not equal to 8"
                         .to_string(),
                 ));
             }
             if tile.is_data() {
-                return Err(TlogError::InvalidInput(
+                return Err(TlogError::ConditionNotMet(
                     "PreloadedTlogTileReader cannot read data tiles".to_string(),
                 ));
             }
@@ -759,7 +759,7 @@ impl TileReader for PreloadedTlogTileReader {
 
             // Record the tile's contents
             let Some(contents) = self.0.get(&tlog_tile) else {
-                return Err(TlogError::InvalidInput(format!(
+                return Err(TlogError::ConditionNotMet(format!(
                     "PreloadedTlogTileReader cannot find {}",
                     tlog_tile.path()
                 )));

@@ -43,7 +43,7 @@ pub enum TlogError {
     #[error("indexes out of order")]
     IndexesOutOfOrder,
     #[error("unmet input condition: {0}")]
-    InvalidInput(String),
+    ConditionNotMet(String),
     #[error("missing verifier signature")]
     MissingVerifierSignature,
     #[error("timestamp is after current time")]
@@ -767,7 +767,7 @@ impl Subtree {
     /// Will return an error if `[lo, hi)` is not a valid subtree.
     pub fn new(lo: u64, hi: u64) -> Result<Self, TlogError> {
         if lo >= hi {
-            return Err(TlogError::InvalidInput("`lo < hi`".into()));
+            return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
         }
         // `s` is the smallest power of 2 that is greater than or equal
         // to `lo - hi`.
@@ -782,7 +782,7 @@ impl Subtree {
             }
         };
         if lo & (s - 1) != 0 {
-            return Err(TlogError::InvalidInput(
+            return Err(TlogError::ConditionNotMet(
                 "`lo` must be a multiple of the smallest power of two ≥ `hi - lo`".into(),
             ));
         }
@@ -825,7 +825,7 @@ impl Subtree {
     /// Will return an error if `lo ≤ hi`.
     pub fn split_interval(lo: u64, hi: u64) -> Result<(Self, Option<Self>), TlogError> {
         if lo >= hi {
-            return Err(TlogError::InvalidInput("`lo < hi`".into()));
+            return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
         }
         if hi - lo == 1 {
             return Ok((Self { lo, hi }, None));
@@ -954,7 +954,7 @@ impl Subtree {
         F: FnMut(&Subtree) -> Vec<T>,
     {
         if !self.contains_subtree(m) {
-            return Err(TlogError::InvalidInput(format!(
+            return Err(TlogError::ConditionNotMet(format!(
                 "{self} does not contain {m}"
             )));
         }
