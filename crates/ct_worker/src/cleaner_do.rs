@@ -90,8 +90,10 @@ impl Cleaner {
             t
         } else {
             // Set the target to a multiple of the tile size greater or equal to
-            // the current log size, since we're not rewriting partials. (Note:
-            // current_size() will update the subrequest count)
+            // the current log size, since we're not rewriting partials.
+            //
+            // Note: `current_size()` will update the subrequest count, so we
+            // don't have to do it explicitly here.
             let t = self
                 .0
                 .current_size()
@@ -147,12 +149,18 @@ impl Cleaner {
     // Returns an error if the tile is not successfully fixed. This could be
     // because of a transient error, or because the full tile doesn't yet exist
     // since the target size is greater than the current log size.
+    //
+    // # Panics
+    //
+    // Will panic if `current_size` is not a multiple of 256.
     async fn fix_issue99_tile(
         &self,
         current_size: u64,
         roots: &CertPool,
         issuer_cache: &mut HashMap<[u8; 32], Certificate>,
     ) -> Result<()> {
+        assert_eq!(current_size % u64::from(TlogTile::FULL_WIDTH), 0);
+
         // Fetch the full data tile for the entries starting at `current_size`.
         let data_tile =
             TlogTile::from_leaf_index(current_size + u64::from(TlogTile::FULL_WIDTH) - 1)
