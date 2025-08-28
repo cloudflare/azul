@@ -391,7 +391,7 @@ pub fn inclusion_proof<R: HashReader>(n: u64, leaf_index: u64, r: &R) -> Result<
     subtree_inclusion_proof(&Subtree::new(0, n)?, leaf_index, r)
 }
 
-/// Returns the subproof that the subtree `n` contains the record with index
+/// Returns the proof that the subtree `n` contains the record with index
 /// `leaf_index`.
 ///
 /// # Errors
@@ -777,17 +777,8 @@ impl Subtree {
             return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
         }
         // `s` is the smallest power of 2 that is greater than or equal
-        // to `lo - hi`.
-        let s = {
-            let n = hi - lo;
-            let l = n.ilog2();
-            // If n is not already a power of two, round up.
-            if n > 1 << l {
-                1 << (l + 1)
-            } else {
-                1 << l
-            }
-        };
+        // to `hi - lo`.
+        let s = (hi - lo).next_power_of_two();
         if lo & (s - 1) != 0 {
             return Err(TlogError::ConditionNotMet(
                 "`lo` must be a multiple of the smallest power of two ≥ `hi - lo`".into(),
@@ -988,7 +979,7 @@ impl Subtree {
                 // `m` is split across children. Fully include the left, recurse
                 // on right child of `m` with `known` set to false as the right
                 // child of `m` was not one of the inputs to the algorithm.
-                assert!(m.lo == self.lo, "bad math in subproof walk");
+                assert!(m.lo == self.lo, "bad math in walk_subproof");
                 let m_right = m.children().1;
                 (f(&left), right.walk_subproof(&m_right, false, f, strategy)?)
             };
