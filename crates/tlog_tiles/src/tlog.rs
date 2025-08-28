@@ -973,22 +973,32 @@ impl Subtree {
         // Recursive step: traverse the children.
         let (left, right) = self.children();
         if left.contains_subtree(m) {
+            // `m` is fully included in the left child.
+            //
             // Recurse on the left, fully include the right.
             let (mut recursive_proof, mut sibling) =
                 (left.walk_subproof(m, known, f, strategy)?, f(&right));
             recursive_proof.append(&mut sibling);
             Ok(recursive_proof)
         } else {
-            let (mut sibling, mut recursive_proof) = if right.contains_subtree(m) {
+            let mut sibling = f(&left);
+            let mut recursive_proof = if right.contains_subtree(m) {
+                // `m` is fully included in the right child.
+                //
                 // Fully include the left, recurse on the right.
-                (f(&left), right.walk_subproof(m, known, f, strategy)?)
+                right.walk_subproof(m, known, f, strategy)?
             } else {
-                // `m` is split across children. Fully include the left, recurse
-                // on right child of `m` with `known` set to false as the right
-                // child of `m` was not one of the inputs to the algorithm.
-                assert!(m.lo == self.lo, "bad math in walk_subproof");
-                let m_right = m.children().1;
-                (f(&left), right.walk_subproof(&m_right, false, f, strategy)?)
+                // `m` is fully included in `self`, but not fully included in
+                // either the left or right child. This implies `m` has the left
+                // child as a prefix and spills over into the right child
+                // (otherwise, `m` would not be a valid subtree).
+                //
+                // Fully include the left, recurse on right child of `m` with
+                // `known` set to false as the right child of `m` was not one of
+                // the inputs to the algorithm.
+                let (m_left, m_right) = m.children();
+                assert!(m_left == left, "expected left children to match");
+                right.walk_subproof(&m_right, false, f, strategy)?
             };
 
             match strategy {
