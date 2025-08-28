@@ -293,6 +293,11 @@ impl<L: LogEntry> GenericSequencer<L> {
 /// checkpoint. Currently, this is used only to update the landmark checkpoint
 /// sequence for MTC, but could be extended in the future to collect
 /// cosignatures or perform other application-specific actions.
+///
+/// The parameters are as follows:
+/// - `tree_size: u64`: The tree size of the latest checkpoint.
+/// - `old_time: UnixTimestamp`: The timestamp of the previous checkpoint.
+/// - `new_time: UnixTimestamp`: The timestamp of the latest checkpoint.
 pub type CheckpointCallbacker = Box<
     dyn Fn(
             u64,
