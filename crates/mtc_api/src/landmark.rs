@@ -58,52 +58,34 @@ impl LandmarkSequence {
         Ok(true)
     }
 
-    /// Return the landmark subtree covering the given leaf index, if one
-    /// exists.
+    /// Return the landmark ID and subtree covering `leaf_index`, or `None` if
+    /// the `leaf_index` is not covered by a landmark range.
     ///
     /// # Panics
     ///
-    /// Panics if the list of landmarks is not sorted.
+    /// Will panic if landmarks are not sorted or are not unique.
     pub fn subtree_for_index(&self, leaf_index: u64) -> Option<(usize, Subtree)> {
-        let lo;
-        let hi;
-        // The landmark ID for a range is that of the higher landmark.
-        let landmark_id;
-        match self.landmarks.binary_search(&leaf_index) {
-            Ok(lo_index) => {
-                // The leaf index aligns exactly with a landmark.
-                lo = Some(self.landmarks[lo_index]);
-                let hi_index = lo_index + 1;
-                hi = self.landmarks.get(hi_index).copied();
-                landmark_id = hi_index + (self.last_landmark + 1 - self.landmarks.len());
-            }
-            Err(hi_index) => {
-                // The leaf index doesn't exactly align with a landmark, but we
-                // have the index of the next higher landmark.
-                lo = if hi_index > 0 {
-                    Some(self.landmarks[hi_index - 1])
-                } else {
-                    None
-                };
-                hi = self.landmarks.get(hi_index).copied();
-                landmark_id = hi_index + (self.last_landmark + 1 - self.landmarks.len());
-            }
-        }
-        match (lo, hi) {
-            (Some(lo), Some(hi)) => {
-                // The leaf is between the landmarks tree sizes `lo` and `hi`.
-                // Find the landmark subtree that contains it.
-                let (left, right) = Subtree::split_interval(lo, hi).unwrap();
-                if left.contains(leaf_index) {
-                    Some((landmark_id, left))
-                } else {
-                    right.map(|tree| (landmark_id, tree))
-                }
-            }
-            _ => {
-                // The leaf is not covered by any landmark.
-                None
-            }
+        // Find the index of the first landmark greater than the leaf index.
+        let hi_index = self
+            .landmarks
+            .partition_point(|&landmark| landmark <= leaf_index);
+
+        // Get the lower index, if it exists.
+        let lo_index = hi_index.checked_sub(1)?;
+
+        // Return the ID of the higher landmark.
+        let landmark_id = hi_index + (self.last_landmark + 1 - self.landmarks.len());
+
+        // Get lo and hi landmarks, if they exist.
+        let &lo = self.landmarks.get(lo_index)?;
+        let &hi = self.landmarks.get(hi_index)?;
+
+        // Find which landmark subtree within `[lo, hi)` contains the leaf.
+        let (left, right) = Subtree::split_interval(lo, hi).unwrap();
+        if left.contains(leaf_index) {
+            Some((landmark_id, left))
+        } else {
+            right.map(|tree| (landmark_id, tree))
         }
     }
 
