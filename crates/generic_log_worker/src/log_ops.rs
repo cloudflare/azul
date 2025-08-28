@@ -467,9 +467,14 @@ impl SequenceState {
         })
     }
 
-    /// Returns the current checkpoint
+    /// Returns the current checkpoint.
     pub(crate) fn checkpoint(&self) -> &[u8] {
         &self.checkpoint
+    }
+
+    /// Returns the current tree size.
+    pub(crate) fn tree_size(&self) -> u64 {
+        self.tree.size()
     }
 
     /// Proves inclusion of the last leaf in the current tree.
@@ -740,13 +745,6 @@ pub(crate) async fn sequence<L: LogEntry>(
     cache: &impl CacheWrite,
     metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
-    // Add the log's initial entry if needed.
-    if sequence_state.borrow().tree.size() == 0 {
-        if let Some(entry) = L::initial_entry() {
-            pool_state.borrow_mut().add(entry.lookup_key(), entry);
-        }
-    }
-
     let Some(entries) = pool_state.borrow_mut().take(
         sequence_state.borrow().tree.size(),
         config.max_sequence_skips,
@@ -856,6 +854,12 @@ async fn sequence_entries<L: LogEntry>(
     let mut cache_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
+        if n == 0 {
+            if let Some(initial_entry) = L::initial_entry() {
+                assert_eq!(entry.lookup_key(), initial_entry.lookup_key());
+            }
+        }
+
         // Add the entry and metadata to our lists of things sequenced
         let metadata = (n, timestamp);
         cache_metadata.push((entry.lookup_key(), metadata));

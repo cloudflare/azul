@@ -7,7 +7,7 @@ use std::{cell::RefCell, future::Future, pin::Pin, time::Duration};
 
 use crate::{
     deserialize, get_durable_object_stub, load_public_bucket,
-    log_ops::{self, CreateError, PoolState, SequenceState},
+    log_ops::{self, add_leaf_to_pool, CreateError, PoolState, SequenceState},
     metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
     serialize,
     util::now_millis,
@@ -228,6 +228,13 @@ impl<L: LogEntry> GenericSequencer<L> {
             SequenceState::load::<L>(&self.config, &self.public_bucket, &self.do_state)
                 .await
                 .map_err(|e| e.to_string())?;
+
+        // If the tree is empty, add the log's initial entry if it has one.
+        if self.sequence_state.borrow().tree_size() == 0 {
+            if let Some(entry) = L::initial_entry() {
+                add_leaf_to_pool(&self.pool_state, &self.cache, &self.config, entry);
+            }
+        }
 
         // Start sequencing loop (OK if alarm is already scheduled).
         self.do_state
