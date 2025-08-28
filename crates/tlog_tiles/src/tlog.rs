@@ -625,6 +625,14 @@ pub fn verify_consistency_proof(
     m: u64,
     m_hash: Hash,
 ) -> Result<(), TlogError> {
+    // Special case for proving consistency with an empty tree.
+    if m == 0 {
+        return if proof.is_empty() && m_hash == EMPTY_HASH && (n != 0 || root_hash == EMPTY_HASH) {
+            Ok(())
+        } else {
+            Err(TlogError::InvalidProof)
+        };
+    }
     verify_subtree_consistency_proof(proof, n, root_hash, &Subtree::new(0, m)?, m_hash)
 }
 
@@ -776,12 +784,11 @@ impl Subtree {
         if lo >= hi {
             return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
         }
-        // `s` is the smallest power of 2 that is greater than or equal
-        // to `hi - lo`.
+        // `s` is the next power of 2 greater than or equal to `hi - lo`.
         let s = (hi - lo).next_power_of_two();
         if lo & (s - 1) != 0 {
             return Err(TlogError::ConditionNotMet(
-                "`lo` must be a multiple of the smallest power of two ≥ `hi - lo`".into(),
+                "`lo` must be a multiple of the next power of two ≥ `hi - lo`".into(),
             ));
         }
         Ok(Self { lo, hi })
@@ -1094,7 +1101,7 @@ mod tests {
 
         let mut trees = Vec::new();
         let mut leafhashes = Vec::new();
-        let mut storage = Vec::new();
+        let mut storage = TestHashStorage::new();
         let mut tiles = HashMap::<Tile, Vec<u8>>::new();
 
         for i in 0..100 {
@@ -1228,6 +1235,42 @@ mod tests {
                 }
             }
             assert_eq!(tile_storage.unsaved.get(), 0, "did not save tiles");
+
+            // Check that subtree consistency proofs work, for all valid subtrees up to the current tree size.
+            for lo in 0..i {
+                let max_hi = if lo == 0 {
+                    u64::MAX
+                } else {
+                    // If `lo` is non-zero, find the maximum power of 2 that divides `lo`.
+                    // This is a bitwise trick that isolates the lowest set bit.
+                    let max_size = lo & lo.wrapping_neg();
+                    lo + max_size
+                };
+                for hi in lo + 1..=i.min(max_hi) {
+                    let m = Subtree::new(lo, hi).unwrap();
+                    let m_hash = subtree_hash(&m, &storage).unwrap();
+                    // Prove that the subtree is consistent with the tree of size `n`.
+                    verify_subtree_consistency_proof(
+                        &subtree_consistency_proof(i + 1, &m, &storage).unwrap(),
+                        i + 1,
+                        th,
+                        &m,
+                        m_hash,
+                    )
+                    .unwrap();
+                    for leaf_index in lo..hi {
+                        // Prove that each leaf in the subtree is included in the subtree.
+                        verify_subtree_inclusion_proof(
+                            &subtree_inclusion_proof(&m, leaf_index, &storage).unwrap(),
+                            &m,
+                            m_hash,
+                            leaf_index,
+                            leafhashes[usize::try_from(leaf_index).unwrap()],
+                        )
+                        .unwrap();
+                    }
+                }
+            }
         }
     }
 
@@ -1258,6 +1301,15 @@ mod tests {
     #[test]
     fn test_empty_tree() {
         assert_eq!(tree_hash(0, &TestHashStorage::new()).unwrap(), EMPTY_HASH);
+
+        // Empty tree.
+        verify_consistency_proof(&vec![], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
+        verify_consistency_proof(&vec![], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
+        verify_consistency_proof(&vec![], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
+
+        // Tree with single leaf.
+        verify_inclusion_proof(&vec![], 1, Hash::default(), 0, Hash::default()).unwrap();
+        verify_consistency_proof(&vec![], 1, Hash::default(), 1, Hash::default()).unwrap();
     }
 
     #[test]
