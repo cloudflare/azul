@@ -60,7 +60,7 @@ struct MtcSignature {
 }
 
 impl MtcSignature {
-    fn serialize(&self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer
             .write_length_prefixed(&self.cosigner_id.0, 1)
@@ -79,7 +79,7 @@ struct MtcProof {
 }
 
 impl MtcProof {
-    fn serialize(&self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.write_u64::<BigEndian>(self.start).unwrap();
         buffer.write_u64::<BigEndian>(self.end).unwrap();
@@ -98,7 +98,7 @@ impl MtcProof {
                 &self
                     .signatures
                     .iter()
-                    .flat_map(MtcSignature::serialize)
+                    .flat_map(MtcSignature::to_bytes)
                     .collect::<Vec<u8>>(),
                 2,
             )
@@ -235,7 +235,7 @@ pub fn serialize_signatureless_cert(
                 inclusion_proof,
                 signatures: Vec::new(),
             }
-            .serialize(),
+            .to_bytes(),
         )?,
     };
     certificate.to_der().map_err(|e| anyhow!(e))

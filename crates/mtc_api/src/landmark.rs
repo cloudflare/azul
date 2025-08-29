@@ -95,7 +95,7 @@ impl LandmarkSequence {
     /// # Errors
     ///
     /// Will return an error if writing to the buffer fails.
-    pub fn serialize(&self) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, anyhow::Error> {
         let mut buffer = format!("{} {}\n", self.last_landmark, self.landmarks.len() - 1);
         for landmark in self.landmarks.iter().rev() {
             writeln!(buffer, "{landmark}")?;
@@ -108,8 +108,9 @@ impl LandmarkSequence {
     ///
     /// # Errors
     ///
-    /// Will return an error if the landmark sequence invalid.
-    pub fn deserialize(data: &[u8], max_landmarks: usize) -> Result<Self, anyhow::Error> {
+    /// Will return an error if the landmark sequence is invalid or if
+    /// `data.len() > 10_000`.
+    pub fn from_bytes(data: &[u8], max_landmarks: usize) -> Result<Self, anyhow::Error> {
         // Note: `lines()` will return the same thing whether or not there's a
         // newline after the last line, and whether or not there are carriage
         // returns preceding each newline.
