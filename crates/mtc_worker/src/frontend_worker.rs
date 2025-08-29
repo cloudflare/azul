@@ -145,7 +145,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                             .max_certificate_lifetime_secs
                             .div_ceil(params.landmark_interval_secs)
                             + 1;
-                        LandmarkSequence::deserialize(&bytes, max_landmarks)
+                        LandmarkSequence::from_bytes(&bytes, max_landmarks)
                             .map_err(|e| e.to_string())?
                     } else {
                         return Err("failed to get landmark sequence".into());

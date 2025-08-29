@@ -90,7 +90,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     let mut seq =
                         if let Some(obj) = bucket_clone.get(LANDMARK_KEY).execute().await? {
                             let bytes = obj.body().ok_or("missing object body")?.bytes().await?;
-                            LandmarkSequence::deserialize(&bytes, max_landmarks)
+                            LandmarkSequence::from_bytes(&bytes, max_landmarks)
                                 .map_err(|e| e.to_string())?
                         } else {
                             LandmarkSequence::create(max_landmarks)
@@ -99,7 +99,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     if seq.add(tree_size).map_err(|e| e.to_string())? {
                         // The landmark sequence was updated. Publish the result.
                         bucket_clone
-                            .put(LANDMARK_KEY, seq.serialize().map_err(|e| e.to_string())?)
+                            .put(LANDMARK_KEY, seq.to_bytes().map_err(|e| e.to_string())?)
                             .execute()
                             .await?;
                     }
