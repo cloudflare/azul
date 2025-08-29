@@ -177,7 +177,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                    // Calculate and verify the inclusion proof.
+                    // Get the inclusion proof.
                     let proof = match prove_subtree_inclusion(
                         checkpoint.size(),
                         *checkpoint.hash(),

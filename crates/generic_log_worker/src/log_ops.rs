@@ -510,9 +510,8 @@ pub enum ProofError {
     Other(#[from] anyhow::Error),
 }
 
-/// Returns a verified inclusion proof that the leaf at index `leaf_index` is
-/// included in the current tree of size `cur_tree_size` with hash
-/// `cur_tree_hash`.
+/// Returns an inclusion proof that the leaf at index `leaf_index` is included
+/// in the current tree of size `cur_tree_size` with hash `cur_tree_hash`.
 ///
 /// # Errors
 ///
@@ -535,9 +534,9 @@ pub async fn prove_inclusion(
     .await
 }
 
-/// Returns a verified inclusion proof that the leaf at index `leaf_index` is
-/// included in the subtree `[start, end)`. `cur_tree_size` and `cur_tree_hash`
-/// allow us to select the correct partial tiles.
+/// Returns an inclusion proof that the leaf at index `leaf_index` is included
+/// in the subtree `[start, end)`. `cur_tree_size` and `cur_tree_hash` allow us
+/// to select the correct partial tiles.
 ///
 /// # Errors
 ///
@@ -553,37 +552,20 @@ pub async fn prove_subtree_inclusion(
 ) -> Result<Proof, ProofError> {
     // Fetch the tiles needed for the proof.
     let n = &Subtree::new(start, end)?;
-    let mut indexes = tlog_tiles::subtree_inclusion_proof_indexes(n, leaf_index)?;
-
-    // Fetch the leaf and subtree hashes to verify the proof. These aren't
-    // needed to construct the proof, but fetch them so they're available in
-    // `tile_reader`.
-    indexes.append(&mut tlog_tiles::subtree_hash_indexes(n));
-    let leaf_shx = tlog_tiles::stored_hash_index(0, leaf_index);
-    indexes.push(leaf_shx);
-    indexes.sort_unstable();
-    indexes.dedup();
-
+    let indexes = tlog_tiles::subtree_inclusion_proof_indexes(n, leaf_index)?;
     let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
+    let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
 
     // Construct the proof.
-    let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
-    let proof = tlog_tiles::subtree_inclusion_proof(n, leaf_index, &hash_reader)?;
-
-    // Verify the proof.
-    let n_hash = tlog_tiles::subtree_hash(n, &hash_reader)?;
-    let leaf_hash: Hash = hash_reader
-        .read_hashes(&[leaf_shx])?
-        .into_iter()
-        .next()
-        .ok_or(anyhow!("failed to read leaf hash"))?;
-    tlog_tiles::verify_subtree_inclusion_proof(&proof, n, n_hash, leaf_index, leaf_hash)?;
-
-    Ok(proof)
+    Ok(tlog_tiles::subtree_inclusion_proof(
+        n,
+        leaf_index,
+        &hash_reader,
+    )?)
 }
 
-/// Returns a verified consistency proof, proving the tree with `cur_tree_size`
-/// and hash `cur_tree_hash` is an extension of the tree with `prev_tree_size`.
+/// Returns a consistency proof that the tree with size `cur_tree_size` and hash
+/// `cur_tree_hash` is an extension of the tree with `prev_tree_size`.
 ///
 /// # Errors
 ///
@@ -598,8 +580,8 @@ pub async fn prove_consistency(
     prove_subtree_consistency(cur_tree_hash, cur_tree_size, 0, prev_tree_size, object).await
 }
 
-/// Returns a verified consistency proof, proving the tree with `cur_tree_size`
-/// and hash `cur_tree_hash` is consistent with the subtree `[start, end)`.
+/// Returns a consistency proof that the tree with size `cur_tree_size` and hash
+/// `cur_tree_hash` is consistent with the subtree `[start, end)`.
 ///
 /// # Errors
 ///
@@ -614,24 +596,16 @@ pub async fn prove_subtree_consistency(
 ) -> Result<Proof, ProofError> {
     let m = &Subtree::new(start, end)?;
     // Fetch the tiles needed for the proof.
-    let mut indexes = tlog_tiles::subtree_consistency_proof_indexes(cur_tree_size, m)?;
-
-    // Fetch the subtree hash to verify the proof. These aren't
-    // needed to construct the proof, but we want to fetch them now so they're
-    // available in `tile_reader`.
-    indexes.append(&mut tlog_tiles::subtree_hash_indexes(m));
-
+    let indexes = tlog_tiles::subtree_consistency_proof_indexes(cur_tree_size, m)?;
     let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
     let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
 
     // Construct the proof.
-    let proof = tlog_tiles::subtree_consistency_proof(cur_tree_size, m, &hash_reader)?;
-
-    // Verify the proof.
-    let m_hash = tlog_tiles::subtree_hash(m, &hash_reader)?;
-    tlog_tiles::verify_subtree_consistency_proof(&proof, cur_tree_size, cur_tree_hash, m, m_hash)?;
-
-    Ok(proof)
+    Ok(tlog_tiles::subtree_consistency_proof(
+        cur_tree_size,
+        m,
+        &hash_reader,
+    )?)
 }
 
 /// Fetch the tree tiles containing the nodes at the requested indexes, as well
