@@ -294,6 +294,10 @@ impl<L: LogEntry> GenericSequencer<L> {
 /// sequence for MTC, but could be extended in the future to collect
 /// cosignatures or perform other application-specific actions.
 ///
+/// This is a `Fn` closure that returns nothing, which might be surprising. The
+/// callback is meant to capture values with interior mutability (e.g., Buckets)
+/// so that it can have side-effects.
+///
 /// The parameters are as follows:
 /// - `tree_size: u64`: The tree size of the latest checkpoint.
 /// - `old_time: UnixTimestamp`: The timestamp of the previous checkpoint.
