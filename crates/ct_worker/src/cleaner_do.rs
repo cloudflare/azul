@@ -25,6 +25,10 @@ use x509_cert::{
 };
 use x509_util::CertPool;
 
+// The number of tiles to attempt to repair at once. If this is too large, we
+// can hit memory limits.
+const MAX_REPAIR_BATCH: usize = 25;
+
 #[durable_object(alarm)]
 struct Cleaner(GenericCleaner);
 
@@ -140,11 +144,16 @@ impl Cleaner {
                 break;
             }
 
+            // Flush if we've reached the batch limit.
+            if futures.len() >= MAX_REPAIR_BATCH {
+                try_join_all(std::mem::take(&mut futures)).await?;
+            }
+
             // Don't attempt to clean the last tile if the log hasn't caught up
             // to the target yet.
             if current_size + u64::from(TlogTile::FULL_WIDTH) == target_size {
-                let current_size = self.0.current_size().await?;
-                if current_size < target_size {
+                let log_size = self.0.current_size().await?;
+                if log_size < target_size {
                     break;
                 }
             }
