@@ -10,7 +10,6 @@ repository.workspace = true
 description.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 byteorder.workspace = true
 der.workspace = true
 ed25519-dalek.workspace = true
