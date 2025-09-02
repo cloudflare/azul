@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail};
+use crate::MtcError;
 use std::{collections::VecDeque, fmt::Write};
 use tlog_tiles::Subtree;
 
@@ -38,14 +38,16 @@ impl LandmarkSequence {
     ///
     /// Will return an error if the tree size is smaller than the last landmark
     /// tree size.
-    pub fn add(&mut self, tree_size: u64) -> Result<bool, anyhow::Error> {
+    pub fn add(&mut self, tree_size: u64) -> Result<bool, MtcError> {
         if let Some(last) = self.landmarks.back() {
             if tree_size == *last {
                 // The last landmark is unchanged.
                 return Ok(false);
             }
             if tree_size < *last {
-                bail!("landmark sequence must be strictly increasing");
+                return Err(MtcError::Dynamic(
+                    "landmark sequence must be strictly increasing".into(),
+                ));
             }
         }
         // Keep `max_landmarks + 1` tree sizes, since we want `max_landmarks`
@@ -95,7 +97,7 @@ impl LandmarkSequence {
     /// # Errors
     ///
     /// Will return an error if writing to the buffer fails.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, MtcError> {
         let mut buffer = format!("{} {}\n", self.last_landmark, self.landmarks.len() - 1);
         for landmark in self.landmarks.iter().rev() {
             writeln!(buffer, "{landmark}")?;
@@ -110,44 +112,52 @@ impl LandmarkSequence {
     ///
     /// Will return an error if the landmark sequence is invalid or if
     /// `data.len() > 10_000`.
-    pub fn from_bytes(data: &[u8], max_landmarks: usize) -> Result<Self, anyhow::Error> {
+    pub fn from_bytes(data: &[u8], max_landmarks: usize) -> Result<Self, MtcError> {
         // Note: `lines()` will return the same thing whether or not there's a
         // newline after the last line, and whether or not there are carriage
         // returns preceding each newline.
 
         // Set some upper limit on what we're willing to process.
         if data.len() > 10_000 {
-            bail!("too much data");
+            return Err(MtcError::Dynamic("too much data".into()));
         }
         let mut iter = std::str::from_utf8(data)?.lines();
         let first = iter
             .next()
-            .ok_or(anyhow!("missing first line"))?
+            .ok_or(MtcError::Dynamic("missing first line".into()))?
             .split_once(' ')
-            .ok_or(anyhow!("malformed first line"))?;
+            .ok_or(MtcError::Dynamic("malformed first line".into()))?;
         let last_landmark = first.0.parse::<usize>()?;
         let num_active_landmarks = first.1.parse::<usize>()?;
 
         if num_active_landmarks > max_landmarks {
-            bail!("condition not met: num_active_landmarks ≤ max_landmarks");
+            return Err(MtcError::Dynamic(
+                "num_active_landmarks must not be greater than max_landmarks".into(),
+            ));
         }
         if num_active_landmarks > last_landmark {
-            bail!("condition not met: num_active_landmarks ≤ last_landmark");
+            return Err(MtcError::Dynamic(
+                "num_active_landmarks must not be greater than last_landmark".into(),
+            ));
         }
 
         let mut landmarks = VecDeque::with_capacity(num_active_landmarks + 1);
         for i in 0..=num_active_landmarks {
             let landmark = iter
                 .next()
-                .ok_or(anyhow!("malformed landmark line"))?
+                .ok_or(MtcError::Dynamic("malformed landmark line".into()))?
                 .parse::<u64>()?;
             if i > 0 && landmark >= landmarks[0] {
-                bail!("landmarks in non-decreasing order");
+                return Err(MtcError::Dynamic(
+                    "landmarks must be in decreasing order".into(),
+                ));
             }
             landmarks.push_front(landmark);
         }
         if iter.next().is_some() {
-            bail!("trailing data");
+            return Err(MtcError::Dynamic(
+                "trailing data in landmark sequence".into(),
+            ));
         }
         Ok(Self {
             max_landmarks,

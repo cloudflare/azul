@@ -27,7 +27,7 @@ impl RelativeOid {
             }
         }
         if ber.len() > 255 {
-            return Err(MtcError::InvalidRelativeOID);
+            return Err(MtcError::Dynamic("invalid relative OID".into()));
         }
         Ok(Self { ber })
     }
