@@ -1186,13 +1186,13 @@ pub async fn read_leaf<L: LogEntry>(
     tree_size: u64,
     tree_hash: &Hash,
 ) -> Result<L, anyhow::Error> {
-    let leaf_shx = tlog_tiles::stored_hash_index(0, leaf_index);
-    let tile_reader = tile_reader_for_indexes(tree_size, &[leaf_shx], object).await?;
+    let leaf_stored_hash_index = tlog_tiles::stored_hash_index(0, leaf_index);
+    let tile_reader = tile_reader_for_indexes(tree_size, &[leaf_stored_hash_index], object).await?;
 
     // Verify the leaf tile against the tree hash.
     let hash_reader = TileHashReader::new(tree_size, *tree_hash, &tile_reader);
     let hashes = hash_reader
-        .read_hashes(&[leaf_shx])
+        .read_hashes(&[leaf_stored_hash_index])
         .map_err(|e| anyhow!(e))?;
     let leaf_hash = hashes.first().ok_or(anyhow!("too many hashes read"))?;
 
@@ -1200,7 +1200,7 @@ pub async fn read_leaf<L: LogEntry>(
     let Some((level0_tile, level0_tile_bytes)) = tile_reader.0.into_iter().find(|(tile, b)| {
         tile.level() == 0
             && tile
-                .hash_at_index(b, leaf_shx)
+                .hash_at_index(b, leaf_stored_hash_index)
                 .is_ok_and(|h| h == *leaf_hash)
     }) else {
         bail!("failed to get level-0 tile");

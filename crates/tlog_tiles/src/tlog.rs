@@ -168,12 +168,14 @@ pub fn node_hash(left: Hash, right: Hash) -> Hash {
     Hash(result.into())
 }
 
-/// Maps the tree coordinates `(level, n)` to a dense linear ordering that can be used for hash
-/// storage.  Hash storage implementations that store hashes in sequential storage can use this
-/// function to compute where to read or write a given hash.
+/// Maps the tree coordinates `(level, n)` to a dense linear ordering that can
+/// be used for hash storage.  Hash storage implementations that store hashes in
+/// sequential storage can use this function to compute where to read or write a
+/// given hash.
 ///
-/// For information about the stored hash index ordering, see section 3.3 of Crosby and Wallach's
-/// paper ["Efficient Data Structures for Tamper-Evident
+/// The stored hash index ordering is given by post-order (leaf, right, root)
+/// traversal of the nodes in the tree. For information, see section 3.3 of
+/// Crosby and Wallach's paper ["Efficient Data Structures for Tamper-Evident
 /// Logging"](https://www.usenix.org/legacy/event/sec09/tech/full_papers/crosby.pdf).
 pub fn stored_hash_index(level: u8, n: u64) -> u64 {
     // Level L's n'th hash is written right after level L+1's 2n+1'th hash.
@@ -206,7 +208,7 @@ pub fn split_stored_hash_index(index: u64) -> (u8, u64) {
     // so the n we want is in [index/2, index/2+log₂(index)].
     let mut n = index / 2;
     let mut index_n = stored_hash_index(0, n);
-    assert!(index_n <= index, "bad math");
+    debug_assert!(index_n <= index, "bad math");
     loop {
         // Each new record n adds 1 + trailingZeros(n) hashes.
         let x = index_n + 1 + u64::from((n + 1).trailing_zeros());
@@ -282,7 +284,7 @@ pub fn stored_hashes_for_record_hash<R: HashReader>(
 
     // Fetch hashes.
     let old = r.read_hashes(&indexes)?;
-    assert_eq!(old.len(), indexes.len(), "bad read_hashes implementation");
+    debug_assert_eq!(old.len(), indexes.len(), "bad read_hashes implementation");
 
     // Build new hashes.
     let mut h = h;
@@ -366,13 +368,13 @@ pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
 pub fn subtree_hash<R: HashReader>(n: &Subtree, r: &R) -> Result<Hash, TlogError> {
     let indexes = n.hash_indexes();
     let mut hashes = r.read_hashes(&indexes)?;
-    assert_eq!(
+    debug_assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
     let hash = n.hash(&mut hashes);
-    assert!(hashes.is_empty(), "bad math in subtree_hash");
+    debug_assert!(hashes.is_empty(), "bad math in subtree_hash");
     Ok(hash)
 }
 
@@ -416,14 +418,14 @@ pub fn subtree_inclusion_proof<R: HashReader>(
         return Ok(vec![]);
     }
     let mut hashes = r.read_hashes(&indexes)?;
-    assert_eq!(
+    debug_assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
     // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
     let proof = n.subproof(m, &mut hashes, true)?;
-    assert!(
+    debug_assert!(
         hashes.is_empty(),
         "bad index math in prove_subtree_inclusion"
     );
@@ -574,13 +576,13 @@ pub fn subtree_consistency_proof<R: HashReader>(
         return Ok(vec![]);
     }
     let mut hashes = r.read_hashes(&indexes)?;
-    assert_eq!(
+    debug_assert_eq!(
         hashes.len(),
         indexes.len(),
         "bad read_hashes implementation"
     );
     let proof = n.subproof(m, &mut hashes, true)?;
-    assert!(
+    debug_assert!(
         hashes.is_empty(),
         "bad index math in subtree_consistency_proof"
     );
@@ -759,9 +761,12 @@ fn lsb_set(i: u64) -> bool {
     (i & 1) == 1
 }
 
-/// A subtree of a Merkle Tree of size `n` is defined by two integers `lo` and `hi` such that:
+/// A subtree of a Merkle Tree of size `n` is defined by two integers `lo` and
+/// `hi` such that:
 /// - 0 ≤ lo < hi ≤ n
 /// - if `s` is the smallest power of two `≥ hi - lo`, `lo` is a multple of `s`
+///
+/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.1>
 #[derive(Debug, PartialEq, Eq)]
 pub struct Subtree {
     lo: u64,
@@ -878,7 +883,7 @@ impl Subtree {
         let mut lo = self.lo;
         while lo < self.hi {
             let (k, level) = maxpow2(self.hi - lo + 1);
-            assert!(lo & (k - 1) == 0 && lo < self.hi, "bad math in walk_hash");
+            debug_assert!(lo & (k - 1) == 0 && lo < self.hi, "bad math in walk_hash");
             f(level, lo);
             lo += k;
         }
@@ -914,7 +919,7 @@ impl Subtree {
         };
         self.walk_hash(&mut get_hash);
 
-        assert!(
+        debug_assert!(
             hashes.len() >= num_hashes,
             "not enough hashes for reconstruction"
         );
@@ -997,7 +1002,7 @@ impl Subtree {
                 // `known` set to false as the right child of `m` was not one of
                 // the inputs to the algorithm.
                 let (m_left, m_right) = m.children();
-                assert!(m_left == left, "expected left children to match");
+                debug_assert!(m_left == left, "expected left children to match");
                 right.walk_subproof(&m_right, false, f, strategy)?
             };
 
