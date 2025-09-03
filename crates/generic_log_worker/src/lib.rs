@@ -548,6 +548,12 @@ impl ObjectBackend for ObjectBucket {
                     .inspect(|&m| m.errors.with_label_values(&["put-failed"]).inc());
             })?;
 
+        self.metrics.as_ref().inspect(|&m| {
+            m.duration
+                .with_label_values(&["put"])
+                .observe(millis_diff_as_secs(start, now_millis()));
+        });
+
         // SAFETY: immediately fetch the uploaded object to make sure that it was persisted.
         // TODO: sentry reporting
         if let Some(fetched) = self.fetch(key.as_ref()).await? {
@@ -572,7 +578,7 @@ impl ObjectBackend for ObjectBucket {
 
         self.metrics.as_ref().inspect(|&m| {
             m.duration
-                .with_label_values(&["put"])
+                .with_label_values(&["put-and-check"])
                 .observe(millis_diff_as_secs(start, now_millis()));
         });
         Ok(())
