@@ -110,10 +110,13 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .post_async("/logs/:log/get-certificate", |mut req, ctx| async move {
                     let name = ctx.data;
                     let params = &CONFIG.logs[name];
-                    let GetCertificateRequest {
+                    let Ok(GetCertificateRequest {
                         leaf_index,
                         spki_der,
-                    } = req.json().await?;
+                    }) = req.json().await
+                    else {
+                        return Response::error("Unexpected input", 400);
+                    };
                     let object_backend = ObjectBucket::new(load_public_bucket(&ctx.env, name)?);
                     // Fetch the current checkpoint to know which tiles to fetch
                     // (full or partials).
