@@ -77,13 +77,15 @@ pub struct GetRootsResponse {
     pub certificates: Vec<Vec<u8>>,
 }
 
-/// Validates a certificate chain and returns a pending log entry.
+/// Validates a certificate chain according to
+/// [RFC6962](https://datatracker.ietf.org/doc/html/rfc6962) and returns a
+/// pending log entry.
 ///
 /// # Errors
 ///
 /// Returns a `ValidationError` if the chain fails to validate.
 #[allow(clippy::too_many_lines)]
-pub fn validate_chain(
+pub fn partially_validate_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
     not_after_start: Option<UnixTimestamp>,
@@ -450,7 +452,7 @@ mod tests {
                     chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
                 )*
 
-                let result = validate_chain(
+                let result = partially_validate_chain(
                         &x509_util::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
                         $not_after_start,

@@ -204,7 +204,7 @@ async fn add_chain_or_pre_chain(
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
     let roots = &load_roots(env, name).await?;
-    let pending_entry = match static_ct_api::validate_chain(
+    let pending_entry = match static_ct_api::partially_validate_chain(
         &req.chain,
         roots,
         Some(
