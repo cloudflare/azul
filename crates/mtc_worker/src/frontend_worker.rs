@@ -8,7 +8,7 @@ use crate::{
     CONFIG, ROOTS,
 };
 use der::{
-    asn1::{SetOfVec, UtcTime},
+    asn1::{SetOfVec, UtcTime, Utf8StringRef},
     Any, Tag,
 };
 use generic_log_worker::{
@@ -21,13 +21,13 @@ use generic_log_worker::{
 };
 use mtc_api::{
     serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
-    LandmarkSequence, RelativeOid, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
+    LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{NoteVerifier, VerifierList};
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 use tlog_tiles::{open_checkpoint, LeafIndex, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -305,8 +305,10 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         SetOfVec::from_iter([AttributeTypeAndValue {
             oid: ID_RDNA_TRUSTANCHOR_ID,
             value: Any::new(
-                Tag::RelativeOid,
-                RelativeOid::from_str(&params.log_id).unwrap().as_bytes(),
+                Tag::Utf8String,
+                Utf8StringRef::new(&params.log_id)
+                    .map_err(|e| e.to_string())?
+                    .as_bytes(),
             )
             .map_err(|e| e.to_string())?,
         }])
