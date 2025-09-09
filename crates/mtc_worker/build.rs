@@ -4,12 +4,11 @@
 // Build script to include per-environment configuration and trusted roots.
 
 use config::AppConfig;
+use der::asn1::Utf8StringRef;
 use der::{asn1::SetOfVec, Any, Tag};
-use mtc_api::RelativeOid;
 use mtc_api::ID_RDNA_TRUSTANCHOR_ID;
 use std::env;
 use std::fs;
-use std::str::FromStr;
 use url::Url;
 use x509_cert::{
     attr::AttributeTypeAndValue,
@@ -41,11 +40,14 @@ fn main() {
     });
     for (name, params) in conf.logs {
         // Make sure we can create the RDN sequence for the issuer log ID.
-        let relative_oid = RelativeOid::from_str(&params.log_id).unwrap();
         let _ = RdnSequence::from(vec![RelativeDistinguishedName(
             SetOfVec::from_iter([AttributeTypeAndValue {
                 oid: ID_RDNA_TRUSTANCHOR_ID,
-                value: Any::new(Tag::RelativeOid, relative_oid.as_bytes()).unwrap(),
+                value: Any::new(
+                    Tag::Utf8String,
+                    Utf8StringRef::new(&params.log_id).unwrap().as_bytes(),
+                )
+                .unwrap(),
             }])
             .unwrap(),
         )]);
