@@ -176,21 +176,19 @@ pub fn partially_validate_chain(
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
     let mut found_root_idx = None;
-    let to_verify_issuer = to_verify.tbs_certificate.issuer.to_string();
     if !roots.includes(to_verify)? {
-        let mut found = false;
-        for &idx in roots.find_potential_parents(to_verify)? {
-            if is_link_valid(to_verify, &roots.certs[idx]) {
-                found_root_idx = Some(idx);
-                chain_certs.push(roots.certs[idx].clone());
-                chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            return Err(StaticCTError::NoPathToTrustedRoot { to_verify_issuer });
-        }
+        let Some(&found_idx) = roots
+            .find_potential_parents(to_verify)?
+            .iter()
+            .find(|&&roots_idx| is_link_valid(to_verify, &roots.certs[roots_idx]))
+        else {
+            return Err(StaticCTError::NoPathToTrustedRoot {
+                to_verify_issuer: to_verify.tbs_certificate.issuer.to_string(),
+            });
+        };
+        found_root_idx = Some(found_idx);
+        chain_certs.push(roots.certs[found_idx].clone());
+        chain_fingerprints.push(Sha256::digest(&roots.certs[found_idx].to_der()?).into());
     }
 
     // Construct a pending log entry.
