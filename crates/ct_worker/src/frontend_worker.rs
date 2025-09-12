@@ -204,7 +204,7 @@ async fn add_chain_or_pre_chain(
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
     let roots = load_roots(env, name).await?;
-    let pending_entry = match static_ct_api::partially_validate_chain(
+    let (pending_entry, found_root_idx) = match static_ct_api::partially_validate_chain(
         &req.chain,
         roots,
         Some(
@@ -251,17 +251,12 @@ async fn add_chain_or_pre_chain(
         .map(Vec::as_slice)
         .collect::<Vec<&[u8]>>();
 
-    // Make sure the root is persisted as well.
-    let root_hash = pending_entry
-        .chain_fingerprints
-        .last()
-        .ok_or("chain fingerprints is empty")?;
-    let Some(root_cert) = roots.by_fingerprint(root_hash) else {
-        return Err(format!("{name}: root hash for chain is not in accepted roots").into());
-    };
-    let root_bytes = root_cert.to_der().map_err(|e| e.to_string())?;
-    if !issuers.iter().any(|issuer| *issuer == root_bytes) {
-        issuers.push(root_bytes.as_slice());
+    // Make sure the inferred root is persisted as well, if the add-chain
+    // request did not include the root.
+    let root_bytes;
+    if let Some(idx) = found_root_idx {
+        root_bytes = roots.certs[idx].to_der().map_err(|e| e.to_string())?;
+        issuers.push(&root_bytes);
     }
 
     generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;

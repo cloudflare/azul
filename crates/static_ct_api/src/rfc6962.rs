@@ -92,7 +92,7 @@ pub fn partially_validate_chain(
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<StaticCTPendingLogEntry, StaticCTError> {
+) -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
     // First make sure the cert is well-formed.
     let mut iter = raw_chain.iter();
     let leaf: Certificate = match iter.next() {
@@ -171,6 +171,7 @@ pub fn partially_validate_chain(
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
     let mut found = false;
+    let mut found_root_idx = None;
     let to_verify_issuer = to_verify.tbs_certificate.issuer.to_string();
     for &idx in roots.find_potential_parents(to_verify)? {
         if to_verify == &roots.certs[idx] {
@@ -178,6 +179,7 @@ pub fn partially_validate_chain(
             break;
         }
         if is_link_valid(to_verify, &roots.certs[idx]) {
+            found_root_idx = Some(idx);
             intermediates.push(roots.certs[idx].clone());
             chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
             found = true;
@@ -226,11 +228,14 @@ pub fn partially_validate_chain(
         certificate = leaf.to_der()?;
     }
 
-    Ok(StaticCTPendingLogEntry {
-        certificate,
-        precert_opt,
-        chain_fingerprints,
-    })
+    Ok((
+        StaticCTPendingLogEntry {
+            certificate,
+            precert_opt,
+            chain_fingerprints,
+        },
+        found_root_idx,
+    ))
 }
 
 /// Precertificate poison extension that can be decoded with [`TbsCertificate::get`].
@@ -462,7 +467,7 @@ mod tests {
                     );
                 assert_eq!(result.is_err(), $want_err);
 
-                if let Ok(pending_entry) = result {
+                if let Ok((pending_entry, _found_root_idx)) = result {
                     assert_eq!(pending_entry.chain_fingerprints.len(), $want_chain_len);
                 }
             }
