@@ -159,12 +159,12 @@ pub fn partially_validate_chain(
             has_precert_signing_cert = true;
         }
 
-        // Also check that intermediates have the CA Basic Constraint,
-        // but don't enforce for Precertificate Signing Certificates.
+        // Check that intermediates have the CA Basic Constraint.
+        // Precertificate signing certificates must also have CA:true.
         if cert
             .tbs_certificate
             .get::<BasicConstraints>()?
-            .is_some_and(|(_, bc)| !bc.ca)
+            .is_none_or(|(_, bc)| !bc.ca)
         {
             return Err(StaticCTError::IntermediateMissingCABasicConstraint);
         }
