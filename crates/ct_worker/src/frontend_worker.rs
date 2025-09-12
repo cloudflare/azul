@@ -252,7 +252,7 @@ async fn add_chain_or_pre_chain(
             .map(Vec::as_slice)
             .collect::<Vec<&[u8]>>();
 
-        // Make sure the inferred root is persisted as well, if the add-chain
+        // Make sure the found root is persisted as well, if the add-chain
         // request did not include the root.
         let root_bytes;
         if let Some(idx) = found_root_idx {

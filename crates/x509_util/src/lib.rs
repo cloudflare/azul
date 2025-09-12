@@ -52,7 +52,7 @@ impl CertPool {
         Ok(pool)
     }
 
-    /// Search the certificate pool for potential parents for the provided certificates.
+    /// Search the certificate pool for potential parents for the provided certificate.
     ///
     /// # Errors
     ///
@@ -109,12 +109,12 @@ impl CertPool {
         Ok(())
     }
 
-    /// Check if a certificate is included in the pool.
+    /// Check if the pool includes a certificate.
     ///
     /// # Errors
     ///
     /// Returns an error if there are issues DER-encoding the certificate.
-    pub fn included(&self, cert: &Certificate) -> Result<bool, DerError> {
+    pub fn includes(&self, cert: &Certificate) -> Result<bool, DerError> {
         Ok(self
             .by_fingerprint
             .contains_key::<[u8; 32]>(&Sha256::digest(cert.to_der()?).into()))
