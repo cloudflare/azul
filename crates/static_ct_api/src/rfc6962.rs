@@ -94,11 +94,10 @@ pub fn partially_validate_chain(
     require_server_auth_eku: bool,
 ) -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
     // First make sure the cert is well-formed.
-    let mut iter = raw_chain.iter();
-    let leaf: Certificate = match iter.next() {
-        Some(v) => parse_certificate(v)?,
-        None => return Err(StaticCTError::EmptyChain),
-    };
+    if raw_chain.is_empty() {
+        return Err(StaticCTError::EmptyChain);
+    }
+    let leaf = parse_certificate(&raw_chain[0])?;
 
     // Check whether the expiry date is within the acceptable range for this log shard.
     let not_after = u64::try_from(
@@ -135,7 +134,8 @@ pub fn partially_validate_chain(
     // We can now do the verification. Use fairly lax options for verification, as
     // CT is intended to observe certifications rather than police them.
 
-    let mut intermediates: Vec<Certificate> = iter
+    let mut intermediates: Vec<Certificate> = raw_chain[1..]
+        .iter()
         .map(|v| parse_certificate(v))
         .collect::<Result<_, _>>()?;
 
