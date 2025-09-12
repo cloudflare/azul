@@ -244,22 +244,24 @@ async fn add_chain_or_pre_chain(
 
     // Entry is not cached, so we need to sequence it.
 
-    // First persist issuers.
-    let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-    let mut issuers = req.chain[1..]
-        .iter()
-        .map(Vec::as_slice)
-        .collect::<Vec<&[u8]>>();
+    // First persist issuers. Use a block so memory is deallocated sooner.
+    {
+        let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
+        let mut issuers = req.chain[1..]
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<&[u8]>>();
 
-    // Make sure the inferred root is persisted as well, if the add-chain
-    // request did not include the root.
-    let root_bytes;
-    if let Some(idx) = found_root_idx {
-        root_bytes = roots.certs[idx].to_der().map_err(|e| e.to_string())?;
-        issuers.push(&root_bytes);
+        // Make sure the inferred root is persisted as well, if the add-chain
+        // request did not include the root.
+        let root_bytes;
+        if let Some(idx) = found_root_idx {
+            root_bytes = roots.certs[idx].to_der().map_err(|e| e.to_string())?;
+            issuers.push(&root_bytes);
+        }
+
+        generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
     }
-
-    generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
 
     // Submit entry to be sequenced, either via a batcher or directly to the
     // sequencer.
