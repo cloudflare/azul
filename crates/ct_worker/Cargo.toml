@@ -51,6 +51,7 @@ serde_with.workspace = true
 static_ct_api.workspace = true
 signed_note.workspace = true
 tlog_tiles.workspace = true
+tokio.workspace = true
 worker.workspace = true
 x509-cert.workspace = true
 x509_util.workspace = true
