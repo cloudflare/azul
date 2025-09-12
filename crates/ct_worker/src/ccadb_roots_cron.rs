@@ -71,7 +71,7 @@ pub(crate) async fn update_ccadb_roots<T: AsRef<str>>(keys: &[T], kv: &KvStore) 
             buf = old;
         }
         for cert in &ccadb_roots {
-            if pool.included(cert).map_err(|e| e.to_string())? {
+            if pool.includes(cert).map_err(|e| e.to_string())? {
                 continue;
             }
             new_roots += 1;

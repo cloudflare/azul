@@ -491,6 +491,7 @@ dependencies = [
  "signed_note",
  "static_ct_api",
  "tlog_tiles",
+ "tokio",
  "url",
  "worker",
  "x509-cert",

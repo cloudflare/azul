@@ -92,13 +92,12 @@ pub fn partially_validate_chain(
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<StaticCTPendingLogEntry, StaticCTError> {
+) -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
     // First make sure the cert is well-formed.
-    let mut iter = raw_chain.iter();
-    let leaf: Certificate = match iter.next() {
-        Some(v) => parse_certificate(v)?,
-        None => return Err(StaticCTError::EmptyChain),
-    };
+    if raw_chain.is_empty() {
+        return Err(StaticCTError::EmptyChain);
+    }
+    let leaf = parse_certificate(&raw_chain[0])?;
 
     // Check whether the expiry date is within the acceptable range for this log shard.
     let not_after = u64::try_from(
@@ -135,57 +134,65 @@ pub fn partially_validate_chain(
     // We can now do the verification. Use fairly lax options for verification, as
     // CT is intended to observe certifications rather than police them.
 
-    let mut intermediates: Vec<Certificate> = iter
+    // Keep an owned copy of the parsed certs, but use a vector of references so
+    // we can avoid needing to clone the inferred root cert when adding it to
+    // the chain.
+    let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
+        .iter()
         .map(|v| parse_certificate(v))
         .collect::<Result<_, _>>()?;
+    let mut chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
 
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
-        .map(|issuer| Sha256::digest(issuer).into())
+        .map(|v| Sha256::digest(v).into())
         .collect();
 
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
     let mut has_precert_signing_cert = false;
-    for (idx, ca) in intermediates.iter().enumerate() {
-        if !is_link_valid(to_verify, ca) {
+    for (idx, cert) in chain_certs.iter().enumerate() {
+        // Check that this cert signs the previous one in the chain.
+        if !is_link_valid(to_verify, cert) {
             return Err(StaticCTError::InvalidLinkInChain);
         }
-        to_verify = ca;
 
-        // Also check that intermediates have the CA Basic Constraint,
-        // but don't enforce for Precertificate Signing Certificates.
-        if is_precert && idx == 0 && is_pre_issuer(ca)? {
+        // Record if this is a precertificate signing certificate.
+        if is_precert && idx == 0 && is_pre_issuer(cert)? {
             has_precert_signing_cert = true;
         }
-        if ca
+
+        // Check that intermediates have the CA Basic Constraint.
+        // Precertificate signing certificates must also have CA:true.
+        if cert
             .tbs_certificate
             .get::<BasicConstraints>()?
-            .is_some_and(|(_, bc)| !bc.ca)
+            .is_none_or(|(_, bc)| !bc.ca)
         {
             return Err(StaticCTError::IntermediateMissingCABasicConstraint);
         }
+
+        // Verify this cert next.
+        to_verify = cert;
     }
 
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
-    let mut found = false;
-    let to_verify_issuer = to_verify.tbs_certificate.issuer.to_string();
-    for &idx in roots.find_potential_parents(to_verify)? {
-        if to_verify == &roots.certs[idx] {
-            found = true;
-            break;
-        }
-        if is_link_valid(to_verify, &roots.certs[idx]) {
-            intermediates.push(roots.certs[idx].clone());
-            chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
-            found = true;
-            break;
-        }
-    }
-    if !found {
-        return Err(StaticCTError::NoPathToTrustedRoot { to_verify_issuer });
+    let mut found_root_idx = None;
+    if !roots.includes(to_verify)? {
+        let Some(&found_idx) = roots
+            .find_potential_parents(to_verify)?
+            .iter()
+            .find(|&&roots_idx| is_link_valid(to_verify, &roots.certs[roots_idx]))
+        else {
+            return Err(StaticCTError::NoPathToTrustedRoot {
+                to_verify_issuer: to_verify.tbs_certificate.issuer.to_string(),
+            });
+        };
+        found_root_idx = Some(found_idx);
+        chain_certs.push(&roots.certs[found_idx]);
+        chain_fingerprints.push(Sha256::digest(&roots.certs[found_idx].to_der()?).into());
     }
 
     // Construct a pending log entry.
@@ -195,12 +202,12 @@ pub fn partially_validate_chain(
         let mut pre_issuer: Option<&TbsCertificate> = None;
         let issuer_key_hash: [u8; 32];
         if has_precert_signing_cert {
-            pre_issuer = Some(&intermediates[0].tbs_certificate);
-            if intermediates.len() < 2 {
+            pre_issuer = Some(&chain_certs[0].tbs_certificate);
+            if chain_certs.len() < 2 {
                 return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
             }
             issuer_key_hash = Sha256::digest(
-                intermediates[1]
+                chain_certs[1]
                     .tbs_certificate
                     .subject_public_key_info
                     .to_der()?,
@@ -208,7 +215,7 @@ pub fn partially_validate_chain(
             .into();
         } else {
             issuer_key_hash = Sha256::digest(
-                intermediates[0]
+                chain_certs[0]
                     .tbs_certificate
                     .subject_public_key_info
                     .to_der()?,
@@ -226,11 +233,14 @@ pub fn partially_validate_chain(
         certificate = leaf.to_der()?;
     }
 
-    Ok(StaticCTPendingLogEntry {
-        certificate,
-        precert_opt,
-        chain_fingerprints,
-    })
+    Ok((
+        StaticCTPendingLogEntry {
+            certificate,
+            precert_opt,
+            chain_fingerprints,
+        },
+        found_root_idx,
+    ))
 }
 
 /// Precertificate poison extension that can be decoded with [`TbsCertificate::get`].
@@ -462,7 +472,7 @@ mod tests {
                     );
                 assert_eq!(result.is_err(), $want_err);
 
-                if let Ok(pending_entry) = result {
+                if let Ok((pending_entry, _found_root_idx)) = result {
                     assert_eq!(pending_entry.chain_fingerprints.len(), $want_chain_len);
                 }
             }
@@ -559,6 +569,10 @@ mod tests {
     test_validate_chain!(missing_server_auth_eku_not_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; false; false; 3);
     test_validate_chain!(missing_server_auth_eku_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; true; true; 0);
     test_validate_chain!(preissuer_chain; "../tests/test-roots.pem"; "../tests/preissuer-chain.pem"; None; None; true; true; false; 3);
+
+    test_validate_chain!(intermediate_as_accepted_root; "../tests/fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 1);
+
+    test_validate_chain!(leaf_as_accepted_root; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 0);
 
     #[test]
     fn test_build_precert_tbs() {
