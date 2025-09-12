@@ -134,38 +134,43 @@ pub fn partially_validate_chain(
     // We can now do the verification. Use fairly lax options for verification, as
     // CT is intended to observe certifications rather than police them.
 
-    let mut intermediates: Vec<Certificate> = raw_chain[1..]
+    let mut chain_certs: Vec<Certificate> = raw_chain[1..]
         .iter()
         .map(|v| parse_certificate(v))
         .collect::<Result<_, _>>()?;
 
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
-        .map(|issuer| Sha256::digest(issuer).into())
+        .map(|v| Sha256::digest(v).into())
         .collect();
 
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
     let mut has_precert_signing_cert = false;
-    for (idx, ca) in intermediates.iter().enumerate() {
-        if !is_link_valid(to_verify, ca) {
+    for (idx, cert) in chain_certs.iter().enumerate() {
+        // Check that this cert signs the previous one in the chain.
+        if !is_link_valid(to_verify, cert) {
             return Err(StaticCTError::InvalidLinkInChain);
         }
-        to_verify = ca;
+
+        // Record if this is a precertificate signing certificate.
+        if is_precert && idx == 0 && is_pre_issuer(cert)? {
+            has_precert_signing_cert = true;
+        }
 
         // Also check that intermediates have the CA Basic Constraint,
         // but don't enforce for Precertificate Signing Certificates.
-        if is_precert && idx == 0 && is_pre_issuer(ca)? {
-            has_precert_signing_cert = true;
-        }
-        if ca
+        if cert
             .tbs_certificate
             .get::<BasicConstraints>()?
             .is_some_and(|(_, bc)| !bc.ca)
         {
             return Err(StaticCTError::IntermediateMissingCABasicConstraint);
         }
+
+        // Verify this cert next.
+        to_verify = cert;
     }
 
     // The last certificate in the chain is either a root certificate
@@ -180,7 +185,7 @@ pub fn partially_validate_chain(
         }
         if is_link_valid(to_verify, &roots.certs[idx]) {
             found_root_idx = Some(idx);
-            intermediates.push(roots.certs[idx].clone());
+            chain_certs.push(roots.certs[idx].clone());
             chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
             found = true;
             break;
@@ -197,12 +202,12 @@ pub fn partially_validate_chain(
         let mut pre_issuer: Option<&TbsCertificate> = None;
         let issuer_key_hash: [u8; 32];
         if has_precert_signing_cert {
-            pre_issuer = Some(&intermediates[0].tbs_certificate);
-            if intermediates.len() < 2 {
+            pre_issuer = Some(&chain_certs[0].tbs_certificate);
+            if chain_certs.len() < 2 {
                 return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
             }
             issuer_key_hash = Sha256::digest(
-                intermediates[1]
+                chain_certs[1]
                     .tbs_certificate
                     .subject_public_key_info
                     .to_der()?,
@@ -210,7 +215,7 @@ pub fn partially_validate_chain(
             .into();
         } else {
             issuer_key_hash = Sha256::digest(
-                intermediates[0]
+                chain_certs[0]
                     .tbs_certificate
                     .subject_public_key_info
                     .to_der()?,
