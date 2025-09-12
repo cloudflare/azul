@@ -175,24 +175,22 @@ pub fn partially_validate_chain(
 
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
-    let mut found = false;
     let mut found_root_idx = None;
     let to_verify_issuer = to_verify.tbs_certificate.issuer.to_string();
-    for &idx in roots.find_potential_parents(to_verify)? {
-        if to_verify == &roots.certs[idx] {
-            found = true;
-            break;
+    if !roots.includes(to_verify)? {
+        let mut found = false;
+        for &idx in roots.find_potential_parents(to_verify)? {
+            if is_link_valid(to_verify, &roots.certs[idx]) {
+                found_root_idx = Some(idx);
+                chain_certs.push(roots.certs[idx].clone());
+                chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
+                found = true;
+                break;
+            }
         }
-        if is_link_valid(to_verify, &roots.certs[idx]) {
-            found_root_idx = Some(idx);
-            chain_certs.push(roots.certs[idx].clone());
-            chain_fingerprints.push(Sha256::digest(roots.certs[idx].to_der()?).into());
-            found = true;
-            break;
+        if !found {
+            return Err(StaticCTError::NoPathToTrustedRoot { to_verify_issuer });
         }
-    }
-    if !found {
-        return Err(StaticCTError::NoPathToTrustedRoot { to_verify_issuer });
     }
 
     // Construct a pending log entry.
@@ -569,6 +567,10 @@ mod tests {
     test_validate_chain!(missing_server_auth_eku_not_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; false; false; 3);
     test_validate_chain!(missing_server_auth_eku_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; true; true; 0);
     test_validate_chain!(preissuer_chain; "../tests/test-roots.pem"; "../tests/preissuer-chain.pem"; None; None; true; true; false; 3);
+
+    test_validate_chain!(intermediate_as_accepted_root; "../tests/fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 1);
+
+    test_validate_chain!(leaf_as_accepted_root; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 0);
 
     #[test]
     fn test_build_precert_tbs() {
