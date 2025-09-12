@@ -134,10 +134,14 @@ pub fn partially_validate_chain(
     // We can now do the verification. Use fairly lax options for verification, as
     // CT is intended to observe certifications rather than police them.
 
-    let mut chain_certs: Vec<Certificate> = raw_chain[1..]
+    // Keep an owned copy of the parsed certs, but use a vector of references so
+    // we can avoid needing to clone the inferred root cert when adding it to
+    // the chain.
+    let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
         .iter()
         .map(|v| parse_certificate(v))
         .collect::<Result<_, _>>()?;
+    let mut chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
 
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
@@ -187,7 +191,7 @@ pub fn partially_validate_chain(
             });
         };
         found_root_idx = Some(found_idx);
-        chain_certs.push(roots.certs[found_idx].clone());
+        chain_certs.push(&roots.certs[found_idx]);
         chain_fingerprints.push(Sha256::digest(&roots.certs[found_idx].to_der()?).into());
     }
 
