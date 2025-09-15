@@ -22,7 +22,7 @@ pub enum StaticCTError {
     #[error(transparent)]
     X509(#[from] x509_verify::spki::Error),
     #[error(transparent)]
-    Validation(#[from] x509_util::ValidationError), // TODO: remove all the errors here that were copied to ValidationError
+    Validation(#[from] x509_util::ValidationError),
     #[error("unexpected extension")]
     UnexpectedExtension,
     #[error("malformed")]
@@ -33,16 +33,8 @@ pub enum StaticCTError {
     UnknownType,
     #[error("trailing data")]
     TrailingData,
-    #[error("empty chain")]
-    EmptyChain,
-    #[error("invalid leaf certificate")]
+    #[error("invalid leaf certificate per CT")]
     InvalidLeaf,
-    #[error("intermediate missing cA basic constraint")]
-    IntermediateMissingCABasicConstraint,
-    #[error("invalid link in chain")]
-    InvalidLinkInChain,
-    #[error("issuer not in root store: {to_verify_issuer}")]
-    NoPathToTrustedRoot { to_verify_issuer: String },
     #[error("CT poison extension is not critical or invalid")]
     InvalidCTPoison,
     #[error("missing precertificate signing certificate issuer")]

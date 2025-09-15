@@ -288,3 +288,133 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::prelude::*;
+    use x509_verify::x509_cert::Certificate;
+
+    fn parse_datetime(s: &str) -> UnixTimestamp {
+        u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
+    }
+
+    macro_rules! test_validate_chain {
+        ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $want_err:expr; $want_chain_len:expr) => {
+            #[test]
+            fn $name() {
+                let mut roots = Vec::new();
+                $(
+                    roots.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
+                )*
+                let mut chain = Vec::new();
+                $(
+                    chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
+                )*
+
+                let result = validate_chain(
+                        &crate::certs_to_bytes(&chain).unwrap(),
+                        &CertPool::new(roots).unwrap(),
+                        $not_after_start,
+                        $not_after_end,
+                        |_, _, fingerprint_chain, _| {
+                            assert_eq!(fingerprint_chain.len(), $want_chain_len);
+                            Result::<(), ()>::Ok(())
+                        },
+                    );
+                assert_eq!(result.is_err(), $want_err);
+            }
+        };
+    }
+
+    macro_rules! test_validate_chain_success {
+        ($name:ident, $want_chain_len:expr, $($chain_file:expr),+) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; $want_chain_len);
+        };
+    }
+
+    macro_rules! test_validate_chain_fail {
+        ($name:ident, $($chain_file:expr),+) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; true; 0);
+        };
+    }
+
+    test_validate_chain_fail!(
+        missing_intermediate_ca,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+    );
+    test_validate_chain_fail!(
+        wrong_cert_order,
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+    );
+    test_validate_chain_fail!(
+        unrelated_cert_in_chain,
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/test-cert.pem"
+    );
+    test_validate_chain_fail!(
+        unrelated_cert_after_chain,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/test-cert.pem"
+    );
+    test_validate_chain_fail!(
+        mismatched_sig_alg_on_intermediate,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-mismatching-sig-alg.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain,
+        2,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_policy_constraints,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_policy_constraints_inc_root,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem",
+        "../../static_ct_api/tests/fake-root-ca-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_name_constraints,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_invalid_name_constraints,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-invalid-name-constraints-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_of_len_4,
+        3,
+        "../../static_ct_api/tests/subleaf.chain"
+    );
+    test_validate_chain_fail!(
+        misordered_chain_of_len_4,
+        "../../static_ct_api/tests/subleaf.misordered.chain"
+    );
+
+    macro_rules! test_not_after {
+        ($name:ident; $start:expr; $end:expr; $want_err:expr) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem", "../../static_ct_api/tests/fake-intermediate-cert.pem"; $start; $end; $want_err; 2);
+        };
+    }
+    test_not_after!(not_after_no_range; None; None; false);
+    test_not_after!(not_after_valid_range; Some(parse_datetime("2018-01-01T00:00:00Z")); Some(parse_datetime("2020-07-01T00:00:00Z")); false);
+    test_not_after!(not_after_before_start; Some(parse_datetime("2020-01-01T00:00:00Z")); None; true);
+    test_not_after!(not_after_after_end; None; Some(parse_datetime("1999-01-01T00:00:00Z")); true);
+
+    test_validate_chain!(intermediate_as_accepted_root; "../../static_ct_api/tests/fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 1);
+    test_validate_chain!(leaf_as_accepted_root; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 0);
+}

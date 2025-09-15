@@ -15,3 +15,6 @@ sha2.workspace = true
 thiserror.workspace = true
 x509-cert.workspace = true
 x509-verify.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true

@@ -3187,6 +3187,7 @@ dependencies = [
 name = "x509_util"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "der",
  "sha2",
  "thiserror 2.0.12",
