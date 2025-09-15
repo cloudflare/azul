@@ -164,8 +164,8 @@ pub enum HookOrValidationError<T> {
 
 /// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
 /// reject obviously bad certificate chains. Accepts a hook that takes the leaf, intermediate certs,
-/// and a list of fingerprints of the full chain (including inferred root), and returns a value or
-/// error of its own.
+/// and a list of fingerprints of the full chain (including inferred root if there is one), and
+/// index of the inferred root (if there is one); and returns a value or error of its own.
 ///
 /// # Errors
 ///
@@ -179,7 +179,7 @@ pub fn validate_chain<T, E, F>(
     mut hook: F,
 ) -> Result<T, HookOrValidationError<E>>
 where
-    F: FnMut(&Certificate, &Vec<Certificate>, Vec<[u8; 32]>) -> Result<T, E>,
+    F: FnMut(&Certificate, &Vec<Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
 {
     if raw_chain.is_empty() {
         return Err(ValidationError::EmptyChain.into());
@@ -244,7 +244,7 @@ where
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
     let mut inferred_root_idx = None;
-    if !roots.included(to_verify).map_err(ValidationError::from)? {
+    if !roots.includes(to_verify).map_err(ValidationError::from)? {
         let Some(&found_idx) = roots
             .find_potential_parents(to_verify)
             .map_err(ValidationError::from)?
@@ -264,7 +264,13 @@ where
         full_chain_fingerprints.push(Sha256::digest(bytes).into());
     }
 
-    hook(&leaf, &intermediates, full_chain_fingerprints).map_err(HookOrValidationError::Hook)
+    hook(
+        &leaf,
+        &intermediates,
+        full_chain_fingerprints,
+        inferred_root_idx,
+    )
+    .map_err(HookOrValidationError::Hook)
 }
 
 /// Returns whether or not the given link in the chain is valid.

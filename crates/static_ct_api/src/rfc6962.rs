@@ -78,26 +78,27 @@ pub struct GetRootsResponse {
 
 /// Validates a certificate chain according to
 /// [RFC6962](https://datatracker.ietf.org/doc/html/rfc6962) and returns a
-/// pending log entry.
+/// pending log entry and the inferred root, if a root had to be inferred.
 ///
 /// # Errors
 ///
 /// Returns a `ValidationError` if the chain fails to validate.
-pub fn validate_ct_entry_chain(
+pub fn partially_validate_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
     not_after_start: Option<UnixTimestamp>,
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<StaticCTPendingLogEntry, StaticCTError> {
+) -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
     // We will run the basic validator supplied by x509_utils. However, we need some extra checks
     // that are particular to CT, and we need to collect information along the way. So define a hook
     // for the validator that does these checks and returns a pending log entry
     let validator_hook = |leaf: &Certificate,
                           intermediates: &Vec<Certificate>,
-                          full_chain_fingerprints: Vec<[u8; 32]>|
-     -> Result<StaticCTPendingLogEntry, StaticCTError> {
+                          full_chain_fingerprints: Vec<[u8; 32]>,
+                          inferred_root_idx: Option<usize>|
+     -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
         // Reject mismatched signature algorithms:
         // https://github.com/google/certificate-transparency-go/pull/702.
         for cert in core::iter::once(leaf).chain(intermediates.iter()) {
@@ -124,9 +125,9 @@ pub fn validate_ct_entry_chain(
         }
 
         // Record if this is a precertificate signing certificate.
-        let has_precert_signing_cert = {
-            let first_intermediate = &intermediates[0];
-            is_leaf_precert && is_pre_issuer(first_intermediate)?
+        let has_precert_signing_cert = match intermediates.get(0) {
+            Some(first_intermediate) => is_leaf_precert && is_pre_issuer(first_intermediate)?,
+            None => false,
         };
 
         // Construct a pending log entry.
@@ -167,15 +168,18 @@ pub fn validate_ct_entry_chain(
             certificate = leaf.to_der()?;
         }
 
-        Ok(StaticCTPendingLogEntry {
-            certificate,
-            precert_opt,
-            chain_fingerprints: full_chain_fingerprints,
-        })
+        Ok((
+            StaticCTPendingLogEntry {
+                certificate,
+                precert_opt,
+                chain_fingerprints: full_chain_fingerprints,
+            },
+            inferred_root_idx,
+        ))
     };
 
     // Call validation with the hook
-    let pending_entry = validate_chain::<StaticCTPendingLogEntry, _, _>(
+    let pending_entry = validate_chain(
         raw_chain,
         roots,
         not_after_start,
