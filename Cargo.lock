@@ -3189,7 +3189,9 @@ version = "0.2.0"
 dependencies = [
  "der",
  "sha2",
+ "thiserror 2.0.12",
  "x509-cert",
+ "x509-verify",
 ]
 
 [[package]]

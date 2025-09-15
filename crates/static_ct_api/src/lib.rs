@@ -21,6 +21,8 @@ pub enum StaticCTError {
     Der(#[from] der::Error),
     #[error(transparent)]
     X509(#[from] x509_verify::spki::Error),
+    #[error(transparent)]
+    Validation(#[from] x509_util::ValidationError), // TODO: remove all the errors here that were copied to ValidationError
     #[error("unexpected extension")]
     UnexpectedExtension,
     #[error("malformed")]

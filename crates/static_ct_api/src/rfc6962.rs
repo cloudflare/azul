@@ -36,13 +36,12 @@ use tlog_tiles::UnixTimestamp;
 use x509_cert::{
     der::{Decode, Encode},
     ext::{
-        pkix::{AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage},
+        pkix::{AuthorityKeyIdentifier, ExtendedKeyUsage},
         Extension,
     },
     impl_newtype, Certificate, TbsCertificate,
 };
-use x509_util::CertPool;
-use x509_verify::VerifyingKey;
+use x509_util::{validate_chain, CertPool, HookOrValidationError};
 
 // Data structures for the [Static CT Submission APIs](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#submission-apis),
 // a subset of the APIs from [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962).
@@ -84,163 +83,117 @@ pub struct GetRootsResponse {
 /// # Errors
 ///
 /// Returns a `ValidationError` if the chain fails to validate.
-#[allow(clippy::too_many_lines)]
-pub fn partially_validate_chain(
+pub fn validate_ct_entry_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
     not_after_start: Option<UnixTimestamp>,
     not_after_end: Option<UnixTimestamp>,
     expect_precert: bool,
     require_server_auth_eku: bool,
-) -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
-    // First make sure the cert is well-formed.
-    if raw_chain.is_empty() {
-        return Err(StaticCTError::EmptyChain);
-    }
-    let leaf = parse_certificate(&raw_chain[0])?;
-
-    // Check whether the expiry date is within the acceptable range for this log shard.
-    let not_after = u64::try_from(
-        leaf.tbs_certificate
-            .validity
-            .not_after
-            .to_unix_duration()
-            .as_millis(),
-    )
-    .map_err(|_| StaticCTError::InvalidLeaf)?;
-    if not_after_start.is_some_and(|start| start > not_after)
-        || not_after_end.is_some_and(|end| end <= not_after)
-    {
-        return Err(StaticCTError::InvalidLeaf);
-    }
-
-    // Check if the CT poison extension is present. If present, it must be critical.
-    let is_precert = is_precert(&leaf)?;
-    if is_precert != expect_precert {
-        return Err(StaticCTError::EndpointMismatch { is_precert });
-    }
-
-    // Check that Server Auth EKU is present. Chrome's CT policy lists this as one acceptable
-    // reason for a CT log to reject a submission: <https://googlechrome.github.io/CertificateTransparency/log_policy.html>.
-    if require_server_auth_eku
-        && !leaf
-            .tbs_certificate
-            .get::<ExtendedKeyUsage>()?
-            .is_some_and(|(_, eku)| eku.0.iter().any(|v| *v == ID_KP_SERVER_AUTH))
-    {
-        return Err(StaticCTError::InvalidLeaf);
-    }
-
-    // We can now do the verification. Use fairly lax options for verification, as
-    // CT is intended to observe certifications rather than police them.
-
-    // Keep an owned copy of the parsed certs, but use a vector of references so
-    // we can avoid needing to clone the inferred root cert when adding it to
-    // the chain.
-    let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
-        .iter()
-        .map(|v| parse_certificate(v))
-        .collect::<Result<_, _>>()?;
-    let mut chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
-
-    let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
-        .iter()
-        .map(|v| Sha256::digest(v).into())
-        .collect();
-
-    // Walk up the chain, ensuring that each certificate signs the previous one.
-    // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
-    let mut to_verify = &leaf;
-    let mut has_precert_signing_cert = false;
-    for (idx, cert) in chain_certs.iter().enumerate() {
-        // Check that this cert signs the previous one in the chain.
-        if !is_link_valid(to_verify, cert) {
-            return Err(StaticCTError::InvalidLinkInChain);
-        }
-
-        // Record if this is a precertificate signing certificate.
-        if is_precert && idx == 0 && is_pre_issuer(cert)? {
-            has_precert_signing_cert = true;
-        }
-
-        // Check that intermediates have the CA Basic Constraint.
-        // Precertificate signing certificates must also have CA:true.
-        if cert
-            .tbs_certificate
-            .get::<BasicConstraints>()?
-            .is_none_or(|(_, bc)| !bc.ca)
-        {
-            return Err(StaticCTError::IntermediateMissingCABasicConstraint);
-        }
-
-        // Verify this cert next.
-        to_verify = cert;
-    }
-
-    // The last certificate in the chain is either a root certificate
-    // or a certificate that chains to a known root certificate.
-    let mut found_root_idx = None;
-    if !roots.includes(to_verify)? {
-        let Some(&found_idx) = roots
-            .find_potential_parents(to_verify)?
-            .iter()
-            .find(|&&roots_idx| is_link_valid(to_verify, &roots.certs[roots_idx]))
-        else {
-            return Err(StaticCTError::NoPathToTrustedRoot {
-                to_verify_issuer: to_verify.tbs_certificate.issuer.to_string(),
-            });
-        };
-        found_root_idx = Some(found_idx);
-        chain_certs.push(&roots.certs[found_idx]);
-        chain_fingerprints.push(Sha256::digest(&roots.certs[found_idx].to_der()?).into());
-    }
-
-    // Construct a pending log entry.
-    let precert_opt: Option<PrecertData>;
-    let certificate: Vec<u8>;
-    if is_precert {
-        let mut pre_issuer: Option<&TbsCertificate> = None;
-        let issuer_key_hash: [u8; 32];
-        if has_precert_signing_cert {
-            pre_issuer = Some(&chain_certs[0].tbs_certificate);
-            if chain_certs.len() < 2 {
-                return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
+) -> Result<StaticCTPendingLogEntry, StaticCTError> {
+    // We will run the basic validator supplied by x509_utils. However, we need some extra checks
+    // that are particular to CT, and we need to collect information along the way. So define a hook
+    // for the validator that does these checks and returns a pending log entry
+    let validator_hook = |leaf: &Certificate,
+                          intermediates: &Vec<Certificate>|
+     -> Result<StaticCTPendingLogEntry, StaticCTError> {
+        // Reject mismatched signature algorithms:
+        // https://github.com/google/certificate-transparency-go/pull/702.
+        for cert in core::iter::once(leaf).chain(intermediates.iter()) {
+            if cert.signature_algorithm != cert.tbs_certificate.signature {
+                return Err(StaticCTError::MismatchingSigAlg);
             }
-            issuer_key_hash = Sha256::digest(
-                chain_certs[1]
-                    .tbs_certificate
-                    .subject_public_key_info
-                    .to_der()?,
-            )
-            .into();
-        } else {
-            issuer_key_hash = Sha256::digest(
-                chain_certs[0]
-                    .tbs_certificate
-                    .subject_public_key_info
-                    .to_der()?,
-            )
-            .into();
         }
-        let pre_certificate = leaf.to_der()?;
-        precert_opt = Some(PrecertData {
-            issuer_key_hash,
-            pre_certificate,
-        });
-        certificate = build_precert_tbs(&leaf.tbs_certificate, pre_issuer)?;
-    } else {
-        precert_opt = None;
-        certificate = leaf.to_der()?;
-    }
 
-    Ok((
-        StaticCTPendingLogEntry {
+        // Check if the CT poison extension is present. If present, it must be critical.
+        let is_leaf_precert = is_precert(&leaf)?;
+        if is_leaf_precert != expect_precert {
+            return Err(StaticCTError::EndpointMismatch {
+                is_precert: is_leaf_precert,
+            });
+        }
+
+        // Check that Server Auth EKU is present. Chrome's CT policy lists this as one acceptable
+        // reason for a CT log to reject a submission: <https://googlechrome.github.io/CertificateTransparency/log_policy.html>.
+        if require_server_auth_eku
+            && !leaf
+                .tbs_certificate
+                .get::<ExtendedKeyUsage>()?
+                .is_some_and(|(_, eku)| eku.0.iter().any(|v| *v == ID_KP_SERVER_AUTH))
+        {
+            return Err(StaticCTError::InvalidLeaf);
+        }
+
+        let first_intermediate = &intermediates[0];
+        let has_precert_signing_cert = is_leaf_precert && is_pre_issuer(first_intermediate)?;
+
+        // Construct a pending log entry.
+        let precert_opt: Option<PrecertData>;
+        let certificate: Vec<u8>;
+        if is_leaf_precert {
+            let mut pre_issuer: Option<&TbsCertificate> = None;
+            let issuer_key_hash: [u8; 32];
+            if has_precert_signing_cert {
+                pre_issuer = Some(&intermediates[0].tbs_certificate);
+                if intermediates.len() < 2 {
+                    return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
+                }
+                issuer_key_hash = Sha256::digest(
+                    intermediates[1]
+                        .tbs_certificate
+                        .subject_public_key_info
+                        .to_der()?,
+                )
+                .into();
+            } else {
+                issuer_key_hash = Sha256::digest(
+                    intermediates[0]
+                        .tbs_certificate
+                        .subject_public_key_info
+                        .to_der()?,
+                )
+                .into();
+            }
+            let pre_certificate = leaf.to_der()?;
+            precert_opt = Some(PrecertData {
+                issuer_key_hash,
+                pre_certificate,
+            });
+            certificate = build_precert_tbs(&leaf.tbs_certificate, pre_issuer)?;
+        } else {
+            precert_opt = None;
+            certificate = leaf.to_der()?;
+        }
+
+        let chain_fingerprints = raw_chain[1..]
+            .iter()
+            .map(|issuer| Sha256::digest(issuer).into())
+            .collect();
+
+        Ok(StaticCTPendingLogEntry {
             certificate,
             precert_opt,
             chain_fingerprints,
-        },
-        found_root_idx,
-    ))
+        })
+    };
+
+    // We need to wrap the errors to satisfy the validation function
+    let wrapped_hook = |leaf: &Certificate, intermediates: &Vec<Certificate>| {
+        validator_hook(leaf, intermediates).map_err(HookOrValidationError::Hook)
+    };
+
+    // Call validation with the hook
+    let pending_entry = validate_chain::<StaticCTPendingLogEntry, _, _>(
+        raw_chain,
+        roots,
+        not_after_start,
+        not_after_end,
+        wrapped_hook,
+    );
+    pending_entry.map_err(|e| match e {
+        HookOrValidationError::Valiadation(ve) => ve.into(),
+        HookOrValidationError::Hook(he) => he,
+    })
 }
 
 /// Precertificate poison extension that can be decoded with [`TbsCertificate::get`].
@@ -251,22 +204,6 @@ impl AssociatedOid for CTPrecertPoison {
     const OID: ObjectIdentifier = CT_PRECERT_POISON;
 }
 impl_newtype!(CTPrecertPoison, Null);
-
-/// Returns whether or not the given link in the chain is valid.
-/// [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962#section-3.1) says:
-/// ```text
-/// Logs MUST verify that the submitted end-entity certificate or
-/// Precertificate has a valid signature chain leading back to a trusted
-/// root CA certificate, using the chain of intermediate CA certificates
-/// provided by the submitter.
-/// ```
-fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
-    if let Ok(key) = VerifyingKey::try_from(issuer) {
-        key.verify_strict(child).is_ok()
-    } else {
-        false
-    }
-}
 
 /// Returns whether or not the certificate contains the precertificate poison extension.
 fn is_precert(cert: &Certificate) -> Result<bool, StaticCTError> {
@@ -363,7 +300,8 @@ fn build_precert_tbs(
     Ok(tbs.to_der()?)
 }
 
-// Parse a certificate and verify that it is well-formed.
+// TODO: make the hook reference this function so we can use it in tests
+// Parse a certificate and verify that it is well-formed. This is x509_utils
 fn parse_certificate(bytes: &[u8]) -> Result<Certificate, StaticCTError> {
     let cert = Certificate::from_der(bytes)?;
     // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
@@ -462,17 +400,17 @@ mod tests {
                     chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
                 )*
 
-                let result = partially_validate_chain(
+                let result = validate_ct_entry_chain(
                         &x509_util::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
                         $not_after_start,
                         $not_after_end,
                         $expect_precert,
                         $require_server_auth_eku,
-                    );
+                );
                 assert_eq!(result.is_err(), $want_err);
 
-                if let Ok((pending_entry, _found_root_idx)) = result {
+                if let Ok(pending_entry) = result {
                     assert_eq!(pending_entry.chain_fingerprints.len(), $want_chain_len);
                 }
             }

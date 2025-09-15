@@ -3,13 +3,14 @@
 
 //! Utilities for X.509 operations.
 
-use der::{Encode, Error as DerError};
+use der::{Decode, Encode, Error as DerError};
 use sha2::{Digest, Sha256};
 use std::collections::{hash_map::Entry, HashMap};
 use x509_cert::{
-    ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier},
+    ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
     Certificate,
 };
+use x509_verify::VerifyingKey;
 
 /// Converts a vector of certificates into an array of DER-encoded certificates.
 ///
@@ -131,5 +132,139 @@ impl CertPool {
         } else {
             None
         }
+    }
+}
+
+type UnixTimestamp = u64;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ValidationError {
+    #[error(transparent)]
+    Der(#[from] der::Error),
+    #[error("empty chain")]
+    EmptyChain,
+    #[error("invalid leaf certificate")]
+    InvalidLeaf,
+    #[error("invalid link in chain")]
+    InvalidLinkInChain,
+    #[error("intermediate missing CA basic constraint")]
+    IntermediateMissingCaBasicConstraint,
+    #[error("issuer not in root store: {to_verify_issuer}")]
+    NoPathToTrustedRoot { to_verify_issuer: String },
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum HookOrValidationError<T> {
+    Hook(T),
+    #[error(transparent)]
+    Valiadation(#[from] ValidationError),
+}
+
+// TODO: move some tests from static_ct_api/rfc6962 to this file
+
+/// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
+/// reject obviously bad certificate chains. Accepts a hook that takes the leaf and intermediate
+/// certs, and returns a value or error of its own.
+///
+/// # Errors
+///
+/// Returns a `ValidationError` if the chain fails to validate. Returns an error of type `E` if the
+/// hook errors.
+pub fn validate_chain<T, E, F>(
+    raw_chain: &[Vec<u8>],
+    roots: &CertPool,
+    not_after_start: Option<UnixTimestamp>,
+    not_after_end: Option<UnixTimestamp>,
+    mut hook: F,
+) -> Result<T, HookOrValidationError<E>>
+where
+    F: FnMut(&Certificate, &Vec<Certificate>) -> Result<T, HookOrValidationError<E>>,
+{
+    // First make sure the cert is well-formed.
+    let mut iter = raw_chain.iter();
+    let leaf: Certificate = match iter.next() {
+        Some(bytes) => Certificate::from_der(bytes).map_err(ValidationError::from)?,
+        None => return Err(ValidationError::EmptyChain.into()),
+    };
+
+    // Check whether the expiry date is within the acceptable range for this log shard.
+    let not_after = u64::try_from(
+        leaf.tbs_certificate
+            .validity
+            .not_after
+            .to_unix_duration()
+            .as_millis(),
+    )
+    .map_err(|_| ValidationError::InvalidLeaf)?;
+    if not_after_start.is_some_and(|start| start > not_after)
+        || not_after_end.is_some_and(|end| end <= not_after)
+    {
+        return Err(ValidationError::InvalidLeaf.into());
+    }
+
+    let mut intermediates: Vec<Certificate> = iter
+        .map(|bytes| Certificate::from_der(bytes))
+        .collect::<Result<_, _>>()
+        .map_err(ValidationError::from)?;
+
+    // Walk up the chain, ensuring that each certificate signs the previous one.
+    // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
+    let mut to_verify = &leaf;
+    for ca in intermediates.iter() {
+        if !is_link_valid(to_verify, ca) {
+            return Err(ValidationError::InvalidLinkInChain.into());
+        }
+        to_verify = ca;
+
+        // Check that intermediates have the CA Basic Constraint
+        if ca
+            .tbs_certificate
+            .get::<BasicConstraints>()
+            .map_err(ValidationError::from)?
+            .is_some_and(|(_, bc)| !bc.ca)
+        {
+            return Err(ValidationError::IntermediateMissingCaBasicConstraint.into());
+        }
+    }
+
+    // The last certificate in the chain is either a root certificate
+    // or a certificate that chains to a known root certificate.
+    let mut found = false;
+    let to_verify_issuer = to_verify.tbs_certificate.issuer.to_string();
+    for &idx in roots
+        .find_potential_parents(to_verify)
+        .map_err(ValidationError::from)?
+    {
+        let root = &roots.certs[idx];
+        if to_verify == root {
+            found = true;
+            break;
+        }
+        if is_link_valid(to_verify, root) {
+            intermediates.push(root.clone());
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err(ValidationError::NoPathToTrustedRoot { to_verify_issuer }.into());
+    }
+
+    hook(&leaf, &intermediates)
+}
+
+/// Returns whether or not the given link in the chain is valid.
+/// [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962#section-3.1) says:
+/// ```text
+/// Logs MUST verify that the submitted end-entity certificate or
+/// Precertificate has a valid signature chain leading back to a trusted
+/// root CA certificate, using the chain of intermediate CA certificates
+/// provided by the submitter.
+/// ```
+fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
+    if let Ok(key) = VerifyingKey::try_from(issuer) {
+        key.verify_strict(child).is_ok()
+    } else {
+        false
     }
 }
