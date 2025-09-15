@@ -163,8 +163,9 @@ pub enum HookOrValidationError<T> {
 // TODO: move some tests from static_ct_api/rfc6962 to this file
 
 /// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
-/// reject obviously bad certificate chains. Accepts a hook that takes the leaf and intermediate
-/// certs, and returns a value or error of its own.
+/// reject obviously bad certificate chains. Accepts a hook that takes the leaf, intermediate certs,
+/// and a list of fingerprints of the full chain (including inferred root), and returns a value or
+/// error of its own.
 ///
 /// # Errors
 ///
@@ -178,13 +179,18 @@ pub fn validate_chain<T, E, F>(
     mut hook: F,
 ) -> Result<T, HookOrValidationError<E>>
 where
-    F: FnMut(&Certificate, &Vec<Certificate>) -> Result<T, HookOrValidationError<E>>,
+    F: FnMut(&Certificate, &Vec<Certificate>, Vec<[u8; 32]>) -> Result<T, HookOrValidationError<E>>,
 {
-    // First make sure the cert is well-formed.
+    if raw_chain.is_empty() {
+        return Err(ValidationError::EmptyChain.into());
+    }
     let mut iter = raw_chain.iter();
-    let leaf: Certificate = match iter.next() {
-        Some(bytes) => Certificate::from_der(bytes).map_err(ValidationError::from)?,
-        None => return Err(ValidationError::EmptyChain.into()),
+
+    // Parse the first element of the chain, i.e., the leaf
+    let leaf = {
+        // We can unwrap the first element because we just checked the chain is not empty
+        let bytes = iter.next().unwrap();
+        Certificate::from_der(bytes).map_err(ValidationError::from)?
     };
 
     // Check whether the expiry date is within the acceptable range for this log shard.
@@ -202,26 +208,34 @@ where
         return Err(ValidationError::InvalidLeaf.into());
     }
 
-    let mut intermediates: Vec<Certificate> = iter
+    let intermediates: Vec<Certificate> = iter
         .map(|bytes| Certificate::from_der(bytes))
         .collect::<Result<_, _>>()
         .map_err(ValidationError::from)?;
+    // All the intermediates plus the inferred root (we'll add it later)
+    let mut full_chain: Vec<&Certificate> = intermediates.iter().collect();
+    let mut full_chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
+        .iter()
+        .map(|v| Sha256::digest(v).into())
+        .collect();
 
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
-    for ca in intermediates.iter() {
-        if !is_link_valid(to_verify, ca) {
+    for cert in intermediates.iter() {
+        // Check that this cert signs the previous one in the chain.
+        if !is_link_valid(to_verify, cert) {
             return Err(ValidationError::InvalidLinkInChain.into());
         }
-        to_verify = ca;
+        to_verify = cert;
 
-        // Check that intermediates have the CA Basic Constraint
-        if ca
+        // Check that intermediates have the CA Basic Constraint.
+        // Precertificate signing certificates must also have CA:true.
+        if cert
             .tbs_certificate
             .get::<BasicConstraints>()
             .map_err(ValidationError::from)?
-            .is_some_and(|(_, bc)| !bc.ca)
+            .is_none_or(|(_, bc)| !bc.ca)
         {
             return Err(ValidationError::IntermediateMissingCaBasicConstraint.into());
         }
@@ -229,28 +243,28 @@ where
 
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
-    let mut found = false;
-    let to_verify_issuer = to_verify.tbs_certificate.issuer.to_string();
-    for &idx in roots
-        .find_potential_parents(to_verify)
-        .map_err(ValidationError::from)?
-    {
-        let root = &roots.certs[idx];
-        if to_verify == root {
-            found = true;
-            break;
-        }
-        if is_link_valid(to_verify, root) {
-            intermediates.push(root.clone());
-            found = true;
-            break;
-        }
-    }
-    if !found {
-        return Err(ValidationError::NoPathToTrustedRoot { to_verify_issuer }.into());
+    let mut found_root_idx = None;
+    if !roots.included(to_verify).map_err(ValidationError::from)? {
+        let Some(&found_idx) = roots
+            .find_potential_parents(to_verify)
+            .map_err(ValidationError::from)?
+            .iter()
+            .find(|&&roots_idx| is_link_valid(to_verify, &roots.certs[roots_idx]))
+        else {
+            return Err(ValidationError::NoPathToTrustedRoot {
+                to_verify_issuer: to_verify.tbs_certificate.issuer.to_string(),
+            }
+            .into());
+        };
+        found_root_idx = Some(found_idx);
+        let root = &roots.certs[found_idx];
+        let bytes = root.to_der().map_err(ValidationError::from)?;
+
+        full_chain.push(&roots.certs[found_idx]);
+        full_chain_fingerprints.push(Sha256::digest(bytes).into());
     }
 
-    hook(&leaf, &intermediates)
+    hook(&leaf, &intermediates, full_chain_fingerprints)
 }
 
 /// Returns whether or not the given link in the chain is valid.

@@ -95,14 +95,13 @@ pub fn validate_ct_entry_chain(
     // that are particular to CT, and we need to collect information along the way. So define a hook
     // for the validator that does these checks and returns a pending log entry
     let validator_hook = |leaf: &Certificate,
-                          intermediates: &Vec<Certificate>|
+                          intermediates: &Vec<Certificate>,
+                          full_chain_fingerprints: Vec<[u8; 32]>|
      -> Result<StaticCTPendingLogEntry, StaticCTError> {
         // Reject mismatched signature algorithms:
         // https://github.com/google/certificate-transparency-go/pull/702.
         for cert in core::iter::once(leaf).chain(intermediates.iter()) {
-            if cert.signature_algorithm != cert.tbs_certificate.signature {
-                return Err(StaticCTError::MismatchingSigAlg);
-            }
+            cert_well_formedness_check(cert)?;
         }
 
         // Check if the CT poison extension is present. If present, it must be critical.
@@ -124,8 +123,11 @@ pub fn validate_ct_entry_chain(
             return Err(StaticCTError::InvalidLeaf);
         }
 
-        let first_intermediate = &intermediates[0];
-        let has_precert_signing_cert = is_leaf_precert && is_pre_issuer(first_intermediate)?;
+        // Record if this is a precertificate signing certificate.
+        let has_precert_signing_cert = {
+            let first_intermediate = &intermediates[0];
+            is_leaf_precert && is_pre_issuer(first_intermediate)?
+        };
 
         // Construct a pending log entry.
         let precert_opt: Option<PrecertData>;
@@ -165,21 +167,19 @@ pub fn validate_ct_entry_chain(
             certificate = leaf.to_der()?;
         }
 
-        let chain_fingerprints = raw_chain[1..]
-            .iter()
-            .map(|issuer| Sha256::digest(issuer).into())
-            .collect();
-
         Ok(StaticCTPendingLogEntry {
             certificate,
             precert_opt,
-            chain_fingerprints,
+            chain_fingerprints: full_chain_fingerprints,
         })
     };
 
     // We need to wrap the errors to satisfy the validation function
-    let wrapped_hook = |leaf: &Certificate, intermediates: &Vec<Certificate>| {
-        validator_hook(leaf, intermediates).map_err(HookOrValidationError::Hook)
+    let wrapped_hook = |leaf: &Certificate,
+                        intermediates: &Vec<Certificate>,
+                        full_chain_fingerprints: Vec<[u8; 32]>| {
+        validator_hook(leaf, intermediates, full_chain_fingerprints)
+            .map_err(HookOrValidationError::Hook)
     };
 
     // Call validation with the hook
@@ -300,16 +300,14 @@ fn build_precert_tbs(
     Ok(tbs.to_der()?)
 }
 
-// TODO: make the hook reference this function so we can use it in tests
-// Parse a certificate and verify that it is well-formed. This is x509_utils
-fn parse_certificate(bytes: &[u8]) -> Result<Certificate, StaticCTError> {
-    let cert = Certificate::from_der(bytes)?;
+// Verify that a cert is well-formed according to the CT spec
+fn cert_well_formedness_check(cert: &Certificate) -> Result<(), StaticCTError> {
     // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
     if cert.signature_algorithm != cert.tbs_certificate.signature {
         return Err(StaticCTError::MismatchingSigAlg);
+    } else {
+        Ok(())
     }
-
-    Ok(cert)
 }
 
 #[cfg(test)]
@@ -324,8 +322,11 @@ mod tests {
 
     #[test]
     fn test_mismatched_sig_alg() {
+        // TODO: this parsing step is failing for some reason
+        let cert =
+            Certificate::from_der(include_bytes!("../tests/mismatching-sig-alg.pem")).unwrap();
         // Mismatched signature on leaf.
-        parse_certificate(include_bytes!("../tests/mismatching-sig-alg.pem")).unwrap_err();
+        cert_well_formedness_check(&cert).unwrap_err();
     }
 
     macro_rules! test_is_precert {
