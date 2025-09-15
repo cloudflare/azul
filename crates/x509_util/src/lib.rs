@@ -179,7 +179,7 @@ pub fn validate_chain<T, E, F>(
     mut hook: F,
 ) -> Result<T, HookOrValidationError<E>>
 where
-    F: FnMut(&Certificate, &Vec<Certificate>, Vec<[u8; 32]>) -> Result<T, HookOrValidationError<E>>,
+    F: FnMut(&Certificate, &Vec<Certificate>, Vec<[u8; 32]>) -> Result<T, E>,
 {
     if raw_chain.is_empty() {
         return Err(ValidationError::EmptyChain.into());
@@ -243,7 +243,7 @@ where
 
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
-    let mut found_root_idx = None;
+    let mut inferred_root_idx = None;
     if !roots.included(to_verify).map_err(ValidationError::from)? {
         let Some(&found_idx) = roots
             .find_potential_parents(to_verify)
@@ -256,7 +256,7 @@ where
             }
             .into());
         };
-        found_root_idx = Some(found_idx);
+        inferred_root_idx = Some(found_idx);
         let root = &roots.certs[found_idx];
         let bytes = root.to_der().map_err(ValidationError::from)?;
 
@@ -264,7 +264,7 @@ where
         full_chain_fingerprints.push(Sha256::digest(bytes).into());
     }
 
-    hook(&leaf, &intermediates, full_chain_fingerprints)
+    hook(&leaf, &intermediates, full_chain_fingerprints).map_err(HookOrValidationError::Hook)
 }
 
 /// Returns whether or not the given link in the chain is valid.

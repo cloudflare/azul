@@ -34,7 +34,7 @@ use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use tlog_tiles::UnixTimestamp;
 use x509_cert::{
-    der::{Decode, Encode},
+    der::Encode,
     ext::{
         pkix::{AuthorityKeyIdentifier, ExtendedKeyUsage},
         Extension,
@@ -174,21 +174,13 @@ pub fn validate_ct_entry_chain(
         })
     };
 
-    // We need to wrap the errors to satisfy the validation function
-    let wrapped_hook = |leaf: &Certificate,
-                        intermediates: &Vec<Certificate>,
-                        full_chain_fingerprints: Vec<[u8; 32]>| {
-        validator_hook(leaf, intermediates, full_chain_fingerprints)
-            .map_err(HookOrValidationError::Hook)
-    };
-
     // Call validation with the hook
     let pending_entry = validate_chain::<StaticCTPendingLogEntry, _, _>(
         raw_chain,
         roots,
         not_after_start,
         not_after_end,
-        wrapped_hook,
+        validator_hook,
     );
     pending_entry.map_err(|e| match e {
         HookOrValidationError::Valiadation(ve) => ve.into(),
@@ -314,6 +306,7 @@ fn cert_well_formedness_check(cert: &Certificate) -> Result<(), StaticCTError> {
 mod tests {
     use super::*;
     use chrono::prelude::*;
+    use der::Decode;
     use x509_verify::x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
