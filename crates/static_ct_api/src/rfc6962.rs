@@ -310,7 +310,7 @@ fn cert_well_formedness_check(cert: &Certificate) -> Result<(), StaticCTError> {
 mod tests {
     use super::*;
     use chrono::prelude::*;
-    use der::Decode;
+    use der::{Decode, DecodePem};
     use x509_verify::x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
@@ -319,9 +319,8 @@ mod tests {
 
     #[test]
     fn test_mismatched_sig_alg() {
-        // TODO: this parsing step is failing for some reason
         let cert =
-            Certificate::from_der(include_bytes!("../tests/mismatching-sig-alg.pem")).unwrap();
+            Certificate::from_pem(include_bytes!("../tests/mismatching-sig-alg.pem")).unwrap();
         // Mismatched signature on leaf.
         cert_well_formedness_check(&cert).unwrap_err();
     }
