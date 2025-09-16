@@ -41,7 +41,7 @@ use x509_cert::{
     },
     impl_newtype, Certificate, TbsCertificate,
 };
-use x509_util::{validate_chain, CertPool, HookOrValidationError};
+use x509_util::{validate_chain_lax, CertPool};
 
 // Data structures for the [Static CT Submission APIs](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#submission-apis),
 // a subset of the APIs from [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962).
@@ -179,7 +179,7 @@ pub fn partially_validate_chain(
     };
 
     // Call validation with the hook
-    let pending_entry = validate_chain(
+    let pending_entry = validate_chain_lax(
         raw_chain,
         roots,
         not_after_start,
@@ -187,8 +187,8 @@ pub fn partially_validate_chain(
         validator_hook,
     );
     pending_entry.map_err(|e| match e {
-        HookOrValidationError::Valiadation(ve) => ve.into(),
-        HookOrValidationError::Hook(he) => he,
+        x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Hook(he) => he,
     })
 }
 

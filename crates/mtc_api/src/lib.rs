@@ -40,7 +40,7 @@ use x509_cert::{
     time::Validity,
     Certificate, TbsCertificate,
 };
-use x509_util::CertPool;
+use x509_util::{validate_chain_lax, CertPool};
 
 // The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
 // as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
@@ -691,7 +691,7 @@ pub fn validate_chain(
     };
 
     // Run the validation and return the hook-constructed pending entry
-    let pending_entry = x509_util::validate_chain(raw_chain, roots, None, None, validation_hook);
+    let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validation_hook);
     pending_entry.map_err(|e| match e {
         x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,

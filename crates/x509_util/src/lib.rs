@@ -135,7 +135,10 @@ impl CertPool {
     }
 }
 
-type UnixTimestamp = u64;
+/// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
+/// ignoring leap seconds, in milliseconds.
+/// This can be unsigned as we never deal with negative timestamps.
+pub type UnixTimestamp = u64;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ValidationError {
@@ -178,7 +181,7 @@ pub enum HookOrValidationError<T> {
 ///
 /// Returns a `ValidationError` if the chain fails to validate. Returns an error of type `E` if the
 /// hook errors.
-pub fn validate_chain<T, E, F>(
+pub fn validate_chain_lax<T, E, F>(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
     not_after_start: Option<UnixTimestamp>,
@@ -319,7 +322,7 @@ mod tests {
                     chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
                 )*
 
-                let result = validate_chain(
+                let result = validate_chain_lax(
                         &crate::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
                         $not_after_start,
