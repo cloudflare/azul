@@ -94,14 +94,14 @@ pub fn partially_validate_chain(
     // We will run the basic validator supplied by x509_utils. However, we need some extra checks
     // that are particular to CT, and we need to collect information along the way. So define a hook
     // for the validator that does these checks and returns a pending log entry
-    let validator_hook = |leaf: &Certificate,
-                          intermediates: &Vec<Certificate>,
+    let validator_hook = |leaf: Certificate,
+                          intermediates: Vec<Certificate>,
                           full_chain_fingerprints: Vec<[u8; 32]>,
                           inferred_root_idx: Option<usize>|
      -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
         // Reject mismatched signature algorithms:
         // https://github.com/google/certificate-transparency-go/pull/702.
-        for cert in core::iter::once(leaf).chain(intermediates.iter()) {
+        for cert in core::iter::once(&leaf).chain(intermediates.iter()) {
             cert_well_formedness_check(cert)?;
         }
 

@@ -251,6 +251,8 @@ pub enum MtcError {
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
+    Validation(#[from] x509_util::ValidationError),
+    #[error(transparent)]
     Fmt(#[from] std::fmt::Error),
     #[error(transparent)]
     Utf8(#[from] std::str::Utf8Error),
@@ -620,79 +622,80 @@ pub fn validate_correspondence(
 /// Returns an error if the chain is invalid.
 pub fn validate_chain(
     raw_chain: &[Vec<u8>],
-    _roots: &CertPool,
+    roots: &CertPool,
     issuer: RdnSequence,
     mut validity: Validity,
 ) -> Result<BootstrapMtcPendingLogEntry, MtcError> {
-    let mut iter = raw_chain.iter();
-    let leaf: Certificate = match iter.next() {
-        Some(v) => Certificate::from_der(v)?,
-        None => return Err(MtcError::Dynamic("empty bootstrap chain".into())),
+    // We will run the ordinary chain validation on our input, but we have some post-processing we
+    // need to do too. Namely we need to adjust the validity period of the provided bootstrap cert,
+    // and then construct a pending log entry. We do this in the validation hook.
+    let validation_hook = |leaf: Certificate, intermediates: Vec<Certificate>, _, _| {
+        // Adjust the validity bound to the overlapping part of validity periods of
+        // all certificates in the chain.
+        for cert in std::iter::once(&leaf).chain(intermediates.iter()) {
+            if validity.not_before.to_unix_duration().lt(&cert
+                .tbs_certificate
+                .validity
+                .not_before
+                .to_unix_duration())
+            {
+                validity.not_before = cert.tbs_certificate.validity.not_before;
+            }
+            if validity.not_after.to_unix_duration().gt(&cert
+                .tbs_certificate
+                .validity
+                .not_after
+                .to_unix_duration())
+            {
+                validity.not_after = cert.tbs_certificate.validity.not_after;
+            }
+            // Check that we still have a non-empty validity period.
+            if validity
+                .not_after
+                .to_unix_duration()
+                .le(&validity.not_before.to_unix_duration())
+            {
+                // There is no remaining validity period.
+                return Err(MtcError::Dynamic(
+                    "overlap in validity with bootstrap chain must not be empty".into(),
+                ));
+            }
+        }
+
+        let mut bootstrap = Vec::new();
+        bootstrap.write_length_prefixed(&raw_chain[0], 3)?;
+        bootstrap.write_length_prefixed(
+            &raw_chain[1..]
+                .iter()
+                .map(Sha256::digest)
+                .collect::<Vec<_>>()
+                .concat(),
+            2,
+        )?;
+
+        let mut bootstrap_tile_entry = Vec::new();
+        bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
+
+        let pending_entry = BootstrapMtcPendingLogEntry {
+            bootstrap: bootstrap_tile_entry,
+            entry: TlogTilesPendingLogEntry {
+                data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
+                    leaf.tbs_certificate,
+                    issuer,
+                    validity,
+                )?)
+                .encode()?,
+            },
+        };
+        Ok(pending_entry)
     };
 
-    // TODO actually validate chain
-    let chain = iter
-        .map(|x| Certificate::from_der(x))
-        .collect::<Result<Vec<Certificate>, der::Error>>()?;
-
-    // Adjust the validity bound to the overlapping part of validity periods of
-    // all certificates in the chain.
-    for cert in std::iter::once(&leaf).chain(&chain) {
-        if validity.not_before.to_unix_duration().lt(&cert
-            .tbs_certificate
-            .validity
-            .not_before
-            .to_unix_duration())
-        {
-            validity.not_before = cert.tbs_certificate.validity.not_before;
-        }
-        if validity.not_after.to_unix_duration().gt(&cert
-            .tbs_certificate
-            .validity
-            .not_after
-            .to_unix_duration())
-        {
-            validity.not_after = cert.tbs_certificate.validity.not_after;
-        }
-        // Check that we still have a non-empty validity period.
-        if validity
-            .not_after
-            .to_unix_duration()
-            .le(&validity.not_before.to_unix_duration())
-        {
-            // There is no remaining validity period.
-            return Err(MtcError::Dynamic(
-                "overlap in validity with bootstrap chain must not be empty".into(),
-            ));
-        }
-    }
-
-    let mut bootstrap = Vec::new();
-    bootstrap.write_length_prefixed(&raw_chain[0], 3)?;
-    bootstrap.write_length_prefixed(
-        &raw_chain[1..]
-            .iter()
-            .map(Sha256::digest)
-            .collect::<Vec<_>>()
-            .concat(),
-        2,
-    )?;
-
-    let mut bootstrap_tile_entry = Vec::new();
-    bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
-
-    let pending_entry = BootstrapMtcPendingLogEntry {
-        bootstrap: bootstrap_tile_entry,
-        entry: TlogTilesPendingLogEntry {
-            data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
-                leaf.tbs_certificate,
-                issuer,
-                validity,
-            )?)
-            .encode()?,
-        },
-    };
-    Ok(pending_entry)
+    // Run the validation and return the hook-constructed pending entry
+    let pending_entry = x509_util::validate_chain(raw_chain, roots, None, None, validation_hook);
+    pending_entry.map_err(|e| match e {
+        x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Hook(he) => he,
+    })
 }
 
 #[cfg(test)]

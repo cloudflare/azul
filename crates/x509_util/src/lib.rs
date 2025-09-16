@@ -153,6 +153,8 @@ pub enum ValidationError {
     NoPathToTrustedRoot { to_verify_issuer: String },
 }
 
+/// An error that's returned by either our validation logic or the hook that [`validate_chain`]
+/// takes
 #[derive(thiserror::Error, Debug)]
 pub enum HookOrValidationError<T> {
     Hook(T),
@@ -160,12 +162,17 @@ pub enum HookOrValidationError<T> {
     Valiadation(#[from] ValidationError),
 }
 
-// TODO: move some tests from static_ct_api/rfc6962 to this file
-
 /// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
-/// reject obviously bad certificate chains. Accepts a hook that takes the leaf, intermediate certs,
-/// and a list of fingerprints of the full chain (including inferred root if there is one), and
-/// index of the inferred root (if there is one); and returns a value or error of its own.
+/// reject obviously bad certificate chains.
+///
+/// # Inputs
+/// * `raw_chain` — A list of DER-encoded certificates, starting from the leaf
+/// * `roots` — The trusted root list
+/// * `not_after_start` — The earliest permissible `not_after` value for the leaf
+/// * `not_after_end` — The earliest non-permissible `not_after` value for the leaf
+/// * `hook` — A closure that the leaf, intermediate certs, and a list of fingerprints of the full
+/// chain (including inferred root if there is one), and index of the inferred root (if there is
+/// one); and returns a value or error of its own.
 ///
 /// # Errors
 ///
@@ -176,10 +183,10 @@ pub fn validate_chain<T, E, F>(
     roots: &CertPool,
     not_after_start: Option<UnixTimestamp>,
     not_after_end: Option<UnixTimestamp>,
-    mut hook: F,
+    hook: F,
 ) -> Result<T, HookOrValidationError<E>>
 where
-    F: FnMut(&Certificate, &Vec<Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
+    F: FnOnce(Certificate, Vec<Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
 {
     if raw_chain.is_empty() {
         return Err(ValidationError::EmptyChain.into());
@@ -193,7 +200,7 @@ where
         Certificate::from_der(bytes).map_err(ValidationError::from)?
     };
 
-    // Check whether the expiry date is within the acceptable range for this log shard.
+    // Check whether the expiry date is within the acceptable range
     let not_after = u64::try_from(
         leaf.tbs_certificate
             .validity
@@ -265,8 +272,8 @@ where
     }
 
     hook(
-        &leaf,
-        &intermediates,
+        leaf,
+        intermediates,
         full_chain_fingerprints,
         inferred_root_idx,
     )
