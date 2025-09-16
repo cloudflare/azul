@@ -174,8 +174,8 @@ pub enum HookOrValidationError<T> {
 /// * `not_after_start` — The earliest permissible `not_after` value for the leaf
 /// * `not_after_end` — The earliest non-permissible `not_after` value for the leaf
 /// * `hook` — A closure that the leaf, intermediate certs, and a list of fingerprints of the full
-/// chain (including inferred root if there is one), and index of the inferred root (if there is
-/// one); and returns a value or error of its own.
+///   chain (including inferred root if there is one), and index of the inferred root (if there is
+///   one); and returns a value or error of its own.
 ///
 /// # Errors
 ///

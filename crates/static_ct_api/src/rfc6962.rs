@@ -119,13 +119,13 @@ pub fn partially_validate_chain(
             && !leaf
                 .tbs_certificate
                 .get::<ExtendedKeyUsage>()?
-                .is_some_and(|(_, eku)| eku.0.iter().any(|v| *v == ID_KP_SERVER_AUTH))
+                .is_some_and(|(_, eku)| eku.0.contains(&ID_KP_SERVER_AUTH))
         {
             return Err(StaticCTError::InvalidLeaf);
         }
 
         // Record if this is a precertificate signing certificate.
-        let has_precert_signing_cert = match intermediates.get(0) {
+        let has_precert_signing_cert = match intermediates.first() {
             Some(first_intermediate) => is_leaf_precert && is_pre_issuer(first_intermediate)?,
             None => false,
         };
@@ -300,7 +300,7 @@ fn build_precert_tbs(
 fn cert_well_formedness_check(cert: &Certificate) -> Result<(), StaticCTError> {
     // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
     if cert.signature_algorithm != cert.tbs_certificate.signature {
-        return Err(StaticCTError::MismatchingSigAlg);
+        Err(StaticCTError::MismatchingSigAlg)
     } else {
         Ok(())
     }
