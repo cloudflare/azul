@@ -690,7 +690,9 @@ pub fn validate_chain(
         Ok(pending_entry)
     };
 
-    // Run the validation and return the hook-constructed pending entry
+    // Run the validation and return the hook-constructed pending entry. We do not give the
+    // validator a window for the `not_after` validity, since we already know the `not_after` we're
+    // giving it, and it's quite short.
     let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validation_hook);
     pending_entry.map_err(|e| match e {
         x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
