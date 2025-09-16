@@ -397,7 +397,7 @@ mod tests {
                     chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
                 )*
 
-                let result = validate_ct_entry_chain(
+                let result = partially_validate_chain(
                         &x509_util::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
                         $not_after_start,
@@ -407,7 +407,7 @@ mod tests {
                 );
                 assert_eq!(result.is_err(), $want_err);
 
-                if let Ok(pending_entry) = result {
+                if let Ok((pending_entry, _found_root_idx)) = result {
                     assert_eq!(pending_entry.chain_fingerprints.len(), $want_chain_len);
                 }
             }
