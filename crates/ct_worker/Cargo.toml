@@ -18,6 +18,10 @@ release = false
 [package.metadata.wasm-pack.profile.dev.wasm-bindgen]
 dwarf-debug-info = true
 
+# https://github.com/cloudflare/workers-rs/issues/818
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["--enable-nontrapping-float-to-int", "--enable-bulk-memory"]
+
 [lib]
 crate-type = ["cdylib"]
 
