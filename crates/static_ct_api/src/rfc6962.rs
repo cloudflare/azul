@@ -126,7 +126,7 @@ pub fn partially_validate_chain(
         && !leaf
             .tbs_certificate
             .get::<ExtendedKeyUsage>()?
-            .is_some_and(|(_, eku)| eku.0.iter().any(|v| *v == ID_KP_SERVER_AUTH))
+            .is_some_and(|(_, eku)| eku.0.contains(&ID_KP_SERVER_AUTH))
     {
         return Err(StaticCTError::InvalidLeaf);
     }

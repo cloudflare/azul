@@ -238,7 +238,7 @@ impl CheckpointText {
         while let Some(Ok(ref line)) = next_line {
             if line.is_empty() || line == "\n" {
                 break;
-            };
+            }
             extensions.push(line.clone());
 
             next_line = lines.next();
