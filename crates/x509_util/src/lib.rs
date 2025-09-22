@@ -162,11 +162,17 @@ pub enum ValidationError {
 pub enum HookOrValidationError<T> {
     Hook(T),
     #[error(transparent)]
-    Valiadation(#[from] ValidationError),
+    Validation(#[from] ValidationError),
 }
 
 /// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
-/// reject obviously bad certificate chains.
+/// reject obviously bad certificate chains. Specifically, this checks
+///
+/// 1. Each certificate in the chain signs the previuos certificate. Extra intermediate certs aren't allowed.
+/// 2. Every intermediate certificate has a `BasicConstraints` extension with `ca = true`
+/// 3. The final cert in the chain is a root or a cert signed by a root (this is actually stricter
+///   than some other verification algorithms).
+/// 4. The `not-after` date of the leaf certificate falls within the given range
 ///
 /// # Inputs
 /// * `raw_chain` — A list of DER-encoded certificates, starting from the leaf
@@ -194,14 +200,10 @@ where
     if raw_chain.is_empty() {
         return Err(ValidationError::EmptyChain.into());
     }
-    let mut iter = raw_chain.iter();
 
     // Parse the first element of the chain, i.e., the leaf
-    let leaf = {
-        // We can unwrap the first element because we just checked the chain is not empty
-        let bytes = iter.next().unwrap();
-        Certificate::from_der(bytes).map_err(ValidationError::from)?
-    };
+    // The first element exists because we just checked the chain is not empty
+    let leaf = Certificate::from_der(&raw_chain[0]).map_err(ValidationError::from)?;
 
     // Check whether the expiry date is within the acceptable range
     let not_after = u64::try_from(
@@ -218,13 +220,13 @@ where
         return Err(ValidationError::InvalidLeaf.into());
     }
 
-    let intermediates: Vec<Certificate> = iter
+    let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
+        .iter()
         .map(|bytes| Certificate::from_der(bytes))
         .collect::<Result<_, _>>()
         .map_err(ValidationError::from)?;
     // All the intermediates plus the inferred root (we'll add it later)
-    let mut full_chain: Vec<&Certificate> = intermediates.iter().collect();
-    let mut full_chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
+    let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
         .map(|v| Sha256::digest(v).into())
         .collect();
@@ -232,7 +234,7 @@ where
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
-    for cert in intermediates.iter() {
+    for cert in chain_certs_owned.iter() {
         // Check that this cert signs the previous one in the chain.
         if !is_link_valid(to_verify, cert) {
             return Err(ValidationError::InvalidLinkInChain.into());
@@ -253,7 +255,7 @@ where
 
     // The last certificate in the chain is either a root certificate
     // or a certificate that chains to a known root certificate.
-    let mut inferred_root_idx = None;
+    let mut found_root_idx = None;
     if !roots.includes(to_verify).map_err(ValidationError::from)? {
         let Some(&found_idx) = roots
             .find_potential_parents(to_verify)
@@ -266,21 +268,15 @@ where
             }
             .into());
         };
-        inferred_root_idx = Some(found_idx);
+        found_root_idx = Some(found_idx);
         let root = &roots.certs[found_idx];
         let bytes = root.to_der().map_err(ValidationError::from)?;
 
-        full_chain.push(&roots.certs[found_idx]);
-        full_chain_fingerprints.push(Sha256::digest(bytes).into());
+        chain_fingerprints.push(Sha256::digest(bytes).into());
     }
 
-    hook(
-        leaf,
-        intermediates,
-        full_chain_fingerprints,
-        inferred_root_idx,
-    )
-    .map_err(HookOrValidationError::Hook)
+    hook(leaf, chain_certs_owned, chain_fingerprints, found_root_idx)
+        .map_err(HookOrValidationError::Hook)
 }
 
 /// Returns whether or not the given link in the chain is valid.

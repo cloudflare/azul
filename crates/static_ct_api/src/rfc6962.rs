@@ -77,8 +77,8 @@ pub struct GetRootsResponse {
 }
 
 /// Validates a certificate chain according to
-/// [RFC6962](https://datatracker.ietf.org/doc/html/rfc6962) and returns a
-/// pending log entry and the inferred root, if a root had to be inferred.
+/// [RFC6962](https://datatracker.ietf.org/doc/html/rfc6962) and returns a pending log entry and the
+/// inferred root, if a root had to be inferred.
 ///
 /// # Errors
 ///
@@ -97,7 +97,7 @@ pub fn partially_validate_chain(
     let validator_hook = |leaf: Certificate,
                           intermediates: Vec<Certificate>,
                           full_chain_fingerprints: Vec<[u8; 32]>,
-                          inferred_root_idx: Option<usize>|
+                          found_root_idx: Option<usize>|
      -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
         // Reject mismatched signature algorithms:
         // https://github.com/google/certificate-transparency-go/pull/702.
@@ -138,11 +138,17 @@ pub fn partially_validate_chain(
             let issuer_key_hash: [u8; 32];
             if has_precert_signing_cert {
                 pre_issuer = Some(&intermediates[0].tbs_certificate);
-                if intermediates.len() < 2 {
+                if full_chain_fingerprints.len() < 2 {
                     return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
                 }
+
+                // The second intermediate exists because of the length check above. So it's either
+                // provided in `intermediates` or it's a found root (hence we can unwrap).
+                let second_intermediate = intermediates
+                    .get(1)
+                    .unwrap_or_else(|| &roots.certs[found_root_idx.unwrap()]);
                 issuer_key_hash = Sha256::digest(
-                    intermediates[1]
+                    second_intermediate
                         .tbs_certificate
                         .subject_public_key_info
                         .to_der()?,
@@ -174,7 +180,7 @@ pub fn partially_validate_chain(
                 precert_opt,
                 chain_fingerprints: full_chain_fingerprints,
             },
-            inferred_root_idx,
+            found_root_idx,
         ))
     };
 
@@ -187,7 +193,7 @@ pub fn partially_validate_chain(
         validator_hook,
     );
     pending_entry.map_err(|e| match e {
-        x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,
     })
 }

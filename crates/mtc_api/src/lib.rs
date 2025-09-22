@@ -508,7 +508,7 @@ pub fn validate_correspondence(
     let validator_hook = |leaf: Certificate,
                           intermediates: Vec<Certificate>,
                           _full_chain_fingerprints: Vec<[u8; 32]>,
-                          _inferred_root_idx: Option<usize>|
+                          _found_root_idx: Option<usize>|
      -> Result<(), MtcError> {
         let bootstrap = leaf.tbs_certificate.clone();
 
@@ -627,7 +627,7 @@ pub fn validate_correspondence(
 
     // Run the validation logic with the above validation hook
     validate_chain_lax(raw_chain, roots, None, None, validator_hook).map_err(|e| match e {
-        x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,
     })
 }
@@ -712,7 +712,7 @@ pub fn validate_chain(
     // giving it, and it's quite short.
     let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validation_hook);
     pending_entry.map_err(|e| match e {
-        x509_util::HookOrValidationError::Valiadation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,
     })
 }
