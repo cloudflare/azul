@@ -6,6 +6,7 @@
 use base64ct::LineEnding;
 use chrono::DateTime;
 use generic_log_worker::util::now_millis;
+use std::fmt::Write;
 use worker::{
     event, kv::KvStore, Env, Fetch, Headers, Method, Request, RequestInit, Result, ScheduleContext,
     ScheduledEvent,
@@ -75,8 +76,9 @@ pub(crate) async fn update_ccadb_roots<T: AsRef<str>>(keys: &[T], kv: &KvStore) 
                 continue;
             }
             new_roots += 1;
-            buf.push_str(&format!(
-                "\n# {}\n# added on {} from {}\n{}\n",
+            write!(
+                &mut buf,
+                "\n# {}\n# added on {} from CCADB\n{}\n",
                 cert.tbs_certificate.subject,
                 DateTime::from_timestamp_millis(
                     now_millis()
@@ -85,9 +87,9 @@ pub(crate) async fn update_ccadb_roots<T: AsRef<str>>(keys: &[T], kv: &KvStore) 
                 )
                 .ok_or("failed to get current time")?
                 .to_rfc3339(),
-                "CCADB",
                 cert.to_pem(LineEnding::LF).map_err(|e| e.to_string())?,
-            ));
+            )
+            .map_err(|e| e.to_string())?;
 
             pool.add_cert(cert.clone()).map_err(|e| e.to_string())?;
         }

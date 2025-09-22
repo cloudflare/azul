@@ -467,7 +467,7 @@ pub fn tbs_cert_to_log_entry(
         return Err(MtcError::Dynamic(
             "entry not_after must not be greater than bootstrap not_after".into(),
         ));
-    };
+    }
 
     let extensions = if let Some(mut bootstrap_extensions) = bootstrap.extensions {
         filter_extensions(&mut bootstrap_extensions)?;
@@ -571,7 +571,7 @@ pub fn validate_correspondence(
                 return Err(MtcError::Dynamic(
                     "bootstrap extension lengths differ".into(),
                 ));
-            };
+            }
 
             let bootstrap_extensions_map = bootstrap_extensions
                 .into_iter()
