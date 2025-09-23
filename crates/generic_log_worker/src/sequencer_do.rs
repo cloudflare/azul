@@ -144,10 +144,10 @@ impl<L: LogEntry> GenericSequencer<L> {
     ///
     /// Returns an error if there are issues scheduling the next alarm.
     pub async fn alarm(&self) -> Result<Response, WorkerError> {
-        if !*self.initialized.borrow() {
-            info!("{}: Initializing log from alarm handler", self.config.name);
-            self.initialize().await?;
-        }
+        //if !*self.initialized.borrow() {
+        //    info!("{}: Initializing log from alarm handler", self.config.name);
+        //    self.initialize().await?;
+        //}
 
         // Schedule the next sequencing.
         self.do_state
@@ -155,21 +155,23 @@ impl<L: LogEntry> GenericSequencer<L> {
             .set_alarm(self.config.sequence_interval)
             .await?;
 
-        if log_ops::sequence::<L>(
-            &self.pool_state,
-            &self.sequence_state,
-            &self.config,
-            &self.public_bucket,
-            &self.do_state,
-            &self.cache,
-            &self.metrics,
-        )
-        .await
-        .is_err()
-        {
-            // Re-initialize the log to get back into a good state.
-            *self.initialized.borrow_mut() = false;
-        }
+        log::info!("{} Alarm fired", self.config.name);
+
+        //if log_ops::sequence::<L>(
+        //    &self.pool_state,
+        //    &self.sequence_state,
+        //    &self.config,
+        //    &self.public_bucket,
+        //    &self.do_state,
+        //    &self.cache,
+        //    &self.metrics,
+        //)
+        //.await
+        //.is_err()
+        //{
+        //    // Re-initialize the log to get back into a good state.
+        //    *self.initialized.borrow_mut() = false;
+        //}
 
         Response::empty()
     }
