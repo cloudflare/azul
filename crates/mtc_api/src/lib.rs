@@ -469,7 +469,7 @@ pub fn tbs_cert_to_log_entry(
         return Err(MtcError::Dynamic(
             "entry not_after must not be greater than bootstrap not_after".into(),
         ));
-    };
+    }
 
     let extensions = if let Some(mut bootstrap_extensions) = bootstrap.extensions {
         filter_extensions(&mut bootstrap_extensions)?;

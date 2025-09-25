@@ -188,7 +188,7 @@ impl<L: LogEntry> GenericSequencer<L> {
 
         if let Err(e) = self.cache.load().await {
             warn!("Failed to load short-term dedup cache from DO storage: {e}");
-        };
+        }
 
         match log_ops::create_log(&self.config, &self.public_bucket, &self.do_state).await {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),

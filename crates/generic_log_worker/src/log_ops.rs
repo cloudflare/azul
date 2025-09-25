@@ -1389,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // This test is skipped as it takes a long time, but can be run with `cargo test -- --ignored`.
+    #[ignore = "This test is skipped as it takes a long time, but can be run with `cargo test -- --ignored`."]
     fn test_sequence_one_leaf_long() {
         sequence_one_leaf((u64::from(TlogTile::FULL_WIDTH) + 2) * u64::from(TlogTile::HEIGHT));
     }
@@ -1514,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // This test is skipped as it takes a long time, but can be run with `cargo test -- --ignored`.
+    #[ignore = "This test is skipped as it takes a long time, but can be run with `cargo test -- --ignored`."]
     fn test_sequence_large_log() {
         let mut log = TestLog::new();
 
