@@ -56,6 +56,50 @@
                     ]
                 }
             ]
+        },
+        "bootstrap-mtca": {
+            "build": {
+                // Change '--release' to '--dev' to compile with debug symbols.
+                // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
+                "command": "cargo install -q worker-build && DEPLOY_ENV=bootstrap-mtca worker-build --release"
+            },
+            "route": {
+                "pattern": "bootstrap-mtca.cloudflareresearch.com",
+                "custom_domain": true
+            },
+            "r2_buckets": [
+                {
+                    "bucket_name": "bootstrap-mtca-shard1",
+                    "binding": "public_shard1"
+                }
+            ],
+            "durable_objects": {
+                "bindings": [
+                    {
+                        "name": "BATCHER",
+                        "class_name": "Batcher"
+                    },
+                    {
+                        "name": "CLEANER",
+                        "class_name": "Cleaner"
+                    },
+                    {
+                        "name": "SEQUENCER",
+                        "class_name": "Sequencer"
+                    }
+                ]
+            },
+            "migrations": [
+                {
+                    // tag should be unique for each entry
+                    "tag": "v1",
+                    "new_sqlite_classes": [
+                        "Batcher",
+                        "Cleaner",
+                        "Sequencer"
+                    ]
+                }
+            ]
         }
     }
 }
