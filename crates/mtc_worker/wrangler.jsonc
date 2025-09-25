@@ -1,10 +1,15 @@
 {
     "name": "mtc",
     "main": "build/worker/shim.mjs",
-    "compatibility_date": "2025-04-01",
+    "compatibility_date": "2025-09-25",
     "workers_dev": false,
     "build": {
         "command": "echo 'Default environment not configured. Please specify an environment with the \"-e\" flag.' && exit 1"
+    },
+    "triggers": {
+        "crons": [
+            "23 4 * * *"
+        ]
     },
     "env": {
         "dev": {
@@ -14,6 +19,12 @@
                 "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
             },
             "workers_dev": true,
+            "kv_namespaces": [
+                {
+                    "id": "e4aab0c89ebe492c9c81c444c78a31ff",
+                    "binding": "ccadb_roots"
+                }
+            ],
             "r2_buckets": [
                 {
                     "bucket_name": "mtc-public-dev1",

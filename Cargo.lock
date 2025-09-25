@@ -1475,7 +1475,9 @@ name = "mtc_worker"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "base64ct",
  "chrono",
+ "csv",
  "der",
  "ed25519-dalek",
  "futures-executor",
@@ -1494,6 +1496,7 @@ dependencies = [
  "serde_with",
  "signed_note",
  "tlog_tiles",
+ "tokio",
  "url",
  "worker",
  "x509-cert",
