@@ -3,13 +3,14 @@
 
 //! Utilities for X.509 operations.
 
-use der::{Encode, Error as DerError};
+use der::{Decode, Encode, Error as DerError};
 use sha2::{Digest, Sha256};
 use std::collections::{hash_map::Entry, HashMap};
 use x509_cert::{
-    ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier},
+    ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
     Certificate,
 };
+use x509_verify::VerifyingKey;
 
 /// Converts a vector of certificates into an array of DER-encoded certificates.
 ///
@@ -132,4 +133,294 @@ impl CertPool {
             None
         }
     }
+}
+
+/// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
+/// ignoring leap seconds, in milliseconds.
+/// This can be unsigned as we never deal with negative timestamps.
+pub type UnixTimestamp = u64;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ValidationError {
+    #[error(transparent)]
+    Der(#[from] der::Error),
+    #[error("empty chain")]
+    EmptyChain,
+    #[error("invalid leaf certificate")]
+    InvalidLeaf,
+    #[error("invalid link in chain")]
+    InvalidLinkInChain,
+    #[error("intermediate missing CA basic constraint")]
+    IntermediateMissingCaBasicConstraint,
+    #[error("issuer not in root store: {to_verify_issuer}")]
+    NoPathToTrustedRoot { to_verify_issuer: String },
+}
+
+/// An error that's returned by either our validation logic or the hook that [`validate_chain`]
+/// takes
+#[derive(thiserror::Error, Debug)]
+pub enum HookOrValidationError<T> {
+    Hook(T),
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+}
+
+/// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
+/// reject obviously bad certificate chains. Specifically, this checks
+///
+/// 1. Each certificate in the chain signs the previuos certificate. Extra intermediate certs aren't allowed.
+/// 2. Every intermediate certificate has a `BasicConstraints` extension with `ca = true`
+/// 3. The final cert in the chain is a root or a cert signed by a root (this is actually stricter
+///   than some other verification algorithms).
+/// 4. The `not-after` date of the leaf certificate falls within the given range
+///
+/// # Inputs
+/// * `raw_chain` — A list of DER-encoded certificates, starting from the leaf
+/// * `roots` — The trusted root list
+/// * `not_after_start` — The earliest permissible `not_after` value for the leaf
+/// * `not_after_end` — The earliest non-permissible `not_after` value for the leaf
+/// * `hook` — A closure that the leaf, intermediate certs, and a list of fingerprints of the full
+///   chain (including inferred root if there is one), and index of the inferred root (if there is
+///   one); and returns a value or error of its own.
+///
+/// # Errors
+///
+/// Returns a `ValidationError` if the chain fails to validate. Returns an error of type `E` if the
+/// hook errors.
+pub fn validate_chain_lax<T, E, F>(
+    raw_chain: &[Vec<u8>],
+    roots: &CertPool,
+    not_after_start: Option<UnixTimestamp>,
+    not_after_end: Option<UnixTimestamp>,
+    hook: F,
+) -> Result<T, HookOrValidationError<E>>
+where
+    F: FnOnce(Certificate, Vec<Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
+{
+    if raw_chain.is_empty() {
+        return Err(ValidationError::EmptyChain.into());
+    }
+
+    // Parse the first element of the chain, i.e., the leaf
+    // The first element exists because we just checked the chain is not empty
+    let leaf = Certificate::from_der(&raw_chain[0]).map_err(ValidationError::from)?;
+
+    // Check whether the expiry date is within the acceptable range
+    let not_after = u64::try_from(
+        leaf.tbs_certificate
+            .validity
+            .not_after
+            .to_unix_duration()
+            .as_millis(),
+    )
+    .map_err(|_| ValidationError::InvalidLeaf)?;
+    if not_after_start.is_some_and(|start| start > not_after)
+        || not_after_end.is_some_and(|end| end <= not_after)
+    {
+        return Err(ValidationError::InvalidLeaf.into());
+    }
+
+    let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
+        .iter()
+        .map(|bytes| Certificate::from_der(bytes))
+        .collect::<Result<_, _>>()
+        .map_err(ValidationError::from)?;
+    // All the intermediates plus the inferred root (we'll add it later)
+    let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
+        .iter()
+        .map(|v| Sha256::digest(v).into())
+        .collect();
+
+    // Walk up the chain, ensuring that each certificate signs the previous one.
+    // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
+    let mut to_verify = &leaf;
+    for cert in chain_certs_owned.iter() {
+        // Check that this cert signs the previous one in the chain.
+        if !is_link_valid(to_verify, cert) {
+            return Err(ValidationError::InvalidLinkInChain.into());
+        }
+        to_verify = cert;
+
+        // Check that intermediates have the CA Basic Constraint.
+        // Precertificate signing certificates must also have CA:true.
+        if cert
+            .tbs_certificate
+            .get::<BasicConstraints>()
+            .map_err(ValidationError::from)?
+            .is_none_or(|(_, bc)| !bc.ca)
+        {
+            return Err(ValidationError::IntermediateMissingCaBasicConstraint.into());
+        }
+    }
+
+    // The last certificate in the chain is either a root certificate
+    // or a certificate that chains to a known root certificate.
+    let mut found_root_idx = None;
+    if !roots.includes(to_verify).map_err(ValidationError::from)? {
+        let Some(&found_idx) = roots
+            .find_potential_parents(to_verify)
+            .map_err(ValidationError::from)?
+            .iter()
+            .find(|&&roots_idx| is_link_valid(to_verify, &roots.certs[roots_idx]))
+        else {
+            return Err(ValidationError::NoPathToTrustedRoot {
+                to_verify_issuer: to_verify.tbs_certificate.issuer.to_string(),
+            }
+            .into());
+        };
+        found_root_idx = Some(found_idx);
+        let root = &roots.certs[found_idx];
+        let bytes = root.to_der().map_err(ValidationError::from)?;
+
+        chain_fingerprints.push(Sha256::digest(bytes).into());
+    }
+
+    hook(leaf, chain_certs_owned, chain_fingerprints, found_root_idx)
+        .map_err(HookOrValidationError::Hook)
+}
+
+/// Returns whether or not the given link in the chain is valid.
+/// [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962#section-3.1) says:
+/// ```text
+/// Logs MUST verify that the submitted end-entity certificate or
+/// Precertificate has a valid signature chain leading back to a trusted
+/// root CA certificate, using the chain of intermediate CA certificates
+/// provided by the submitter.
+/// ```
+fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
+    if let Ok(key) = VerifyingKey::try_from(issuer) {
+        key.verify_strict(child).is_ok()
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::prelude::*;
+    use x509_verify::x509_cert::Certificate;
+
+    fn parse_datetime(s: &str) -> UnixTimestamp {
+        u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
+    }
+
+    macro_rules! test_validate_chain {
+        ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $want_err:expr; $want_chain_len:expr) => {
+            #[test]
+            fn $name() {
+                let mut roots = Vec::new();
+                $(
+                    roots.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
+                )*
+                let mut chain = Vec::new();
+                $(
+                    chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
+                )*
+
+                let result = validate_chain_lax(
+                        &crate::certs_to_bytes(&chain).unwrap(),
+                        &CertPool::new(roots).unwrap(),
+                        $not_after_start,
+                        $not_after_end,
+                        |_, _, fingerprint_chain, _| {
+                            assert_eq!(fingerprint_chain.len(), $want_chain_len);
+                            Result::<(), ()>::Ok(())
+                        },
+                    );
+                assert_eq!(result.is_err(), $want_err);
+            }
+        };
+    }
+
+    macro_rules! test_validate_chain_success {
+        ($name:ident, $want_chain_len:expr, $($chain_file:expr),+) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; $want_chain_len);
+        };
+    }
+
+    macro_rules! test_validate_chain_fail {
+        ($name:ident, $($chain_file:expr),+) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; true; 0);
+        };
+    }
+
+    test_validate_chain_fail!(
+        missing_intermediate_ca,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+    );
+    test_validate_chain_fail!(
+        wrong_cert_order,
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+    );
+    test_validate_chain_fail!(
+        unrelated_cert_in_chain,
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/test-cert.pem"
+    );
+    test_validate_chain_fail!(
+        unrelated_cert_after_chain,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/test-cert.pem"
+    );
+    test_validate_chain_fail!(
+        mismatched_sig_alg_on_intermediate,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-mismatching-sig-alg.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain,
+        2,
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_policy_constraints,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_policy_constraints_inc_root,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem",
+        "../../static_ct_api/tests/fake-root-ca-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_name_constraints,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_with_invalid_name_constraints,
+        2,
+        "../../static_ct_api/tests/leaf-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-with-invalid-name-constraints-cert.pem"
+    );
+    test_validate_chain_success!(
+        valid_chain_of_len_4,
+        3,
+        "../../static_ct_api/tests/subleaf.chain"
+    );
+    test_validate_chain_fail!(
+        misordered_chain_of_len_4,
+        "../../static_ct_api/tests/subleaf.misordered.chain"
+    );
+
+    macro_rules! test_not_after {
+        ($name:ident; $start:expr; $end:expr; $want_err:expr) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem", "../../static_ct_api/tests/fake-intermediate-cert.pem"; $start; $end; $want_err; 2);
+        };
+    }
+    test_not_after!(not_after_no_range; None; None; false);
+    test_not_after!(not_after_valid_range; Some(parse_datetime("2018-01-01T00:00:00Z")); Some(parse_datetime("2020-07-01T00:00:00Z")); false);
+    test_not_after!(not_after_before_start; Some(parse_datetime("2020-01-01T00:00:00Z")); None; true);
+    test_not_after!(not_after_after_end; None; Some(parse_datetime("1999-01-01T00:00:00Z")); true);
+
+    test_validate_chain!(intermediate_as_accepted_root; "../../static_ct_api/tests/fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 1);
+    test_validate_chain!(leaf_as_accepted_root; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 0);
 }

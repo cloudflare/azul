@@ -2533,6 +2533,7 @@ dependencies = [
  "signed_note",
  "thiserror 2.0.12",
  "url",
+ "x509_util",
 ]
 
 [[package]]
@@ -3188,9 +3189,12 @@ dependencies = [
 name = "x509_util"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "der",
  "sha2",
+ "thiserror 2.0.12",
  "x509-cert",
+ "x509-verify",
 ]
 
 [[package]]

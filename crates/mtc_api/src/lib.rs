@@ -40,7 +40,7 @@ use x509_cert::{
     time::Validity,
     Certificate, TbsCertificate,
 };
-use x509_util::CertPool;
+use x509_util::{validate_chain_lax, CertPool};
 
 // The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
 // as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
@@ -250,6 +250,8 @@ pub enum MtcError {
     Der(#[from] der::Error),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    Validation(#[from] x509_util::ValidationError),
     #[error(transparent)]
     Fmt(#[from] std::fmt::Error),
     #[error(transparent)]
@@ -498,119 +500,136 @@ pub fn tbs_cert_to_log_entry(
 /// certificate doesn't cover the log entry.
 pub fn validate_correspondence(
     log_entry: &TbsCertificateLogEntry,
-    chain: &[Certificate],
+    raw_chain: &[Vec<u8>],
+    roots: &CertPool,
 ) -> Result<(), MtcError> {
-    // TODO validate bootstrap chain
-    if chain.is_empty() {
-        return Err(MtcError::Dynamic(
-            "bootstrap chain must not be empty".into(),
-        ));
-    }
-    let bootstrap = chain[0].tbs_certificate.clone();
+    // We will run ordinary chain validation on the given chain. After, we will do additional
+    // validation, expressed in the below closure.
+    let validator_hook = |leaf: Certificate,
+                          intermediates: Vec<Certificate>,
+                          _full_chain_fingerprints: Vec<[u8; 32]>,
+                          _found_root_idx: Option<usize>|
+     -> Result<(), MtcError> {
+        let bootstrap = leaf.tbs_certificate.clone();
 
-    if !(log_entry.version == bootstrap.version && log_entry.version == Version::V3) {
-        return Err(MtcError::Dynamic(
-            "entry and bootstrap versions must be v3".into(),
-        ));
-    }
-    // Make sure the validity is contained within the validity of every cert in
-    // the chain.
-    for cert in chain {
-        if log_entry.validity.not_before.to_unix_duration().lt(&cert
-            .tbs_certificate
-            .validity
-            .not_before
-            .to_unix_duration())
-        {
+        if !(log_entry.version == bootstrap.version && log_entry.version == Version::V3) {
             return Err(MtcError::Dynamic(
-                "entry not_before must not be less than bootstrap chain cert not_before".into(),
+                "entry and bootstrap versions must be v3".into(),
             ));
         }
-        if log_entry.validity.not_after.to_unix_duration().gt(&cert
-            .tbs_certificate
-            .validity
-            .not_after
-            .to_unix_duration())
-        {
-            return Err(MtcError::Dynamic(
-                "entry not_after must not be greater than bootstrap chain cert not_after".into(),
-            ));
-        }
-    }
-    if log_entry.subject != bootstrap.subject {
-        return Err(MtcError::Dynamic(
-            "entry subject must match bootstrap subject".into(),
-        ));
-    }
-    if log_entry.subject_public_key_info_hash
-        != OctetString::new(Sha256::digest(bootstrap.subject_public_key_info.to_der()?).as_slice())?
-    {
-        return Err(MtcError::Dynamic(
-            "entry spki hash must match hash of bootstrap spki".into(),
-        ));
-    }
-    if log_entry.issuer_unique_id != bootstrap.issuer_unique_id {
-        return Err(MtcError::Dynamic(
-            "entry issuer unique ID must match bootstrap issuer unique ID".into(),
-        ));
-    }
-    if log_entry.subject_unique_id != bootstrap.subject_unique_id {
-        return Err(MtcError::Dynamic(
-            "entry subject unique ID must match bootstrap subject unique ID".into(),
-        ));
-    }
-
-    match (log_entry.extensions.as_ref(), bootstrap.extensions) {
-        (None, None) => {}
-        (Some(log_entry_extensions), Some(mut bootstrap_extensions)) => {
-            // Check and filter bootstrap extensions.
-            filter_extensions(&mut bootstrap_extensions)?;
-
-            // Make sure the filtered bootstrap extensions cover those of the log entry.
-            if log_entry_extensions.len() != bootstrap_extensions.len() {
+        // Make sure the validity is contained within the validity of every cert in
+        // the chain.
+        for cert in core::iter::once(&leaf).chain(intermediates.iter()) {
+            if log_entry.validity.not_before.to_unix_duration().lt(&cert
+                .tbs_certificate
+                .validity
+                .not_before
+                .to_unix_duration())
+            {
                 return Err(MtcError::Dynamic(
-                    "bootstrap extension lengths differ".into(),
+                    "entry not_before must not be less than bootstrap chain cert not_before".into(),
                 ));
             }
+            if log_entry.validity.not_after.to_unix_duration().gt(&cert
+                .tbs_certificate
+                .validity
+                .not_after
+                .to_unix_duration())
+            {
+                return Err(MtcError::Dynamic(
+                    "entry not_after must not be greater than bootstrap chain cert not_after"
+                        .into(),
+                ));
+            }
+        }
+        if log_entry.subject != bootstrap.subject {
+            return Err(MtcError::Dynamic(
+                "entry subject must match bootstrap subject".into(),
+            ));
+        }
+        if log_entry.subject_public_key_info_hash
+            != OctetString::new(
+                Sha256::digest(bootstrap.subject_public_key_info.to_der()?).as_slice(),
+            )?
+        {
+            return Err(MtcError::Dynamic(
+                "entry spki hash must match hash of bootstrap spki".into(),
+            ));
+        }
+        if log_entry.issuer_unique_id != bootstrap.issuer_unique_id {
+            return Err(MtcError::Dynamic(
+                "entry issuer unique ID must match bootstrap issuer unique ID".into(),
+            ));
+        }
+        if log_entry.subject_unique_id != bootstrap.subject_unique_id {
+            return Err(MtcError::Dynamic(
+                "entry subject unique ID must match bootstrap subject unique ID".into(),
+            ));
+        }
 
-            let bootstrap_extensions_map = bootstrap_extensions
-                .into_iter()
-                .map(|extn| (extn.extn_id, extn))
-                .collect::<HashMap<_, _>>();
-            for extension in log_entry_extensions {
-                match extension.extn_id {
-                    id @ (rfc5280::ID_CE_EXT_KEY_USAGE
-                    | rfc5280::ID_CE_SUBJECT_ALT_NAME
-                    | rfc5280::ID_CE_KEY_USAGE) => {
-                        if let Some(bootstrap_extension) = bootstrap_extensions_map.get(&id) {
-                            // This currently checks for strict equality, but
-                            // could be relaxed somewhat, for example to allow a
-                            // bootstrap cert with the key usage
-                            // DigitalSignature+KeyEncipherment to cover a log
-                            // entry with only the DigitalSignature key usage.
-                            if extension != bootstrap_extension {
-                                return Err(MtcError::Dynamic(format!(
-                                    "boostrap extension mismatch {id}"
-                                )));
-                            }
-                        } else {
+        // If no extensions, we're done. If mismatched, that's an error
+        match (&log_entry.extensions, &bootstrap.extensions) {
+            (None, None) => return Ok(()),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(MtcError::Dynamic("mismatched extensions".into()))
+            }
+            _ => {}
+        };
+        // Otherwise both the log entry and bootstrap cert have extensions
+        let log_entry_extensions = log_entry.extensions.as_ref().unwrap();
+        let mut bootstrap_extensions = bootstrap.extensions.unwrap();
+
+        // Check and filter bootstrap extensions.
+        filter_extensions(&mut bootstrap_extensions)?;
+
+        // Make sure the filtered bootstrap extensions cover those of the log entry.
+        if log_entry_extensions.len() != bootstrap_extensions.len() {
+            return Err(MtcError::Dynamic(
+                "bootstrap extension lengths differ".into(),
+            ));
+        };
+
+        let bootstrap_extensions_map = bootstrap_extensions
+            .into_iter()
+            .map(|extn| (extn.extn_id, extn))
+            .collect::<HashMap<_, _>>();
+        for extension in log_entry_extensions {
+            match extension.extn_id {
+                id @ (rfc5280::ID_CE_EXT_KEY_USAGE
+                | rfc5280::ID_CE_SUBJECT_ALT_NAME
+                | rfc5280::ID_CE_KEY_USAGE) => {
+                    if let Some(bootstrap_extension) = bootstrap_extensions_map.get(&id) {
+                        // This currently checks for strict equality, but
+                        // could be relaxed somewhat, for example to allow a
+                        // bootstrap cert with the key usage
+                        // DigitalSignature+KeyEncipherment to cover a log
+                        // entry with only the DigitalSignature key usage.
+                        if extension != bootstrap_extension {
                             return Err(MtcError::Dynamic(format!(
-                                "bootstrap missing extension {id}"
+                                "boostrap extension mismatch {id}"
                             )));
                         }
-                    }
-                    id => {
+                    } else {
                         return Err(MtcError::Dynamic(format!(
-                            "log entry has unsupported extension {id}"
-                        )))
+                            "bootstrap missing extension {id}"
+                        )));
                     }
+                }
+                id => {
+                    return Err(MtcError::Dynamic(format!(
+                        "log entry has unsupported extension {id}"
+                    )))
                 }
             }
         }
-        _ => return Err(MtcError::Dynamic("mismatched extensions".into())),
-    }
+        Ok(())
+    };
 
-    Ok(())
+    // Run the validation logic with the above validation hook
+    validate_chain_lax(raw_chain, roots, None, None, validator_hook).map_err(|e| match e {
+        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Hook(he) => he,
+    })
 }
 
 /// Parse and validate a bootstrap chain, returning a pending log entry.
@@ -620,79 +639,82 @@ pub fn validate_correspondence(
 /// Returns an error if the chain is invalid.
 pub fn validate_chain(
     raw_chain: &[Vec<u8>],
-    _roots: &CertPool,
+    roots: &CertPool,
     issuer: RdnSequence,
     mut validity: Validity,
 ) -> Result<BootstrapMtcPendingLogEntry, MtcError> {
-    let mut iter = raw_chain.iter();
-    let leaf: Certificate = match iter.next() {
-        Some(v) => Certificate::from_der(v)?,
-        None => return Err(MtcError::Dynamic("empty bootstrap chain".into())),
+    // We will run the ordinary chain validation on our input, but we have some post-processing we
+    // need to do too. Namely we need to adjust the validity period of the provided bootstrap cert,
+    // and then construct a pending log entry. We do this in the validation hook.
+    let validation_hook = |leaf: Certificate, intermediates: Vec<Certificate>, _, _| {
+        // Adjust the validity bound to the overlapping part of validity periods of
+        // all certificates in the chain.
+        for cert in std::iter::once(&leaf).chain(intermediates.iter()) {
+            if validity.not_before.to_unix_duration().lt(&cert
+                .tbs_certificate
+                .validity
+                .not_before
+                .to_unix_duration())
+            {
+                validity.not_before = cert.tbs_certificate.validity.not_before;
+            }
+            if validity.not_after.to_unix_duration().gt(&cert
+                .tbs_certificate
+                .validity
+                .not_after
+                .to_unix_duration())
+            {
+                validity.not_after = cert.tbs_certificate.validity.not_after;
+            }
+            // Check that we still have a non-empty validity period.
+            if validity
+                .not_after
+                .to_unix_duration()
+                .le(&validity.not_before.to_unix_duration())
+            {
+                // There is no remaining validity period.
+                return Err(MtcError::Dynamic(
+                    "overlap in validity with bootstrap chain must not be empty".into(),
+                ));
+            }
+        }
+
+        let mut bootstrap = Vec::new();
+        bootstrap.write_length_prefixed(&raw_chain[0], 3)?;
+        bootstrap.write_length_prefixed(
+            &raw_chain[1..]
+                .iter()
+                .map(Sha256::digest)
+                .collect::<Vec<_>>()
+                .concat(),
+            2,
+        )?;
+
+        let mut bootstrap_tile_entry = Vec::new();
+        bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
+
+        let pending_entry = BootstrapMtcPendingLogEntry {
+            bootstrap: bootstrap_tile_entry,
+            entry: TlogTilesPendingLogEntry {
+                data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
+                    leaf.tbs_certificate,
+                    issuer,
+                    validity,
+                )?)
+                .encode()?,
+            },
+        };
+        Ok(pending_entry)
     };
 
-    // TODO actually validate chain
-    let chain = iter
-        .map(|x| Certificate::from_der(x))
-        .collect::<Result<Vec<Certificate>, der::Error>>()?;
-
-    // Adjust the validity bound to the overlapping part of validity periods of
-    // all certificates in the chain.
-    for cert in std::iter::once(&leaf).chain(&chain) {
-        if validity.not_before.to_unix_duration().lt(&cert
-            .tbs_certificate
-            .validity
-            .not_before
-            .to_unix_duration())
-        {
-            validity.not_before = cert.tbs_certificate.validity.not_before;
-        }
-        if validity.not_after.to_unix_duration().gt(&cert
-            .tbs_certificate
-            .validity
-            .not_after
-            .to_unix_duration())
-        {
-            validity.not_after = cert.tbs_certificate.validity.not_after;
-        }
-        // Check that we still have a non-empty validity period.
-        if validity
-            .not_after
-            .to_unix_duration()
-            .le(&validity.not_before.to_unix_duration())
-        {
-            // There is no remaining validity period.
-            return Err(MtcError::Dynamic(
-                "overlap in validity with bootstrap chain must not be empty".into(),
-            ));
-        }
-    }
-
-    let mut bootstrap = Vec::new();
-    bootstrap.write_length_prefixed(&raw_chain[0], 3)?;
-    bootstrap.write_length_prefixed(
-        &raw_chain[1..]
-            .iter()
-            .map(Sha256::digest)
-            .collect::<Vec<_>>()
-            .concat(),
-        2,
-    )?;
-
-    let mut bootstrap_tile_entry = Vec::new();
-    bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
-
-    let pending_entry = BootstrapMtcPendingLogEntry {
-        bootstrap: bootstrap_tile_entry,
-        entry: TlogTilesPendingLogEntry {
-            data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
-                leaf.tbs_certificate,
-                issuer,
-                validity,
-            )?)
-            .encode()?,
-        },
-    };
-    Ok(pending_entry)
+    // Run the validation and return the hook-constructed pending entry. We do not give the
+    // validator a window for the `not_after` validity, since we already know the `not_after` we're
+    // giving it, and it's quite short.
+    let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validation_hook);
+    pending_entry.map_err(|e| match e {
+        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
+        x509_util::HookOrValidationError::Hook(he) => he,
+    })
 }
 
 #[cfg(test)]
@@ -700,16 +722,36 @@ mod tests {
     use der::asn1::UtcTime;
     use std::time::Duration;
     use x509_cert::{time::Time, Certificate};
+    use x509_util::certs_to_bytes;
 
     use super::*;
 
+    /// Builds a certificate chain from the the given PEM files
+    macro_rules! build_chain {
+        ($($root_file:expr),+) => {{
+            let mut chain = Vec::new();
+            $(
+                chain.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
+            )*
+            chain
+        }}
+    }
+
     #[test]
     fn test_tbs_cert_to_log_entry() {
-        let bootstrap_chain =
-            Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
-                .unwrap();
-        let bootstrap = &bootstrap_chain[0].tbs_certificate;
-        let issuer = RdnSequence::default();
+        let bootstrap_chain = build_chain!(
+            "../../static_ct_api/tests/leaf-cert.pem",
+            "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem"
+        );
+        let raw_chain = certs_to_bytes(&bootstrap_chain).unwrap();
+
+        let roots = CertPool::new(build_chain!(
+            "../../static_ct_api/tests/fake-ca-cert.pem",
+            "../../static_ct_api/tests/fake-root-ca-cert.pem",
+            "../../static_ct_api/tests/ca-cert.pem",
+            "../../static_ct_api/tests/real-precert-intermediate.pem"
+        ))
+        .unwrap();
 
         let validity = Validity {
             not_before: Time::UtcTime(
@@ -720,10 +762,14 @@ mod tests {
             ),
         };
 
-        let mut log_entry = tbs_cert_to_log_entry(bootstrap.clone(), issuer, validity).unwrap();
+        let mut log_entry = {
+            let bootstrap = &bootstrap_chain[0].tbs_certificate;
+            let issuer = RdnSequence::default();
+            tbs_cert_to_log_entry(bootstrap.clone(), issuer, validity).unwrap()
+        };
 
         // Valid.
-        validate_correspondence(&log_entry, &bootstrap_chain).unwrap();
+        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();
 
         // Put the extensions in a different order.
         log_entry
@@ -733,7 +779,7 @@ mod tests {
             .sort_by(|a, b| b.extn_id.cmp(&a.extn_id));
 
         // Still valid.
-        validate_correspondence(&log_entry, &bootstrap_chain).unwrap();
+        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();
 
         // Remove an extension.
         let ext = log_entry
@@ -744,7 +790,7 @@ mod tests {
             .unwrap();
 
         // No longer valid.
-        validate_correspondence(&log_entry, &bootstrap_chain).unwrap_err();
+        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap_err();
 
         // Put it back.
         log_entry
@@ -754,14 +800,14 @@ mod tests {
             .push(ext);
 
         // Valid again.
-        validate_correspondence(&log_entry, &bootstrap_chain).unwrap();
+        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();
 
         // Increase the validity to outside the bootstrap's validity.
         log_entry.validity.not_after =
             Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_920)).unwrap());
 
         // No longer valid.
-        validate_correspondence(&log_entry, &bootstrap_chain).unwrap_err();
+        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap_err();
     }
 
     #[test]
