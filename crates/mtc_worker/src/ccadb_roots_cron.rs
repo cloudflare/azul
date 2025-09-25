@@ -17,25 +17,14 @@ use x509_cert::{
 };
 use x509_util::CertPool;
 
-use crate::CONFIG;
-
 // A KV namespace with this binding must be configured in 'wrangler.jsonc' if
 // any log shards have 'enable_ccadb_roots=true'.
 pub(crate) const CCADB_ROOTS_NAMESPACE: &str = "ccadb_roots";
-
-pub(crate) fn ccadb_roots_filename(name: &str) -> String {
-    format!("roots_{name}.pem")
-}
+pub(crate) const CCADB_ROOTS_FILENAME: &str = "mtc_bootstrap_roots.pem";
 
 #[event(scheduled)]
 async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let mut keys = Vec::new();
-    for (name, params) in &CONFIG.logs {
-        if params.enable_ccadb_roots {
-            keys.push(ccadb_roots_filename(name));
-        }
-    }
-    log::info!("Updating CCADB roots for keys: {keys:?}");
+    log::info!("Updating CCADB roots");
     let kv = match env.kv(CCADB_ROOTS_NAMESPACE) {
         Ok(kv) => kv,
         Err(e) => {
@@ -43,69 +32,56 @@ async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
             return;
         }
     };
-    if let Err(e) = update_ccadb_roots(&keys, &kv).await {
+    if let Err(e) = update_ccadb_roots(&kv).await {
         log::warn!("Failed to update CCADB roots: {e}");
     } else {
         log::info!("Successfully updated CCADB roots");
     }
 }
 
-/// Update CCADB roots at each of the provided keys. Roots are never removed
-/// once added.
+/// Update CCADB roots at each of the provided keys. Roots are pruned to match
+/// the current CCADB list, since we want the trust store to always be a subset
+/// of Chrome's trust store.
 ///
 /// SAFETY: In theory it's possible for multiple instances of this job to be
-/// running concurrently, such that the result written by one job is overwritten
-/// by the other, possibly removing roots that were just added to the list. This
-/// isn't an integrity violation for the log (it's fine to have entries chaining
-/// to roots that aren't currently served by get-roots, since each entry stores
-/// the `chain_fingerprints` for its chain). Further, the chance of this job
-/// running concurrently is slim given that the cron job runs only once per day.
-/// If this turns out to be an issue we can add a lock.
+/// running concurrently. Since they're pulling from the same data source, it
+/// shouldn't be problematic. Further, the chance of this job running
+/// concurrently is slim given that the cron job runs only once per day. If this
+/// turns out to be an issue we can add a lock.
 ///
 /// # Errors
 /// Will return an error if the latest CCADB roots cannot be fetched or if there
 /// are issues getting or putting records into the KV store.
-pub(crate) async fn update_ccadb_roots<T: AsRef<str>>(keys: &[T], kv: &KvStore) -> Result<()> {
+pub(crate) async fn update_ccadb_roots(kv: &KvStore) -> Result<()> {
     let ccadb_roots = ccadb_roots().await?;
     log::info!("Fetched {} CCADB roots", ccadb_roots.len());
 
-    for key in keys {
-        let old = kv.get(key.as_ref()).text().await?;
-        let mut new_roots = 0;
-        let mut buf = String::new();
-        let mut pool = CertPool::default();
-        if let Some(old) = old {
-            pool.append_certs_from_pem(old.as_bytes())
-                .map_err(|e| e.to_string())?;
-            buf = old;
-        }
-        for cert in &ccadb_roots {
-            if pool.includes(cert).map_err(|e| e.to_string())? {
-                continue;
-            }
-            new_roots += 1;
-            write!(
-                &mut buf,
-                "\n# {}\n# added on {} from CCADB\n{}\n",
-                cert.tbs_certificate.subject,
-                DateTime::from_timestamp_millis(
-                    now_millis()
-                        .try_into()
-                        .or(Err("failed to convert time to i64"))?
-                )
-                .ok_or("failed to get current time")?
-                .to_rfc3339(),
-                cert.to_pem(LineEnding::LF).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
+    let mut buf = String::new();
+    let mut pool = CertPool::default();
 
-            pool.add_cert(cert.clone()).map_err(|e| e.to_string())?;
+    for cert in &ccadb_roots {
+        if pool.includes(cert).map_err(|e| e.to_string())? {
+            continue;
         }
-        if new_roots > 0 {
-            log::info!("Added {new_roots} new roots to {}", key.as_ref());
-            kv.put(key.as_ref(), buf)?.execute().await?;
-        }
+        write!(
+            &mut buf,
+            "\n# {}\n# added on {} from CCADB\n{}\n",
+            cert.tbs_certificate.subject,
+            DateTime::from_timestamp_millis(
+                now_millis()
+                    .try_into()
+                    .or(Err("failed to convert time to i64"))?
+            )
+            .ok_or("failed to get current time")?
+            .to_rfc3339(),
+            cert.to_pem(LineEnding::LF).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
+        pool.add_cert(cert.clone()).map_err(|e| e.to_string())?;
     }
+    kv.put(CCADB_ROOTS_FILENAME, buf)?.execute().await?;
+
     Ok(())
 }
 
@@ -138,6 +114,14 @@ async fn ccadb_roots() -> Result<Vec<Certificate>> {
         .iter()
         .position(|hdr| hdr == "Intended Use Case(s) Served")
         .ok_or("CCADB CSV header does not contain 'Intended Use Case(s) Served'")?;
+    let chrome_status_idx = hdr
+        .iter()
+        .position(|hdr| hdr == "Google Chrome Status")
+        .ok_or("CCADB CSV header does not contain 'Google Chrome Status'")?;
+    let mozilla_status_idx = hdr
+        .iter()
+        .position(|hdr| hdr == "Mozilla Status")
+        .ok_or("CCADB CSV header does not contain 'Mozilla Status'")?;
     let mut certificates = Vec::new();
     for result in rdr.records() {
         let record = result.map_err(|e| format!("failed to read CCADB CSV row: {e}"))?;
@@ -147,9 +131,20 @@ async fn ccadb_roots() -> Result<Vec<Certificate>> {
             continue;
         }
         let uses = record.get(uses_idx).ok_or("CCADB CSV row is too short")?;
-        if !(uses.contains("Server Authentication (TLS) 1.3.6.1.5.5.7.3.1")
-            || uses.contains("CT Monitoring"))
-        {
+        if !uses.contains("Server Authentication (TLS) 1.3.6.1.5.5.7.3.1") {
+            continue;
+        }
+
+        // Filter to the intersection of the Chrome and Mozilla root stores.
+        // Chrome must be able to validate bootstrap certificate chains, and
+        // Mozilla's CRLite filters to check for revocation.
+        let chrome_status = record
+            .get(chrome_status_idx)
+            .ok_or("CCADB CSV row is too short")?;
+        let mozilla_status = record
+            .get(mozilla_status_idx)
+            .ok_or("CCADB CSV row is too short")?;
+        if !(chrome_status == "Included" && mozilla_status == "Included") {
             continue;
         }
 

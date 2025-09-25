@@ -6,6 +6,11 @@
     "build": {
         "command": "echo 'Default environment not configured. Please specify an environment with the \"-e\" flag.' && exit 1"
     },
+    "triggers": {
+        "crons": [
+            "23 4 * * *"
+        ]
+    },
     "env": {
         "dev": {
             "build": {
@@ -14,6 +19,12 @@
                 "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
             },
             "workers_dev": true,
+            "kv_namespaces": [
+                {
+                    "id": "e4aab0c89ebe492c9c81c444c78a31ff",
+                    "binding": "ccadb_roots"
+                }
+            ],
             "r2_buckets": [
                 {
                     "bucket_name": "mtc-public-dev1",

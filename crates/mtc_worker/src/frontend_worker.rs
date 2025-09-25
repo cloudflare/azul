@@ -4,8 +4,8 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{
-    load_checkpoint_signers, load_origin, load_signing_key, load_witness_key, SequenceMetadata,
-    CONFIG, ROOTS,
+    load_checkpoint_signers, load_origin, load_roots, load_signing_key, load_witness_key,
+    SequenceMetadata, CONFIG,
 };
 use der::{
     asn1::{SetOfVec, UtcTime, Utf8StringRef},
@@ -335,13 +335,14 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         ),
     };
 
-    let pending_entry = match mtc_api::validate_chain(&req.chain, &ROOTS, issuer, validity) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("{name}: Bad request: {e}");
-            return Response::error("Bad request", 400);
-        }
-    };
+    let pending_entry =
+        match mtc_api::validate_chain(&req.chain, load_roots(env, name).await?, issuer, validity) {
+            Ok(v) => v,
+            Err(e) => {
+                log::debug!("{name}: Bad request: {e}");
+                return Response::error("Bad request", 400);
+            }
+        };
 
     // Retrieve the sequenced entry for this pending log entry by first checking the
     // deduplication cache and then sending a request to the DO to sequence the entry.

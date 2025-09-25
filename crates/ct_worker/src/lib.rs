@@ -3,6 +3,7 @@
 
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
+use crate::ccadb_roots_cron::{ccadb_roots_filename, update_ccadb_roots, CCADB_ROOTS_NAMESPACE};
 use config::AppConfig;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
@@ -15,17 +16,11 @@ use tokio::sync::OnceCell;
 use worker::{Env, Result};
 use x509_util::CertPool;
 
-use crate::ccadb_roots_cron::update_ccadb_roots;
-
 mod batcher_do;
 mod ccadb_roots_cron;
 mod cleaner_do;
 mod frontend_worker;
 mod sequencer_do;
-
-// A KV namespace with this binding must be configured in 'wrangler.jsonc' if
-// any log shards have 'enable_ccadb_roots=true'.
-const CCADB_ROOTS_NAMESPACE: &str = "ccadb_roots";
 
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
@@ -103,10 +98,6 @@ pub(crate) fn load_origin(name: &str) -> KeyName {
             .to_string(),
     )
     .expect("invalid origin name")
-}
-
-fn ccadb_roots_filename(name: &str) -> String {
-    format!("roots_{name}.pem")
 }
 
 async fn load_roots(env: &Env, name: &str) -> Result<&'static CertPool> {

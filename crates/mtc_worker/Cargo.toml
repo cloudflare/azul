@@ -41,7 +41,10 @@ futures-executor.workspace = true
 
 [dependencies]
 base64.workspace = true
+base64ct.workspace = true
+chrono.workspace = true
 config = { path = "./config", package = "mtc_worker_config" }
+csv.workspace = true
 der.workspace = true
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
@@ -53,6 +56,7 @@ serde_json.workspace = true
 serde_with.workspace = true
 signed_note.workspace = true
 tlog_tiles.workspace = true
+tokio.workspace = true
 worker.workspace = true
 x509-cert.workspace = true
 x509_util.workspace = true

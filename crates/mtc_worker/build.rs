@@ -13,7 +13,6 @@ use url::Url;
 use x509_cert::{
     attr::AttributeTypeAndValue,
     name::{RdnSequence, RelativeDistinguishedName},
-    Certificate,
 };
 
 fn main() {
@@ -67,25 +66,13 @@ fn main() {
         }
     }
 
-    // Get and validate roots. Use 'roots.default.pem' if no environment-specific roots file is found.
-    let mut roots_file: &str = &format!("roots.{env}.pem");
-    if !fs::exists(roots_file).expect("failed to check if file exists") {
-        roots_file = "roots.default.pem";
-    }
-    let roots =
-        Certificate::load_pem_chain(&fs::read(roots_file).expect("failed to read roots file"))
-            .expect("unable to decode certificates");
-    assert!(!roots.is_empty(), "Roots file is empty");
-
     // Copy to OUT_DIR.
     let out_dir = env::var("OUT_DIR").unwrap();
     fs::copy(config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
-    fs::copy(roots_file, format!("{out_dir}/roots.pem")).expect("failed to copy roots file");
 
     println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
     println!("cargo::rerun-if-changed=config.schema.json");
     println!("cargo::rerun-if-changed={config_file}");
-    println!("cargo::rerun-if-changed={roots_file}");
 }
 
 // Validate the URL prefix according to https://datatracker.ietf.org/doc/html/rfc6962#section-4.

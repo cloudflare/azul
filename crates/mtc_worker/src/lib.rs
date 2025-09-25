@@ -3,6 +3,7 @@
 
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
+use crate::ccadb_roots_cron::{update_ccadb_roots, CCADB_ROOTS_FILENAME, CCADB_ROOTS_NAMESPACE};
 use config::AppConfig;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use mtc_api::{MTCSubtreeCosigner, RelativeOid, TrustAnchorID};
@@ -12,12 +13,13 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{LazyLock, OnceLock};
 use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner, SequenceMetadata};
+use tokio::sync::OnceCell;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
-use x509_cert::Certificate;
 use x509_util::CertPool;
 
 mod batcher_do;
+mod ccadb_roots_cron;
 mod cleaner_do;
 mod frontend_worker;
 mod sequencer_do;
@@ -28,16 +30,9 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
         .expect("Failed to parse config")
 });
 
-static ROOTS: LazyLock<CertPool> = LazyLock::new(|| {
-    CertPool::new(
-        Certificate::load_pem_chain(include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem")))
-            .expect("Failed to parse roots"),
-    )
-    .unwrap()
-});
-
 static SIGNING_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
 static WITNESS_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
+static ROOTS: OnceCell<CertPool> = OnceCell::const_new();
 
 pub(crate) fn load_signing_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
     load_ed25519_key(env, name, &SIGNING_KEY_MAP, &format!("SIGNING_KEY_{name}"))
@@ -105,4 +100,30 @@ pub(crate) fn load_origin(name: &str) -> KeyName {
             .to_string(),
     )
     .expect("invalid origin name")
+}
+
+async fn load_roots(env: &Env, name: &str) -> Result<&'static CertPool> {
+    // Load embedded roots.
+    ROOTS
+        .get_or_try_init(|| async {
+            let mut pool = CertPool::default();
+            // Load additional roots from the CCADB roots file in Workers KV.
+            let kv = env.kv(CCADB_ROOTS_NAMESPACE)?;
+            let pem = if let Some(pem) = kv.get(CCADB_ROOTS_FILENAME).text().await? {
+                pem
+            } else {
+                // The roots file might not exist if the CCADB roots cron job hasn't
+                // run yet. Try to create it once before failing.
+                update_ccadb_roots(&kv).await?;
+                kv.get(CCADB_ROOTS_FILENAME)
+                    .text()
+                    .await?
+                    .ok_or(format!("{name}: '{CCADB_ROOTS_FILENAME}' not found in KV"))?
+            };
+            pool.append_certs_from_pem(pem.as_bytes())
+                .map_err(|e| format!("failed to add CCADB certs to pool: {e}"))?;
+
+            Ok(pool)
+        })
+        .await
 }
