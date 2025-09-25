@@ -132,6 +132,8 @@ Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to co
         openssl genpkey -algorithm ed25519 | npx wrangler -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
         openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
 
+    (Note: For mtc_worker we use ed25519 for both the witness key and the signing key.)
+
 1.  Deploy the worker. The worker will be available at `https://static-ct-${ENV}.<your-team>.workers.dev/logs/${LOG_NAME}`.
 
         npx wrangler -e=${ENV} deploy
