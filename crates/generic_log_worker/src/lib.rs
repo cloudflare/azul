@@ -56,7 +56,6 @@ pub fn init_logging(level: Option<&str>) {
     let level = level
         .and_then(|level| Level::from_str(level).ok())
         .unwrap_or(Level::Info);
-    console_error_panic_hook::set_once();
     INIT_LOGGING.call_once(|| {
         console_log::init_with_level(level).expect("error initializing logger");
     });
@@ -244,9 +243,10 @@ impl CacheRead for DedupCache {
 }
 
 impl DedupCache {
-    // Batches are written at most once per second, and we only need them deduplicate
-    // entries long enough for KV's eventual consistency guarantees (~60s).
-    // Cap at 128 so we can use a single get_multiple call to get all batches at once.
+    // Batches are written at most once per second, and we only need them to
+    // deduplicate entries long enough for KV's eventual consistency guarantees
+    // (~60s). Cap at 128 so we can use a single get_multiple call to get all
+    // batches at once.
     // https://developers.cloudflare.com/durable-objects/api/storage-api/#get
     const MAX_BATCHES: usize = 128;
     const FIFO_HEAD_KEY: &str = "fifo:head";

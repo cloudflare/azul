@@ -251,6 +251,15 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
                         .await
                 })
+                .get("/logs/:log/sequencer_id", |_req, ctx| {
+                    // Print out the Durable Object ID of the sequencer to allow
+                    // looking it up in internal Cloudflare dashboards. This
+                    // value does not need to be kept secret.
+                    let name = ctx.data;
+                    let namespace = ctx.env.durable_object("SEQUENCER")?;
+                    let object_id = namespace.id_from_name(name)?;
+                    Response::ok(object_id.to_string())
+                })
                 .get_async("/logs/:log/*key", |_req, ctx| async move {
                     let name = ctx.data;
                     let key = ctx.param("key").unwrap();

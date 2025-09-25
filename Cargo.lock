@@ -3055,9 +3055,9 @@ dependencies = [
 
 [[package]]
 name = "worker"
-version = "0.6.5"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38079fb888798411da925f8e7da31d05f99f34d960876e7f0f64d38dd1c5a8e4"
+checksum = "4a53a6374d6ec3d7fdf49db98fa7f5173a81ffb20bb81e5594b94aa7ae1ba899"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3101,9 +3101,9 @@ dependencies = [
 
 [[package]]
 name = "worker-macros"
-version = "0.6.5"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b04c25dc6fc79ac2c111eadac8e98fddfa42f97625e48a3b94f82455d9b29766"
+checksum = "a9b87ff3abcd9e21f0c2de1b6ad145b535bc4e1761d46fa27e6dcd549e145f06"
 dependencies = [
  "async-trait",
  "proc-macro2",
@@ -3117,9 +3117,9 @@ dependencies = [
 
 [[package]]
 name = "worker-sys"
-version = "0.6.5"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa601b8e81a1a06f0b0cc1ca5d48eef4901f491d324a4b2796354b0d49aeeaf0"
+checksum = "c4b5b178b64415a5992165f5c17f9632e458bf7f6461839f885bfc6d7b685e2f"
 dependencies = [
  "cfg-if",
  "js-sys",
