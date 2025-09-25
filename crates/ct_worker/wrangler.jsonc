@@ -1,7 +1,7 @@
 {
     "name": "static-ct",
     "main": "build/worker/shim.mjs",
-    "compatibility_date": "2025-04-01",
+    "compatibility_date": "2025-09-25",
     "workers_dev": false,
     "build": {
         "command": "echo 'Default environment not configured. Please specify an environment with the \"-e\" flag.' && exit 1"
