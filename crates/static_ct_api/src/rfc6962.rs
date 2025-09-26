@@ -118,49 +118,37 @@ pub fn partially_validate_chain(
             return Err(StaticCTError::InvalidLeaf);
         }
 
-        // Record if this is a precertificate signing certificate.
-        let has_precert_signing_cert = match chain_certs.first() {
-            Some(first_intermediate) => is_leaf_precert && is_pre_issuer(first_intermediate)?,
-            None => false,
-        };
-
-        // Construct a pending log entry.
-        let precert_opt: Option<PrecertData>;
-        let certificate: Vec<u8>;
-        if is_leaf_precert {
-            let mut pre_issuer: Option<&TbsCertificate> = None;
-            let issuer_key_hash: [u8; 32];
-            if has_precert_signing_cert {
-                pre_issuer = Some(&chain_certs[0].tbs_certificate);
+        // Construct the fields needed for the pending log entry. If the entry
+        // is a precertificate, `precert_opt` is populated with the
+        // precertificate data.
+        let (precert_opt, certificate) = if is_leaf_precert {
+            // Reject if the precertificate doesn't have an issuer.
+            if chain_certs.is_empty() {
+                return Err(StaticCTError::MissingPrecertIssuer);
+            }
+            // Handle (rarely used) precertificate signing certificates.
+            let (pre_issuer, issuer) = if is_precert_signing_cert(chain_certs[0])? {
+                // Reject if the precertificate signing certificate doesn't have an issuer.
                 if chain_certs.len() < 2 {
                     return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
                 }
-                issuer_key_hash = Sha256::digest(
-                    chain_certs[1]
-                        .tbs_certificate
-                        .subject_public_key_info
-                        .to_der()?,
-                )
-                .into();
+                (Some(&chain_certs[0].tbs_certificate), chain_certs[1])
             } else {
-                issuer_key_hash = Sha256::digest(
-                    chain_certs[0]
-                        .tbs_certificate
-                        .subject_public_key_info
-                        .to_der()?,
-                )
-                .into();
-            }
-            let pre_certificate = leaf.to_der()?;
-            precert_opt = Some(PrecertData {
-                issuer_key_hash,
-                pre_certificate,
-            });
-            certificate = build_precert_tbs(&leaf.tbs_certificate, pre_issuer)?;
+                (None, chain_certs[0])
+            };
+            (
+                Some(PrecertData {
+                    issuer_key_hash: Sha256::digest(
+                        issuer.tbs_certificate.subject_public_key_info.to_der()?,
+                    )
+                    .into(),
+                    pre_certificate: leaf.to_der()?,
+                }),
+                build_precert_tbs(&leaf.tbs_certificate, pre_issuer)?,
+            )
         } else {
-            precert_opt = None;
-            certificate = leaf.to_der()?;
-        }
+            (None, leaf.to_der()?)
+        };
 
         Ok((
             StaticCTPendingLogEntry {
@@ -204,8 +192,8 @@ fn is_precert(cert: &Certificate) -> Result<bool, StaticCTError> {
     }
 }
 
-/// Returns whether or not the certificate contains the `CertificateTransparency` extended key usage.
-fn is_pre_issuer(cert: &Certificate) -> Result<bool, StaticCTError> {
+/// Returns whether or not the certificate is a precertificate signing certificate.
+fn is_precert_signing_cert(cert: &Certificate) -> Result<bool, StaticCTError> {
     match cert.tbs_certificate.get::<ExtendedKeyUsage>()? {
         Some((_, eku)) => {
             for usage in eku.0 {
