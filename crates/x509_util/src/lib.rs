@@ -154,6 +154,8 @@ pub enum ValidationError {
     IntermediateMissingCaBasicConstraint,
     #[error("issuer not in root store: {to_verify_issuer}")]
     NoPathToTrustedRoot { to_verify_issuer: String },
+    #[error("mismatching signature algorithm identifier")]
+    MismatchingSigAlg,
 }
 
 /// An error that's returned by either our validation logic or the hook that [`validate_chain`]
@@ -225,6 +227,15 @@ where
         .map(|bytes| Certificate::from_der(bytes))
         .collect::<Result<_, _>>()
         .map_err(ValidationError::from)?;
+
+    // Reject mismatched signature algorithms:
+    // https://github.com/google/certificate-transparency-go/pull/702.
+    for cert in core::iter::once(&leaf).chain(&chain_certs_owned) {
+        if !is_well_formed(cert) {
+            return Err(ValidationError::MismatchingSigAlg.into());
+        }
+    }
+
     // All the intermediates plus the inferred root (we'll add it later)
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
@@ -279,6 +290,12 @@ where
         .map_err(HookOrValidationError::Hook)
 }
 
+/// Verify that a cert is well-formed according to RFC 5280.
+fn is_well_formed(cert: &Certificate) -> bool {
+    // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
+    cert.signature_algorithm == cert.tbs_certificate.signature
+}
+
 /// Returns whether or not the given link in the chain is valid.
 /// [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962#section-3.1) says:
 /// ```text
@@ -299,10 +316,21 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
 mod tests {
     use super::*;
     use chrono::prelude::*;
+    use der::DecodePem;
     use x509_verify::x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
+    }
+
+    #[test]
+    fn test_mismatched_sig_alg() {
+        let cert = Certificate::from_pem(include_bytes!(
+            "../../static_ct_api/tests/mismatching-sig-alg.pem"
+        ))
+        .unwrap();
+        // Mismatched signature on leaf.
+        assert!(!is_well_formed(&cert));
     }
 
     macro_rules! test_validate_chain {
