@@ -197,7 +197,7 @@ pub fn validate_chain_lax<T, E, F>(
     hook: F,
 ) -> Result<T, HookOrValidationError<E>>
 where
-    F: FnOnce(Certificate, Vec<Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
+    F: FnOnce(Certificate, Vec<&Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
 {
     if raw_chain.is_empty() {
         return Err(ValidationError::EmptyChain.into());
@@ -237,6 +237,7 @@ where
     }
 
     // All the intermediates plus the inferred root (we'll add it later)
+    let chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
         .map(|v| Sha256::digest(v).into())
@@ -245,7 +246,7 @@ where
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
-    for cert in chain_certs_owned.iter() {
+    for cert in &chain_certs {
         // Check that this cert signs the previous one in the chain.
         if !is_link_valid(to_verify, cert) {
             return Err(ValidationError::InvalidLinkInChain.into());
@@ -286,8 +287,7 @@ where
         chain_fingerprints.push(Sha256::digest(bytes).into());
     }
 
-    hook(leaf, chain_certs_owned, chain_fingerprints, found_root_idx)
-        .map_err(HookOrValidationError::Hook)
+    hook(leaf, chain_certs, chain_fingerprints, found_root_idx).map_err(HookOrValidationError::Hook)
 }
 
 /// Verify that a cert is well-formed according to RFC 5280.

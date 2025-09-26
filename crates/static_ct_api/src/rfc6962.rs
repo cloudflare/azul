@@ -95,7 +95,7 @@ pub fn partially_validate_chain(
     // that are particular to CT, and we need to collect information along the way. So define a hook
     // for the validator that does these checks and returns a pending log entry
     let validator_hook = |leaf: Certificate,
-                          intermediates: Vec<Certificate>,
+                          intermediates: Vec<&Certificate>,
                           full_chain_fingerprints: Vec<[u8; 32]>,
                           found_root_idx: Option<usize>|
      -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
@@ -138,9 +138,11 @@ pub fn partially_validate_chain(
 
                 // The second intermediate exists because of the length check above. So it's either
                 // provided in `intermediates` or it's a found root (hence we can unwrap).
-                let second_intermediate = intermediates
-                    .get(1)
-                    .unwrap_or_else(|| &roots.certs[found_root_idx.unwrap()]);
+                let second_intermediate = if intermediates.len() > 1 {
+                    intermediates[1]
+                } else {
+                    &roots.certs[found_root_idx.unwrap()]
+                };
                 issuer_key_hash = Sha256::digest(
                     second_intermediate
                         .tbs_certificate
