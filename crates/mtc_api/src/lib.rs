@@ -724,20 +724,9 @@ mod tests {
     use der::asn1::UtcTime;
     use std::time::Duration;
     use x509_cert::{time::Time, Certificate};
-    use x509_util::certs_to_bytes;
+    use x509_util::{build_chain, certs_to_bytes};
 
     use super::*;
-
-    /// Builds a certificate chain from the the given PEM files
-    macro_rules! build_chain {
-        ($($root_file:expr),+) => {{
-            let mut chain = Vec::new();
-            $(
-                chain.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
-            )*
-            chain
-        }}
-    }
 
     #[test]
     fn test_tbs_cert_to_log_entry() {

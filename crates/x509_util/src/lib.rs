@@ -313,6 +313,18 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     }
 }
 
+/// Builds a certificate chain from the the given PEM files
+#[macro_export]
+macro_rules! build_chain {
+        ($($root_file:expr),+) => {{
+            let mut chain = Vec::new();
+            $(
+                chain.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
+            )*
+            chain
+        }}
+    }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,14 +350,8 @@ mod tests {
         ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $want_err:expr; $want_chain_len:expr) => {
             #[test]
             fn $name() {
-                let mut roots = Vec::new();
-                $(
-                    roots.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
-                )*
-                let mut chain = Vec::new();
-                $(
-                    chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
-                )*
+                let roots = build_chain!($($root_file),*);
+                let chain = build_chain!($($chain_file),*);
 
                 let result = validate_chain_lax(
                         &crate::certs_to_bytes(&chain).unwrap(),
