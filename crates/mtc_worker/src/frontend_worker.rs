@@ -9,7 +9,7 @@ use crate::{
 };
 use der::{
     asn1::{SetOfVec, UtcTime, Utf8StringRef},
-    Any, Tag,
+    Any, Encode, Tag,
 };
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
@@ -306,6 +306,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> {
     let params = &CONFIG.logs[name];
     let req: AddEntryRequest = req.json().await?;
@@ -335,8 +336,9 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         ),
     };
 
-    let pending_entry =
-        match mtc_api::validate_chain(&req.chain, load_roots(env, name).await?, issuer, validity) {
+    let roots = load_roots(env, name).await?;
+    let (pending_entry, found_root_idx) =
+        match mtc_api::validate_chain(&req.chain, roots, issuer, validity) {
             Ok(v) => v,
             Err(e) => {
                 log::debug!("{name}: Bad request: {e}");
@@ -362,17 +364,24 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     // Entry is not cached, so we need to sequence it.
 
-    // First persist issuers.
-    let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-    generic_log_worker::upload_issuers(
-        &public_bucket,
-        &req.chain[1..]
+    // First persist issuers. Use a block so memory is deallocated sooner.
+    {
+        let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
+        let mut issuers = req.chain[1..]
             .iter()
             .map(Vec::as_slice)
-            .collect::<Vec<&[u8]>>(),
-        name,
-    )
-    .await?;
+            .collect::<Vec<&[u8]>>();
+
+        // Make sure the found root is persisted as well, if the add-chain
+        // request did not include the root.
+        let root_bytes;
+        if let Some(idx) = found_root_idx {
+            root_bytes = roots.certs[idx].to_der().map_err(|e| e.to_string())?;
+            issuers.push(&root_bytes);
+        }
+
+        generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
+    }
 
     // Submit entry to be sequenced, either via a batcher or directly to the
     // sequencer.

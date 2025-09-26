@@ -167,28 +167,46 @@ pub enum HookOrValidationError<T> {
     Validation(#[from] ValidationError),
 }
 
-/// Validates a certificate chain. This is not a super strict validation function. Its purpose is to
-/// reject obviously bad certificate chains. Specifically, this checks
+/// Validates a certificate chain. This is not a super strict validation
+/// function. Its purpose is to reject obviously bad certificate chains.
+/// Specifically, this does the following checks:
 ///
-/// 1. Each certificate in the chain signs the previuos certificate. Extra intermediate certs aren't allowed.
-/// 2. Every intermediate certificate has a `BasicConstraints` extension with `ca = true`
-/// 3. The final cert in the chain is a root or a cert signed by a root (this is actually stricter
-///   than some other verification algorithms).
-/// 4. The `not-after` date of the leaf certificate falls within the given range
+/// 1. Each certificate in the chain signs the previous certificate. Extra
+///    intermediate certs aren't allowed.
+/// 2. Each certificate in the chain is well-formed, meaning the signature
+///    algorithm used to sign it matches the signature algorithm field in the
+///    `TBSCertificate`.
+/// 3. Every intermediate certificate has a `BasicConstraints` extension with
+///    `ca = true`
+/// 4. The final cert in the chain is a root or a cert signed by a root (this is
+///    actually stricter than some other verification algorithms).
+/// 5. The `not_after` date of the leaf certificate falls within the given
+///    range.
 ///
-/// # Inputs
+/// # Arguments
 /// * `raw_chain` — A list of DER-encoded certificates, starting from the leaf
 /// * `roots` — The trusted root list
-/// * `not_after_start` — The earliest permissible `not_after` value for the leaf
-/// * `not_after_end` — The earliest non-permissible `not_after` value for the leaf
-/// * `hook` — A closure that the leaf, intermediate certs, and a list of fingerprints of the full
-///   chain (including inferred root if there is one), and index of the inferred root (if there is
-///   one); and returns a value or error of its own.
+/// * `not_after_start` — The earliest permissible `not_after` value for the
+///   leaf
+/// * `not_after_end` — The earliest non-permissible `not_after` value for the
+///   leaf
+/// * `hook` — A closure that the leaf, intermediate certs, and a list of
+///   fingerprints of the full chain (including inferred root if there is one),
+///   and index of the inferred root (if there is one); and returns a value or
+///   error of its own.
+///
+/// # Arguments for function closure `F`
+/// * `leaf` - The leaf of the bootstrap chain
+/// * `chain_certs` - A chain of certificates that authenticate the leaf, ending
+///   in a trusted root. This can be empty if the leaf itself is a trusted root.
+/// * `chain_fingerprints` - The hashes of `chain_certs`
+/// * `found_root_idx` - If `raw_chain` did not already contain a trusted root,
+///   the index in `roots` of the trusted root
 ///
 /// # Errors
 ///
-/// Returns a `ValidationError` if the chain fails to validate. Returns an error of type `E` if the
-/// hook errors.
+/// Returns a `ValidationError` if the chain fails to validate. Returns an error
+/// of type `E` if the hook errors.
 pub fn validate_chain_lax<T, E, F>(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
@@ -222,6 +240,8 @@ where
         return Err(ValidationError::InvalidLeaf.into());
     }
 
+    // Keep the owned certs in scope, but we'll create a vector of references
+    // below so we can append the found root without needing to clone it.
     let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
         .iter()
         .map(|bytes| Certificate::from_der(bytes))
@@ -236,7 +256,7 @@ where
         }
     }
 
-    // All the intermediates plus the inferred root (we'll add it later)
+    // All the intermediates plus the found root (we'll add it later).
     let mut chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
