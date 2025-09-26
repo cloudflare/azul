@@ -217,15 +217,13 @@ pub fn validate_chain_lax<T, E, F>(
 where
     F: FnOnce(Certificate, Vec<&Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
 {
-    if raw_chain.is_empty() {
-        return Err(ValidationError::EmptyChain.into());
-    }
+    // Parse the first element of the chain, i.e., the leaf.
+    let leaf = match raw_chain.first() {
+        Some(cert) => Certificate::from_der(cert).map_err(ValidationError::from)?,
+        None => return Err(ValidationError::EmptyChain.into()),
+    };
 
-    // Parse the first element of the chain, i.e., the leaf
-    // The first element exists because we just checked the chain is not empty
-    let leaf = Certificate::from_der(&raw_chain[0]).map_err(ValidationError::from)?;
-
-    // Check whether the expiry date is within the acceptable range
+    // Check whether the expiry date is within the acceptable range.
     let not_after = u64::try_from(
         leaf.tbs_certificate
             .validity
