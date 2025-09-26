@@ -37,6 +37,8 @@ pub enum StaticCTError {
     InvalidLeaf,
     #[error("CT poison extension is not critical or invalid")]
     InvalidCTPoison,
+    #[error("missing precertificate issuer")]
+    MissingPrecertIssuer,
     #[error("missing precertificate signing certificate issuer")]
     MissingPrecertSigningCertificateIssuer,
     #[error(
