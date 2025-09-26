@@ -568,17 +568,18 @@ pub fn validate_correspondence(
             ));
         }
 
-        // If no extensions, we're done. If mismatched, that's an error
-        match (&log_entry.extensions, &bootstrap.extensions) {
-            (None, None) => return Ok(()),
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(MtcError::Dynamic("mismatched extensions".into()))
-            }
-            _ => {}
-        };
-        // Otherwise both the log entry and bootstrap cert have extensions
-        let log_entry_extensions = log_entry.extensions.as_ref().unwrap();
-        let mut bootstrap_extensions = bootstrap.extensions.unwrap();
+        let (log_entry_extensions, mut bootstrap_extensions) =
+            match (&log_entry.extensions, bootstrap.extensions) {
+                // If no extensions in either entry or bootstrap, we're done.
+                (None, None) => return Ok(()),
+                // If mismatched, that's an error.
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(MtcError::Dynamic("mismatched extensions".into()))
+                }
+                // Otherwise both the log entry and bootstrap cert have
+                // extensions. Check them below.
+                (Some(log_ext), Some(boot_ext)) => (log_ext, boot_ext),
+            };
 
         // Check and filter bootstrap extensions.
         filter_extensions(&mut bootstrap_extensions)?;
