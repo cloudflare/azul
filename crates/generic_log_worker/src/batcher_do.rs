@@ -154,7 +154,7 @@ impl GenericBatcher {
                 } else {
                     // Failed to sequence this entry, either due to an error
                     // submitting the batch or rate limiting at the Sequencer.
-                    Response::error("rate limited", 429)
+                    Response::error("sequencing error", 503)
                 };
                 *self.in_flight.borrow_mut() -= 1;
 
