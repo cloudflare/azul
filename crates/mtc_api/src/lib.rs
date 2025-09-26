@@ -498,6 +498,7 @@ pub fn tbs_cert_to_log_entry(
 ///
 /// Returns an error if either certificate is invalid, or if the bootstrap
 /// certificate doesn't cover the log entry.
+#[allow(clippy::too_many_lines)]
 pub fn validate_correspondence(
     log_entry: &TbsCertificateLogEntry,
     raw_chain: &[Vec<u8>],
@@ -506,8 +507,8 @@ pub fn validate_correspondence(
     // We will run ordinary chain validation on the given chain. After, we will do additional
     // validation, expressed in the below closure.
     let validator_hook = |leaf: Certificate,
-                          intermediates: Vec<&Certificate>,
-                          _full_chain_fingerprints: Vec<[u8; 32]>,
+                          chain_certs: Vec<&Certificate>,
+                          _chain_fingerprints: Vec<[u8; 32]>,
                           _found_root_idx: Option<usize>|
      -> Result<(), MtcError> {
         let bootstrap = leaf.tbs_certificate.clone();
@@ -519,7 +520,7 @@ pub fn validate_correspondence(
         }
         // Make sure the validity is contained within the validity of every cert in
         // the chain.
-        for cert in core::iter::once(&leaf).chain(intermediates) {
+        for cert in core::iter::once(&leaf).chain(chain_certs) {
             if log_entry.validity.not_before.to_unix_duration().lt(&cert
                 .tbs_certificate
                 .validity
@@ -646,10 +647,10 @@ pub fn validate_chain(
     // We will run the ordinary chain validation on our input, but we have some post-processing we
     // need to do too. Namely we need to adjust the validity period of the provided bootstrap cert,
     // and then construct a pending log entry. We do this in the validation hook.
-    let validation_hook = |leaf: Certificate, intermediates: Vec<&Certificate>, _, _| {
+    let validation_hook = |leaf: Certificate, chain_certs: Vec<&Certificate>, _, _| {
         // Adjust the validity bound to the overlapping part of validity periods of
         // all certificates in the chain.
-        for cert in std::iter::once(&leaf).chain(intermediates) {
+        for cert in std::iter::once(&leaf).chain(chain_certs) {
             if validity.not_before.to_unix_duration().lt(&cert
                 .tbs_certificate
                 .validity

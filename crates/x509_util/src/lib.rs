@@ -237,7 +237,7 @@ where
     }
 
     // All the intermediates plus the inferred root (we'll add it later)
-    let chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
+    let mut chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
     let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
         .iter()
         .map(|v| Sha256::digest(v).into())
@@ -284,6 +284,7 @@ where
         let root = &roots.certs[found_idx];
         let bytes = root.to_der().map_err(ValidationError::from)?;
 
+        chain_certs.push(root);
         chain_fingerprints.push(Sha256::digest(bytes).into());
     }
 

@@ -95,8 +95,8 @@ pub fn partially_validate_chain(
     // that are particular to CT, and we need to collect information along the way. So define a hook
     // for the validator that does these checks and returns a pending log entry
     let validator_hook = |leaf: Certificate,
-                          intermediates: Vec<&Certificate>,
-                          full_chain_fingerprints: Vec<[u8; 32]>,
+                          chain_certs: Vec<&Certificate>,
+                          chain_fingerprints: Vec<[u8; 32]>,
                           found_root_idx: Option<usize>|
      -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
         // Check if the CT poison extension is present. If present, it must be critical.
@@ -119,7 +119,7 @@ pub fn partially_validate_chain(
         }
 
         // Record if this is a precertificate signing certificate.
-        let has_precert_signing_cert = match intermediates.first() {
+        let has_precert_signing_cert = match chain_certs.first() {
             Some(first_intermediate) => is_leaf_precert && is_pre_issuer(first_intermediate)?,
             None => false,
         };
@@ -131,20 +131,12 @@ pub fn partially_validate_chain(
             let mut pre_issuer: Option<&TbsCertificate> = None;
             let issuer_key_hash: [u8; 32];
             if has_precert_signing_cert {
-                pre_issuer = Some(&intermediates[0].tbs_certificate);
-                if full_chain_fingerprints.len() < 2 {
+                pre_issuer = Some(&chain_certs[0].tbs_certificate);
+                if chain_certs.len() < 2 {
                     return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
                 }
-
-                // The second intermediate exists because of the length check above. So it's either
-                // provided in `intermediates` or it's a found root (hence we can unwrap).
-                let second_intermediate = if intermediates.len() > 1 {
-                    intermediates[1]
-                } else {
-                    &roots.certs[found_root_idx.unwrap()]
-                };
                 issuer_key_hash = Sha256::digest(
-                    second_intermediate
+                    chain_certs[1]
                         .tbs_certificate
                         .subject_public_key_info
                         .to_der()?,
@@ -152,7 +144,7 @@ pub fn partially_validate_chain(
                 .into();
             } else {
                 issuer_key_hash = Sha256::digest(
-                    intermediates[0]
+                    chain_certs[0]
                         .tbs_certificate
                         .subject_public_key_info
                         .to_der()?,
@@ -174,7 +166,7 @@ pub fn partially_validate_chain(
             StaticCTPendingLogEntry {
                 certificate,
                 precert_opt,
-                chain_fingerprints: full_chain_fingerprints,
+                chain_fingerprints,
             },
             found_root_idx,
         ))
