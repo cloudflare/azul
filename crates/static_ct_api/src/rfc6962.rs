@@ -99,12 +99,6 @@ pub fn partially_validate_chain(
                           full_chain_fingerprints: Vec<[u8; 32]>,
                           found_root_idx: Option<usize>|
      -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
-        // Reject mismatched signature algorithms:
-        // https://github.com/google/certificate-transparency-go/pull/702.
-        for cert in core::iter::once(&leaf).chain(intermediates.iter()) {
-            cert_well_formedness_check(cert)?;
-        }
-
         // Check if the CT poison extension is present. If present, it must be critical.
         let is_leaf_precert = is_precert(&leaf)?;
         if is_leaf_precert != expect_precert {
@@ -302,33 +296,15 @@ fn build_precert_tbs(
     Ok(tbs.to_der()?)
 }
 
-// Verify that a cert is well-formed according to the CT spec
-fn cert_well_formedness_check(cert: &Certificate) -> Result<(), StaticCTError> {
-    // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
-    if cert.signature_algorithm != cert.tbs_certificate.signature {
-        Err(StaticCTError::MismatchingSigAlg)
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::prelude::*;
-    use der::{Decode, DecodePem};
+    use der::Decode;
     use x509_verify::x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
-    }
-
-    #[test]
-    fn test_mismatched_sig_alg() {
-        let cert =
-            Certificate::from_pem(include_bytes!("../tests/mismatching-sig-alg.pem")).unwrap();
-        // Mismatched signature on leaf.
-        cert_well_formedness_check(&cert).unwrap_err();
     }
 
     macro_rules! test_is_precert {
