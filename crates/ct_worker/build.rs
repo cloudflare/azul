@@ -58,14 +58,12 @@ fn main() {
         }
     }
 
-    // Get and validate roots from an embedded roots file, which must exist but
-    // can be empty unless 'enable_ccadb_roots' is set to false. If
-    // 'enable_ccadb_roots' is set to true, the log shard will combine trusted
-    // roots from the embedded roots file and from a roots file loaded from
-    // Workers KV.
+    // Get and validate roots from an embedded roots file, which must exist if
+    // 'enable_ccadb_roots' is false. If 'enable_ccadb_roots' is true, the log
+    // shard will combine trusted roots from the embedded roots file and from a
+    // roots file loaded from Workers KV.
     let roots_file: &str = &format!("roots.{env}.pem");
     let roots_file_exists = fs::exists(roots_file).expect("failed to check if file exists");
-    // If 'enable_ccadb_roots' is
     if roots_file_exists {
         let roots =
             Certificate::load_pem_chain(&fs::read(roots_file).expect("failed to read roots file"))
