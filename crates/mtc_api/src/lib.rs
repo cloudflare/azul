@@ -589,7 +589,7 @@ pub fn validate_correspondence(
             return Err(MtcError::Dynamic(
                 "bootstrap extension lengths differ".into(),
             ));
-        };
+        }
 
         let bootstrap_extensions_map = bootstrap_extensions
             .into_iter()
@@ -627,7 +627,9 @@ pub fn validate_correspondence(
         Ok(())
     };
 
-    // Run the validation logic with the above validation hook
+    // Run the validation logic with the above validation hook. We do
+    // not give `validate_chain_lax` a window for the `not_after` validity,
+    // since validity is checked within the validator hook.
     validate_chain_lax(raw_chain, roots, None, None, validator_hook).map_err(|e| match e {
         x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,
@@ -635,6 +637,26 @@ pub fn validate_correspondence(
 }
 
 /// Parse and validate a bootstrap chain, returning a pending log entry.
+///
+/// # Arguments
+///
+/// * `raw_chain` - The 'bootstrap' chain of certificates submitted to the
+///   `add-entry` endpoint. Each entry must sign the previous entry, and the
+///   chain must start with a leaf certificate and end with a certificate that
+///   is a trusted root or is signed by a trusted root.
+/// * `roots` - A certificate pool containing the trusted roots.
+/// * `issuer` - The issuer name of the Merkle Tree CA, to replace the issuer in
+///   the bootstrap certificate.
+/// * `validity` - A bound on the maximum validity period for the returned
+///   Merkle Tree log entry, based on the Merkle Tree CA's parameters. This
+///   bound is further adjusted to ensure that it is covered by the bootstrap
+///   chain.
+///
+/// # Returns
+///
+/// Returns a pending Merkle Tree log entry derived from the bootstrap chain and
+/// other provided parameters and the inferred root, if a root had to be
+/// inferred.
 ///
 /// # Errors
 ///
@@ -644,11 +666,14 @@ pub fn validate_chain(
     roots: &CertPool,
     issuer: RdnSequence,
     mut validity: Validity,
-) -> Result<BootstrapMtcPendingLogEntry, MtcError> {
+) -> Result<(BootstrapMtcPendingLogEntry, Option<usize>), MtcError> {
     // We will run the ordinary chain validation on our input, but we have some post-processing we
     // need to do too. Namely we need to adjust the validity period of the provided bootstrap cert,
     // and then construct a pending log entry. We do this in the validation hook.
-    let validation_hook = |leaf: Certificate, chain_certs: Vec<&Certificate>, _, _| {
+    let validator_hook = |leaf: Certificate,
+                          chain_certs: Vec<&Certificate>,
+                          chain_fingerprints: Vec<[u8; 32]>,
+                          found_root_idx: Option<usize>| {
         // Adjust the validity bound to the overlapping part of validity periods of
         // all certificates in the chain.
         for cert in std::iter::once(&leaf).chain(chain_certs) {
@@ -682,15 +707,11 @@ pub fn validate_chain(
         }
 
         let mut bootstrap = Vec::new();
+        // SAFETY: `validate_chain_lax` checks that `raw_chain` is non-empty. We
+        // use `raw_chain[0]` here instead of `leaf` to avoid having to
+        // re-encode it to DER format.
         bootstrap.write_length_prefixed(&raw_chain[0], 3)?;
-        bootstrap.write_length_prefixed(
-            &raw_chain[1..]
-                .iter()
-                .map(Sha256::digest)
-                .collect::<Vec<_>>()
-                .concat(),
-            2,
-        )?;
+        bootstrap.write_length_prefixed(&chain_fingerprints.concat(), 2)?;
 
         let mut bootstrap_tile_entry = Vec::new();
         bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
@@ -706,13 +727,13 @@ pub fn validate_chain(
                 .encode()?,
             },
         };
-        Ok(pending_entry)
+        Ok((pending_entry, found_root_idx))
     };
 
-    // Run the validation and return the hook-constructed pending entry. We do not give the
-    // validator a window for the `not_after` validity, since we already know the `not_after` we're
-    // giving it, and it's quite short.
-    let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validation_hook);
+    // Run the validation and return the hook-constructed pending entry. We do
+    // not give `validate_chain_lax` a window for the `not_after` validity,
+    // since validity is checked within the validator hook.
+    let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validator_hook);
     pending_entry.map_err(|e| match e {
         x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,
