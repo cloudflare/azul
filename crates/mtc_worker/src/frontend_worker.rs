@@ -21,7 +21,7 @@ use generic_log_worker::{
 };
 use mtc_api::{
     serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
-    LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
+    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,14 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             // Now that we've validated the log name, use an inner router to
             // handle the request.
             Router::with_data(name)
+                .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
+                    Response::from_json(&GetRootsResponse {
+                        certificates: x509_util::certs_to_bytes(
+                            &load_roots(&ctx.env, ctx.data).await?.certs,
+                        )
+                        .unwrap(),
+                    })
+                })
                 .post_async("/logs/:log/add-entry", |req, ctx| async move {
                     add_entry(req, &ctx.env, ctx.data).await
                 })

@@ -120,8 +120,39 @@ async fn load_roots(env: &Env, name: &str) -> Result<&'static CertPool> {
                     .await?
                     .ok_or(format!("{name}: '{CCADB_ROOTS_FILENAME}' not found in KV"))?
             };
+
             pool.append_certs_from_pem(pem.as_bytes())
                 .map_err(|e| format!("failed to add CCADB certs to pool: {e}"))?;
+
+            // Add additional roots when the 'dev-bootstrap-roots' feature is
+            // enabled.
+            //
+            // A note on the differences between how roots are handled for the
+            // MTC vs CT applications:
+            //
+            // The purpose of CT is to observe certificates but not police them.
+            // As long as it's not a spam vector, we're generally willing to
+            // accept any root certificates that have been trusted by at least
+            // one major root program during the log shard's lifetime. Roots
+            // aren't removed from the list once they're added in order to keep
+            // a better record. We have the ability to add in custom roots from
+            // a per-environment roots file too, in order to support test CAs.
+            //
+            // For bootstrap MTC, the roots are meant to ensure that the log
+            // only accepts bootstrap MTC chains that will be trusted by Chrome,
+            // since Chrome might reject an entire batch of MTCs if there's a
+            // single untrusted entry. Thus, we want to keep the trusted roots
+            // as a subset of Chrome's trust store. We're using Mozilla's CRLite
+            // filters to check for revocation, so we need to be a subset of
+            // Mozilla's trust store too. When either root program stops
+            // trusting a root, we also need to remove it from our trust store.
+            // Given that, we gate the ability to add in custom roots behind the
+            // 'dev-bootstrap-roots' feature flag.
+            #[cfg(feature = "dev-bootstrap-roots")]
+            {
+                pool.append_certs_from_pem(include_bytes!("../dev-bootstrap-roots.pem"))
+                    .map_err(|e| format!("failed to add dev certs to pool: {e}"))?;
+            }
 
             Ok(pool)
         })
