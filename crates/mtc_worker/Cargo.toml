@@ -11,6 +11,9 @@ description = "An implementation of a Merkle Tree Certificates CA on Cloudflare 
 categories = ["cryptography"]
 keywords = ["certificate", "transparency", "crypto", "pki"]
 
+[features]
+dev-bootstrap-roots = []
+
 [package.metadata.release]
 release = false
 

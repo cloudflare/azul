@@ -123,6 +123,15 @@ pub struct AddEntryResponse {
     pub timestamp: UnixTimestamp,
 }
 
+/// Get-roots response. This is in the same format as the RFC 6962 get-roots
+/// response, which is the base64 encoding of the DER-encoded certificate bytes.
+#[serde_as]
+#[derive(Serialize)]
+pub struct GetRootsResponse {
+    #[serde_as(as = "Vec<Base64>")]
+    pub certificates: Vec<Vec<u8>>,
+}
+
 /// A wrapper around `TlogTilesPendingLogEntry` that supports auxiliary bootstrap data.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct BootstrapMtcPendingLogEntry {

@@ -104,8 +104,12 @@ impl CertPool {
     ///
     /// Returns an error if there are DER encoding issues.
     pub fn append_certs_from_pem(&mut self, input: &[u8]) -> Result<(), DerError> {
-        for cert in Certificate::load_pem_chain(input)? {
-            self.add_cert(cert)?;
+        // Until next x509-cert release, load_pem_chain doesn't support an empty
+        // input: https://github.com/RustCrypto/formats/pull/1965
+        if !input.is_empty() {
+            for cert in Certificate::load_pem_chain(input)? {
+                self.add_cert(cert)?;
+            }
         }
         Ok(())
     }
