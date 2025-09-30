@@ -349,7 +349,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         match mtc_api::validate_chain(&req.chain, roots, issuer, validity) {
             Ok(v) => v,
             Err(e) => {
-                log::debug!("{name}: Bad request: {e}");
+                log::warn!("{name}: Bad request: {e}");
                 return Response::error("Bad request", 400);
             }
         };
