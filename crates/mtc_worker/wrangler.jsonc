@@ -81,6 +81,12 @@
                 "pattern": "bootstrap-mtca.cloudflareresearch.com",
                 "custom_domain": true
             },
+            "kv_namespaces": [
+                {
+                    "id": "e4aab0c89ebe492c9c81c444c78a31ff",
+                    "binding": "ccadb_roots"
+                }
+            ],
             "r2_buckets": [
                 {
                     "bucket_name": "bootstrap-mtca-shard1",
