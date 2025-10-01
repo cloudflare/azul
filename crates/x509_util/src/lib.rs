@@ -154,8 +154,8 @@ pub enum ValidationError {
     InvalidLeaf,
     #[error("invalid link in chain")]
     InvalidLinkInChain,
-    #[error("intermediate missing CA basic constraint")]
-    IntermediateMissingCaBasicConstraint,
+    #[error("missing or invalid basic constraints")]
+    InvalidBasicConstraints,
     #[error("issuer not in root store: {to_verify_issuer}")]
     NoPathToTrustedRoot { to_verify_issuer: String },
     #[error("mismatching signature algorithm identifier")]
@@ -268,7 +268,7 @@ where
     // Walk up the chain, ensuring that each certificate signs the previous one.
     // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
     let mut to_verify = &leaf;
-    for cert in &chain_certs {
+    for (path_len, cert) in chain_certs.iter().enumerate() {
         // Check that this cert signs the previous one in the chain.
         if !is_link_valid(to_verify, cert) {
             return Err(ValidationError::InvalidLinkInChain.into());
@@ -281,9 +281,22 @@ where
             .tbs_certificate
             .get::<BasicConstraints>()
             .map_err(ValidationError::from)?
-            .is_none_or(|(_, bc)| !bc.ca)
+            .is_none_or(|(_, bc)| {
+                // If the path length constraint is specified, check it. The
+                // path length constraint gives the maximum number of
+                // intermediate certificates that can follow this certificate in
+                // a valid certification path. Note that the end-entity
+                // certificate is not included in this limit.
+                if bc
+                    .path_len_constraint
+                    .is_some_and(|max| path_len > (max as usize))
+                {
+                    return true;
+                }
+                !bc.ca
+            })
         {
-            return Err(ValidationError::IntermediateMissingCaBasicConstraint.into());
+            return Err(ValidationError::InvalidBasicConstraints.into());
         }
     }
 
@@ -452,6 +465,9 @@ mod tests {
         "../../static_ct_api/tests/leaf-cert.pem",
         "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem"
     );
+    // CT ignores invalid name constraints, and MTC ignores them if the
+    // extension is not marked critical. Other applications may wish to properly
+    // check name constraints.
     test_validate_chain_success!(
         valid_chain_with_invalid_name_constraints,
         2,
