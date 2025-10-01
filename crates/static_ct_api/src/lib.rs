@@ -33,6 +33,8 @@ pub enum StaticCTError {
     UnknownType,
     #[error("trailing data")]
     TrailingData,
+    #[error("invalid certificate chain per CT")]
+    InvalidChain,
     #[error("invalid leaf certificate per CT")]
     InvalidLeaf,
     #[error("CT poison extension is not critical or invalid")]
