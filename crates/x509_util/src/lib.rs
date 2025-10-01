@@ -154,8 +154,8 @@ pub enum ValidationError {
     InvalidLeaf,
     #[error("invalid link in chain")]
     InvalidLinkInChain,
-    #[error("intermediate missing CA basic constraint")]
-    IntermediateMissingCaBasicConstraint,
+    #[error("missing or invalid basic constraints")]
+    InvalidBasicConstraints,
     #[error("issuer not in root store: {to_verify_issuer}")]
     NoPathToTrustedRoot { to_verify_issuer: String },
     #[error("mismatching signature algorithm identifier")]
@@ -171,19 +171,38 @@ pub enum HookOrValidationError<T> {
     Validation(#[from] ValidationError),
 }
 
+pub struct ValidationOptions {
+    // If enabled, chain validation short-circuits as soon as either a trusted
+    // root or a certificate signed by a trusted root is found, and extraneous
+    // certificates at the end are discarded. This is used for MTC to support
+    // cross-signed chains, for example.
+    //
+    // If disabled, every certificate in the raw chain must be used in the
+    // verified chain. This is required for CT.
+    pub stop_on_first_trusted_cert: bool,
+
+    // Bounds on allowed NotAfter values appearing in the end-entity
+    // certificate. This is only used by CT.
+    pub not_after_start: Option<UnixTimestamp>,
+    pub not_after_end: Option<UnixTimestamp>,
+}
+
 /// Validates a certificate chain. This is not a super strict validation
 /// function. Its purpose is to reject obviously bad certificate chains.
 /// Specifically, this does the following checks:
 ///
-/// 1. Each certificate in the chain signs the previous certificate. Extra
-///    intermediate certs aren't allowed.
+/// 1. Each certificate in the chain signs the previous certificate.
 /// 2. Each certificate in the chain is well-formed, meaning the signature
 ///    algorithm used to sign it matches the signature algorithm field in the
 ///    `TBSCertificate`.
 /// 3. Every intermediate certificate has a `BasicConstraints` extension with
-///    `ca = true`
-/// 4. The final cert in the chain is a root or a cert signed by a root (this is
-///    actually stricter than some other verification algorithms).
+///    `ca = true`, and where path length constraints are met.
+/// 4. A cert in the chain is a root or a cert signed by a trusted root. If
+///    `stop_on_first_trusted_cert` is set, chain validation stops as soon as a
+///    path to a trusted root is found. This is useful, for example, to validate
+///    cross-signed chains where the final cert in the chain may not be trusted.
+///    Otherwise, all certs in the chain must be part of the path to a trusted
+///    root, as is required in CT.
 /// 5. The `not_after` date of the leaf certificate falls within the given
 ///    range.
 ///
@@ -214,20 +233,20 @@ pub enum HookOrValidationError<T> {
 pub fn validate_chain_lax<T, E, F>(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
-    not_after_start: Option<UnixTimestamp>,
-    not_after_end: Option<UnixTimestamp>,
+    opts: &ValidationOptions,
     hook: F,
 ) -> Result<T, HookOrValidationError<E>>
 where
     F: FnOnce(Certificate, Vec<&Certificate>, Vec<[u8; 32]>, Option<usize>) -> Result<T, E>,
 {
-    // Parse the first element of the chain, i.e., the leaf.
-    let leaf = match raw_chain.first() {
-        Some(cert) => Certificate::from_der(cert).map_err(ValidationError::from)?,
-        None => return Err(ValidationError::EmptyChain.into()),
-    };
+    let (leaf_der, intermediates_der) =
+        raw_chain.split_first().ok_or(ValidationError::EmptyChain)?;
+    let leaf = Certificate::from_der(leaf_der).map_err(ValidationError::from)?;
 
-    // Check whether the expiry date is within the acceptable range.
+    // Check that the leaf is well formed.
+    check_well_formedness(&leaf)?;
+
+    // Check whether the leaf expiry date is within the acceptable range.
     let not_after = u64::try_from(
         leaf.tbs_certificate
             .validity
@@ -236,87 +255,145 @@ where
             .as_millis(),
     )
     .map_err(|_| ValidationError::InvalidLeaf)?;
-    if not_after_start.is_some_and(|start| start > not_after)
-        || not_after_end.is_some_and(|end| end <= not_after)
+    if opts.not_after_start.is_some_and(|start| start > not_after)
+        || opts.not_after_end.is_some_and(|end| end <= not_after)
     {
         return Err(ValidationError::InvalidLeaf.into());
     }
 
-    // Keep the owned certs in scope, but we'll create a vector of references
-    // below so we can append the found root without needing to clone it.
-    let chain_certs_owned: Vec<Certificate> = raw_chain[1..]
-        .iter()
-        .map(|bytes| Certificate::from_der(bytes))
-        .collect::<Result<_, _>>()
-        .map_err(ValidationError::from)?;
+    // Intermediates that are part of the chain to a trusted root.
+    let mut validated_intermediates = Vec::new();
+    // The current certificate to be verified.
+    let mut current_cert = &leaf;
 
-    // Reject mismatched signature algorithms:
-    // https://github.com/google/certificate-transparency-go/pull/702.
-    for cert in core::iter::once(&leaf).chain(&chain_certs_owned) {
-        if !is_well_formed(cert) {
-            return Err(ValidationError::MismatchingSigAlg.into());
+    // The path to a trusted root, if one is found.
+    let mut path_to_root: Option<PathToRoot> = None;
+
+    // Walk up the chain, checking that each certificate signs the previous one.
+    for (i, intermediate_der) in intermediates_der.iter().enumerate() {
+        // Before parsing the intermediate, check if we can stop early.
+        if opts.stop_on_first_trusted_cert {
+            path_to_root = find_path_to_root(current_cert, roots, i)?;
+            if path_to_root.is_some() {
+                break;
+            }
         }
-    }
 
-    // All the intermediates plus the found root (we'll add it later).
-    let mut chain_certs = chain_certs_owned.iter().collect::<Vec<_>>();
-    let mut chain_fingerprints: Vec<[u8; 32]> = raw_chain[1..]
-        .iter()
-        .map(|v| Sha256::digest(v).into())
-        .collect();
+        // Parse the intermediate and make sure it is well formed.
+        let intermediate_cert =
+            Certificate::from_der(intermediate_der).map_err(ValidationError::from)?;
+        check_well_formedness(&intermediate_cert)?;
 
-    // Walk up the chain, ensuring that each certificate signs the previous one.
-    // This simplified chain validation is possible due to the constraints laid out in RFC 6962.
-    let mut to_verify = &leaf;
-    for cert in &chain_certs {
-        // Check that this cert signs the previous one in the chain.
-        if !is_link_valid(to_verify, cert) {
+        // Check basic constraints for the intermediate, passing in the number
+        // of preceding intermediates in the chain (excluding the leaf).
+        check_ca_basic_constraints(&intermediate_cert, i)?;
+
+        // Check that this intermediate signs the previous cert in the chain.
+        if !is_link_valid(current_cert, &intermediate_cert) {
             return Err(ValidationError::InvalidLinkInChain.into());
         }
-        to_verify = cert;
 
-        // Check that intermediates have the CA Basic Constraint.
-        // Precertificate signing certificates must also have CA:true.
-        if cert
-            .tbs_certificate
-            .get::<BasicConstraints>()
-            .map_err(ValidationError::from)?
-            .is_none_or(|(_, bc)| !bc.ca)
-        {
-            return Err(ValidationError::IntermediateMissingCaBasicConstraint.into());
-        }
+        // Add the intermediate to the validated chain.
+        validated_intermediates.push(intermediate_cert);
+
+        // Check this intermediate next.
+        current_cert = &validated_intermediates[i];
     }
 
-    // The last certificate in the chain is either a root certificate
-    // or a certificate that chains to a known root certificate.
-    let mut found_root_idx = None;
-    if !roots.includes(to_verify).map_err(ValidationError::from)? {
-        let Some(&found_idx) = roots
-            .find_potential_parents(to_verify)
-            .map_err(ValidationError::from)?
-            .iter()
-            .find(|&&roots_idx| is_link_valid(to_verify, &roots.certs[roots_idx]))
+    // If we haven't yet found a path to a trusted root, check if we can find
+    // one for the last cert in the chain. If we can't, fail chain validation.
+    let path_to_root = if let Some(path) = path_to_root {
+        path
+    } else {
+        let Some(path) = find_path_to_root(current_cert, roots, validated_intermediates.len())?
         else {
             return Err(ValidationError::NoPathToTrustedRoot {
-                to_verify_issuer: to_verify.tbs_certificate.issuer.to_string(),
+                to_verify_issuer: current_cert.tbs_certificate.issuer.to_string(),
             }
             .into());
         };
-        found_root_idx = Some(found_idx);
-        let root = &roots.certs[found_idx];
-        let bytes = root.to_der().map_err(ValidationError::from)?;
+        path
+    };
 
-        chain_certs.push(root);
-        chain_fingerprints.push(Sha256::digest(bytes).into());
-    }
+    // Prepare arguments for the validation hook.
+    let mut chain_certs = validated_intermediates.iter().collect::<Vec<_>>();
+    let mut chain_fingerprints = intermediates_der
+        .iter()
+        .take(validated_intermediates.len())
+        .map(|der| Sha256::digest(der).into())
+        .collect::<Vec<_>>();
+
+    // If the trusted root was not taken from the provided chain, add it and
+    // extract its index in the root pool.
+    let found_root_idx = {
+        match path_to_root {
+            PathToRoot::IsRoot => None,
+            PathToRoot::SignedByRoot(root_pool_idx) => {
+                // Append the trusted root to the validated chain.
+                let root = &roots.certs[root_pool_idx];
+                let root_der = root.to_der().map_err(ValidationError::from)?;
+                chain_certs.push(root);
+                chain_fingerprints.push(Sha256::digest(&root_der).into());
+                Some(root_pool_idx)
+            }
+        }
+    };
 
     hook(leaf, chain_certs, chain_fingerprints, found_root_idx).map_err(HookOrValidationError::Hook)
 }
 
+enum PathToRoot {
+    IsRoot,
+    SignedByRoot(usize),
+}
+
+/// Check for a path from the provided certificate to a trusted root. This can
+/// be the case if the cert itself is a trusted root, or if the certificate is
+/// signed by a trusted root. In the latter case, return the index in the cert
+/// pool of that root.
+///
+/// If no path to a trusted root is found, return `None`.
+///
+/// # Arguments
+///
+/// * `cert` - The cert for which to find a path to a trusted root.
+/// * `roots` - The cert pool of trusted roots.
+/// * `num_intermediates` - The number of intermediate certs preceding the cert
+///   in the chain. This is used for checking the path length basic constraint.
+fn find_path_to_root(
+    cert: &Certificate,
+    roots: &CertPool,
+    num_intermediates: usize,
+) -> Result<Option<PathToRoot>, ValidationError> {
+    // Check if the cert is itself a trusted root.
+    if roots.includes(cert).map_err(ValidationError::from)? {
+        return Ok(Some(PathToRoot::IsRoot));
+    }
+
+    // Check if the cert is signed by a trusted root.
+    if let Some(&found_idx) = roots
+        .find_potential_parents(cert)
+        .map_err(ValidationError::from)?
+        .iter()
+        .find(|&&roots_idx| {
+            is_link_valid(cert, &roots.certs[roots_idx])
+                && check_ca_basic_constraints(&roots.certs[roots_idx], num_intermediates).is_ok()
+        })
+    {
+        return Ok(Some(PathToRoot::SignedByRoot(found_idx)));
+    }
+
+    // No path to root found from this certificate.
+    Ok(None)
+}
+
 /// Verify that a cert is well-formed according to RFC 5280.
-fn is_well_formed(cert: &Certificate) -> bool {
+fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
     // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
-    cert.signature_algorithm == cert.tbs_certificate.signature
+    if cert.signature_algorithm != cert.tbs_certificate.signature {
+        return Err(ValidationError::MismatchingSigAlg);
+    }
+    Ok(())
 }
 
 /// Returns whether or not the given link in the chain is valid.
@@ -333,6 +410,42 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     } else {
         false
     }
+}
+
+/// Validate Basic Constraints for a CA certificate.
+///
+/// # Arguments
+///
+/// * `ca_cert` - The CA certificate to check.
+/// * `current_path_len` - The number of intermediate certificates preceding the
+///   CA certificate in the chain. Note that end-entity certs are not counted.
+fn check_ca_basic_constraints(
+    ca_cert: &Certificate,
+    current_path_len: usize,
+) -> Result<(), ValidationError> {
+    // Check the cert's basic constraints.
+    if ca_cert
+        .tbs_certificate
+        .get::<BasicConstraints>()
+        .map_err(ValidationError::from)?
+        .is_none_or(|(_, bc)| {
+            // If the path length constraint is specified, check it. The
+            // path length constraint gives the maximum number of
+            // intermediate certificates that can follow this certificate in
+            // a valid certification path. Note that the end-entity
+            // certificate is not included in this limit.
+            if bc
+                .path_len_constraint
+                .is_some_and(|max| current_path_len > (max as usize))
+            {
+                return true;
+            }
+            !bc.ca
+        })
+    {
+        return Err(ValidationError::InvalidBasicConstraints);
+    }
+    Ok(())
 }
 
 /// Builds a certificate chain from the the given PEM files
@@ -365,11 +478,11 @@ mod tests {
         ))
         .unwrap();
         // Mismatched signature on leaf.
-        assert!(!is_well_formed(&cert));
+        check_well_formedness(&cert).unwrap_err();
     }
 
     macro_rules! test_validate_chain {
-        ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $want_err:expr; $want_chain_len:expr) => {
+        ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $want_err:expr; $want_chain_len:expr; $stop_on_first_trusted_cert:expr) => {
             #[test]
             fn $name() {
                 let roots = build_chain!($($root_file),*);
@@ -378,99 +491,142 @@ mod tests {
                 let result = validate_chain_lax(
                         &crate::certs_to_bytes(&chain).unwrap(),
                         &CertPool::new(roots).unwrap(),
-                        $not_after_start,
-                        $not_after_end,
+                        &ValidationOptions {
+                            stop_on_first_trusted_cert: $stop_on_first_trusted_cert,
+                            not_after_start: $not_after_start,
+                            not_after_end: $not_after_end,
+                        },
                         |_, _, fingerprint_chain, _| {
                             assert_eq!(fingerprint_chain.len(), $want_chain_len);
                             Result::<(), ()>::Ok(())
                         },
-                    );
+                );
                 assert_eq!(result.is_err(), $want_err);
             }
         };
     }
 
     macro_rules! test_validate_chain_success {
-        ($name:ident, $want_chain_len:expr, $($chain_file:expr),+) => {
-            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; $want_chain_len);
+        ($name:ident; $want_chain_len:expr; $($chain_file:expr),+; $stop_on_first_trusted_cert:expr) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; false; $want_chain_len; $stop_on_first_trusted_cert);
         };
     }
 
     macro_rules! test_validate_chain_fail {
-        ($name:ident, $($chain_file:expr),+) => {
-            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; true; 0);
+        ($name:ident; $($chain_file:expr),+; $stop_on_first_trusted_cert:expr) => {
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; true; 0; $stop_on_first_trusted_cert);
         };
     }
 
     test_validate_chain_fail!(
-        missing_intermediate_ca,
-        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+        missing_intermediate_ca;
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem";
+        false
     );
     test_validate_chain_fail!(
-        wrong_cert_order,
+        wrong_cert_order;
         "../../static_ct_api/tests/fake-intermediate-cert.pem",
-        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem";
+        false
     );
     test_validate_chain_fail!(
-        unrelated_cert_in_chain,
+        unrelated_cert_in_chain;
         "../../static_ct_api/tests/fake-intermediate-cert.pem",
-        "../../static_ct_api/tests/test-cert.pem"
+        "../../static_ct_api/tests/test-cert.pem";
+        false
     );
     test_validate_chain_fail!(
-        unrelated_cert_after_chain,
+        unrelated_cert_after_chain;
         "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
         "../../static_ct_api/tests/fake-intermediate-cert.pem",
-        "../../static_ct_api/tests/test-cert.pem"
+        "../../static_ct_api/tests/test-cert.pem";
+        false
     );
     test_validate_chain_fail!(
-        mismatched_sig_alg_on_intermediate,
+        mismatched_sig_alg_on_intermediate;
         "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
-        "../../static_ct_api/tests/fake-intermediate-with-mismatching-sig-alg.pem"
+        "../../static_ct_api/tests/fake-intermediate-with-mismatching-sig-alg.pem";
+        false
     );
     test_validate_chain_success!(
-        valid_chain,
-        2,
+        valid_chain;
+        2;
         "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
-        "../../static_ct_api/tests/fake-intermediate-cert.pem"
+        "../../static_ct_api/tests/fake-intermediate-cert.pem";
+        false
     );
     test_validate_chain_success!(
-        valid_chain_with_policy_constraints,
-        2,
+        valid_chain_inc_root;
+        2;
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-ca-cert.pem";
+        false
+    );
+    test_validate_chain_fail!(
+        unrelated_cert_after_chain_inc_root;
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-ca-cert.pem",
+        "../../static_ct_api/tests/test-cert.pem";
+        false
+    );
+    test_validate_chain_success!(
+        unrelated_cert_after_chain_inc_root_allowed;
+        2;
+        "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-intermediate-cert.pem",
+        "../../static_ct_api/tests/fake-ca-cert.pem",
+        "../../static_ct_api/tests/test-cert.pem";
+        true
+    );
+    test_validate_chain_success!(
+        valid_chain_with_policy_constraints;
+        2;
         "../../static_ct_api/tests/leaf-cert.pem",
-        "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem"
+        "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem";
+        false
     );
     test_validate_chain_success!(
-        valid_chain_with_policy_constraints_inc_root,
-        2,
+        valid_chain_with_policy_constraints_inc_root;
+        2;
         "../../static_ct_api/tests/leaf-cert.pem",
         "../../static_ct_api/tests/fake-intermediate-with-policy-constraints-cert.pem",
-        "../../static_ct_api/tests/fake-root-ca-cert.pem"
+        "../../static_ct_api/tests/fake-root-ca-cert.pem";
+        false
     );
     test_validate_chain_success!(
-        valid_chain_with_name_constraints,
-        2,
+        valid_chain_with_name_constraints;
+        2;
         "../../static_ct_api/tests/leaf-cert.pem",
-        "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem"
+        "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem";
+        false
     );
+    // CT ignores invalid name constraints, and MTC ignores them if the
+    // extension is not marked critical. Other applications may wish to properly
+    // check name constraints.
     test_validate_chain_success!(
-        valid_chain_with_invalid_name_constraints,
-        2,
+        valid_chain_with_invalid_name_constraints;
+        2;
         "../../static_ct_api/tests/leaf-cert.pem",
-        "../../static_ct_api/tests/fake-intermediate-with-invalid-name-constraints-cert.pem"
+        "../../static_ct_api/tests/fake-intermediate-with-invalid-name-constraints-cert.pem";
+        false
     );
     test_validate_chain_success!(
-        valid_chain_of_len_4,
-        3,
-        "../../static_ct_api/tests/subleaf.chain"
+        valid_chain_of_len_4;
+        3;
+        "../../static_ct_api/tests/subleaf.chain";
+        false
     );
     test_validate_chain_fail!(
-        misordered_chain_of_len_4,
-        "../../static_ct_api/tests/subleaf.misordered.chain"
+        misordered_chain_of_len_4;
+        "../../static_ct_api/tests/subleaf.misordered.chain";
+        false
     );
 
     macro_rules! test_not_after {
         ($name:ident; $start:expr; $end:expr; $want_err:expr) => {
-            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem", "../../static_ct_api/tests/fake-intermediate-cert.pem"; $start; $end; $want_err; 2);
+            test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem", "../../static_ct_api/tests/fake-intermediate-cert.pem"; $start; $end; $want_err; 2; false);
         };
     }
     test_not_after!(not_after_no_range; None; None; false);
@@ -478,6 +634,6 @@ mod tests {
     test_not_after!(not_after_before_start; Some(parse_datetime("2020-01-01T00:00:00Z")); None; true);
     test_not_after!(not_after_after_end; None; Some(parse_datetime("1999-01-01T00:00:00Z")); true);
 
-    test_validate_chain!(intermediate_as_accepted_root; "../../static_ct_api/tests/fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 1);
-    test_validate_chain!(leaf_as_accepted_root; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 0);
+    test_validate_chain!(intermediate_as_accepted_root; "../../static_ct_api/tests/fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 1; false);
+    test_validate_chain!(leaf_as_accepted_root; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 0; false);
 }

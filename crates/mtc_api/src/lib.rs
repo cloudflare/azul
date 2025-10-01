@@ -40,7 +40,7 @@ use x509_cert::{
     time::Validity,
     Certificate, TbsCertificate,
 };
-use x509_util::{validate_chain_lax, CertPool};
+use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
 
 // The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
 // as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
@@ -639,7 +639,17 @@ pub fn validate_correspondence(
     // Run the validation logic with the above validation hook. We do
     // not give `validate_chain_lax` a window for the `not_after` validity,
     // since validity is checked within the validator hook.
-    validate_chain_lax(raw_chain, roots, None, None, validator_hook).map_err(|e| match e {
+    validate_chain_lax(
+        raw_chain,
+        roots,
+        &ValidationOptions {
+            stop_on_first_trusted_cert: true,
+            not_after_start: None,
+            not_after_end: None,
+        },
+        validator_hook,
+    )
+    .map_err(|e| match e {
         x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,
     })
@@ -742,7 +752,16 @@ pub fn validate_chain(
     // Run the validation and return the hook-constructed pending entry. We do
     // not give `validate_chain_lax` a window for the `not_after` validity,
     // since validity is checked within the validator hook.
-    let pending_entry = validate_chain_lax(raw_chain, roots, None, None, validator_hook);
+    let pending_entry = validate_chain_lax(
+        raw_chain,
+        roots,
+        &ValidationOptions {
+            stop_on_first_trusted_cert: true,
+            not_after_start: None,
+            not_after_end: None,
+        },
+        validator_hook,
+    );
     pending_entry.map_err(|e| match e {
         x509_util::HookOrValidationError::Validation(ve) => ve.into(),
         x509_util::HookOrValidationError::Hook(he) => he,

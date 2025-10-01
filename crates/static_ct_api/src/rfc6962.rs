@@ -41,7 +41,7 @@ use x509_cert::{
     },
     impl_newtype, Certificate, TbsCertificate,
 };
-use x509_util::{validate_chain_lax, CertPool};
+use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
 
 // Data structures for the [Static CT Submission APIs](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#submission-apis),
 // a subset of the APIs from [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962).
@@ -164,8 +164,11 @@ pub fn partially_validate_chain(
     let pending_entry = validate_chain_lax(
         raw_chain,
         roots,
-        not_after_start,
-        not_after_end,
+        &ValidationOptions {
+            stop_on_first_trusted_cert: false,
+            not_after_start,
+            not_after_end,
+        },
         validator_hook,
     );
     pending_entry.map_err(|e| match e {
@@ -352,14 +355,8 @@ mod tests {
         ($name:ident; $($root_file:expr),+; $($chain_file:expr),+; $not_after_start:expr; $not_after_end:expr; $expect_precert:expr; $require_server_auth_eku:expr; $want_err:expr; $want_chain_len:expr) => {
             #[test]
             fn $name() {
-                let mut roots = Vec::new();
-                $(
-                    roots.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
-                )*
-                let mut chain = Vec::new();
-                $(
-                    chain.append(&mut Certificate::load_pem_chain(include_bytes!($chain_file)).unwrap());
-                )*
+                let roots = x509_util::build_chain!($($root_file),*);
+                let chain = x509_util::build_chain!($($chain_file),*);
 
                 let result = partially_validate_chain(
                         &x509_util::certs_to_bytes(&chain).unwrap(),
@@ -399,6 +396,11 @@ mod tests {
     test_validate_chain!(intermediate_as_accepted_root; "../tests/fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 1);
 
     test_validate_chain!(leaf_as_accepted_root; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 0);
+
+    test_validate_chain!(valid_chain_inc_root;  "../../static_ct_api/tests/fake-ca-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem", "../tests/fake-intermediate-cert.pem", "../tests/fake-ca-cert.pem"; None; None; false; true; false; 2);
+
+    // CT does not allow extra certs at the end of the chain.
+    test_validate_chain!(unrelated_cert_after_chain_inc_root;  "../../static_ct_api/tests/fake-ca-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem", "../tests/fake-intermediate-cert.pem", "../tests/fake-ca-cert.pem", "../tests/test-cert.pem"; None; None; false; true; true; 0);
 
     #[test]
     fn test_build_precert_tbs() {
