@@ -302,6 +302,17 @@ where
 
     // If we haven't yet found a path to a trusted root, check if we can find
     // one for the last cert in the chain. If we can't, fail chain validation.
+    // At this point, `path_to_root` is `Some(...)` if all of the following
+    // conditions hold:
+    //
+    //     1. `opts.stop_on_first_trusted_cert` is set to true
+    //     2. The submitted cert chain contains at least one intermediate
+    //      (otherwise we never enter the above loop).
+    //     3. We found a path to a trusted cert and broke from the loop early,
+    //      before processing the last cert in the chain.
+    //
+    // Otherwise, we still need to try to find a path to a trusted root for the
+    // last cert in the chain.
     let path_to_root = if let Some(path) = path_to_root {
         path
     } else {
@@ -417,11 +428,11 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
 /// # Arguments
 ///
 /// * `ca_cert` - The CA certificate to check.
-/// * `current_path_len` - The number of intermediate certificates preceding the
-///   CA certificate in the chain. Note that end-entity certs are not counted.
+/// * `num_intermediates` - The number of intermediate certs preceding the cert
+///   in the chain. This is used for checking the path length basic constraint.
 fn check_ca_basic_constraints(
     ca_cert: &Certificate,
-    current_path_len: usize,
+    num_intermediates: usize,
 ) -> Result<(), ValidationError> {
     // Check the cert's basic constraints.
     if ca_cert
@@ -436,7 +447,7 @@ fn check_ca_basic_constraints(
             // certificate is not included in this limit.
             if bc
                 .path_len_constraint
-                .is_some_and(|max| current_path_len > (max as usize))
+                .is_some_and(|max| num_intermediates > (max as usize))
             {
                 return true;
             }
@@ -454,7 +465,7 @@ macro_rules! build_chain {
         ($($root_file:expr),+) => {{
             let mut chain = Vec::new();
             $(
-                chain.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).unwrap());
+                chain.append(&mut Certificate::load_pem_chain(include_bytes!($root_file)).expect("failed to parse PEM file"));
             )*
             chain
         }}
@@ -517,7 +528,26 @@ mod tests {
             test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem", "../../static_ct_api/tests/fake-root-ca-cert.pem", "../../static_ct_api/tests/ca-cert.pem", "../../static_ct_api/tests/real-precert-intermediate.pem"; $($chain_file),+; None; None; true; 0; $stop_on_first_trusted_cert);
         };
     }
-
+    test_validate_chain!(
+        cloudflare_chain_with_cross_signed_gts_root_by_untrusted_globalsign_success;
+        "../../static_ct_api/tests/google-gts-root-r4.pem";
+        "../../static_ct_api/tests/cloudflare.pem";
+        None;
+        None;
+        false;
+        2;
+        true
+    );
+    test_validate_chain!(
+        cloudflare_chain_with_cross_signed_gts_root_by_untrusted_globalsign_fail;
+        "../../static_ct_api/tests/google-gts-root-r4.pem";
+        "../../static_ct_api/tests/cloudflare.pem";
+        None;
+        None;
+        true;
+        0;
+        false
+    );
     test_validate_chain_fail!(
         missing_intermediate_ca;
         "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem";
