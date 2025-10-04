@@ -230,6 +230,11 @@ pub struct ValidationOptions {
 ///
 /// Returns a `ValidationError` if the chain fails to validate. Returns an error
 /// of type `E` if the hook errors.
+///
+/// # Panics
+///
+/// This section is here to avoid linter complaints about the `unwrap()` below,
+/// but this function won't panic.
 pub fn validate_chain_lax<T, E, F>(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
@@ -296,8 +301,8 @@ where
         // Add the intermediate to the validated chain.
         validated_intermediates.push(intermediate_cert);
 
-        // Check this intermediate next.
-        current_cert = &validated_intermediates[i];
+        // Get a reference to the intermediate we just pushed to check next.
+        current_cert = validated_intermediates.last().unwrap();
     }
 
     // If we haven't yet found a path to a trusted root, check if we can find
