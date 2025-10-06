@@ -510,7 +510,9 @@ pub fn verify_inclusion_proof(
         f_n >>= 1;
         s_n >>= 1;
     }
-    // 5. Compare sn to 0. Compare r against the root_hash. If sn is equal to 0 and r and the root_hash are equal, then the log has proven the inclusion of hash. Otherwise, fail the proof verification.
+    // 5. Compare sn to 0. Compare r against the root_hash. If sn is equal to 0
+    //    and r and the root_hash are equal, then the log has proven the
+    //    inclusion of hash. Otherwise, fail the proof verification.
     if s_n == 0 && r == root_hash {
         Ok(())
     } else {
@@ -646,10 +648,6 @@ pub fn verify_consistency_proof(
 /// # Errors
 ///
 /// Will return an error if proof verification fails.
-///
-/// # Panics
-///
-/// Will panic if there are internal math errors.
 pub fn verify_subtree_consistency_proof(
     proof: &Proof,
     n: u64,
@@ -658,101 +656,90 @@ pub fn verify_subtree_consistency_proof(
     subtree_hash: Hash,
 ) -> Result<(), TlogError> {
     let Subtree { lo: start, hi: end } = *m;
-    // 1. If end is n, run the following:
-    if end == n {
-        // 1. Set fn to start and sn to end - 1.
-        let mut f_n = start;
-        let mut s_n = end - 1;
-        // 2. Set r to node_hash.
-        let mut r = subtree_hash;
-        // 3. Until LSB(fn) is set or sn is 0, right-shift fn and sn equally.
-        while !lsb_set(f_n) && s_n != 0 {
+
+    // Check that `[start, end)` is a valid subtree, and that `end <= n`. If either do not hold, fail proof verification. These checks imply `0 <= start < end <= n`.
+    if end > n {
+        return Err(TlogError::InvalidProof);
+    }
+
+    // Set `fn` to `start`, `sn` to `end - 1`, and `tn` to `n - 1`.
+    let mut f_n = start;
+    let mut s_n = end - 1;
+    let mut t_n = n - 1;
+    let mut f_r: Hash;
+    let mut s_r: Hash;
+    // If `sn` is `tn`, then:
+    if s_n == t_n {
+        // Until `fn` is `sn`, right-shift `fn`, `sn`, and `tn` equally.
+        while f_n != s_n {
             f_n >>= 1;
             s_n >>= 1;
+            t_n >>= 1;
         }
-        // 4. For each value p in the proof array:
-        for p in proof {
-            // 1. If sn is 0, then stop iteration and fail the proof verification.
-            if s_n == 0 {
-                return Err(TlogError::InvalidProof);
-            }
-            // 2. Set r to HASH(0x01, || p || r).
-            r = node_hash(*p, r);
-            // 3. Until LSB(sn) is set, right-shift sn.
-            while !lsb_set(s_n) {
-                s_n >>= 1;
-            }
-            // 4. Right-shift sn once more.
-            s_n >>= 1;
-        }
-        // 5. Compare sn to 0 and r to root_hash. If either is not equal, fail the proof verification. If all are equal, accept the proof.
-        if s_n == 0 && r == root_hash {
-            Ok(())
-        } else {
-            Err(TlogError::InvalidProof)
-        }
-    }
-    // 2. Otherwise, run the following:
-    else {
-        // 1. If proof is an empty array, stop and fail verification.
-        if proof.is_empty() {
-            return Err(TlogError::InvalidProof);
-        }
-        // 2. If end - start is an exact power of 2, prepend node_hash to the proof array.
-        let mut proof = proof.clone();
-        if (end - start).is_power_of_two() {
-            proof.insert(0, subtree_hash);
-        }
-        // 3. Set fn to start, sn to end - 1, and tn to n - 1.
-        let mut f_n = start;
-        let mut s_n = end - 1;
-        let mut t_n = n - 1;
-        // 4. Until LSB(sn) is not set or fn is equal to sn, right-shift fn, sn, and tn equally.
+    } else
+    // Otherwise:
+    {
+        // Until `LSB(sn)` is not set or `fn` is `sn`, right-shift `fn`, `sn`, and `tn` equally.
         while lsb_set(s_n) && f_n != s_n {
             f_n >>= 1;
             s_n >>= 1;
             t_n >>= 1;
         }
-        // 5. Set both fr and sr to the first value in the proof array.
-        let mut f_r = proof[0];
-        let mut s_r = proof[0];
-        // 6. For each subsequent value c in the proof array:
-        for c in proof.into_iter().skip(1) {
-            // 1. If tn is 0, then stop the iteration and fail the proof verification.
-            if t_n == 0 {
-                return Err(TlogError::InvalidProof);
-            }
-            // 2. If LSB(sn) is set, or if sn is equal to tn, then:
-            if lsb_set(s_n) || s_n == t_n {
-                // 1. If fn < sn, set fr to HASH(0x01 || c || fr).
-                if f_n < s_n {
-                    f_r = node_hash(c, f_r);
-                }
-                // 2. Set sr to HASH(0x01 || c || sr).
-                s_r = node_hash(c, s_r);
-                // 3. Until LSB(sn) is set, right-shift fn, sn, and tn equally.
-                while !lsb_set(s_n) {
-                    f_n >>= 1;
-                    s_n >>= 1;
-                    t_n >>= 1;
-                }
-            }
-            // 3. Otherwise:
-            else {
-                // 1. Set sr to HASH(0x01 || sr || c).
-                s_r = node_hash(s_r, c);
-            }
-            // 4. Right-shift fn, sn, and tn once more.
-            f_n >>= 1;
-            s_n >>= 1;
-            t_n >>= 1;
+    }
+    // If `fn` is `sn`, set `fr` and `sr` to `node_hash`.
+    let proof_offset;
+    if f_n == s_n {
+        f_r = subtree_hash;
+        s_r = subtree_hash;
+        proof_offset = 0;
+    } else
+    // Otherwise:
+    {
+        // If `proof` is an empty array, stop and fail verification.
+        if proof.is_empty() {
+            return Err(TlogError::InvalidProof);
         }
-        // 7. Compare tn to 0, fr to node_hash, and sr to root_hash. If any are not equal, fail the proof verification. If all are equal, accept the proof.
-        if t_n == 0 && f_r == subtree_hash && s_r == root_hash {
-            Ok(())
-        } else {
-            Err(TlogError::InvalidProof)
+        // Remove the first value of the `proof` array and set `fr` and `sr` to the removed value.
+        f_r = proof[0];
+        s_r = proof[0];
+        proof_offset = 1;
+    }
+    // For each value `c` in the `proof` array:
+    for &c in proof.iter().skip(proof_offset) {
+        // If `tn` is `0`, then stop the iteration and fail the proof verification.
+        if t_n == 0 {
+            return Err(TlogError::InvalidProof);
         }
+        // If `LSB(sn)` is set, or if `sn` is equal to `tn`, then:
+        if lsb_set(s_n) || s_n == t_n {
+            // If `fn < sn`, set `fr` to `HASH(0x01 || c || fr)`.
+            if f_n < s_n {
+                f_r = node_hash(c, f_r);
+            }
+            // Set `sr` to `HASH(0x01 || c || sr)`.
+            s_r = node_hash(c, s_r);
+            // Until `LSB(sn)` is set, right-shift `fn`, `sn`, and `tn` equally.
+            while !lsb_set(s_n) {
+                f_n >>= 1;
+                s_n >>= 1;
+                t_n >>= 1;
+            }
+        }
+        // Otherwise:
+        else {
+            // Set `sr` to `HASH(0x01 || sr || c)`.
+            s_r = node_hash(s_r, c);
+        }
+        // Right-shift `fn`, `sn`, and `tn` once more.
+        f_n >>= 1;
+        s_n >>= 1;
+        t_n >>= 1;
+    }
+    // Compare `tn` to `0`, `fr` to `node_hash`, and `sr` to `root_hash`. If any are not equal, fail the proof verification. If all are equal, accept the proof.
+    if t_n == 0 && f_r == subtree_hash && s_r == root_hash {
+        Ok(())
+    } else {
+        Err(TlogError::InvalidProof)
     }
 }
 
@@ -1321,6 +1308,8 @@ mod tests {
         verify_consistency_proof(&vec![], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
         verify_consistency_proof(&vec![], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
         verify_consistency_proof(&vec![], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
+        verify_consistency_proof(&vec![Hash::default()], 0, Hash::default(), 1, EMPTY_HASH)
+            .unwrap_err();
 
         // Tree with single leaf.
         verify_inclusion_proof(&vec![], 1, Hash::default(), 0, Hash::default()).unwrap();
