@@ -14,7 +14,9 @@ use der::{
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket,
-    log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
+    log_ops::{
+        prove_subtree_consistency, prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY,
+    },
     put_cache_entry_metadata, serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
@@ -28,7 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{NoteVerifier, VerifierList};
 use std::time::Duration;
-use tlog_tiles::{open_checkpoint, LeafIndex, PendingLogEntry, PendingLogEntryBlob};
+use tlog_tiles::{
+    open_checkpoint, CheckpointText, LeafIndex, PendingLogEntry, PendingLogEntryBlob,
+};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::{
@@ -69,6 +73,24 @@ pub struct GetCertificateResponse {
     #[serde_as(as = "Base64")]
     pub data: Vec<u8>,
     pub landmark_id: usize,
+}
+
+/// GET response structure for the `/get-landmark-bundle` endpoint
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct GetLandmarkBundleResponse {
+    #[serde_as(as = "Base64")]
+    pub checkpoint: Vec<u8>,
+    pub subtrees: Vec<SubtreeWithConsistencyProof>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct SubtreeWithConsistencyProof {
+    pub start: u64,
+    pub end: u64,
+    #[serde_as(as = "Vec<Base64>")]
+    pub consistency_proof: Vec<Vec<u8>>,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -128,39 +150,13 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     let object_backend = ObjectBucket::new(load_public_bucket(&ctx.env, name)?);
                     // Fetch the current checkpoint to know which tiles to fetch
                     // (full or partials).
-                    let checkpoint_bytes = object_backend
-                        .fetch(CHECKPOINT_KEY)
-                        .await?
-                        .ok_or("no checkpoint in object storage".to_string())?;
-                    let origin = &load_origin(name);
-                    let verifiers = &VerifierList::new(
-                        load_checkpoint_signers(&ctx.env, name)
-                            .iter()
-                            .map(|s| s.verifier())
-                            .collect::<Vec<Box<dyn NoteVerifier>>>(),
-                    );
-                    let checkpoint = open_checkpoint(
-                        origin.as_str(),
-                        verifiers,
-                        now_millis(),
-                        &checkpoint_bytes,
-                    )
-                    .map_err(|e| e.to_string())?
-                    .0;
+                    let (checkpoint, _checkpoint_bytes) =
+                        get_current_checkpoint(&ctx.env, name, &object_backend).await?;
                     if leaf_index >= checkpoint.size() {
                         return Response::error("Leaf index is not in log", 422);
                     }
 
-                    let seq = if let Some(bytes) = object_backend.fetch(LANDMARK_KEY).await? {
-                        let max_landmarks = params
-                            .max_certificate_lifetime_secs
-                            .div_ceil(params.landmark_interval_secs)
-                            + 1;
-                        LandmarkSequence::from_bytes(&bytes, max_landmarks)
-                            .map_err(|e| e.to_string())?
-                    } else {
-                        return Err("failed to get landmark sequence".into());
-                    };
+                    let seq = get_landmark_sequence(name, &object_backend).await?;
                     if leaf_index < seq.first_index() {
                         return Response::error("Leaf index is before first active landmark", 422);
                     }
@@ -222,6 +218,9 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     };
 
                     Response::from_json(&GetCertificateResponse { data, landmark_id })
+                })
+                .get_async("/logs/:log/get-landmark-bundle", |_req, ctx| async move {
+                    get_landmark_bundle(&ctx.env, ctx.data).await
                 })
                 .get("/logs/:log/metadata", |_req, ctx| {
                     let name = ctx.data;
@@ -440,6 +439,90 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         leaf_index: metadata.0,
         timestamp: metadata.1,
     })
+}
+
+async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
+    let object_backend = ObjectBucket::new(load_public_bucket(env, name)?);
+
+    // Fetch the current checkpoint.
+    let (checkpoint, checkpoint_bytes) = get_current_checkpoint(env, name, &object_backend).await?;
+
+    // Fetch the current landmark sequence.
+    let landmark_sequence = get_landmark_sequence(name, &object_backend).await?;
+
+    // Compute the sequence of landmark subtrees and, for each subtree, a proof of consistency with
+    // the checkpoint. Each signatureless MTC includes an inclusion proof in one of these subtrees.
+    let mut subtrees = Vec::new();
+    for landmark_subtree in landmark_sequence.subtrees() {
+        let consistency_proof = match prove_subtree_consistency(
+            *checkpoint.hash(),
+            checkpoint.size(),
+            landmark_subtree.lo(),
+            landmark_subtree.hi(),
+            &object_backend,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
+            Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+        };
+
+        subtrees.push(SubtreeWithConsistencyProof {
+            start: landmark_subtree.lo(),
+            end: landmark_subtree.hi(),
+            consistency_proof: consistency_proof.iter().map(|h| h.0.to_vec()).collect(),
+        });
+    }
+
+    Response::from_json(&GetLandmarkBundleResponse {
+        checkpoint: checkpoint_bytes,
+        subtrees,
+    })
+}
+
+async fn get_current_checkpoint(
+    env: &Env,
+    name: &str,
+    object_backend: &ObjectBucket,
+) -> Result<(CheckpointText, Vec<u8>)> {
+    let checkpoint_bytes = object_backend
+        .fetch(CHECKPOINT_KEY)
+        .await?
+        .ok_or("no checkpoint in object storage".to_string())?;
+
+    let origin = &load_origin(name);
+    let verifiers = &VerifierList::new(
+        load_checkpoint_signers(env, name)
+            .iter()
+            .map(|s| s.verifier())
+            .collect::<Vec<Box<dyn NoteVerifier>>>(),
+    );
+    let (checkpoint, _timestamp) =
+        open_checkpoint(origin.as_str(), verifiers, now_millis(), &checkpoint_bytes)
+            .map_err(|e| e.to_string())?;
+    Ok((checkpoint, checkpoint_bytes))
+}
+
+async fn get_landmark_sequence(
+    name: &str,
+    object_backend: &ObjectBucket,
+) -> Result<LandmarkSequence> {
+    let params = &CONFIG.logs[name];
+
+    let Some(landmark_sequence_bytes) = object_backend.fetch(LANDMARK_KEY).await? else {
+        return Err("failed to get landmark sequence".into());
+    };
+
+    let max_landmarks = params
+        .max_certificate_lifetime_secs
+        .div_ceil(params.landmark_interval_secs)
+        + 1;
+
+    let landmark_sequence = LandmarkSequence::from_bytes(&landmark_sequence_bytes, max_landmarks)
+        .map_err(|e| e.to_string())?;
+
+    Ok(landmark_sequence)
 }
 
 fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {

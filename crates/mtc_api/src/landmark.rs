@@ -165,6 +165,49 @@ impl LandmarkSequence {
             landmarks,
         })
     }
+
+    /// Iterate over the sequence of subtrees determined by the landmark sequence.
+    pub fn subtrees(&self) -> LandmarkSubtreesIterator<'_> {
+        LandmarkSubtreesIterator {
+            index: 1,
+            landmarks: &self.landmarks,
+            next_subtree: None,
+        }
+    }
+}
+
+/// An iterator over the subtrees determined by the landmark sequence.
+pub struct LandmarkSubtreesIterator<'a> {
+    index: usize,
+    landmarks: &'a VecDeque<u64>,
+    next_subtree: Option<Subtree>,
+}
+
+impl Iterator for LandmarkSubtreesIterator<'_> {
+    type Item = Subtree;
+
+    fn next(&mut self) -> Option<Subtree> {
+        if self.landmarks.len() < 2 {
+            return None;
+        }
+
+        if let Some(subtree) = self.next_subtree.take() {
+            self.next_subtree = None;
+            return Some(subtree);
+        }
+
+        if self.index == self.landmarks.len() {
+            return None;
+        }
+
+        let subtree;
+        (subtree, self.next_subtree) =
+            Subtree::split_interval(self.landmarks[self.index - 1], self.landmarks[self.index])
+                .unwrap();
+
+        self.index += 1;
+        Some(subtree)
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +275,29 @@ mod tests {
         );
         // Past last landmark.
         assert!(seq.subtree_for_index(200).is_none());
+    }
+
+    #[test]
+    fn test_subtrees() {
+        let mut seq = LandmarkSequence::create(10);
+        assert!(seq.subtrees().next().is_none());
+
+        for i in 1..=5 {
+            seq.add(i * 10).unwrap();
+        }
+        let got = seq.subtrees().collect::<Vec<_>>();
+        let want = vec![
+            Subtree::new(0, 8).unwrap(),
+            Subtree::new(8, 10).unwrap(),
+            Subtree::new(8, 16).unwrap(),
+            Subtree::new(16, 20).unwrap(),
+            Subtree::new(20, 24).unwrap(),
+            Subtree::new(24, 30).unwrap(),
+            Subtree::new(30, 32).unwrap(),
+            Subtree::new(32, 40).unwrap(),
+            Subtree::new(40, 48).unwrap(),
+            Subtree::new(48, 50).unwrap(),
+        ];
+        assert_eq!(got, want);
     }
 }
