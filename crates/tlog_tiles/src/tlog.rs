@@ -836,7 +836,11 @@ impl Subtree {
         let mid = last & !mask;
         // Maximize the left endpoint. This is just before `lo`'s path leaves
         // the right edge of its new subtree.
-        let left_split = (!lo & mask).ilog2() + 1;
+        let left_split = if (!lo & mask) == 0 {
+            0
+        } else {
+            (!lo & mask).ilog2() + 1
+        };
         let left = lo & !((1 << left_split) - 1);
 
         Ok((Self { lo: left, hi: mid }, Some(Self { lo: mid, hi })))
