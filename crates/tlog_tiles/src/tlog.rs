@@ -1334,5 +1334,14 @@ mod tests {
                 Some(Subtree::new(1280, 1300).unwrap())
             )
         );
+
+        // Panic fixed by https://github.com/cloudflare/azul/commit/0c8b8574eaa8ab6114ebeded7b23ac40d517fa54.
+        assert_eq!(
+            Subtree::split_interval(64, 66).unwrap(),
+            (
+                Subtree::new(64, 65).unwrap(),
+                Some(Subtree::new(65, 66).unwrap())
+            )
+        );
     }
 }
