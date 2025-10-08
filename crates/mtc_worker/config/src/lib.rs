@@ -34,15 +34,10 @@ pub struct LogParams {
     pub batch_timeout_millis: u64,
     #[serde(default = "default_usize::<100>")]
     pub max_batch_entries: usize,
-    #[serde(default = "default_bool::<true>")]
-    pub enable_dedup: bool,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,
 }
 
-fn default_bool<const V: bool>() -> bool {
-    V
-}
 fn default_u8<const V: u8>() -> u8 {
     V
 }

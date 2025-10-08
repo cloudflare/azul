@@ -35,7 +35,7 @@ impl DurableObject for Sequencer {
             checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extension for MTC
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
-            enable_dedup: params.enable_dedup,
+            enable_dedup: false, // deduplication is not currently supported
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
             checkpoint_callback: checkpoint_callback(&env, name),
