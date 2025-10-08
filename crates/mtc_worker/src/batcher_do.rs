@@ -22,7 +22,7 @@ impl DurableObject for Batcher {
             name: name.to_string(),
             max_batch_entries: params.max_batch_entries,
             batch_timeout_millis: params.batch_timeout_millis,
-            enable_dedup: params.enable_dedup,
+            enable_dedup: false, // deduplication is not currently supported
             location_hint: params.location_hint.clone(),
         };
         Batcher(GenericBatcher::new(env, config))

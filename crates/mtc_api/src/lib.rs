@@ -119,8 +119,15 @@ pub struct AddEntryRequest {
 #[serde_as]
 #[derive(Serialize)]
 pub struct AddEntryResponse {
+    /// The index of the entry in the log.
     pub leaf_index: LeafIndex,
+
+    /// The time at which the entry was added to the log.
     pub timestamp: UnixTimestamp,
+
+    /// The validity period of the certificate.
+    pub not_before: UnixTimestamp,
+    pub not_after: UnixTimestamp,
 }
 
 /// Get-roots response. This is in the same format as the RFC 6962 get-roots
@@ -684,7 +691,7 @@ pub fn validate_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
     issuer: RdnSequence,
-    mut validity: Validity,
+    validity: &mut Validity,
 ) -> Result<(BootstrapMtcPendingLogEntry, Option<usize>), MtcError> {
     // We will run the ordinary chain validation on our input, but we have some post-processing we
     // need to do too. Namely we need to adjust the validity period of the provided bootstrap cert,
@@ -741,7 +748,7 @@ pub fn validate_chain(
                 data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
                     leaf.tbs_certificate,
                     issuer,
-                    validity,
+                    *validity,
                 )?)
                 .encode()?,
             },

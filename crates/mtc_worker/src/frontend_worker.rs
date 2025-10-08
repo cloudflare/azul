@@ -12,12 +12,12 @@ use der::{
     Any, Encode, Tag,
 };
 use generic_log_worker::{
-    batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
-    init_logging, load_cache_kv, load_public_bucket,
+    batcher_id_from_lookup_key, deserialize, get_durable_object_stub, init_logging,
+    load_public_bucket,
     log_ops::{
         prove_subtree_consistency, prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY,
     },
-    put_cache_entry_metadata, serialize,
+    serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
@@ -333,7 +333,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     )]);
 
     let now = Duration::from_millis(now_millis());
-    let validity = Validity {
+    let mut validity = Validity {
         not_before: Time::UtcTime(UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?),
         not_after: Time::UtcTime(
             UtcTime::from_unix_duration(
@@ -345,7 +345,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     let roots = load_roots(env, name).await?;
     let (pending_entry, found_root_idx) =
-        match mtc_api::validate_chain(&req.chain, roots, issuer, validity) {
+        match mtc_api::validate_chain(&req.chain, roots, issuer, &mut validity) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("{name}: Bad request: {e}");
@@ -353,23 +353,9 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
             }
         };
 
-    // Retrieve the sequenced entry for this pending log entry by first checking the
-    // deduplication cache and then sending a request to the DO to sequence the entry.
+    // Retrieve the sequenced entry for this pending log entry by sending a request to the DO to
+    // sequence the entry.
     let lookup_key = pending_entry.lookup_key();
-
-    // Check if entry is cached and return right away if so.
-    if params.enable_dedup {
-        if let Some(metadata) = get_cached_metadata(&load_cache_kv(env, name)?, &lookup_key).await?
-        {
-            log::debug!("{name}: Entry is cached");
-            return Response::from_json(&AddEntryResponse {
-                leaf_index: metadata.0,
-                timestamp: metadata.1,
-            });
-        }
-    }
-
-    // Entry is not cached, so we need to sequence it.
 
     // First persist issuers. Use a block so memory is deallocated sooner.
     {
@@ -425,19 +411,11 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         return Ok(response);
     }
     let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
-    if params.num_batchers == 0 && params.enable_dedup {
-        // Write sequenced entry to the long-term deduplication cache in Workers
-        // KV as there are no batchers configured to do it for us.
-        if put_cache_entry_metadata(&load_cache_kv(env, name)?, &pending_entry, metadata)
-            .await
-            .is_err()
-        {
-            log::warn!("{name}: Failed to write entry to deduplication cache");
-        }
-    }
     Response::from_json(&AddEntryResponse {
         leaf_index: metadata.0,
         timestamp: metadata.1,
+        not_before: validity.not_before.to_unix_duration().as_secs(),
+        not_after: validity.not_after.to_unix_duration().as_secs(),
     })
 }
 

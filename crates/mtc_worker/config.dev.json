@@ -5,15 +5,13 @@
             "description": "MTCA Dev1",
             "log_id": "13335.1",
             "submission_url": "http://localhost:8787/logs/dev1/",
-            "location_hint": "enam",
-            "enable_dedup": false
+            "location_hint": "enam"
         },
         "dev2": {
             "description": "MTCA Dev2",
             "log_id": "13335.2",
             "submission_url": "http://localhost:8787/logs/dev2/",
             "location_hint": "enam",
-            "enable_dedup": false,
             "max_certificate_lifetime_secs": 100,
             "landmark_interval_secs": 10
         }

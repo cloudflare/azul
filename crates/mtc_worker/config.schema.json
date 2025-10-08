@@ -90,11 +90,6 @@
                             "default": 256,
                             "description": "The maximum number of entries per batch."
                         },
-                        "enable_dedup": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Enables checking the deduplication cache for add-(pre-)chain requests. Can be disabled for tests and benchmarks. If disabled, `kv_namespaces` can be omitted from `wrangler.jsonc`."
-                        },
                         "clean_interval_secs": {
                             "type": "integer",
                             "minimum": 1,
