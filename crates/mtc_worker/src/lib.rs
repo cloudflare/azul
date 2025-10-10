@@ -12,7 +12,7 @@ use signed_note::KeyName;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner, SequenceMetadata};
+use tlog_tiles::{CheckpointSigner, SequenceMetadata};
 use tokio::sync::OnceCell;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -64,23 +64,28 @@ pub(crate) fn load_ed25519_key(
     }
 }
 
+fn parse_trust_anchor(id: &str) -> TrustAnchorID {
+    // Parse the log ID, an ASN.1 `RELATIVE OID` in decimal-dotted string form.
+    let relative_oid = RelativeOid::from_str(id).unwrap();
+
+    // Get the BER/DER serialization of the content bytes, as described in <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
+    TrustAnchorID(relative_oid.as_bytes().to_vec())
+}
+
 pub(crate) fn load_checkpoint_signers(env: &Env, name: &str) -> Vec<Box<dyn CheckpointSigner>> {
     let origin = load_origin(name);
 
-    // Parse the log ID, an ASN.1 `RELATIVE OID` in decimal-dotted string form.
-    let log_id_relative_oid = RelativeOid::from_str(&CONFIG.logs[name].log_id).unwrap();
-
-    // Get the BER/DER serialization of the content bytes, as described in <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
-    let log_id = TrustAnchorID(log_id_relative_oid.as_bytes().to_vec());
+    let log_id = parse_trust_anchor(&CONFIG.logs[name].log_id);
+    let witness_id = parse_trust_anchor(&CONFIG.logs[name].witness_id);
 
     // TODO should the CA cosigner have a different ID than the log itself?
-    let cosigner_id = log_id.clone();
+    let signing_id = log_id.clone();
     let signing_key = load_signing_key(env, name).unwrap().clone();
     let witness_key = load_witness_key(env, name).unwrap().clone();
 
     // Make the checkpoint signers from the secret keys and put them in a vec
-    let signer = MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key);
-    let witness = CosignatureV1CheckpointSigner::new(origin, witness_key);
+    let signer = MTCSubtreeCosigner::new(signing_id, log_id.clone(), origin.clone(), signing_key);
+    let witness = MTCSubtreeCosigner::new(witness_id, log_id.clone(), origin.clone(), witness_key);
 
     vec![Box::new(signer), Box::new(witness)]
 }

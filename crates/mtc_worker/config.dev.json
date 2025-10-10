@@ -4,12 +4,14 @@
         "dev1": {
             "description": "MTCA Dev1",
             "log_id": "13335.1",
+            "witness_id": "44363.47.1",
             "submission_url": "http://localhost:8787/logs/dev1/",
             "location_hint": "enam"
         },
         "dev2": {
             "description": "MTCA Dev2",
             "log_id": "13335.2",
+            "witness_id": "44363.47.2",
             "submission_url": "http://localhost:8787/logs/dev2/",
             "location_hint": "enam",
             "max_certificate_lifetime_secs": 100,
