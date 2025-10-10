@@ -126,7 +126,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             // Now that we've validated the log name, use an inner router to
             // handle the request.
             Router::with_data(name)
-                .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
+                .get_async("/logs/:log/get-roots", |_req, ctx| async move {
                     Response::from_json(&GetRootsResponse {
                         certificates: x509_util::certs_to_bytes(
                             &load_roots(&ctx.env, ctx.data).await?.certs,
