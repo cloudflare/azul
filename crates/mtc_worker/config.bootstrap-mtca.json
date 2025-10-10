@@ -4,6 +4,7 @@
         "shard1": {
             "description": "Cloudflare bootstrap MTCA shard 1",
             "log_id": "13335.1",
+            "witness_id": "44363.47.3",
             "submission_url": "https://bootstrap-mtca.cloudflareresearch.com/logs/shard1/",
             "monitoring_url": "https://bootstrap-mtca-shard1.cloudflareresearch.com"
         }

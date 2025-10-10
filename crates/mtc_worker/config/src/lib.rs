@@ -15,6 +15,7 @@ pub struct AppConfig {
 pub struct LogParams {
     pub description: Option<String>,
     pub log_id: String,
+    pub witness_id: String,
     #[serde(default = "default_usize::<604_800>")]
     pub max_certificate_lifetime_secs: usize,
     #[serde(default = "default_usize::<3600>")]
