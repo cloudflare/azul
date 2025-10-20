@@ -4,8 +4,7 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{
-    load_checkpoint_signers, load_origin, load_roots, load_signing_key, load_witness_key,
-    SequenceMetadata, CONFIG,
+    load_checkpoint_signers, load_origin, load_roots, load_signing_key, SequenceMetadata, CONFIG,
 };
 use der::{
     asn1::{SetOfVec, UtcTime, Utf8StringRef},
@@ -50,8 +49,6 @@ struct MetadataResponse<'a> {
     description: &'a Option<String>,
     #[serde_as(as = "Base64")]
     key: &'a [u8],
-    #[serde_as(as = "Base64")]
-    witness_key: &'a [u8],
     submission_url: &'a str,
     monitoring_url: &'a str,
 }
@@ -229,15 +226,9 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     let key = verifying_key
                         .to_public_key_der()
                         .map_err(|e| e.to_string())?;
-                    let witness_key = load_witness_key(&ctx.env, name)?;
-                    let witness_key = witness_key
-                        .verifying_key()
-                        .to_public_key_der()
-                        .map_err(|e| e.to_string())?;
                     Response::from_json(&MetadataResponse {
                         description: &params.description,
                         key: key.as_bytes(),
-                        witness_key: witness_key.as_bytes(),
                         submission_url: &params.submission_url,
                         monitoring_url: if params.monitoring_url.is_empty() {
                             &params.submission_url

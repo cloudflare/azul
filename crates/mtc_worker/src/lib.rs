@@ -12,7 +12,7 @@ use signed_note::KeyName;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{CheckpointSigner, CosignatureV1CheckpointSigner, SequenceMetadata};
+use tlog_tiles::{CheckpointSigner, SequenceMetadata};
 use tokio::sync::OnceCell;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -31,15 +31,10 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 });
 
 static SIGNING_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
-static WITNESS_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
 static ROOTS: OnceCell<CertPool> = OnceCell::const_new();
 
 pub(crate) fn load_signing_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
     load_ed25519_key(env, name, &SIGNING_KEY_MAP, &format!("SIGNING_KEY_{name}"))
-}
-
-pub(crate) fn load_witness_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
-    load_ed25519_key(env, name, &WITNESS_KEY_MAP, &format!("WITNESS_KEY_{name}"))
 }
 
 pub(crate) fn load_ed25519_key(
@@ -76,13 +71,11 @@ pub(crate) fn load_checkpoint_signers(env: &Env, name: &str) -> Vec<Box<dyn Chec
     // TODO should the CA cosigner have a different ID than the log itself?
     let cosigner_id = log_id.clone();
     let signing_key = load_signing_key(env, name).unwrap().clone();
-    let witness_key = load_witness_key(env, name).unwrap().clone();
 
     // Make the checkpoint signers from the secret keys and put them in a vec
     let signer = MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key);
-    let witness = CosignatureV1CheckpointSigner::new(origin, witness_key);
 
-    vec![Box::new(signer), Box::new(witness)]
+    vec![Box::new(signer)]
 }
 
 pub(crate) fn load_origin(name: &str) -> KeyName {
