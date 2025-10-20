@@ -50,10 +50,9 @@ impl LandmarkSequence {
                 ));
             }
         }
-        // Keep `max_landmarks + 1` tree sizes, since we want `max_landmarks`
-        // landmark intervals.
-        if self.landmarks.len() == self.max_landmarks + 1 {
-            self.landmarks.pop_front();
+        if self.landmarks.len() > self.max_landmarks {
+            self.landmarks
+                .drain(..self.landmarks.len() - self.max_landmarks);
         }
         self.landmarks.push_back(tree_size);
         self.last_landmark += 1;
