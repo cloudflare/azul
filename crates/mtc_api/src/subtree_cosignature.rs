@@ -9,7 +9,7 @@ use ed25519_dalek::{
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
-use tlog_tiles::{CheckpointText, CheckpointSigner, Hash, LeafIndex, UnixTimestamp};
+use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
 
 #[derive(Clone)]
 pub struct TrustAnchorID(pub Vec<u8>);
@@ -55,6 +55,21 @@ impl MTCSubtreeCosigner {
         );
 
         Ok(self.k.try_sign(&serialized)?.to_vec())
+    }
+
+    /// Return the log ID as bytes.
+    pub fn log_id(&self) -> &[u8] {
+        &self.v.log_id.0
+    }
+
+    /// Return the cosigner ID as bytes.
+    pub fn cosigner_id(&self) -> &[u8] {
+        &self.v.cosigner_id.0
+    }
+
+    /// Return the verifying key as bytes.
+    pub fn verifying_key(&self) -> &[u8] {
+        self.v.verifying_key.as_bytes()
     }
 }
 

@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use crate::{load_checkpoint_signers, load_origin, CONFIG};
+use crate::{load_cosigner, load_origin, CONFIG};
 use generic_log_worker::{get_durable_object_name, CleanerConfig, GenericCleaner, CLEANER_BINDING};
 use mtc_api::BootstrapMtcPendingLogEntry;
 use signed_note::VerifierList;
-use tlog_tiles::PendingLogEntry;
+use tlog_tiles::{CheckpointSigner, PendingLogEntry};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -26,12 +26,7 @@ impl DurableObject for Cleaner {
             origin: load_origin(name),
             data_path: BootstrapMtcPendingLogEntry::DATA_TILE_PATH,
             aux_path: BootstrapMtcPendingLogEntry::AUX_TILE_PATH,
-            verifiers: VerifierList::new(
-                load_checkpoint_signers(&env, name)
-                    .iter()
-                    .map(|s| s.verifier())
-                    .collect(),
-            ),
+            verifiers: VerifierList::new(vec![load_cosigner(&env, name).verifier()]),
             clean_interval: Duration::from_secs(params.clean_interval_secs),
         };
 
