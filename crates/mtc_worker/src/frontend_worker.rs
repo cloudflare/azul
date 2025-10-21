@@ -3,9 +3,7 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{
-    load_checkpoint_signers, load_origin, load_roots, load_signing_key, SequenceMetadata, CONFIG,
-};
+use crate::{load_cosigner, load_origin, load_roots, SequenceMetadata, CONFIG};
 use der::{
     asn1::{SetOfVec, UtcTime, Utf8StringRef},
     Any, Encode, Tag,
@@ -24,13 +22,13 @@ use mtc_api::{
     serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
     GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
 };
-use p256::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
-use signed_note::{NoteVerifier, VerifierList};
+use signed_note::VerifierList;
 use std::time::Duration;
 use tlog_tiles::{
-    open_checkpoint, CheckpointText, LeafIndex, PendingLogEntry, PendingLogEntryBlob,
+    open_checkpoint, CheckpointSigner, CheckpointText, LeafIndex, PendingLogEntry,
+    PendingLogEntryBlob,
 };
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -48,7 +46,11 @@ struct MetadataResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: &'a Option<String>,
     #[serde_as(as = "Base64")]
-    key: &'a [u8],
+    log_id: &'a [u8],
+    #[serde_as(as = "Base64")]
+    cosigner_id: &'a [u8],
+    #[serde_as(as = "Base64")]
+    cosigner_public_key: &'a [u8],
     submission_url: &'a str,
     monitoring_url: &'a str,
 }
@@ -222,13 +224,12 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .get("/logs/:log/metadata", |_req, ctx| {
                     let name = ctx.data;
                     let params = &CONFIG.logs[name];
-                    let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-                    let key = verifying_key
-                        .to_public_key_der()
-                        .map_err(|e| e.to_string())?;
+                    let cosigner = load_cosigner(&ctx.env, name);
                     Response::from_json(&MetadataResponse {
                         description: &params.description,
-                        key: key.as_bytes(),
+                        log_id: cosigner.log_id(),
+                        cosigner_id: cosigner.cosigner_id(),
+                        cosigner_public_key: cosigner.verifying_key(),
                         submission_url: &params.submission_url,
                         monitoring_url: if params.monitoring_url.is_empty() {
                             &params.submission_url
@@ -461,12 +462,7 @@ async fn get_current_checkpoint(
         .ok_or("no checkpoint in object storage".to_string())?;
 
     let origin = &load_origin(name);
-    let verifiers = &VerifierList::new(
-        load_checkpoint_signers(env, name)
-            .iter()
-            .map(|s| s.verifier())
-            .collect::<Vec<Box<dyn NoteVerifier>>>(),
-    );
+    let verifiers = &VerifierList::new(vec![load_cosigner(env, name).verifier()]);
     let (checkpoint, _timestamp) =
         open_checkpoint(origin.as_str(), verifiers, now_millis(), &checkpoint_bytes)
             .map_err(|e| e.to_string())?;

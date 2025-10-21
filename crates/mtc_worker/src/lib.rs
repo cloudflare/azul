@@ -12,7 +12,7 @@ use signed_note::KeyName;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{CheckpointSigner, SequenceMetadata};
+use tlog_tiles::SequenceMetadata;
 use tokio::sync::OnceCell;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -59,23 +59,26 @@ pub(crate) fn load_ed25519_key(
     }
 }
 
-pub(crate) fn load_checkpoint_signers(env: &Env, name: &str) -> Vec<Box<dyn CheckpointSigner>> {
+pub(crate) fn load_cosigner(env: &Env, name: &str) -> MTCSubtreeCosigner {
     let origin = load_origin(name);
 
     // Parse the log ID, an ASN.1 `RELATIVE OID` in decimal-dotted string form.
-    let log_id_relative_oid = RelativeOid::from_str(&CONFIG.logs[name].log_id).unwrap();
+    let log_id = {
+        let relative_oid = RelativeOid::from_str(&CONFIG.logs[name].log_id).unwrap();
+        // Get the BER/DER serialization of the content bytes, as described in
+        // <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
+        TrustAnchorID(relative_oid.as_bytes().to_vec())
+    };
 
-    // Get the BER/DER serialization of the content bytes, as described in <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
-    let log_id = TrustAnchorID(log_id_relative_oid.as_bytes().to_vec());
+    // Likewise for the cosigner ID.
+    let cosigner_id = {
+        let relative_oid = RelativeOid::from_str(&CONFIG.logs[name].cosigner_id).unwrap();
+        TrustAnchorID(relative_oid.as_bytes().to_vec())
+    };
 
-    // TODO should the CA cosigner have a different ID than the log itself?
-    let cosigner_id = log_id.clone();
     let signing_key = load_signing_key(env, name).unwrap().clone();
 
-    // Make the checkpoint signers from the secret keys and put them in a vec
-    let signer = MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key);
-
-    vec![Box::new(signer)]
+    MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key)
 }
 
 pub(crate) fn load_origin(name: &str) -> KeyName {

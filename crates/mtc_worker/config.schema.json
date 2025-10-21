@@ -28,7 +28,11 @@
                         },
                         "log_id": {
                             "type": "string",
-                            "description": "The log name (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
+                            "description": "The log ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
+                        },
+                        "cosigner_id": {
+                            "type": "string",
+                            "description": "The cosigner's ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
                         },
                         "max_certificate_lifetime_secs": {
                             "type": "integer",
