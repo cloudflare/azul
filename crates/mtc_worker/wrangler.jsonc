@@ -91,6 +91,10 @@
                 {
                     "bucket_name": "bootstrap-mtca-shard1",
                     "binding": "public_shard1"
+                },
+                {
+                    "bucket_name": "bootstrap-mtca-shard2",
+                    "binding": "public_shard2"
                 }
             ],
             "durable_objects": {
