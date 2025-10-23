@@ -3,10 +3,17 @@
     "logs": {
         "shard1": {
             "description": "Cloudflare bootstrap MTCA shard 1",
-            "log_id": "44363.48.5",
-            "cosigner_id": "44363.48.6",
+            "log_id": "13335.1",
+            "cosigner_id": "13335.1",
             "submission_url": "https://bootstrap-mtca.cloudflareresearch.com/logs/shard1/",
             "monitoring_url": "https://bootstrap-mtca-shard1.cloudflareresearch.com"
+        },
+        "shard2": {
+            "description": "Cloudflare bootstrap MTCA shard 2",
+            "log_id": "44363.48.5",
+            "cosigner_id": "44363.48.6",
+            "submission_url": "https://bootstrap-mtca.cloudflareresearch.com/logs/shard2/",
+            "monitoring_url": "https://bootstrap-mtca-shard2.cloudflareresearch.com"
         }
     }
 }
