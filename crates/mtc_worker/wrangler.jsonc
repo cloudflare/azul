@@ -118,6 +118,14 @@
                         "Cleaner",
                         "Sequencer"
                     ]
+                },
+                {
+                    "tag": "v2",
+                    "delete_classes": [
+                        "Batcher",
+                        "Cleaner",
+                        "Sequencer"
+                    ]
                 }
             ]
         }
