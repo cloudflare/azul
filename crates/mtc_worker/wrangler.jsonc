@@ -126,6 +126,14 @@
                         "Cleaner",
                         "Sequencer"
                     ]
+                },
+                {
+                    "tag": "v3",
+                    "new_sqlite_classes": [
+                        "Batcher",
+                        "Cleaner",
+                        "Sequencer"
+                    ]
                 }
             ]
         }
