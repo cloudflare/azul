@@ -42,15 +42,12 @@ use x509_cert::{
 };
 use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
 
-// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
-// as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
-pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.1");
+// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2".
+pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1");
 
-// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.6.TBD"
-// as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.6.TBD".
 pub const ID_ALG_MTCPROOF: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.0");
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.48.0");
 
 // MTCSignature from <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
 struct MtcSignature {
