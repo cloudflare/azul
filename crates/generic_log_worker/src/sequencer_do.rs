@@ -179,19 +179,25 @@ impl<L: LogEntry> GenericSequencer<L> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&self) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
+        info!("{} Seq: Locking", self.config.name);
         let _lock = self.init_mux.try_lock().map_err(|_| {
             worker::Error::from("init_mux locked")
         })?;
+        info!("{} Seq: Done Locking", self.config.name);
         let name = &self.config.name;
 
         if *self.initialized.borrow() {
+            info!("{} Seq: Returning ok", self.config.name);
             return Ok(());
         }
 
-        if let Err(e) = self.cache.load().await {
+        info!("{} Seq: Loading cache", self.config.name);
+        if let Err(e) = self.cache.load(&self.config.name).await {
             warn!("Failed to load short-term dedup cache from DO storage: {e}");
         }
+        info!("{} Seq: Done loading cache", self.config.name);
 
+        info!("{} Seq: Creating log", self.config.name);
         match log_ops::create_log(&self.config, &self.public_bucket, &self.do_state).await {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),
             Err(CreateError::Other(msg)) => {
@@ -201,6 +207,7 @@ impl<L: LogEntry> GenericSequencer<L> {
         }
 
         // Start the cleaner, if configured.
+        info!("{} Seq: Getting stub", self.config.name);
         match get_durable_object_stub(
             &self.env,
             name,

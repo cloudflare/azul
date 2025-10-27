@@ -17,7 +17,7 @@ pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use log::Level;
+use log::{info, Level};
 use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde::{Deserialize, Serialize};
@@ -257,22 +257,24 @@ impl DedupCache {
     }
 
     // Load batches of cache entries from DO storage into the in-memory cache.
-    async fn load(&self) -> Result<()> {
-        log::info!("DedupCache: loading head");
+    async fn load(&self, name: &str) -> Result<()> {
+        info!("{name} DedupCache: Loading head");
         let head = self
             .storage
             .get::<usize>(Self::FIFO_HEAD_KEY)
             .await
             .unwrap_or_default();
-        log::info!("DedupCache: loading tail");
+        info!("{name} DedupCache: Loading tail");
         let tail = self
             .storage
             .get::<usize>(Self::FIFO_TAIL_KEY)
             .await
             .unwrap_or_default();
-        log::info!("DedupCache: head and tail loaded");
+        info!("{name} DedupCache: head and tail loaded");
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
+        info!("{name} DedupCache: Getting keys");
         let map = self.storage.get_multiple(keys).await?;
+        info!("{name} DedupCache: Putting entries");
         for value in map.values() {
             let batch = serde_wasm_bindgen::from_value::<ByteBuf>(value?)?;
             self.memory
