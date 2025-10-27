@@ -182,6 +182,9 @@ impl NoteVerifier for MTCSubtreeNoteVerifier {
 ///
 /// opaque HashValue[HASH_SIZE];
 ///
+/// /* From Section 4.1 of draft-ietf-tls-trust-anchor-ids */
+/// opaque TrustAnchorID<1..2^8-1>;
+///
 /// struct {
 ///     TrustAnchorID log_id;
 ///     uint64 start;
@@ -190,8 +193,7 @@ impl NoteVerifier for MTCSubtreeNoteVerifier {
 /// } MTCSubtree;
 ///
 /// struct {
-///     uint8 label[14] = "mtc-subtree/v1";
-///     uint8 separator = 0;
+///     uint8 label[16] = "mtc-subtree/v1\n\0";
 ///     TrustAnchorID cosigner_id;
 ///     MTCSubtree subtree;
 /// } MTCSubtreeSignatureInput;
@@ -207,7 +209,7 @@ fn serialize_mtc_subtree_signature_input(
     end: LeafIndex,
     root_hash: &Hash,
 ) -> Vec<u8> {
-    let mut buffer: Vec<u8> = b"mtc-subtree/v1\x00".to_vec();
+    let mut buffer: Vec<u8> = b"mtc-subtree/v1\n\x00".to_vec();
     buffer.write_length_prefixed(&cosigner_id.0, 1).unwrap();
     buffer.write_length_prefixed(&log_id.0, 1).unwrap();
     buffer.write_u64::<BigEndian>(start).unwrap();
