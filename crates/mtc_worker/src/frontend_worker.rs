@@ -77,9 +77,8 @@ pub struct GetCertificateResponse {
 /// GET response structure for the `/get-landmark-bundle` endpoint
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct GetLandmarkBundleResponse {
-    #[serde_as(as = "Base64")]
-    pub checkpoint: Vec<u8>,
+pub struct GetLandmarkBundleResponse<'a> {
+    pub checkpoint: &'a str,
     pub subtrees: Vec<SubtreeWithConsistencyProof>,
 }
 
@@ -446,7 +445,7 @@ async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
     }
 
     Response::from_json(&GetLandmarkBundleResponse {
-        checkpoint: checkpoint_bytes,
+        checkpoint: std::str::from_utf8(&checkpoint_bytes).unwrap(),
         subtrees,
     })
 }
