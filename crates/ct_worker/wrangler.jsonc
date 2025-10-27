@@ -1,6 +1,6 @@
 {
     "name": "static-ct",
-    "main": "build/worker/shim.mjs",
+    "main": "./shim.js",
     "compatibility_date": "2025-09-25",
     "workers_dev": false,
     "build": {
