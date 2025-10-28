@@ -45,10 +45,8 @@ const UNKNOWN_LOG_MSG: &str = "unknown log";
 struct MetadataResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: &'a Option<String>,
-    #[serde_as(as = "Base64")]
-    log_id: &'a [u8],
-    #[serde_as(as = "Base64")]
-    cosigner_id: &'a [u8],
+    log_id: String,
+    cosigner_id: String,
     #[serde_as(as = "Base64")]
     cosigner_public_key: &'a [u8],
     submission_url: &'a str,
@@ -226,8 +224,8 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     let cosigner = load_checkpoint_cosigner(&ctx.env, name);
                     Response::from_json(&MetadataResponse {
                         description: &params.description,
-                        log_id: cosigner.log_id(),
-                        cosigner_id: cosigner.cosigner_id(),
+                        log_id: cosigner.log_id().to_string(),
+                        cosigner_id: cosigner.cosigner_id().to_string(),
                         cosigner_public_key: cosigner.verifying_key(),
                         submission_url: &params.submission_url,
                         monitoring_url: if params.monitoring_url.is_empty() {
