@@ -3,7 +3,7 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{load_cosigner, load_origin, load_roots, SequenceMetadata, CONFIG};
+use crate::{load_checkpoint_cosigner, load_origin, load_roots, SequenceMetadata, CONFIG};
 use der::{
     asn1::{SetOfVec, UtcTime, Utf8StringRef},
     Any, Encode, Tag,
@@ -223,7 +223,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .get("/logs/:log/metadata", |_req, ctx| {
                     let name = ctx.data;
                     let params = &CONFIG.logs[name];
-                    let cosigner = load_cosigner(&ctx.env, name);
+                    let cosigner = load_checkpoint_cosigner(&ctx.env, name);
                     Response::from_json(&MetadataResponse {
                         description: &params.description,
                         log_id: cosigner.log_id(),
@@ -461,7 +461,7 @@ async fn get_current_checkpoint(
         .ok_or("no checkpoint in object storage".to_string())?;
 
     let origin = &load_origin(name);
-    let verifiers = &VerifierList::new(vec![load_cosigner(env, name).verifier()]);
+    let verifiers = &VerifierList::new(vec![load_checkpoint_cosigner(env, name).verifier()]);
     let (checkpoint, _timestamp) =
         open_checkpoint(origin.as_str(), verifiers, now_millis(), &checkpoint_bytes)
             .map_err(|e| e.to_string())?;

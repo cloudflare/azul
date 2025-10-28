@@ -6,7 +6,7 @@
 use crate::ccadb_roots_cron::{update_ccadb_roots, CCADB_ROOTS_FILENAME, CCADB_ROOTS_NAMESPACE};
 use config::AppConfig;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
-use mtc_api::{MTCSubtreeCosigner, TrustAnchorID};
+use mtc_api::{MtcCosigner, TrustAnchorID};
 use p256::pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
@@ -59,11 +59,11 @@ pub(crate) fn load_ed25519_key(
     }
 }
 
-pub(crate) fn load_cosigner(env: &Env, name: &str) -> MTCSubtreeCosigner {
+pub(crate) fn load_checkpoint_cosigner(env: &Env, name: &str) -> MtcCosigner {
     let log_id = TrustAnchorID::from_str(&CONFIG.logs[name].log_id).unwrap();
     let cosigner_id = TrustAnchorID::from_str(&CONFIG.logs[name].cosigner_id).unwrap();
     let signing_key = load_signing_key(env, name).unwrap().clone();
-    MTCSubtreeCosigner::new(cosigner_id, log_id, signing_key)
+    MtcCosigner::new_checkpoint(cosigner_id, log_id, signing_key)
 }
 
 pub(crate) fn load_origin(name: &str) -> KeyName {
