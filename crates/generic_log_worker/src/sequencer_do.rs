@@ -15,7 +15,7 @@ use crate::{
     CLEANER_BINDING, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use futures_util::future::join_all;
-use log::{error, info, warn};
+use log::{error, info};
 use prometheus::{Registry, TextEncoder};
 use signed_note::KeyName;
 use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntryBlob, UnixTimestamp};
