@@ -6,7 +6,7 @@
 use crate::ccadb_roots_cron::{update_ccadb_roots, CCADB_ROOTS_FILENAME, CCADB_ROOTS_NAMESPACE};
 use config::AppConfig;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
-use mtc_api::{MTCSubtreeCosigner, RelativeOid, TrustAnchorID};
+use mtc_api::{MTCSubtreeCosigner, TrustAnchorID};
 use p256::pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
@@ -61,23 +61,9 @@ pub(crate) fn load_ed25519_key(
 
 pub(crate) fn load_cosigner(env: &Env, name: &str) -> MTCSubtreeCosigner {
     let origin = load_origin(name);
-
-    // Parse the log ID, an ASN.1 `RELATIVE OID` in decimal-dotted string form.
-    let log_id = {
-        let relative_oid = RelativeOid::from_str(&CONFIG.logs[name].log_id).unwrap();
-        // Get the BER/DER serialization of the content bytes, as described in
-        // <https://datatracker.ietf.org/doc/html/draft-ietf-tls-trust-anchor-ids-01#name-trust-anchor-identifiers>.
-        TrustAnchorID(relative_oid.as_bytes().to_vec())
-    };
-
-    // Likewise for the cosigner ID.
-    let cosigner_id = {
-        let relative_oid = RelativeOid::from_str(&CONFIG.logs[name].cosigner_id).unwrap();
-        TrustAnchorID(relative_oid.as_bytes().to_vec())
-    };
-
+    let log_id = TrustAnchorID::from_str(&CONFIG.logs[name].log_id).unwrap();
+    let cosigner_id = TrustAnchorID::from_str(&CONFIG.logs[name].cosigner_id).unwrap();
     let signing_key = load_signing_key(env, name).unwrap().clone();
-
     MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key)
 }
 
