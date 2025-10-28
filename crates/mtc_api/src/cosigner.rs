@@ -60,14 +60,14 @@ impl MtcCosigner {
         Ok(self.k.try_sign(&serialized)?.to_vec())
     }
 
-    /// Return the log ID as bytes.
-    pub fn log_id(&self) -> &[u8] {
-        self.v.log_id.as_bytes()
+    /// Return the log ID.
+    pub fn log_id(&self) -> &TrustAnchorID {
+        &self.v.log_id
     }
 
-    /// Return the cosigner ID as bytes.
-    pub fn cosigner_id(&self) -> &[u8] {
-        self.v.cosigner_id.as_bytes()
+    /// Return the cosigner ID.
+    pub fn cosigner_id(&self) -> &TrustAnchorID {
+        &self.v.cosigner_id
     }
 
     /// Return the verifying key as bytes.
