@@ -15,7 +15,7 @@ use crate::{
     CLEANER_BINDING, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use futures_util::future::join_all;
-use log::{info, warn};
+use log::{error, info, warn};
 use prometheus::{Registry, TextEncoder};
 use signed_note::KeyName;
 use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntryBlob, UnixTimestamp};
@@ -181,13 +181,14 @@ impl<L: LogEntry> GenericSequencer<L> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
         let name = &self.config.name;
+        info!("{name}: Locked init mutex");
 
         if *self.initialized.borrow() {
             return Ok(());
         }
 
-        if let Err(e) = self.cache.load().await {
-            warn!("Failed to load short-term dedup cache from DO storage: {e}");
+        if let Err(e) = self.cache.load(name).await {
+            error!("Failed to load short-term dedup cache from DO storage: {e}");
         }
 
         match log_ops::create_log(&self.config, &self.public_bucket, &self.do_state).await {

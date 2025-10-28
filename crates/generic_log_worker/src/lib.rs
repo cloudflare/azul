@@ -17,7 +17,7 @@ pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use log::Level;
+use log::{error, Level};
 use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde::de::DeserializeOwned;
@@ -274,8 +274,9 @@ impl DedupCache {
         format!("fifo:{idx}")
     }
 
-    // Load batches of cache entries from DO storage into the in-memory cache.
-    async fn load(&self) -> Result<()> {
+    // Load batches of cache entries from DO storage into the in-memory cache. log_name is the name
+    // of the log this dedup cache belongs to (for debugging purposes)
+    async fn load(&self, log_name: &str) -> Result<()> {
         // TODO: Find a cleaner way to do a dedup cache without an ever growing head/tail and error
         // conditions to manage. The storage SQL API with a time-based cache might be a good choice
 
@@ -290,7 +291,9 @@ impl DedupCache {
         // Check that the head isn't somehow ahead of the tail. This should never happen. At one
         // batch per second, the tail would take 136 years to overflow (since usize==u32 on WASM).
         if head > tail {
-            log::error!("cache head ({head}) is greater than tail ({tail}), setting to equal");
+            error!(
+                "{log_name}: cache head ({head}) is greater than tail ({tail}), setting to equal"
+            );
             // Set the head equal to the tail. This effectively clears the cache. Not idea, but
             // we're allowed to have dupes in the CT log, so this is fine.
             head = tail;
@@ -301,7 +304,7 @@ impl DedupCache {
         // We can subtract because we checked for underflow above
         if tail - head > Self::MAX_BATCHES {
             // If the head is somehow very far behind the tail, move it up
-            log::error!("delta too high, setting head to tail - MAX_BATCHES ({head})");
+            error!("{log_name}: delta too high, setting head to tail - MAX_BATCHES ({head})");
             head = tail.saturating_sub(Self::MAX_BATCHES);
             self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
         }
