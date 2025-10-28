@@ -294,7 +294,7 @@ impl DedupCache {
             error!(
                 "{log_name}: cache head ({head}) is greater than tail ({tail}), setting to equal"
             );
-            // Set the head equal to the tail. This effectively clears the cache. Not idea, but
+            // Set the head equal to the tail. This effectively clears the cache. Not ideal, but
             // we're allowed to have dupes in the CT log, so this is fine.
             head = tail;
             self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
