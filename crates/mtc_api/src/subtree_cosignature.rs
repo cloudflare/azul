@@ -11,8 +11,10 @@ use length_prefixed::WriteLengthPrefixedBytesExt;
 use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
 
-#[derive(Clone)]
-pub struct TrustAnchorID(pub Vec<u8>);
+use crate::RelativeOid;
+
+pub type TrustAnchorID = RelativeOid;
+
 pub struct MTCSubtreeCosigner {
     v: MTCSubtreeNoteVerifier,
     k: Ed25519SigningKey,
@@ -59,12 +61,12 @@ impl MTCSubtreeCosigner {
 
     /// Return the log ID as bytes.
     pub fn log_id(&self) -> &[u8] {
-        &self.v.log_id.0
+        self.v.log_id.as_bytes()
     }
 
     /// Return the cosigner ID as bytes.
     pub fn cosigner_id(&self) -> &[u8] {
-        &self.v.cosigner_id.0
+        self.v.cosigner_id.as_bytes()
     }
 
     /// Return the verifying key as bytes.
@@ -210,8 +212,10 @@ fn serialize_mtc_subtree_signature_input(
     root_hash: &Hash,
 ) -> Vec<u8> {
     let mut buffer: Vec<u8> = b"mtc-subtree/v1\n\x00".to_vec();
-    buffer.write_length_prefixed(&cosigner_id.0, 1).unwrap();
-    buffer.write_length_prefixed(&log_id.0, 1).unwrap();
+    buffer
+        .write_length_prefixed(cosigner_id.as_bytes(), 1)
+        .unwrap();
+    buffer.write_length_prefixed(log_id.as_bytes(), 1).unwrap();
     buffer.write_u64::<BigEndian>(start).unwrap();
     buffer.write_u64::<BigEndian>(end).unwrap();
     buffer.extend(root_hash.0);
@@ -227,6 +231,7 @@ mod tests {
     use super::*;
     use rand::rngs::OsRng;
     use signed_note::VerifierList;
+    use std::str::FromStr;
 
     #[test]
     fn test_cosignature_v1_sign_verify() {
@@ -242,8 +247,8 @@ mod tests {
             let sk = Ed25519SigningKey::generate(&mut rng);
             let name = KeyName::new("my-signer".into()).unwrap();
             MTCSubtreeCosigner::new(
-                TrustAnchorID(vec![0, 1, 2]),
-                TrustAnchorID(vec![3, 4, 5]),
+                TrustAnchorID::from_str("1.2.3").unwrap(),
+                TrustAnchorID::from_str("4.5.6").unwrap(),
                 name,
                 sk,
             )

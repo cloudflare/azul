@@ -62,7 +62,7 @@ impl MtcSignature {
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer
-            .write_length_prefixed(&self.cosigner_id.0, 1)
+            .write_length_prefixed(self.cosigner_id.as_bytes(), 1)
             .unwrap();
         buffer.write_length_prefixed(&self.signature, 2).unwrap();
         buffer

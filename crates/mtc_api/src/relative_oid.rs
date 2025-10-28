@@ -4,6 +4,7 @@ use std::str::FromStr;
 /// ASN.1 `RELATIVE OID`.
 ///
 /// TODO upstream this to the `der` crate.
+#[derive(Clone)]
 pub struct RelativeOid {
     ber: Vec<u8>,
 }
