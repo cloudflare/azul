@@ -266,11 +266,11 @@ impl DedupCache {
     // (~60s). Cap at 128 so we can use a single get_multiple call to get all
     // batches at once.
     // https://developers.cloudflare.com/durable-objects/api/storage-api/#get
-    const MAX_BATCHES: usize = 128;
+    const MAX_BATCHES: u32 = 128;
     const FIFO_HEAD_KEY: &str = "fifo:head";
     const FIFO_TAIL_KEY: &str = "fifo:tail";
 
-    fn fifo_key(idx: usize) -> String {
+    fn fifo_key(idx: u32) -> String {
         format!("fifo:{idx}")
     }
 
@@ -281,15 +281,15 @@ impl DedupCache {
         // conditions to manage. The storage SQL API with a time-based cache might be a good choice
 
         // Get the head and tail of the dedup cache, picking 0 if uninitialized
-        let mut head = get_maybe::<usize>(&self.storage, Self::FIFO_HEAD_KEY)
+        let mut head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
             .await?
             .unwrap_or_default();
-        let tail = get_maybe::<usize>(&self.storage, Self::FIFO_TAIL_KEY)
+        let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
             .await?
             .unwrap_or_default();
 
         // Check that the head isn't somehow ahead of the tail. This should never happen. At one
-        // batch per second, the tail would take 136 years to overflow (since usize==u32 on WASM).
+        // batch per second, the tail would take 136 years to overflow
         if head > tail {
             error!(
                 "{log_name}: cache head ({head}) is greater than tail ({tail}), setting to equal"
@@ -324,10 +324,10 @@ impl DedupCache {
     // Store a batch of cache entries in DO storage.
     async fn store(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
         // Get the head and tail of the dedup cache, picking 0 if uninitialized
-        let head = get_maybe::<usize>(&self.storage, Self::FIFO_HEAD_KEY)
+        let head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
             .await?
             .unwrap_or_default();
-        let tail = get_maybe::<usize>(&self.storage, Self::FIFO_TAIL_KEY)
+        let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
             .await?
             .unwrap_or_default();
 
