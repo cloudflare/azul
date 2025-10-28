@@ -17,7 +17,7 @@ pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use log::Level;
+use log::{error, Level};
 use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde::{Deserialize, Serialize};
@@ -258,7 +258,7 @@ impl DedupCache {
 
     // Load batches of cache entries from DO storage into the in-memory cache.
     async fn load(&self) -> Result<()> {
-        let head = self
+        let mut head = self
             .storage
             .get::<usize>(Self::FIFO_HEAD_KEY)
             .await
@@ -268,6 +268,11 @@ impl DedupCache {
             .get::<usize>(Self::FIFO_TAIL_KEY)
             .await
             .unwrap_or_default();
+        if tail - head > Self::MAX_BATCHES {
+            head = tail - Self::MAX_BATCHES;
+            error!("DedupCache: delta too high, setting head = tail - MAX_BATCHES, {head}");
+            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
+        }
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
         let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {
