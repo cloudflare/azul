@@ -309,6 +309,8 @@ impl DedupCache {
             self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
         }
 
+        // Collect all the recent values from storage and put them in the memory backend
+        // We can subtract because we checked for underflow above
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
         let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {
@@ -334,7 +336,7 @@ impl DedupCache {
         // somehow gets larger too
         let delta = tail.saturating_sub(head);
         if delta >= Self::MAX_BATCHES {
-            // Move the head up to at most tail - MAX_BATCHES
+            // Move the head up to at least tail - MAX_BATCHES + 1
             self.storage
                 .put(
                     Self::FIFO_HEAD_KEY,
