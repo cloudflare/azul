@@ -1,12 +1,12 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
+mod cosigner;
 mod landmark;
 mod relative_oid;
-mod subtree_cosignature;
+pub use cosigner::*;
 pub use landmark::*;
 pub use relative_oid::*;
-pub use subtree_cosignature::*;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{

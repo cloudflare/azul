@@ -16,21 +16,26 @@ use crate::{RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
 
 pub type TrustAnchorID = RelativeOid;
 
-pub struct MTCSubtreeCosigner {
-    v: MTCSubtreeNoteVerifier,
+pub struct MtcCosigner {
+    v: MtcNoteVerifier,
     k: Ed25519SigningKey,
 }
 
-impl MTCSubtreeCosigner {
-    pub fn new(cosigner_id: TrustAnchorID, log_id: TrustAnchorID, k: Ed25519SigningKey) -> Self {
+impl MtcCosigner {
+    /// Return a checkpoint cosigner.
+    pub fn new_checkpoint(
+        cosigner_id: TrustAnchorID,
+        log_id: TrustAnchorID,
+        k: Ed25519SigningKey,
+    ) -> Self {
         Self {
-            v: MTCSubtreeNoteVerifier::new(cosigner_id, log_id, k.verifying_key()),
+            v: MtcNoteVerifier::new_checkpoint(cosigner_id, log_id, k.verifying_key()),
             k,
         }
     }
 }
 
-impl MTCSubtreeCosigner {
+impl MtcCosigner {
     /// Compute an Ed25519 subtree cosignature as defined in
     /// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-signature-format>.
     ///
@@ -72,7 +77,7 @@ impl MTCSubtreeCosigner {
 }
 
 /// Support signing tlog-checkpoint with the subtree cosigner.
-impl CheckpointSigner for MTCSubtreeCosigner {
+impl CheckpointSigner for MtcCosigner {
     fn name(&self) -> &KeyName {
         self.v.name()
     }
@@ -96,10 +101,10 @@ impl CheckpointSigner for MTCSubtreeCosigner {
     }
 }
 
-/// [`MTCSubtreeNoteVerifier`] is the verifier for subtree cosignatures defined in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-cosigners>
+/// [`MtcNoteVerifier`] is the verifier for subtree cosignatures defined in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-cosigners>
 /// It currently supports only Ed25519 signatures.
 #[derive(Clone)]
-pub struct MTCSubtreeNoteVerifier {
+pub struct MtcNoteVerifier {
     cosigner_id: TrustAnchorID,
     log_id: TrustAnchorID,
     name: KeyName,
@@ -107,8 +112,9 @@ pub struct MTCSubtreeNoteVerifier {
     verifying_key: Ed25519VerifyingKey,
 }
 
-impl MTCSubtreeNoteVerifier {
-    pub fn new(
+impl MtcNoteVerifier {
+    /// Return a checkpoint verifier.
+    pub fn new_checkpoint(
         cosigner_id: TrustAnchorID,
         log_id: TrustAnchorID,
         verifying_key: Ed25519VerifyingKey,
@@ -119,7 +125,7 @@ impl MTCSubtreeNoteVerifier {
             let mut hasher = Sha256::new();
             hasher.update(name.as_str().as_bytes());
             hasher.update([0x0a, 0xff]);
-            hasher.update(b"mtc-subtree/v1");
+            hasher.update(b"mtc-checkpoint/v1");
             let result = hasher.finalize();
             u32::from_be_bytes(result[0..4].try_into().unwrap())
         };
@@ -135,7 +141,7 @@ impl MTCSubtreeNoteVerifier {
 }
 
 /// Support verifying signed note signatures created using the subtree cosigner.
-impl NoteVerifier for MTCSubtreeNoteVerifier {
+impl NoteVerifier for MtcNoteVerifier {
     fn name(&self) -> &KeyName {
         &self.name
     }
@@ -242,7 +248,7 @@ mod tests {
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
             let sk = Ed25519SigningKey::generate(&mut rng);
-            MTCSubtreeCosigner::new(
+            MtcCosigner::new_checkpoint(
                 TrustAnchorID::from_str("1.2.3").unwrap(),
                 TrustAnchorID::from_str("4.5.6").unwrap(),
                 sk,

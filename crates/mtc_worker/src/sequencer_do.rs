@@ -5,7 +5,7 @@
 
 use std::{future::Future, pin::Pin, time::Duration};
 
-use crate::{load_cosigner, load_origin, CONFIG};
+use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
 use generic_log_worker::{
     get_durable_object_name, load_public_bucket, CheckpointCallbacker, GenericSequencer,
     SequencerConfig, SEQUENCER_BINDING,
@@ -31,7 +31,7 @@ impl DurableObject for Sequencer {
         let config = SequencerConfig {
             name: name.to_string(),
             origin: load_origin(name),
-            checkpoint_signers: vec![Box::new(load_cosigner(&env, name))],
+            checkpoint_signers: vec![Box::new(load_checkpoint_cosigner(&env, name))],
             checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extension for MTC
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
