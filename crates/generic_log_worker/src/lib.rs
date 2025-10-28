@@ -20,6 +20,7 @@ use byteorder::{BigEndian, WriteBytesExt};
 use log::Level;
 use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -144,6 +145,23 @@ pub fn get_durable_object_stub(
     }
 }
 
+/// Gets the value from the given DO storage backend with the given key, returning `None` if the key
+/// is not defined.
+async fn get_maybe<T: DeserializeOwned>(storage: &Storage, key: &str) -> Result<Option<T>> {
+    let res = storage.get::<T>(key).await;
+
+    // Return None if the result of the get is
+    //   worker::Error::from(JsValue:from("No such value in storage."))
+    if let Err(Error::JsError(ref e)) = res {
+        if e == "No such value in storage." {
+            return Ok(None);
+        }
+    }
+
+    // In any other case, we either have a real return value or an error
+    res.map(Option::Some)
+}
+
 /// Return a handle for the public R2 bucket from which to serve this log's
 /// static assets.
 ///
@@ -258,16 +276,35 @@ impl DedupCache {
 
     // Load batches of cache entries from DO storage into the in-memory cache.
     async fn load(&self) -> Result<()> {
-        let head = self
-            .storage
-            .get::<usize>(Self::FIFO_HEAD_KEY)
-            .await
+        // TODO: Find a cleaner way to do a dedup cache without an ever growing head/tail and error
+        // conditions to manage. The storage SQL API with a time-based cache might be a good choice
+
+        // Get the head and tail of the dedup cache, picking 0 if uninitialized
+        let mut head = get_maybe::<usize>(&self.storage, Self::FIFO_HEAD_KEY)
+            .await?
             .unwrap_or_default();
-        let tail = self
-            .storage
-            .get::<usize>(Self::FIFO_TAIL_KEY)
-            .await
+        let tail = get_maybe::<usize>(&self.storage, Self::FIFO_TAIL_KEY)
+            .await?
             .unwrap_or_default();
+
+        // Check that the head isn't somehow ahead of the tail. This should never happen. At one
+        // batch per second, the tail would take 136 years to overflow (since usize==u32 on WASM).
+        if head > tail {
+            log::error!("cache head ({head}) is greater than tail ({tail}), setting to equal");
+            // Set the head equal to the tail. This effectively clears the cache. Not idea, but
+            // we're allowed to have dupes in the CT log, so this is fine.
+            head = tail;
+            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
+        }
+
+        // Check that tail is not too far ahead of head
+        // We can subtract because we checked for underflow above
+        if tail - head > Self::MAX_BATCHES {
+            log::error!("delta too high, setting head to tail - MAX_BATCHES ({head})");
+            head = tail.saturating_sub(Self::MAX_BATCHES);
+            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
+        }
+
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
         let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {
