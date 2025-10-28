@@ -300,6 +300,7 @@ impl DedupCache {
         // Check that tail is not too far ahead of head
         // We can subtract because we checked for underflow above
         if tail - head > Self::MAX_BATCHES {
+            // If the head is somehow very far behind the tail, move it up
             log::error!("delta too high, setting head to tail - MAX_BATCHES ({head})");
             head = tail.saturating_sub(Self::MAX_BATCHES);
             self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
@@ -317,21 +318,29 @@ impl DedupCache {
 
     // Store a batch of cache entries in DO storage.
     async fn store(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
-        let head = self
-            .storage
-            .get::<usize>(Self::FIFO_HEAD_KEY)
-            .await
+        // Get the head and tail of the dedup cache, picking 0 if uninitialized
+        let head = get_maybe::<usize>(&self.storage, Self::FIFO_HEAD_KEY)
+            .await?
             .unwrap_or_default();
-        let tail = self
-            .storage
-            .get::<usize>(Self::FIFO_TAIL_KEY)
-            .await
+        let tail = get_maybe::<usize>(&self.storage, Self::FIFO_TAIL_KEY)
+            .await?
             .unwrap_or_default();
-        // Check if the cache is full.
-        if tail - head >= Self::MAX_BATCHES {
-            // Evict the oldest item by incrementing the head.
-            self.storage.put(Self::FIFO_HEAD_KEY, head + 1).await?;
+
+        // If the cache will have gotten too big after this store operation, evict some items at the
+        // head. In practice, the delta never exceed MAX_BATCHES, but we handle the case where it
+        // somehow gets larger too
+        let delta = tail.saturating_sub(head);
+        if delta >= Self::MAX_BATCHES {
+            // Move the head up to at most tail - MAX_BATCHES
+            self.storage
+                .put(
+                    Self::FIFO_HEAD_KEY,
+                    tail.saturating_sub(Self::MAX_BATCHES) + 1,
+                )
+                .await?;
         }
+
+        // Insert at the tail (mod cache size)
         let insert_idx = tail % Self::MAX_BATCHES;
         self.storage
             .put::<&ByteBuf>(
@@ -339,6 +348,8 @@ impl DedupCache {
                 &ByteBuf::from(serialize_entries(entries)),
             )
             .await?;
+
+        // Increment the tail
         self.storage.put(Self::FIFO_TAIL_KEY, tail + 1).await
     }
 }
