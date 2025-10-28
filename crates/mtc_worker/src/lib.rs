@@ -60,11 +60,10 @@ pub(crate) fn load_ed25519_key(
 }
 
 pub(crate) fn load_cosigner(env: &Env, name: &str) -> MTCSubtreeCosigner {
-    let origin = load_origin(name);
     let log_id = TrustAnchorID::from_str(&CONFIG.logs[name].log_id).unwrap();
     let cosigner_id = TrustAnchorID::from_str(&CONFIG.logs[name].cosigner_id).unwrap();
     let signing_key = load_signing_key(env, name).unwrap().clone();
-    MTCSubtreeCosigner::new(cosigner_id, log_id, origin.clone(), signing_key)
+    MTCSubtreeCosigner::new(cosigner_id, log_id, signing_key)
 }
 
 pub(crate) fn load_origin(name: &str) -> KeyName {
