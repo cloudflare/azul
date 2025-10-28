@@ -205,6 +205,7 @@ impl<L: LogEntry> GenericSequencer<L> {
             }
             Ok(()) => {}
         }
+        info!("{} Seq: Done creating log", self.config.name);
 
         // Start the cleaner, if configured.
         info!("{} Seq: Getting stub", self.config.name);

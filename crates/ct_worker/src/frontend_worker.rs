@@ -119,6 +119,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 })
                 .get_async("/logs/:log/metrics", |_req, ctx| async move {
                     let name = ctx.data;
+                    log::info!("{name} Metrics: Getting sequencer stub");
                     let stub = get_durable_object_stub(
                         &ctx.env,
                         name,
@@ -126,6 +127,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                         "SEQUENCER",
                         CONFIG.logs[name].location_hint.as_deref(),
                     )?;
+                    log::info!("{name} Metrics: Calling metric endpoint");
                     stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
                         .await
                 })
