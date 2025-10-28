@@ -8,10 +8,11 @@ use ed25519_dalek::{
     VerifyingKey as Ed25519VerifyingKey,
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
-use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
+use sha2::{Digest, Sha256};
+use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
 use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
 
-use crate::RelativeOid;
+use crate::{RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
 
 pub type TrustAnchorID = RelativeOid;
 
@@ -21,14 +22,9 @@ pub struct MTCSubtreeCosigner {
 }
 
 impl MTCSubtreeCosigner {
-    pub fn new(
-        cosigner_id: TrustAnchorID,
-        log_id: TrustAnchorID,
-        name: KeyName,
-        k: Ed25519SigningKey,
-    ) -> Self {
+    pub fn new(cosigner_id: TrustAnchorID, log_id: TrustAnchorID, k: Ed25519SigningKey) -> Self {
         Self {
-            v: MTCSubtreeNoteVerifier::new(cosigner_id, log_id, name, k.verifying_key()),
+            v: MTCSubtreeNoteVerifier::new(cosigner_id, log_id, k.verifying_key()),
             k,
         }
     }
@@ -115,18 +111,19 @@ impl MTCSubtreeNoteVerifier {
     pub fn new(
         cosigner_id: TrustAnchorID,
         log_id: TrustAnchorID,
-        name: KeyName,
         verifying_key: Ed25519VerifyingKey,
     ) -> Self {
+        let name = KeyName::new(format!("oid/{}.{}", ID_RDNA_TRUSTANCHOR_ID, log_id)).unwrap();
+
         let id = {
-            // TODO what signature algorithm to use for mtc-subtree/v1?
-            let pubkey = [
-                &[SignatureType::Undefined as u8],
-                verifying_key.to_bytes().as_slice(),
-            ]
-            .concat();
-            compute_key_id(&name, &pubkey)
+            let mut hasher = Sha256::new();
+            hasher.update(name.as_str().as_bytes());
+            hasher.update([0x0a, 0xff]);
+            hasher.update(b"mtc-subtree/v1");
+            let result = hasher.finalize();
+            u32::from_be_bytes(result[0..4].try_into().unwrap())
         };
+
         Self {
             cosigner_id,
             log_id,
@@ -245,11 +242,9 @@ mod tests {
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
             let sk = Ed25519SigningKey::generate(&mut rng);
-            let name = KeyName::new("my-signer".into()).unwrap();
             MTCSubtreeCosigner::new(
                 TrustAnchorID::from_str("1.2.3").unwrap(),
                 TrustAnchorID::from_str("4.5.6").unwrap(),
-                name,
                 sk,
             )
         };
