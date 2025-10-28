@@ -270,7 +270,7 @@ impl DedupCache {
             .get::<usize>(Self::FIFO_TAIL_KEY)
             .await
             .unwrap_or_default();
-        info!("{name} DedupCache: head and tail loaded");
+        info!("{name} DedupCache: head({head}) and tail({tail}) loaded");
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
         info!("{name} DedupCache: Getting keys");
         let map = self.storage.get_multiple(keys).await?;
