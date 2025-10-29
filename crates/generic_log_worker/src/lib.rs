@@ -17,9 +17,10 @@ pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use log::Level;
+use log::{error, Level};
 use log_ops::UploadOptions;
 use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -144,6 +145,17 @@ pub fn get_durable_object_stub(
     }
 }
 
+/// Gets the value from the given DO storage backend with the given key. Returns `Ok(None)` if no such
+/// key exists.
+async fn get_maybe<T: DeserializeOwned>(storage: &Storage, key: &str) -> Result<Option<T>> {
+    match storage.get::<T>(key).await {
+        Ok(val) => Ok(Some(val)),
+        // Return None if the result of the get is "No such value in storage."
+        Err(Error::JsError(ref e)) if e == "No such value in storage." => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Return a handle for the public R2 bucket from which to serve this log's
 /// static assets.
 ///
@@ -248,26 +260,51 @@ impl DedupCache {
     // (~60s). Cap at 128 so we can use a single get_multiple call to get all
     // batches at once.
     // https://developers.cloudflare.com/durable-objects/api/storage-api/#get
-    const MAX_BATCHES: usize = 128;
+    const MAX_BATCHES: u32 = 128;
     const FIFO_HEAD_KEY: &str = "fifo:head";
     const FIFO_TAIL_KEY: &str = "fifo:tail";
 
-    fn fifo_key(idx: usize) -> String {
+    fn fifo_key(idx: u32) -> String {
         format!("fifo:{idx}")
     }
 
-    // Load batches of cache entries from DO storage into the in-memory cache.
-    async fn load(&self) -> Result<()> {
-        let head = self
-            .storage
-            .get::<usize>(Self::FIFO_HEAD_KEY)
-            .await
+    // Load batches of cache entries from DO storage into the in-memory cache. log_name is the name
+    // of the log this dedup cache belongs to (for debugging purposes)
+    async fn load(&self, log_name: &str) -> Result<()> {
+        // TODO: Find a cleaner way to do a dedup cache without an ever growing head/tail and error
+        // conditions to manage. The storage SQL API with a time-based cache might be a good choice
+
+        // Get the head and tail of the dedup cache, picking 0 if uninitialized
+        let mut head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
+            .await?
             .unwrap_or_default();
-        let tail = self
-            .storage
-            .get::<usize>(Self::FIFO_TAIL_KEY)
-            .await
+        let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
+            .await?
             .unwrap_or_default();
+
+        // Check that the head isn't somehow ahead of the tail. This should never happen. At one
+        // batch per second, the tail would take 136 years to overflow
+        if head > tail {
+            error!(
+                "{log_name}: cache head ({head}) is greater than tail ({tail}), setting to equal"
+            );
+            // Set the head equal to the tail. This effectively clears the cache. Not ideal, but
+            // we're allowed to have dupes in the CT log, so this is fine.
+            head = tail;
+            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
+        }
+
+        // Check that tail is not too far ahead of head
+        // We can subtract because we checked for underflow above
+        if tail - head > Self::MAX_BATCHES {
+            // If the head is somehow very far behind the tail, move it up
+            error!("{log_name}: delta too high, setting head to tail - MAX_BATCHES ({head})");
+            head = tail.saturating_sub(Self::MAX_BATCHES);
+            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
+        }
+
+        // Collect all the recent values from storage and put them in the memory backend
+        // We can subtract because we checked for underflow above
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
         let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {
@@ -280,21 +317,29 @@ impl DedupCache {
 
     // Store a batch of cache entries in DO storage.
     async fn store(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
-        let head = self
-            .storage
-            .get::<usize>(Self::FIFO_HEAD_KEY)
-            .await
+        // Get the head and tail of the dedup cache, picking 0 if uninitialized
+        let head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
+            .await?
             .unwrap_or_default();
-        let tail = self
-            .storage
-            .get::<usize>(Self::FIFO_TAIL_KEY)
-            .await
+        let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
+            .await?
             .unwrap_or_default();
-        // Check if the cache is full.
-        if tail - head >= Self::MAX_BATCHES {
-            // Evict the oldest item by incrementing the head.
-            self.storage.put(Self::FIFO_HEAD_KEY, head + 1).await?;
+
+        // If the cache will have gotten too big after this store operation, evict some items at the
+        // head. In practice, the delta never exceed MAX_BATCHES, but we handle the case where it
+        // somehow gets larger too
+        let delta = tail.saturating_sub(head);
+        if delta >= Self::MAX_BATCHES {
+            // Move the head up to at least tail - MAX_BATCHES + 1
+            self.storage
+                .put(
+                    Self::FIFO_HEAD_KEY,
+                    tail.saturating_sub(Self::MAX_BATCHES) + 1,
+                )
+                .await?;
         }
+
+        // Insert at the tail (mod cache size)
         let insert_idx = tail % Self::MAX_BATCHES;
         self.storage
             .put::<&ByteBuf>(
@@ -302,6 +347,8 @@ impl DedupCache {
                 &ByteBuf::from(serialize_entries(entries)),
             )
             .await?;
+
+        // Increment the tail
         self.storage.put(Self::FIFO_TAIL_KEY, tail + 1).await
     }
 }

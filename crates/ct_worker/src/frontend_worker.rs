@@ -206,8 +206,8 @@ async fn add_chain_or_pre_chain(
     let req: AddChainRequest = match req.json().await {
         Ok(req) => req,
         Err(e) => {
-            log::debug!("{name}: Invalid JSON in add-(pre)chain request: {e}");
-            return Response::error("Invalid JSON in add-[pre-]chain request", 400);
+            log::debug!("{name}: Invalid add-(pre)chain request: {e}");
+            return Response::error("Invalid add-[pre-]chain request", 400);
         }
     };
 
