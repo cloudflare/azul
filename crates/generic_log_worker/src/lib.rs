@@ -148,18 +148,12 @@ pub fn get_durable_object_stub(
 /// Gets the value from the given DO storage backend with the given key. Returns `Ok(None)` if no such
 /// key exists.
 async fn get_maybe<T: DeserializeOwned>(storage: &Storage, key: &str) -> Result<Option<T>> {
-    let res = storage.get::<T>(key).await;
-
-    // Return None if the result of the get is
-    //   worker::Error::from(JsValue:from("No such value in storage."))
-    if let Err(Error::JsError(ref e)) = res {
-        if e == "No such value in storage." {
-            return Ok(None);
-        }
+    match storage.get::<T>(key).await {
+        Ok(val) => Ok(Some(val)),
+        // Return None if the result of the get is "No such value in storage."
+        Err(Error::JsError(ref e)) if e == "No such value in storage." => Ok(None),
+        Err(e) => Err(e),
     }
-
-    // In any other case, we either have a real return value or an error
-    res.map(Option::Some)
 }
 
 /// Return a handle for the public R2 bucket from which to serve this log's
