@@ -145,8 +145,8 @@ pub fn get_durable_object_stub(
     }
 }
 
-/// Gets the value from the given DO storage backend with the given key, returning `None` if the key
-/// is not defined.
+/// Gets the value from the given DO storage backend with the given key. Returns `Ok(None)` if no such
+/// key exists.
 async fn get_maybe<T: DeserializeOwned>(storage: &Storage, key: &str) -> Result<Option<T>> {
     let res = storage.get::<T>(key).await;
 
