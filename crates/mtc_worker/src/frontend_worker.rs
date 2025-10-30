@@ -85,8 +85,10 @@ pub struct GetLandmarkBundleResponse<'a> {
 pub struct SubtreeWithConsistencyProof {
     pub start: u64,
     pub end: u64,
+    #[serde_as(as = "Base64")]
+    pub hash: [u8; 32],
     #[serde_as(as = "Vec<Base64>")]
-    pub consistency_proof: Vec<Vec<u8>>,
+    pub consistency_proof: Vec<[u8; 32]>,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -421,7 +423,7 @@ async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
     // the checkpoint. Each signatureless MTC includes an inclusion proof in one of these subtrees.
     let mut subtrees = Vec::new();
     for landmark_subtree in landmark_sequence.subtrees() {
-        let consistency_proof = match prove_subtree_consistency(
+        let (consistency_proof, landmark_subtree_hash) = match prove_subtree_consistency(
             *checkpoint.hash(),
             checkpoint.size(),
             landmark_subtree.lo(),
@@ -438,7 +440,8 @@ async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
         subtrees.push(SubtreeWithConsistencyProof {
             start: landmark_subtree.lo(),
             end: landmark_subtree.hi(),
-            consistency_proof: consistency_proof.iter().map(|h| h.0.to_vec()).collect(),
+            hash: landmark_subtree_hash.0,
+            consistency_proof: consistency_proof.iter().map(|h| h.0).collect(),
         });
     }
 
