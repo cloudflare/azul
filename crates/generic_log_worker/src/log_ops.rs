@@ -582,11 +582,14 @@ pub async fn prove_consistency(
     prev_tree_size: u64,
     object: &impl ObjectBackend,
 ) -> Result<Proof, ProofError> {
-    prove_subtree_consistency(cur_tree_hash, cur_tree_size, 0, prev_tree_size, object).await
+    prove_subtree_consistency(cur_tree_hash, cur_tree_size, 0, prev_tree_size, object)
+        .await
+        .map(|(p, _)| p)
 }
 
-/// Returns a consistency proof that the tree with size `cur_tree_size` and hash
-/// `cur_tree_hash` is consistent with the subtree `[start, end)`.
+/// Returns a consistency proof that the tree with size `cur_tree_size` and hash `cur_tree_hash` is
+/// consistent with the subtree `[start, end)`. Returns the subtree hash that the verifier would
+/// check the proof against.
 ///
 /// # Errors
 ///
@@ -598,7 +601,7 @@ pub async fn prove_subtree_consistency(
     start: u64,
     end: u64,
     object: &impl ObjectBackend,
-) -> Result<Proof, ProofError> {
+) -> Result<(Proof, Hash), ProofError> {
     let m = &Subtree::new(start, end)?;
     // Fetch the tiles needed for the proof.
     let indexes = tlog_tiles::subtree_consistency_proof_indexes(cur_tree_size, m)?;
@@ -606,11 +609,11 @@ pub async fn prove_subtree_consistency(
     let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
 
     // Construct the proof.
-    Ok(tlog_tiles::subtree_consistency_proof(
-        cur_tree_size,
-        m,
-        &hash_reader,
-    )?)
+    let proof = tlog_tiles::subtree_consistency_proof(cur_tree_size, m, &hash_reader)?;
+
+    // Compute the subtree hash.
+    let subtree_hash = tlog_tiles::subtree_hash(&m, &hash_reader)?;
+    Ok((proof, subtree_hash))
 }
 
 /// Fetch the tree tiles containing the nodes at the requested indexes, as well
