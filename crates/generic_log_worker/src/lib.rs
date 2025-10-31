@@ -258,16 +258,19 @@ impl DedupCache {
 
     // Load batches of cache entries from DO storage into the in-memory cache.
     async fn load(&self) -> Result<()> {
+        log::info!("DedupCache: loading head");
         let head = self
             .storage
             .get::<usize>(Self::FIFO_HEAD_KEY)
             .await
             .unwrap_or_default();
+        log::info!("DedupCache: loading tail");
         let tail = self
             .storage
             .get::<usize>(Self::FIFO_TAIL_KEY)
             .await
             .unwrap_or_default();
+        log::info!("DedupCache: head and tail loaded");
         let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
         let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {

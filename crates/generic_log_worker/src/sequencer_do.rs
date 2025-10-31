@@ -179,7 +179,9 @@ impl<L: LogEntry> GenericSequencer<L> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&self) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
-        let _lock = self.init_mux.lock().await;
+        let _lock = self.init_mux.try_lock().map_err(|_| {
+            worker::Error::from("init_mux locked")
+        })?;
         let name = &self.config.name;
 
         if *self.initialized.borrow() {
