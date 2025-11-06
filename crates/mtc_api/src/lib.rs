@@ -32,9 +32,9 @@ use x509_cert::{
     certificate::Version,
     ext::{
         pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages},
-        Extension,
+        Extension, Extensions,
     },
-    name::RdnSequence,
+    name::{Name, RdnSequence},
     serial_number::SerialNumber,
     spki::{AlgorithmIdentifier, SubjectPublicKeyInfo},
     time::Validity,
@@ -355,14 +355,24 @@ impl MerkleTreeCertEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq, Sequence, ValueOrd)]
 pub struct TbsCertificateLogEntry {
+    /// The certificate version
+    ///
+    /// Note that this value defaults to Version 1 per the RFC. However,
+    /// fields such as `issuer_unique_id`, `subject_unique_id` and `extensions`
+    /// require later versions. Care should be taken in order to ensure
+    /// standards compliance.
+    #[asn1(context_specific = "0", default = "Default::default")]
     pub version: Version,
-    pub issuer: RdnSequence,
+    pub issuer: Name,
     pub validity: Validity,
-    pub subject: RdnSequence,
+    pub subject: Name,
     pub subject_public_key_info_hash: OctetString,
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
     pub issuer_unique_id: Option<BitString>,
+    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
     pub subject_unique_id: Option<BitString>,
-    pub extensions: Option<Vec<Extension>>,
+    #[asn1(context_specific = "3", tag_mode = "EXPLICIT", optional = "true")]
+    pub extensions: Option<Extensions>,
 }
 
 // Validate and filter extended key usage extension.
