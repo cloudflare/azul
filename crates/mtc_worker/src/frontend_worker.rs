@@ -25,7 +25,7 @@ use mtc_api::{
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 use tlog_tiles::{
     open_checkpoint, CheckpointSigner, CheckpointText, LeafIndex, PendingLogEntry,
     PendingLogEntryBlob,
@@ -74,17 +74,16 @@ pub struct GetCertificateResponse {
 
 /// GET response structure for the `/get-landmark-bundle` endpoint
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct GetLandmarkBundleResponse<'a> {
     pub checkpoint: &'a str,
     pub subtrees: Vec<SubtreeWithConsistencyProof>,
+    pub landmarks: &'a VecDeque<u64>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct SubtreeWithConsistencyProof {
-    pub start: u64,
-    pub end: u64,
     #[serde_as(as = "Base64")]
     pub hash: [u8; 32],
     #[serde_as(as = "Vec<Base64>")]
@@ -438,8 +437,6 @@ async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
         };
 
         subtrees.push(SubtreeWithConsistencyProof {
-            start: landmark_subtree.lo(),
-            end: landmark_subtree.hi(),
             hash: landmark_subtree_hash.0,
             consistency_proof: consistency_proof.iter().map(|h| h.0).collect(),
         });
@@ -448,6 +445,7 @@ async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
     Response::from_json(&GetLandmarkBundleResponse {
         checkpoint: std::str::from_utf8(&checkpoint_bytes).unwrap(),
         subtrees,
+        landmarks: &landmark_sequence.landmarks,
     })
 }
 

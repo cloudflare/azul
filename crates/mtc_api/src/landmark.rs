@@ -4,9 +4,9 @@ use tlog_tiles::Subtree;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct LandmarkSequence {
-    max_landmarks: usize,
-    last_landmark: usize,
-    landmarks: VecDeque<u64>,
+    pub max_landmarks: usize,
+    pub last_landmark: usize,
+    pub landmarks: VecDeque<u64>,
 }
 
 /// The location in object storage for the landmark bundle.
