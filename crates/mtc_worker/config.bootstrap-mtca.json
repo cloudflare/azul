@@ -14,6 +14,13 @@
             "cosigner_id": "44363.48.6",
             "submission_url": "https://bootstrap-mtca.cloudflareresearch.com/logs/shard2/",
             "monitoring_url": "https://bootstrap-mtca-shard2.cloudflareresearch.com"
+        },
+        "shard3": {
+            "description": "Cloudflare bootstrap MTCA shard 3",
+            "log_id": "44363.48.8",
+            "cosigner_id": "44363.48.9",
+            "submission_url": "https://bootstrap-mtca.cloudflareresearch.com/logs/shard3/",
+            "monitoring_url": "https://bootstrap-mtca-shard3.cloudflareresearch.com"
         }
     }
 }
