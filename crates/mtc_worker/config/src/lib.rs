@@ -39,6 +39,15 @@ pub struct LogParams {
     pub clean_interval_secs: u64,
 }
 
+impl LogParams {
+    /// Return the maximum number of landmarks that cover unexpired certificates at any given time.
+    pub fn max_landmarks(&self) -> usize {
+        self.max_certificate_lifetime_secs
+            .div_ceil(self.landmark_interval_secs)
+            + 1
+    }
+}
+
 fn default_u8<const V: u8>() -> u8 {
     V
 }
