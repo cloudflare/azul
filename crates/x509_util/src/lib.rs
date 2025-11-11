@@ -421,6 +421,8 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// provided by the submitter.
 /// ```
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
+    assert_eq!(child.tbs_certificate.issuer, issuer.tbs_certificate.subject);
+
     if let Ok(key) = VerifyingKey::try_from(issuer) {
         key.verify_strict(child).is_ok()
     } else {
