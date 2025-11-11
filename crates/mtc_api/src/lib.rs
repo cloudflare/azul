@@ -544,6 +544,13 @@ pub fn validate_correspondence(
                 "entry and bootstrap versions must be v3".into(),
             ));
         }
+
+        if log_entry.issuer != bootstrap.issuer {
+            return Err(MtcError::Dynamic(
+                "entry issuer must match bootstrap issuer".into(),
+            ));
+        }
+
         // Make sure the validity is contained within the validity of every cert in
         // the chain.
         for cert in core::iter::once(&leaf).chain(chain_certs) {
