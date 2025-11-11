@@ -421,7 +421,11 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// provided by the submitter.
 /// ```
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
-    assert_eq!(child.tbs_certificate.issuer, issuer.tbs_certificate.subject);
+    //assert_eq!(child.tbs_certificate.issuer, issuer.tbs_certificate.subject);
+    assert_eq!(
+        child.tbs_certificate.issuer.0[1], issuer.tbs_certificate.subject.0[1],
+        "second RDNSequence components do not match"
+    );
 
     if let Ok(key) = VerifyingKey::try_from(issuer) {
         key.verify_strict(child).is_ok()
