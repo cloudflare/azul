@@ -81,10 +81,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     }
 
                     // Time to add a new landmark.
-                    let max_landmarks = params
-                        .max_certificate_lifetime_secs
-                        .div_ceil(params.landmark_interval_secs)
-                        + 1;
+                    let max_landmarks = params.max_landmarks();
 
                     // Load current landmark sequence.
                     let mut seq =

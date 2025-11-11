@@ -477,13 +477,9 @@ async fn get_landmark_sequence(
         return Err("failed to get landmark sequence".into());
     };
 
-    let max_landmarks = params
-        .max_certificate_lifetime_secs
-        .div_ceil(params.landmark_interval_secs)
-        + 1;
-
-    let landmark_sequence = LandmarkSequence::from_bytes(&landmark_sequence_bytes, max_landmarks)
-        .map_err(|e| e.to_string())?;
+    let landmark_sequence =
+        LandmarkSequence::from_bytes(&landmark_sequence_bytes, params.max_landmarks())
+            .map_err(|e| e.to_string())?;
 
     Ok(landmark_sequence)
 }
