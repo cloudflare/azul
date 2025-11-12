@@ -421,12 +421,18 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// provided by the submitter.
 /// ```
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
-    //assert_eq!(child.tbs_certificate.issuer, issuer.tbs_certificate.subject);
-    assert_eq!(
-        child.tbs_certificate.issuer.0[1], issuer.tbs_certificate.subject.0[1],
-        "second RDNSequence components do not match"
-    );
+    // Currently paths are built by comparing
+    //   child.tbs_certificate.issuer.to_string()
+    // to
+    //   issuer.tbs_certificate.subject.to_string().
+    // When these are equal, there is a plausible link between these. This is NOT the actual
+    // algorithm for determining whether a link is valid. A discussion on the correct algorithm can
+    // be found here
+    //   https://github.com/golang/go/issues/31440#issuecomment-537222858
+    // The short version is: many clients do byte-by-byte comparison. This to_string() comparison is
+    // strictly laxer than that. Which is probably fine for MTC and (static) CT use cases.
 
+    // Verify the issuer's signature on the child cert
     if let Ok(key) = VerifyingKey::try_from(issuer) {
         key.verify_strict(child).is_ok()
     } else {
