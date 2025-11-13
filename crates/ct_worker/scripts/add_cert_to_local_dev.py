@@ -6,7 +6,7 @@ import socket
 import ssl
 import sys
 
-HOST = "www.python.org"
+HOST = "www.google.com"
 
 if sys.version_info < (3, 13, 0):
     cur_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
