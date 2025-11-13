@@ -1,6 +1,6 @@
 #!/bin/sh
 
-set -eu -o pipefail
+set -e -o pipefail
 
 # Helper script to create resources for a log shard.
 
@@ -35,3 +35,13 @@ if npx wrangler -e=${ENV} secret list | grep -q SIGNING_KEY_${LOG_NAME}; then
 else
 	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
 fi
+
+echo "DONE"
+echo "NOTE: If you intend to run wrangler dev with this log, you must add the appropriate signing keys to .dev.vars"
+echo "~~~~~~"
+echo "echo -n \"SIGNING_KEY_${LOG_NAME}=\\\\\"\" >> .dev.vars"
+echo "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | sed 's/$/\\\\\\\\\\\\\\\\n/g' | tr -d \\\\n >> .dev.vars"
+echo "echo '\"' >> .dev.vars"
+echo "echo -n \"WITNESS_KEY_${LOG_NAME}=\\\\\"\" >> .dev.vars"
+echo "openssl genpkey -algorithm ed25519 | sed 's/$/\\\\\\\\\\\\\\\\n/g' | tr -d \\\\n >> .dev.vars"
+echo "echo '\"' >> .dev.vars"
