@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -eu -o pipefail
+
 # Helper script to create resources for a log shard.
 
 if [ -z $ENV ] || [ -z $LOG_NAME ] || [ -z $LOCATION ] || [ -z $CLOUDFLARE_ACCOUNT_ID ]; then
