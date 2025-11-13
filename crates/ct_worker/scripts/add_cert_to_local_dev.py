@@ -35,8 +35,9 @@ log_name = f"dev{not_after_year}h{not_after_half}a"
 
 # Make a POST request to localhost add-chain
 payload = {"chain": b64_cert_chain}
+url = f"http://localhost:8787/logs/{log_name}/ct/v1/add-chain"
 request = urllib.request.Request(
-    f"http://localhost:8787/logs/{log_name}/ct/v1/add-chain",
+    url,
     data=bytes(json.dumps(payload), encoding="utf-8"),
     headers={'Content-Type': 'application/json'},
     method='POST'
@@ -47,4 +48,4 @@ except Exception as e:
     print("Error: ", e)
     sys.exit(1)
 
-print("Success")
+print(f"Successfully submitted to {url}")
