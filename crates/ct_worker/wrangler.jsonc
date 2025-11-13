@@ -39,6 +39,10 @@
                 {
                     "id": "00297460599846869decff3d015191ce",
                     "binding": "cache_dev2026h1a"
+                },
+                {
+                    "id": "f3a1a27d611b4c4bab366d7211133e3d",
+                    "binding": "cache_dev2026h2a"
                 }
             ],
             "r2_buckets": [
@@ -53,6 +57,10 @@
                 {
                     "bucket_name": "static-ct-public-dev2026h1a",
                     "binding": "public_dev2026h1a"
+                },
+                {
+                    "bucket_name": "static-ct-public-dev2026h2a",
+                    "binding": "public_dev2026h2a"
                 }
             ],
             "durable_objects": {
