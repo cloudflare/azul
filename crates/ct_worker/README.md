@@ -64,20 +64,13 @@ Follow these instructions to spin up a CT log on your local machine using the `d
 
 1.  (Optional) [Clear the local storage cache](https://developers.cloudflare.com/workers/testing/local-development/#clear-wranglers-local-storage):
 
-        rm -r .workers/state
+        ./reset-dev.sh
 
 1.  Deploy worker locally with `npx wrangler -e=dev dev`.
 
 1.  Send some requests. After the first request that hits the Durable Object (`/ct/v1/add-[pre-]chain` or `/metrics`), the sequencing loop will begin.
 
-    Submit a certificate from a server:
-
-    ```text
-    openssl s_client -showcerts -connect google.com:443 -servername google.com </dev/null 2>/dev/null |\
-    while (set -o pipefail; openssl x509 -outform DER 2>/dev/null | base64); do :; done |\
-    sed '/^$/d' | sed 's/.*/"&"/' | jq -sc '{"chain":.}' |\
-    curl -s "http://localhost:8787/logs/dev2025h1a/ct/v1/add-chain" -d@-
-    ```
+    Submit a certificate from `google.com` by running `python3 scripts/add_cert_to_local_dev.py`. Note you need Python 3.13 or greater.
 
     Use [ctclient](https://github.com/google/certificate-transparency-go/tree/master/client/ctclient) to 'cross-pollinate' entries from another log (RFC6962 logs only, until [static-ct-api support is added](https://github.com/google/certificate-transparency-go/issues/1669)) with overlapping roots and NotAfter temporal interval:
 
