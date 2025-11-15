@@ -25,11 +25,13 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::Once;
 use tlog_tiles::{LookupKey, PendingLogEntry, SequenceMetadata};
+use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
     js_sys, kv, kv::KvStore, wasm_bindgen, Bucket, Env, Error, HttpMetadata, Result, State,
@@ -626,5 +628,45 @@ impl ObjectBackend for ObjectBucket {
                 .observe(millis_diff_as_secs(start, now_millis()));
         });
         res
+    }
+}
+
+/// A read-only ObjectBucket that caches every fetch no matter how big
+pub struct CachedRoObjectBucket {
+    bucket: ObjectBucket,
+    cache: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
+}
+
+impl CachedRoObjectBucket {
+    pub fn new(bucket: ObjectBucket) -> Self {
+        CachedRoObjectBucket {
+            bucket,
+            cache: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl ObjectBackend for CachedRoObjectBucket {
+    async fn upload<S: AsRef<str>, D: Into<Vec<u8>>>(
+        &self,
+        _key: S,
+        _data: D,
+        _opts: &UploadOptions,
+    ) -> Result<()> {
+        unimplemented!("CachedRoObjectBucket does not implement ObjectBackend::upload")
+    }
+
+    async fn fetch<S: AsRef<str>>(&self, key: S) -> Result<Option<Vec<u8>>> {
+        // See if the key is in the cache
+        match self.cache.blocking_lock().entry(key.as_ref().to_string()) {
+            // If so, return the value
+            Entry::Occupied(oentry) => Ok(oentry.get().clone()),
+            // Otherwise, fetch the value, cache it, and return it
+            Entry::Vacant(ventry) => {
+                let val = self.bucket.fetch(key).await?;
+                ventry.insert(val.clone());
+                Ok(val)
+            }
+        }
     }
 }

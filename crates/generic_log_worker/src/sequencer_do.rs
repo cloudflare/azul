@@ -307,14 +307,14 @@ impl<L: LogEntry> GenericSequencer<L> {
 /// so that it can have side-effects.
 ///
 /// The parameters are as follows:
-/// - `tree_size: u64`: The tree size of the latest checkpoint.
 /// - `old_time: UnixTimestamp`: The timestamp of the previous checkpoint.
 /// - `new_time: UnixTimestamp`: The timestamp of the latest checkpoint.
+/// - `new_checkpoint: &[u8]`: The latest checkpoint bytes. This is a signed note.
 pub type CheckpointCallbacker = Box<
     dyn Fn(
-            u64,
             UnixTimestamp,
             UnixTimestamp,
+            &[u8],
         ) -> Pin<Box<dyn Future<Output = Result<(), WorkerError>> + 'static>>
         + 'static,
 >;
@@ -323,9 +323,8 @@ pub type CheckpointCallbacker = Box<
 /// don't need to perform any action after the checkpoint is updated.
 pub fn empty_checkpoint_callback() -> CheckpointCallbacker {
     Box::new(
-        move |_tree_size: u64, _old_time: UnixTimestamp, _new_time: UnixTimestamp| {
+        move |_old_time: UnixTimestamp, _new_time: UnixTimestamp, _new_checkpoint: &[u8]| {
             Box::pin(async move { Ok(()) })
-                as Pin<Box<dyn Future<Output = Result<(), WorkerError>>>>
         },
     )
 }
