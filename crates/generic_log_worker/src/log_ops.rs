@@ -612,7 +612,7 @@ pub async fn prove_subtree_consistency(
     let proof = tlog_tiles::subtree_consistency_proof(cur_tree_size, m, &hash_reader)?;
 
     // Compute the subtree hash.
-    let subtree_hash = tlog_tiles::subtree_hash(&m, &hash_reader)?;
+    let subtree_hash = tlog_tiles::subtree_hash(m, &hash_reader)?;
     Ok((proof, subtree_hash))
 }
 

@@ -364,7 +364,7 @@ fn serialize_entries(entries: &[(LookupKey, SequenceMetadata)]) -> Vec<u8> {
 }
 
 fn deserialize_entries(buf: &[u8]) -> Result<Vec<(LookupKey, SequenceMetadata)>> {
-    if buf.len() % 32 != 0 {
+    if !buf.len().is_multiple_of(32) {
         return Err("invalid buffer length".into());
     }
     let mut entries = Vec::with_capacity(buf.len() / 32);
