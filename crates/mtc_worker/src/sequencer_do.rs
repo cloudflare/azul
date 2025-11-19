@@ -151,7 +151,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     // TODO: the put operation here should be done with the put operation above.
                     // Otherwise an error here might put us in a state where the landmark bundle is
                     // out of sync with the landmark sequence. We need an all-or-nothing multi-put
-                    // operation.
+                    // operation. Tracking issue here https://github.com/cloudflare/workers-rs/issues/876
                     bucket_clone
                         // Can unwrap here because we use the autoderived Serialize impl for LandmarkBundle
                         .put(LANDMARK_BUNDLE_KEY, serde_json::to_vec(&bundle).unwrap())

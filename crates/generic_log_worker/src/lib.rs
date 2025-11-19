@@ -632,6 +632,9 @@ impl ObjectBackend for ObjectBucket {
 }
 
 /// A read-only ObjectBucket that caches every fetch no matter how big
+///
+/// **NOTE:** The cache here has no size limit. If you use a `CachedRoObjectBucket` for too many
+/// fetches, you will run out of memory.
 pub struct CachedRoObjectBucket {
     bucket: ObjectBucket,
     cache: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
