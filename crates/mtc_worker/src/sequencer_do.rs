@@ -12,7 +12,10 @@ use generic_log_worker::{
     CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
     SEQUENCER_BINDING,
 };
-use mtc_api::{BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_KEY};
+use mtc_api::{
+    BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
+    LANDMARK_KEY,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::Note;
@@ -121,6 +124,13 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     // Time to add a new landmark.
                     let max_landmarks = params.max_landmarks();
 
+                    // TODO: the put operations below should all be done as part of the same
+                    // transaction. Otherwise an error that occurs after this point might put us in
+                    // a state where the objects are not in sync with one another, e.g., the
+                    // landmark bundle and checkpoint might have the same value. We need an
+                    // all-or-nothing multi-put operation. Tracking issue here
+                    // https://github.com/cloudflare/workers-rs/issues/876
+
                     // Load current landmark sequence.
                     let mut seq =
                         if let Some(obj) = bucket_clone.get(LANDMARK_KEY).execute().await? {
@@ -139,6 +149,12 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                             .await?;
                     }
 
+                    // Update the landmark checkpoint.
+                    bucket_clone
+                        .put(LANDMARK_CHECKPOINT_KEY, new_checkpoint_str.clone())
+                        .execute()
+                        .await?;
+
                     // Compute the landmark bundle and save it
                     let subtrees =
                         get_landmark_subtrees(&seq, root_hash, tree_size, bucket_clone.clone())
@@ -148,10 +164,6 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                         subtrees,
                         landmarks: seq.landmarks,
                     };
-                    // TODO: the put operation here should be done with the put operation above.
-                    // Otherwise an error here might put us in a state where the landmark bundle is
-                    // out of sync with the landmark sequence. We need an all-or-nothing multi-put
-                    // operation. Tracking issue here https://github.com/cloudflare/workers-rs/issues/876
                     bucket_clone
                         // Can unwrap here because we use the autoderived Serialize impl for LandmarkBundle
                         .put(LANDMARK_BUNDLE_KEY, serde_json::to_vec(&bundle).unwrap())
