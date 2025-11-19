@@ -9,8 +9,11 @@ pub struct LandmarkSequence {
     pub landmarks: VecDeque<u64>,
 }
 
-/// The location in object storage for the landmark bundle.
-pub static LANDMARK_KEY: &str = "landmark";
+/// The location in object storage for the landmark sequence
+pub const LANDMARK_KEY: &str = "landmark";
+
+/// The location in object storage for the landmark bundle. Its serialized form is JSON
+pub const LANDMARK_BUNDLE_KEY: &str = "landmark-bundle";
 
 impl LandmarkSequence {
     /// Create a new landmark sequence with the given `max_landmarks` and an

@@ -1061,7 +1061,7 @@ async fn sequence_entries<L: LogEntry>(
 
     // Call the checkpoint callback. This is a no-op for CT, but is used to
     // update landmark checkpoints for MTC.
-    if let Err(e) = (config.checkpoint_callback)(n, old_time, timestamp).await {
+    if let Err(e) = (config.checkpoint_callback)(old_time, timestamp, new.checkpoint()).await {
         warn!("{name}: Checkpoint callback failed: {e}");
     }
 

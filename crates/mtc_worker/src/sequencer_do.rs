@@ -3,15 +3,20 @@
 
 //! Sequencer is the 'brain' of the CT log, responsible for sequencing entries and maintaining log state.
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{collections::VecDeque, time::Duration};
 
 use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
 use generic_log_worker::{
-    get_durable_object_name, load_public_bucket, CheckpointCallbacker, GenericSequencer,
-    SequencerConfig, SEQUENCER_BINDING,
+    get_durable_object_name, load_public_bucket,
+    log_ops::{prove_subtree_consistency, ProofError},
+    CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
+    SEQUENCER_BINDING,
 };
-use mtc_api::{BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_KEY};
-use tlog_tiles::UnixTimestamp;
+use mtc_api::{BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_KEY};
+use serde::{Deserialize, Serialize};
+use serde_with::{base64::Base64, serde_as};
+use signed_note::Note;
+use tlog_tiles::{CheckpointText, Hash, UnixTimestamp};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -53,6 +58,23 @@ impl DurableObject for Sequencer {
     }
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct SubtreeWithConsistencyProof {
+    #[serde_as(as = "Base64")]
+    pub hash: [u8; 32],
+    #[serde_as(as = "Vec<Base64>")]
+    pub consistency_proof: Vec<[u8; 32]>,
+}
+
+/// GET response structure for the `/get-landmark-bundle` endpoint
+#[derive(Serialize, Deserialize)]
+pub struct LandmarkBundle {
+    pub checkpoint: String,
+    pub subtrees: Vec<SubtreeWithConsistencyProof>,
+    pub landmarks: VecDeque<u64>,
+}
+
 /// Return a callback function that gets passed into the generic sequencer and
 /// called each time a new checkpoint is created. For MTC, this is used to
 /// periodically update the landmark checkpoint sequence.
@@ -60,7 +82,23 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
     let params = &CONFIG.logs[name];
     let bucket = load_public_bucket(env, name).unwrap();
     Box::new(
-        move |tree_size: u64, old_time: UnixTimestamp, new_time: UnixTimestamp| {
+        move |old_time: UnixTimestamp, new_time: UnixTimestamp, new_checkpoint_bytes: &[u8]| {
+            let new_checkpoint = {
+                // TODO: Make more efficient. There are two unnecessary allocations here.
+
+                // We can unwrap because the checkpoint provided is the checkpoint that the
+                // sequencer just created, so it must be well formed.
+                let note = Note::from_bytes(new_checkpoint_bytes)
+                    .expect("freshly created checkpoint is not a note");
+                CheckpointText::from_bytes(note.text())
+                    .expect("freshly created checkpoint is not a checkpoint")
+            };
+            let tree_size = new_checkpoint.size();
+            let root_hash = *new_checkpoint.hash();
+            // We can unwrap here for the same reason as above
+            let new_checkpoint_str = String::from_utf8(new_checkpoint_bytes.to_vec())
+                .expect("freshly created checkpoint is not UTF-8");
+
             Box::pin({
                 // We have to clone each time since the bucket gets moved into
                 // the async function.
@@ -100,9 +138,63 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                             .execute()
                             .await?;
                     }
+
+                    // Compute the landmark bundle and save it
+                    let subtrees =
+                        get_landmark_subtrees(&seq, root_hash, tree_size, bucket_clone.clone())
+                            .await?;
+                    let bundle = LandmarkBundle {
+                        checkpoint: new_checkpoint_str,
+                        subtrees,
+                        landmarks: seq.landmarks,
+                    };
+                    // TODO: the put operation here should be done with the put operation above.
+                    // Otherwise an error here might put us in a state where the landmark bundle is
+                    // out of sync with the landmark sequence. We need an all-or-nothing multi-put
+                    // operation. Tracking issue here https://github.com/cloudflare/workers-rs/issues/876
+                    bucket_clone
+                        // Can unwrap here because we use the autoderived Serialize impl for LandmarkBundle
+                        .put(LANDMARK_BUNDLE_KEY, serde_json::to_vec(&bundle).unwrap())
+                        .execute()
+                        .await?;
+
                     Ok(())
                 }
-            }) as Pin<Box<dyn Future<Output = Result<()>>>>
+            })
         },
     )
+}
+
+// Computes the sequence of landmark subtrees and, for each subtree, a proof of consistency with the
+// checkpoint. Each signatureless MTC includes an inclusion proof in one of these subtrees.
+async fn get_landmark_subtrees(
+    landmark_sequence: &LandmarkSequence,
+    checkpoint_hash: Hash,
+    checkpoint_size: u64,
+    bucket: Bucket,
+) -> Result<Vec<SubtreeWithConsistencyProof>> {
+    let cached_object_backend = CachedRoObjectBucket::new(ObjectBucket::new(bucket));
+    let mut subtrees = Vec::new();
+    for landmark_subtree in landmark_sequence.subtrees() {
+        let (consistency_proof, landmark_subtree_hash) = match prove_subtree_consistency(
+            checkpoint_hash,
+            checkpoint_size,
+            landmark_subtree.lo(),
+            landmark_subtree.hi(),
+            &cached_object_backend,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(ProofError::Tlog(s)) => return Err(s.to_string().into()),
+            Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+        };
+
+        subtrees.push(SubtreeWithConsistencyProof {
+            hash: landmark_subtree_hash.0,
+            consistency_proof: consistency_proof.iter().map(|h| h.0).collect(),
+        });
+    }
+
+    Ok(subtrees)
 }

@@ -11,21 +11,19 @@ use der::{
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_durable_object_stub, init_logging,
     load_public_bucket,
-    log_ops::{
-        prove_subtree_consistency, prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY,
-    },
+    log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
     serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
 };
 use mtc_api::{
     serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
-    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_KEY,
+    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
-use std::{collections::VecDeque, time::Duration};
+use std::time::Duration;
 use tlog_tiles::{
     open_checkpoint, CheckpointSigner, CheckpointText, LeafIndex, PendingLogEntry,
     PendingLogEntryBlob,
@@ -70,24 +68,6 @@ pub struct GetCertificateResponse {
     #[serde_as(as = "Base64")]
     pub data: Vec<u8>,
     pub landmark_id: usize,
-}
-
-/// GET response structure for the `/get-landmark-bundle` endpoint
-#[serde_as]
-#[derive(Serialize)]
-pub struct GetLandmarkBundleResponse<'a> {
-    pub checkpoint: &'a str,
-    pub subtrees: Vec<SubtreeWithConsistencyProof>,
-    pub landmarks: &'a VecDeque<u64>,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize)]
-pub struct SubtreeWithConsistencyProof {
-    #[serde_as(as = "Base64")]
-    pub hash: [u8; 32],
-    #[serde_as(as = "Vec<Base64>")]
-    pub consistency_proof: Vec<[u8; 32]>,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -412,41 +392,14 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
     let object_backend = ObjectBucket::new(load_public_bucket(env, name)?);
 
-    // Fetch the current checkpoint.
-    let (checkpoint, checkpoint_bytes) = get_current_checkpoint(env, name, &object_backend).await?;
+    // Fetch the current landmark bundle from R2 (already encoded in JSON) and return it
+    let Some(landmark_bundle_bytes) = object_backend.fetch(LANDMARK_BUNDLE_KEY).await? else {
+        return Err("failed to get landmark bundle".into());
+    };
 
-    // Fetch the current landmark sequence.
-    let landmark_sequence = get_landmark_sequence(name, &object_backend).await?;
-
-    // Compute the sequence of landmark subtrees and, for each subtree, a proof of consistency with
-    // the checkpoint. Each signatureless MTC includes an inclusion proof in one of these subtrees.
-    let mut subtrees = Vec::new();
-    for landmark_subtree in landmark_sequence.subtrees() {
-        let (consistency_proof, landmark_subtree_hash) = match prove_subtree_consistency(
-            *checkpoint.hash(),
-            checkpoint.size(),
-            landmark_subtree.lo(),
-            landmark_subtree.hi(),
-            &object_backend,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
-            Err(ProofError::Other(e)) => return Err(e.to_string().into()),
-        };
-
-        subtrees.push(SubtreeWithConsistencyProof {
-            hash: landmark_subtree_hash.0,
-            consistency_proof: consistency_proof.iter().map(|h| h.0).collect(),
-        });
-    }
-
-    Response::from_json(&GetLandmarkBundleResponse {
-        checkpoint: std::str::from_utf8(&checkpoint_bytes).unwrap(),
-        subtrees,
-        landmarks: &landmark_sequence.landmarks,
-    })
+    Ok(ResponseBuilder::new()
+        .with_header("content-type", "application/json")?
+        .body(ResponseBody::Body(landmark_bundle_bytes)))
 }
 
 async fn get_current_checkpoint(
