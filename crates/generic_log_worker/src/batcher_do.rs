@@ -7,8 +7,8 @@
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
 use crate::{
-    deserialize, get_durable_object_stub, load_cache_kv, serialize, LookupKey, SequenceMetadata,
-    BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
+    deserialize, get_durable_object_stub, load_cache_kv, obs, serialize, LookupKey,
+    SequenceMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
 };
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
@@ -26,10 +26,12 @@ use worker::*;
 pub struct GenericBatcher {
     env: Env,
     config: BatcherConfig,
+    state: State,
     kv: Option<KvStore>,
     batch: RefCell<Batch>,
     in_flight: RefCell<usize>,
     processed: RefCell<usize>,
+    wshim: Option<obs::Wshim>,
 }
 
 pub struct BatcherConfig {
@@ -64,20 +66,24 @@ impl GenericBatcher {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the sequencer or KV store.
-    pub fn new(env: Env, config: BatcherConfig) -> Self {
+    pub fn new(state: State, env: Env, config: BatcherConfig) -> Self {
         let kv = if config.enable_dedup {
             Some(load_cache_kv(&env, &config.name).unwrap())
         } else {
             None
         };
 
+        let wshim = obs::Wshim::from_env(&env).ok();
+
         Self {
             env,
             config,
+            state,
             kv,
             batch: RefCell::new(Batch::default()),
             in_flight: RefCell::new(0),
             processed: RefCell::new(0),
+            wshim,
         }
     }
 
@@ -89,7 +95,11 @@ impl GenericBatcher {
     ///
     /// Returns an error if the request cannot be parsed or response cannot be
     /// constructed.
-    pub async fn fetch(&self, mut req: Request) -> Result<Response> {
+    pub async fn fetch(&self, req: Request) -> Result<Response> {
+        self.with_obs(async || self.fetch_impl(req).await).await
+    }
+
+    async fn fetch_impl(&self, mut req: Request) -> Result<Response> {
         match req.path().as_str() {
             ENTRY_ENDPOINT => {
                 let entry: PendingLogEntryBlob = deserialize(&req.bytes().await?)?;
@@ -162,6 +172,19 @@ impl GenericBatcher {
             }
             _ => Response::error("not found", 404),
         }
+    }
+
+    async fn with_obs<F, R>(&self, f: F) -> R
+    where
+        F: AsyncFnOnce() -> R,
+    {
+        let r = f().await;
+        if let Some(wshim) = self.wshim.clone() {
+            self.state.wait_until(async move {
+                wshim.flush(&obs::logs::LOGGER).await;
+            });
+        }
+        r
     }
 }
 
