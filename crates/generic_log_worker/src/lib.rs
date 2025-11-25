@@ -7,7 +7,7 @@ use base64::Engine;
 pub mod batcher_do;
 pub mod cleaner_do;
 pub mod log_ops;
-mod metrics;
+pub mod obs;
 pub mod sequencer_do;
 pub mod util;
 
@@ -17,9 +17,9 @@ pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use log::{error, Level};
+use log::error;
 use log_ops::UploadOptions;
-use metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
+use obs::metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -28,8 +28,6 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
-use std::str::FromStr;
-use std::sync::Once;
 use tlog_tiles::{LookupKey, PendingLogEntry, SequenceMetadata};
 use tokio::sync::Mutex;
 use util::now_millis;
@@ -44,9 +42,6 @@ pub const CLEANER_BINDING: &str = "CLEANER";
 
 const BATCH_ENDPOINT: &str = "/add_batch";
 pub const ENTRY_ENDPOINT: &str = "/add_entry";
-pub const METRICS_ENDPOINT: &str = "/metrics";
-
-static INIT_LOGGING: Once = Once::new();
 
 /// Initialize logging and panic handling for the Worker. This should be called
 /// in the Worker's start event handler.
@@ -56,12 +51,7 @@ static INIT_LOGGING: Once = Once::new();
 /// Panics if the logger has already been initialized, which should never happen
 /// due to the use of `sync::Once`.
 pub fn init_logging(level: Option<&str>) {
-    let level = level
-        .and_then(|level| Level::from_str(level).ok())
-        .unwrap_or(Level::Info);
-    INIT_LOGGING.call_once(|| {
-        console_log::init_with_level(level).expect("error initializing logger");
-    });
+    obs::logs::init(level);
 }
 
 /// Wrapper around `bitcode::serialize`.

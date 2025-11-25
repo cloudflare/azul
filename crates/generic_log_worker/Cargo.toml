@@ -29,13 +29,14 @@ console_log.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 hex.workspace = true
-log.workspace = true
+log = { workspace = true, features = ["kv"] }
 p256.workspace = true
 prometheus.workspace = true
 rand.workspace = true
 serde-wasm-bindgen.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
 thiserror.workspace = true

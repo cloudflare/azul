@@ -19,7 +19,7 @@
                 // config and roots. Add `--features dev-bootstrap-roots` to the
                 // worker-build command to enable dev bootstrap roots (which
                 // should NOT be enabled in a production deployment).
-                "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
+                "command": "cargo install -q worker-build@0.1.14 && DEPLOY_ENV=dev worker-build --release"
             },
             "workers_dev": true,
             "kv_namespaces": [
@@ -75,7 +75,7 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build && DEPLOY_ENV=bootstrap-mtca worker-build --release"
+                "command": "cargo install -q worker-build@0.1.14 && DEPLOY_ENV=bootstrap-mtca worker-build --release"
             },
             "route": {
                 "pattern": "bootstrap-mtca.cloudflareresearch.com",

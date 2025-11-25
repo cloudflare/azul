@@ -19,7 +19,7 @@
 //! - [testlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/testlog_test.go)
 
 use crate::{
-    metrics::{millis_diff_as_secs, AsF64, SequencerMetrics},
+    obs::metrics::{millis_diff_as_secs, AsF64, SequencerMetrics},
     util::now_millis,
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
     SequencerConfig,

@@ -204,3 +204,17 @@ impl_as_f64!(usize, u64, i64);
 pub(crate) fn millis_diff_as_secs(start: u64, end: u64) -> f64 {
     (end.as_f64() - start.as_f64()) / 1e3
 }
+
+impl super::WshimData for &prometheus::Registry {
+    fn endpoint() -> &'static str {
+        "prometheus"
+    }
+
+    fn to_body(&self) -> Vec<u8> {
+        let encoder = prometheus::TextEncoder::new();
+        encoder
+            .encode_to_string(&self.gather())
+            .unwrap()
+            .into_bytes()
+    }
+}

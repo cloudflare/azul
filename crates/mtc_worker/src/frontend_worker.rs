@@ -12,9 +12,10 @@ use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_durable_object_stub, init_logging,
     load_public_bucket,
     log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
+    obs::Wshim,
     serialize,
     util::now_millis,
-    ObjectBackend, ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
 };
 use mtc_api::{
     serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
@@ -86,9 +87,10 @@ fn start() {
 ///
 /// Panics if there are issues parsing route parameters, which should never happen.
 #[event(fetch, respond_with_errors)]
-async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    let wshim = Wshim::from_env(&env);
     // Use an outer router as middleware to check that the log name is valid.
-    Router::new()
+    let response = Router::new()
         .or_else_any_method_async("/logs/:log/*route", |req, ctx| async move {
             let name = if let Some(name) = ctx.param("log") {
                 if CONFIG.logs.contains_key(name) {
@@ -216,18 +218,6 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                         },
                     })
                 })
-                .get_async("/logs/:log/metrics", |_req, ctx| async move {
-                    let name = ctx.data;
-                    let stub = get_durable_object_stub(
-                        &ctx.env,
-                        name,
-                        None,
-                        "SEQUENCER",
-                        CONFIG.logs[name].location_hint.as_deref(),
-                    )?;
-                    stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
-                        .await
-                })
                 .get("/logs/:log/sequencer_id", |_req, ctx| {
                     // Print out the Durable Object ID of the sequencer to allow
                     // looking it up in internal Cloudflare dashboards. This
@@ -280,7 +270,11 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 log::warn!("Internal error: {e}");
                 Response::error("Internal error", 500)
             }
-        })
+        });
+    if let Ok(wshim) = wshim {
+        ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
+    }
+    response
 }
 
 #[allow(clippy::too_many_lines)]
