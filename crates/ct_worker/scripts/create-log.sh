@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 set -e -o pipefail
 
@@ -8,6 +8,8 @@ if [ -z $ENV ] || [ -z $LOG_NAME ] || [ -z $LOCATION ] || [ -z $CLOUDFLARE_ACCOU
 	echo "ENV, LOG_NAME, LOCATION, and CLOUDFLARE_ACCOUNT_ID must all be set"
 	exit 1
 fi
+
+WRANGLER_CONF=${WRANGLER_CONF:-wrangler.jsonc}
 
 while true; do
     read -p "Do you want to proceed with ENV=${ENV}, LOG_NAME=${LOG_NAME}, LOCATION=${LOCATION}, CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}? (y/N) " yn
@@ -19,21 +21,21 @@ while true; do
 done
 
 # Create R2 bucket if it does not already exist
-npx wrangler r2 bucket create static-ct-public-${LOG_NAME} --location ${LOCATION}
+npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" r2 bucket create static-ct-public-${LOG_NAME} --location ${LOCATION}
 
 # Create KV namespace if it does not already exist
-npx wrangler kv namespace create static-ct-cache-${LOG_NAME}
+npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" kv namespace create static-ct-cache-${LOG_NAME}
 
 # Create witness and log signing keys if they do not already exist
 if npx wrangler -e=${ENV} secret list | grep -q WITNESS_KEY_${LOG_NAME}; then
 	echo "WITNESS_KEY_${LOG_NAME} already exists"
 else
-	openssl genpkey -algorithm ed25519 | npx wrangler -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
+	openssl genpkey -algorithm ed25519 | npx wrangler -c "$WRANGLER_CONF" -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
 fi
 if npx wrangler -e=${ENV} secret list | grep -q SIGNING_KEY_${LOG_NAME}; then
 	echo "SIGNING_KEY_${LOG_NAME} already exists"
 else
-	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -c "$WRANGLER_CONF" -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
 fi
 
 echo "DONE"
