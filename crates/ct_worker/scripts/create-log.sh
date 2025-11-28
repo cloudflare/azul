@@ -21,21 +21,36 @@ while true; do
 done
 
 # Create R2 bucket if it does not already exist
-npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" r2 bucket create static-ct-public-${LOG_NAME} --location ${LOCATION}
+npx wrangler \
+    -e="${ENV}" \
+    -c "${WRANGLER_CONF}" \
+    r2 bucket create \
+    static-ct-public-${LOG_NAME} \
+    --location ${LOCATION} \
+    --update-config \
+    --binding public_${LOG_NAME}
 
 # Create KV namespace if it does not already exist
-npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" kv namespace create static-ct-cache-${LOG_NAME}
+npx wrangler \
+    -e="${ENV}" \
+    -c "${WRANGLER_CONF}" \
+    kv namespace create \
+    static-ct-cache-${LOG_NAME} \
+    --update-config \
+    --binding cache_${LOG_NAME}
 
 # Create witness and log signing keys if they do not already exist
-if npx wrangler -e=${ENV} secret list | grep -q WITNESS_KEY_${LOG_NAME}; then
+if npx wrangler -e=${ENV} -c "${WRANGLER_CONF}" secret list | grep -q WITNESS_KEY_${LOG_NAME}; then
 	echo "WITNESS_KEY_${LOG_NAME} already exists"
 else
-	openssl genpkey -algorithm ed25519 | npx wrangler -c "$WRANGLER_CONF" -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
+	openssl genpkey -algorithm ed25519 |
+        npx wrangler -c "${WRANGLER_CONF}" -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
 fi
-if npx wrangler -e=${ENV} secret list | grep -q SIGNING_KEY_${LOG_NAME}; then
+if npx wrangler -e=${ENV} -c "${WRANGLER_CONF}" secret list | grep -q SIGNING_KEY_${LOG_NAME}; then
 	echo "SIGNING_KEY_${LOG_NAME} already exists"
 else
-	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -c "$WRANGLER_CONF" -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 |
+        npx wrangler -e=${ENV} -c "${WRANGLER_CONF}" secret put SIGNING_KEY_${LOG_NAME}
 fi
 
 echo "DONE"
