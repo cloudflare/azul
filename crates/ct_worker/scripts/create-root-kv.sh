@@ -5,15 +5,15 @@ cd "$(dirname "$0")/.." || exit # this script assumes it's runnnig inside the ct
 
 # Helper script to create resources for a log shard.
 
-if [ -z $ENV ] || [ -z $CLOUDFLARE_ACCOUNT_ID ]; then
-	echo "ENV, LOG_NAME, LOCATION, and CLOUDFLARE_ACCOUNT_ID must all be set"
+if [ -z "${ENV}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+	echo "ENV and CLOUDFLARE_ACCOUNT_ID must all be set"
 	exit 1
 fi
 
 WRANGLER_CONF=${WRANGLER_CONF:-wrangler.jsonc}
 
 while true; do
-    read -p "Do you want to proceed with ENV=${ENV}, CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}? (y/N) " yn
+    read -rp "Do you want to proceed with ENV=${ENV}, CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}? (y/N) " yn
     case $yn in
         [yY] ) echo "Proceeding..."; break;;
         [nN] ) echo "Exiting..."; exit;;
