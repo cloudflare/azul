@@ -104,36 +104,48 @@ Follow these instructions to deploy a CT log with the `dev` configuration to Clo
 
 Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to configure resources (or use `scripts/create-log.sh`):
 
-1.  Set log shard name and deployment environment.
+1.  Set log shard name and deployment environment. The [location hint][location-hint] is optional.
 
-        export LOG_NAME=dev2025h1a
-        export ENV=dev
+```bash
+export LOG_NAME=dev2025h1a
+export CLOUDFLARE_ACCOUNT_ID=some-account-id-here
+export ENV=dev
+export LOCATION=wnam # optional
+```
 
-1.  Create R2 bucket for public assets, optionally with a [location hint](https://developers.cloudflare.com/r2/reference/data-location/).
+1.  Setup the roots kv namespace
 
-        npx wrangler r2 bucket create static-ct-public-${LOG_NAME} [--location <location>]
+```bash
+npx wrangler -e="${ENV}" kv namespace create static-ct-ccadb-roots --binding ccadb_roots
+```
 
-1.  Create KV namespace for per-log deduplication cache.
+**Alternatively run the script [create-root-kv.sh](./scripts/create-root-kv.sh)**
 
-    ```text
-    # After running, add generated namespace ID to `wrangler.jsonc`
-    npx wrangler kv namespace create static-ct-cache-${LOG_NAME}
-    ```
+1.  Create the the R2 bucket for public assets, the kv namespace for per-log
+    deduplication cache and generate the [secrets][secrets-docs] for signing and witness keys.
 
-1.  Generate [secrets](https://developers.cloudflare.com/workers/configuration/secrets) for the signing and witness keys. NOTE: this will overwrite any existing secrets of the same name.
+```bash
+npx wrangler r2 bucket create static-ct-public-${LOG_NAME} [--location <location>]
+npx wrangler kv namespace create static-ct-cache-${LOG_NAME}
+openssl genpkey -algorithm ed25519 | npx wrangler -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
+```
 
-        openssl genpkey -algorithm ed25519 | npx wrangler -e=${ENV} secret put WITNESS_KEY_${LOG_NAME}
-        openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e=${ENV} secret put SIGNING_KEY_${LOG_NAME}
+**Alternatively, simply run the script [create-log.sh](./scripts/create-log.sh)**
 
-    (Note: For mtc_worker we use ed25519 for the signing key. There is no witness.)
+(Note: For mtc_worker we use ed25519 for the signing key. There is no witness.)
 
 1.  Deploy the worker. The worker will be available at `https://static-ct-${ENV}.<your-team>.workers.dev/logs/${LOG_NAME}`.
 
-        npx wrangler -e=${ENV} deploy
+```bash
+npx wrangler -e=${ENV} deploy
+```
 
 1.  Tail the worker:
 
-        npx wrangler -e=${ENV} tail
+```bash
+npx wrangler -e=${ENV} tail
+```
 
 1.  Send some requests. See [local development](#local-deployment) for examples.
 
@@ -197,3 +209,7 @@ This project ports code from [sunlight](https://github.com/FiloSottile/sunlight)
 ## License
 
 The project is licensed under the [BSD-3-Clause License](./LICENSE).
+
+
+location-hint: https://developers.cloudflare.com/r2/reference/data-location/
+secrets-docs: https://developers.cloudflare.com/workers/configuration/secrets
