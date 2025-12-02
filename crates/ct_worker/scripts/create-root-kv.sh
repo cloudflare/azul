@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -e -o pipefail
+cd "$(dirname "$0")/.." || exit # this script assumes it's runnnig inside the ct_worker dir
 
 # Helper script to create resources for a log shard.
 
