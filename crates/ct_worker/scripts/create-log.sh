@@ -4,15 +4,18 @@ set -e -o pipefail
 
 # Helper script to create resources for a log shard.
 
-if [ -z $ENV ] || [ -z $LOG_NAME ] || [ -z $LOCATION ] || [ -z $CLOUDFLARE_ACCOUNT_ID ]; then
-	echo "ENV, LOG_NAME, LOCATION, and CLOUDFLARE_ACCOUNT_ID must all be set"
+if [ -z "${ENV}" ] || [ -z "${LOG_NAME}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+	echo "ENV, LOG_NAME, and CLOUDFLARE_ACCOUNT_ID must all be set"
 	exit 1
 fi
 
 WRANGLER_CONF=${WRANGLER_CONF:-wrangler.jsonc}
 
 while true; do
-    read -p "Do you want to proceed with ENV=${ENV}, LOG_NAME=${LOG_NAME}, LOCATION=${LOCATION}, CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}? (y/N) " yn
+    if [ "${LOCATION}" ]; then
+        L=", LOCATION=${LOCATION}"
+    fi
+    read -p "Do you want to proceed with ENV=${ENV}, LOG_NAME=${LOG_NAME}${L}, CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}? (y/N) " yn
     case $yn in
         [yY] ) echo "Proceeding..."; break;;
         [nN] ) echo "Exiting..."; exit;;
@@ -20,15 +23,21 @@ while true; do
     esac
 done
 
+
+# https://github.com/cloudflare/azul/pull/169#discussion_r2582145507
+location=()
+if [ "${LOCATION}" ]; then
+    location=(--location "${LOCATION}")
+fi
+
 # Create R2 bucket if it does not already exist
 npx wrangler \
     -e="${ENV}" \
     -c "${WRANGLER_CONF}" \
     r2 bucket create \
     static-ct-public-${LOG_NAME} \
-    --location ${LOCATION} \
     --update-config \
-    --binding public_${LOG_NAME}
+    --binding public_${LOG_NAME} "${location[@]}"
 
 # Create KV namespace if it does not already exist
 npx wrangler \
