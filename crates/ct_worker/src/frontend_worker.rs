@@ -7,8 +7,8 @@ use crate::{load_roots, load_signing_key, SequenceMetadata, CONFIG};
 use config::TemporalInterval;
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
-    init_logging, load_cache_kv, load_public_bucket, put_cache_entry_metadata, serialize,
-    ObjectBucket, ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    init_logging, load_cache_kv, load_public_bucket, obs::Wshim, put_cache_entry_metadata,
+    serialize, ObjectBucket, ENTRY_ENDPOINT,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -62,9 +62,10 @@ fn start() {
 ///
 /// Panics if there are issues parsing route parameters, which should never happen.
 #[event(fetch, respond_with_errors)]
-async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    let wshim = Wshim::from_env(&env);
     // Use an outer router as middleware to check that the log name is valid.
-    Router::new()
+    let response = Router::new()
         .or_else_any_method_async("/logs/:log/*route", |req, ctx| async move {
             let name = if let Some(name) = ctx.param("log") {
                 if CONFIG.logs.contains_key(name) {
@@ -116,18 +117,6 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                         mmd: MAX_MERGE_DELAY_SECS,
                         temporal_interval: &params.temporal_interval,
                     })
-                })
-                .get_async("/logs/:log/metrics", |_req, ctx| async move {
-                    let name = ctx.data;
-                    let stub = get_durable_object_stub(
-                        &ctx.env,
-                        name,
-                        None,
-                        "SEQUENCER",
-                        CONFIG.logs[name].location_hint.as_deref(),
-                    )?;
-                    stub.fetch_with_str(&format!("http://fake_url.com{METRICS_ENDPOINT}"))
-                        .await
                 })
                 .get("/logs/:log/sequencer_id", |_req, ctx| {
                     // Print out the Durable Object ID of the sequencer to allow
@@ -181,7 +170,11 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 log::warn!("Internal error: {e}");
                 Response::error("Internal error", 500)
             }
-        })
+        });
+    if let Ok(wshim) = wshim {
+        ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
+    }
+    response
 }
 
 #[allow(clippy::too_many_lines)]

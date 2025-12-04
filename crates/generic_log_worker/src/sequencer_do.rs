@@ -8,18 +8,22 @@ use std::{cell::RefCell, future::Future, pin::Pin, time::Duration};
 use crate::{
     deserialize, get_durable_object_stub, load_public_bucket,
     log_ops::{self, add_leaf_to_pool, CreateError, PoolState, SequenceState},
-    metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
+    obs::{
+        self,
+        metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
+        Wshim,
+    },
     serialize,
     util::now_millis,
     DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
-    CLEANER_BINDING, ENTRY_ENDPOINT, METRICS_ENDPOINT,
+    CLEANER_BINDING, ENTRY_ENDPOINT,
 };
 use futures_util::future::join_all;
 use log::{error, info};
-use prometheus::{Registry, TextEncoder};
+use prometheus::Registry;
 use signed_note::KeyName;
 use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntryBlob, UnixTimestamp};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use worker::{Env, Error as WorkerError, Request, Response, State};
 
 // The number of entries in the short-term deduplication cache.
@@ -29,16 +33,15 @@ const MEMORY_CACHE_SIZE: usize = 300_000;
 
 pub struct GenericSequencer<L: LogEntry> {
     env: Env,
-    do_state: State,             // implements LockBackend
-    public_bucket: ObjectBucket, // implements ObjectBackend
-    cache: DedupCache,           // implements CacheRead, CacheWrite
+    do_state: State,                     // implements LockBackend
+    public_bucket: RwLock<ObjectBucket>, // implements ObjectBackend
+    cache: DedupCache,                   // implements CacheRead, CacheWrite
     config: SequencerConfig,
     sequence_state: RefCell<SequenceState>,
     pool_state: RefCell<PoolState<L::Pending>>,
     initialized: RefCell<bool>,
     init_mux: Mutex<()>,
-    registry: Registry,
-    metrics: SequencerMetrics,
+    wshim: Option<Wshim>,
 }
 
 /// Configuration for a CT log.
@@ -64,29 +67,28 @@ impl<L: LogEntry> GenericSequencer<L> {
     ///
     /// Panics if we can't get a handle for the public bucket.
     pub fn new(state: State, env: Env, config: SequencerConfig) -> Self {
-        let registry = Registry::new();
-        let metrics = SequencerMetrics::new(&registry);
         let public_bucket = ObjectBucket {
             bucket: load_public_bucket(&env, &config.name).unwrap(),
-            metrics: Some(ObjectMetrics::new(&registry)),
+            metrics: None,
         };
         let cache = DedupCache {
             memory: MemoryCache::new(MEMORY_CACHE_SIZE),
             storage: state.storage(),
         };
 
+        let wshim = Wshim::from_env(&env).ok();
+
         Self {
             env,
             do_state: state,
-            public_bucket,
+            public_bucket: RwLock::new(public_bucket),
             cache,
             config,
             sequence_state: RefCell::new(SequenceState::default()),
             pool_state: RefCell::new(PoolState::default()),
             initialized: RefCell::new(false),
             init_mux: Mutex::new(()),
-            registry,
-            metrics,
+            wshim,
         }
     }
 
@@ -96,23 +98,31 @@ impl<L: LogEntry> GenericSequencer<L> {
     /// # Errors
     ///
     /// Returns an error if the request cannot be parsed.
-    pub async fn fetch(&self, mut req: Request) -> Result<Response, WorkerError> {
+    pub async fn fetch(&self, req: Request) -> Result<Response, WorkerError> {
+        self.with_obs(async |metrics| self.fetch_impl(req, metrics).await)
+            .await
+    }
+
+    async fn fetch_impl(
+        &self,
+        mut req: Request,
+        metrics: SequencerMetrics,
+    ) -> Result<Response, WorkerError> {
         if !*self.initialized.borrow() {
             info!("{}: Initializing log from fetch handler", self.config.name);
             self.initialize().await?;
         }
 
         let start = now_millis();
-        self.metrics.req_in_flight.inc();
+        metrics.req_in_flight.inc();
 
         let path = req.path();
         let mut endpoint = path.trim_start_matches('/');
         let resp = match path.as_str() {
-            METRICS_ENDPOINT => self.fetch_metrics(),
             ENTRY_ENDPOINT => {
                 let pending_entry = deserialize::<PendingLogEntryBlob>(&req.bytes().await?)?;
                 let lookup_key = pending_entry.lookup_key;
-                let result = self.add_batch(vec![pending_entry]).await?;
+                let result = self.add_batch(vec![pending_entry], &metrics).await?;
                 if result.is_empty() || result[0].0 != lookup_key {
                     Response::error("rate limited", 429)
                 } else {
@@ -121,16 +131,18 @@ impl<L: LogEntry> GenericSequencer<L> {
             }
             BATCH_ENDPOINT => {
                 let pending_entries: Vec<PendingLogEntryBlob> = deserialize(&req.bytes().await?)?;
-                Response::from_bytes(serialize(&self.add_batch(pending_entries).await?)?)
+                Response::from_bytes(serialize(
+                    &self.add_batch(pending_entries, &metrics).await?,
+                )?)
             }
             _ => {
                 endpoint = "unknown";
                 Response::error("unknown endpoint", 404)
             }
         };
-        self.metrics.req_count.with_label_values(&[endpoint]).inc();
-        self.metrics.req_in_flight.dec();
-        self.metrics
+        metrics.req_count.with_label_values(&[endpoint]).inc();
+        metrics.req_in_flight.dec();
+        metrics
             .req_duration
             .with_label_values(&[endpoint])
             .observe(millis_diff_as_secs(start, now_millis()));
@@ -144,6 +156,11 @@ impl<L: LogEntry> GenericSequencer<L> {
     ///
     /// Returns an error if there are issues scheduling the next alarm.
     pub async fn alarm(&self) -> Result<Response, WorkerError> {
+        self.with_obs(async |metrics| self.alarm_impl(metrics).await)
+            .await
+    }
+
+    async fn alarm_impl(&self, metrics: SequencerMetrics) -> Result<Response, WorkerError> {
         if !*self.initialized.borrow() {
             info!("{}: Initializing log from alarm handler", self.config.name);
             self.initialize().await?;
@@ -159,10 +176,10 @@ impl<L: LogEntry> GenericSequencer<L> {
             &self.pool_state,
             &self.sequence_state,
             &self.config,
-            &self.public_bucket,
+            &*self.public_bucket.read().await,
             &self.do_state,
             &self.cache,
-            &self.metrics,
+            &metrics,
         )
         .await
         .is_err()
@@ -172,6 +189,26 @@ impl<L: LogEntry> GenericSequencer<L> {
         }
 
         Response::empty()
+    }
+
+    async fn with_obs<F, R>(&self, f: F) -> R
+    where
+        F: AsyncFnOnce(SequencerMetrics) -> R,
+    {
+        let registry = Registry::new();
+        let metrics = SequencerMetrics::new(&registry);
+        // a bit of a hack but makes the rest of the code simpler.
+        // We setup metrics here so that the closure f can then use these reset metrics.
+        self.public_bucket.write().await.metrics = Some(ObjectMetrics::new(&registry));
+
+        let r = f(metrics).await;
+        if let Some(wshim) = self.wshim.clone() {
+            self.do_state.wait_until(async move {
+                wshim.flush(&registry).await;
+                wshim.flush(&obs::logs::LOGGER).await;
+            });
+        }
+        r
     }
 }
 
@@ -191,7 +228,13 @@ impl<L: LogEntry> GenericSequencer<L> {
             error!("Failed to load short-term dedup cache from DO storage: {e}");
         }
 
-        match log_ops::create_log(&self.config, &self.public_bucket, &self.do_state).await {
+        match log_ops::create_log(
+            &self.config,
+            &*self.public_bucket.read().await,
+            &self.do_state,
+        )
+        .await
+        {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),
             Err(CreateError::Other(msg)) => {
                 return Err(format!("{name}: failed to create: {msg}").into())
@@ -225,10 +268,13 @@ impl<L: LogEntry> GenericSequencer<L> {
         }
 
         // Load sequencing state.
-        *self.sequence_state.borrow_mut() =
-            SequenceState::load::<L>(&self.config, &self.public_bucket, &self.do_state)
-                .await
-                .map_err(|e| e.to_string())?;
+        *self.sequence_state.borrow_mut() = SequenceState::load::<L>(
+            &self.config,
+            &*self.public_bucket.read().await,
+            &self.do_state,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         // If the tree is empty, add the log's initial entry if it has one.
         if self.sequence_state.borrow().tree_size() == 0 {
@@ -254,6 +300,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     async fn add_batch(
         &self,
         pending_entries: Vec<PendingLogEntryBlob>,
+        metrics: &SequencerMetrics,
     ) -> Result<Vec<(LookupKey, SequenceMetadata)>, WorkerError> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
@@ -269,7 +316,7 @@ impl<L: LogEntry> GenericSequencer<L> {
                 pending_entry,
             );
 
-            self.metrics
+            metrics
                 .entry_count
                 .with_label_values(&[add_leaf_result.source()])
                 .inc();
@@ -285,15 +332,6 @@ impl<L: LogEntry> GenericSequencer<L> {
             .zip(entries_metadata.iter())
             .filter_map(|(key, value_opt)| value_opt.map(|metadata| (key, metadata)))
             .collect::<Vec<_>>())
-    }
-
-    fn fetch_metrics(&self) -> Result<Response, WorkerError> {
-        let mut buffer = String::new();
-        let encoder = TextEncoder::new();
-        encoder
-            .encode_utf8(&self.registry.gather(), &mut buffer)
-            .unwrap();
-        Response::ok(buffer)
     }
 }
 

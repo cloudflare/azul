@@ -25,7 +25,7 @@ impl DurableObject for Batcher {
             enable_dedup: false, // deduplication is not currently supported
             location_hint: params.location_hint.clone(),
         };
-        Batcher(GenericBatcher::new(env, config))
+        Batcher(GenericBatcher::new(state, env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

@@ -9,7 +9,7 @@ use std::{cell::RefCell, mem, time::Duration};
 use tlog_tiles::{PathElem, TlogTile};
 use worker::{Bucket, Env, Error as WorkerError, Object, Request, Response, State, Storage};
 
-use crate::{load_public_bucket, log_ops::CHECKPOINT_KEY, util::now_millis};
+use crate::{load_public_bucket, log_ops::CHECKPOINT_KEY, obs, util::now_millis};
 
 // Workers are limited to 1000 subrequests per invocation (including R2 operations).
 // For each log, we'll need to perform the following subrequests:
@@ -36,6 +36,7 @@ pub struct CleanerConfig {
 }
 
 pub struct GenericCleaner {
+    state: State,
     config: CleanerConfig,
     storage: Storage,
     bucket: Bucket,
@@ -43,6 +44,7 @@ pub struct GenericCleaner {
     current_size: RefCell<u64>,
     subrequests: RefCell<usize>,
     initialized: RefCell<bool>,
+    wshim: Option<obs::Wshim>,
 }
 
 impl GenericCleaner {
@@ -51,16 +53,19 @@ impl GenericCleaner {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the public bucket.
-    pub fn new(state: &State, env: &Env, config: CleanerConfig) -> Self {
+    pub fn new(state: State, env: &Env, config: CleanerConfig) -> Self {
         let bucket = load_public_bucket(env, &config.name).unwrap();
+        let wshim = obs::Wshim::from_env(env).ok();
         Self {
             storage: state.storage(),
+            state,
             config,
             bucket,
             cleaned_size: RefCell::new(0),
             current_size: RefCell::new(0),
             subrequests: RefCell::new(0),
             initialized: RefCell::new(false),
+            wshim,
         }
     }
 
@@ -96,10 +101,13 @@ impl GenericCleaner {
     /// # Errors
     /// Will return an error if initialization fails.
     pub async fn fetch(&self, _req: Request) -> Result<Response, WorkerError> {
-        if !*self.initialized.borrow() {
-            self.initialize().await?;
-        }
-        Response::ok("Started cleaner")
+        self.with_obs(async || {
+            if !*self.initialized.borrow() {
+                self.initialize().await?;
+            }
+            Response::ok("Started cleaner")
+        })
+        .await
     }
 
     /// Alarm handler for the partial tile cleaner. This runs in a loop
@@ -109,6 +117,10 @@ impl GenericCleaner {
     /// # Errors
     /// Will return an error if initialization or cleaning fails.
     pub async fn alarm(&self) -> Result<Response, WorkerError> {
+        self.with_obs(async || self.alarm_impl().await).await
+    }
+
+    async fn alarm_impl(&self) -> Result<Response, WorkerError> {
         // Reset the subrequest count.
         *self.subrequests.borrow_mut() = 0;
 
@@ -292,5 +304,18 @@ impl GenericCleaner {
         }
         *self.subrequests.borrow_mut() += new;
         Ok(())
+    }
+
+    async fn with_obs<F, R>(&self, f: F) -> R
+    where
+        F: AsyncFnOnce() -> R,
+    {
+        let r = f().await;
+        if let Some(wshim) = self.wshim.clone() {
+            self.state.wait_until(async move {
+                wshim.flush(&obs::logs::LOGGER).await;
+            });
+        }
+        r
     }
 }

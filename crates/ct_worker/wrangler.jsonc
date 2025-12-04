@@ -17,7 +17,7 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build && DEPLOY_ENV=dev worker-build --release"
+                "command": "cargo install -q worker-build@0.1.14 && DEPLOY_ENV=dev worker-build --release"
             },
             "route": {
                 "pattern": "static-ct-dev.cloudflareresearch.com",
@@ -117,7 +117,7 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build && DEPLOY_ENV=cftest worker-build --release"
+                "command": "cargo install -q worker-build@0.1.14 && DEPLOY_ENV=cftest worker-build --release"
             },
             "route": {
                 "pattern": "static-ct.cloudflareresearch.com",
@@ -185,7 +185,7 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build && DEPLOY_ENV=raio worker-build --release"
+                "command": "cargo install -q worker-build@0.1.14 && DEPLOY_ENV=raio worker-build --release"
             },
             "routes": [
                 "https://ct.cloudflare.com/logs/raio2025h2b/*",
