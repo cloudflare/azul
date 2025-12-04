@@ -28,11 +28,12 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
+use std::time::Duration;
 use tlog_tiles::{LookupKey, PendingLogEntry, SequenceMetadata};
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
-    js_sys, kv, kv::KvStore, wasm_bindgen, Bucket, Env, Error, HttpMetadata, Result, State,
+    js_sys, kv, kv::KvStore, wasm_bindgen, Bucket, Delay, Env, Error, HttpMetadata, Result, State,
     Storage, Stub,
 };
 
@@ -513,6 +514,36 @@ impl LockBackend for State {
     }
 }
 
+// R2 retry config: 3 retries with exponential backoff (100ms -> 200ms -> 400ms).
+pub const R2_MAX_RETRIES: u32 = 3;
+pub const R2_BASE_DELAY_MS: u64 = 100;
+
+/// Retries an async operation with exponential backoff.
+///
+/// # Errors
+///
+/// Returns the last error if all retry attempts fail.
+pub async fn with_retry<T, F, Fut>(max_retries: u32, base_delay_ms: u64, operation: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut last_error = None;
+    for attempt in 0..=max_retries {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < max_retries {
+                    let delay_ms = base_delay_ms * (1 << attempt);
+                    Delay::from(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("with_retry: at least one attempt should have been made"))
+}
+
 pub trait ObjectBackend {
     /// Upload the object with the given key and data to the object backend,
     /// adding additional HTTP metadata headers based on the provided options.
@@ -561,31 +592,39 @@ impl ObjectBackend for ObjectBucket {
         opts: &UploadOptions,
     ) -> Result<()> {
         let start = now_millis();
-        let mut metadata = HttpMetadata::default();
-        if let Some(content_type) = &opts.content_type {
-            metadata.content_type = Some(content_type.to_string());
+        let content_type = opts
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".into());
+        let cache_control = if opts.immutable {
+            "public, max-age=604800, immutable"
         } else {
-            metadata.content_type = Some("application/octet-stream".into());
-        }
-        if opts.immutable {
-            metadata.cache_control = Some("public, max-age=604800, immutable".into());
-        } else {
-            metadata.cache_control = Some("no-store".into());
-        }
+            "no-store"
+        };
         let value: Vec<u8> = data.into();
+        let key_str = key.as_ref();
         self.metrics
             .as_ref()
             .inspect(|&m| m.upload_size_bytes.observe(value.len().as_f64()));
-        self.bucket
-            .put(key.as_ref(), value.clone())
-            .http_metadata(metadata)
-            .execute()
-            .await
-            .inspect_err(|_| {
-                self.metrics
-                    .as_ref()
-                    .inspect(|&m| m.errors.with_label_values(&["put"]).inc());
-            })?;
+
+        with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.clone()),
+                cache_control: Some(cache_control.into()),
+                ..Default::default()
+            };
+            self.bucket
+                .put(key_str, value.clone())
+                .http_metadata(metadata)
+                .execute()
+                .await
+        })
+        .await
+        .inspect_err(|_| {
+            self.metrics
+                .as_ref()
+                .inspect(|&m| m.errors.with_label_values(&["put"]).inc());
+        })?;
 
         self.metrics.as_ref().inspect(|&m| {
             m.duration
@@ -598,20 +637,25 @@ impl ObjectBackend for ObjectBucket {
 
     async fn fetch<S: AsRef<str>>(&self, key: S) -> Result<Option<Vec<u8>>> {
         let start = now_millis();
-        let res = match self.bucket.get(key.as_ref()).execute().await? {
-            Some(obj) => {
-                let body = obj
-                    .body()
-                    .ok_or_else(|| format!("missing object body: {}", key.as_ref()))?;
-                let bytes = body.bytes().await.inspect_err(|_| {
-                    self.metrics.as_ref().inspect(|&m| {
-                        m.errors.with_label_values(&["get"]).inc();
-                    });
-                })?;
-                Ok(Some(bytes))
+        let key_str = key.as_ref();
+        let res = with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
+            match self.bucket.get(key_str).execute().await? {
+                Some(obj) => {
+                    let body = obj
+                        .body()
+                        .ok_or_else(|| format!("missing object body: {}", key_str))?;
+                    let bytes = body.bytes().await?;
+                    Ok(Some(bytes))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        };
+        })
+        .await
+        .inspect_err(|_| {
+            self.metrics
+                .as_ref()
+                .inspect(|&m| m.errors.with_label_values(&["get"]).inc());
+        });
         self.metrics.as_ref().inspect(|&m| {
             m.duration
                 .with_label_values(&["get"])
