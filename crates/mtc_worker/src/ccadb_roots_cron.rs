@@ -24,18 +24,30 @@ pub(crate) const CCADB_ROOTS_FILENAME: &str = "mtc_bootstrap_roots.pem";
 
 #[event(scheduled)]
 async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    // Update CCADB roots
     log::info!("Updating CCADB roots");
-    let kv = match env.kv(CCADB_ROOTS_NAMESPACE) {
-        Ok(kv) => kv,
-        Err(e) => {
-            log::warn!("Failed to get KV namespace '{CCADB_ROOTS_NAMESPACE}': {e}");
-            return;
+    match env.kv(CCADB_ROOTS_NAMESPACE) {
+        Ok(kv) => {
+            if let Err(e) = update_ccadb_roots(&kv).await {
+                log::warn!("Failed to update CCADB roots: {e}");
+            } else {
+                log::info!("Successfully updated CCADB roots");
+            }
         }
-    };
-    if let Err(e) = update_ccadb_roots(&kv).await {
-        log::warn!("Failed to update CCADB roots: {e}");
-    } else {
-        log::info!("Successfully updated CCADB roots");
+        Err(e) => log::warn!("Failed to get KV namespace '{CCADB_ROOTS_NAMESPACE}': {e}"),
+    }
+
+    // Update CT logs for SCT validation
+    log::info!("Updating CT logs");
+    match env.kv(crate::ct_logs_cron::CT_LOGS_NAMESPACE) {
+        Ok(kv) => match crate::ct_logs_cron::update_ct_logs(&kv).await {
+            Ok(_) => log::info!("Successfully updated CT logs"),
+            Err(e) => log::warn!("Failed to update CT logs: {e}"),
+        },
+        Err(e) => log::warn!(
+            "Failed to get KV namespace '{}': {e}",
+            crate::ct_logs_cron::CT_LOGS_NAMESPACE
+        ),
     }
 }
 

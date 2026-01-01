@@ -37,6 +37,9 @@ pub struct LogParams {
     pub max_batch_entries: usize,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,
+    /// Enable SCT validation for bootstrap certificates
+    #[serde(default)]
+    pub enable_sct_validation: bool,
 }
 
 impl LogParams {

@@ -317,6 +317,42 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
             }
         };
 
+    // SCT validation (if enabled for this log shard)
+    if params.enable_sct_validation {
+        use crate::ct_logs_cron::load_ct_logs;
+        use sct_validator::{SctValidationResult, SctValidator};
+
+        // Load the CT log list from KV
+        let ct_logs = load_ct_logs(env).await?;
+        let validator = SctValidator::new(ct_logs);
+
+        // Get leaf and issuer DER for SCT validation
+        // TODO: Handle single-cert chains where root directly signs leaf (issuer not in chain)
+        let leaf_der = req.chain.first().ok_or("Chain is empty")?;
+        let issuer_der = req.chain.get(1).ok_or("Chain must have at least 2 certificates")?;
+
+        let validation_time_secs = now_millis() / 1000;
+
+        match validator.validate_embedded_scts(leaf_der, issuer_der, validation_time_secs) {
+            Ok(SctValidationResult::Valid) => {
+                log::info!("{name}: SCT validation passed");
+            }
+            Ok(SctValidationResult::ValidWithWarnings(warnings)) => {
+                log::info!("{name}: SCT validation passed with {} warnings", warnings.len());
+                for warning in &warnings {
+                    log::debug!("{name}: SCT warning: {:?}", warning);
+                }
+            }
+            Ok(SctValidationResult::StaleLogList) => {
+                log::warn!("{name}: SCT validation skipped (stale log list)");
+            }
+            Err(e) => {
+                log::warn!("{name}: SCT validation failed: {e}");
+                return Response::error(format!("SCT validation failed: {e}"), 400);
+            }
+        }
+    }
+
     // Retrieve the sequenced entry for this pending log entry by sending a request to the DO to
     // sequence the entry.
     let lookup_key = pending_entry.lookup_key();
