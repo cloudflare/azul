@@ -17,7 +17,6 @@ der.workspace = true
 hashbrown = "0.15"
 log.workspace = true
 p256.workspace = true
-rsa = { version = "0.9", default-features = false, features = ["sha2"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

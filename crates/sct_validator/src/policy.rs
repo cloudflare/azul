@@ -115,7 +115,6 @@ pub fn check_chrome_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::VerifyingKey;
 
     // Helper to create a test log
     fn make_test_log(
@@ -139,7 +138,7 @@ mod tests {
         CtLog {
             description: "test log".to_string(),
             id,
-            key: VerifyingKey::P256(dummy_key),
+            key: dummy_key,
             state,
             state_entered_at,
             current_operator: operator.to_string(),
@@ -173,7 +172,10 @@ mod tests {
 
         // One SCT should fail
         let result = check_chrome_policy(lifetime, &one_sct);
-        assert!(matches!(result, Err(PolicyError::NotEnoughCompliantSCTs { .. })));
+        assert!(matches!(
+            result,
+            Err(PolicyError::NotEnoughCompliantSCTs { .. })
+        ));
 
         // Two SCTs from different logs/operators should pass
         let result = check_chrome_policy(lifetime, &two_scts);
@@ -217,7 +219,10 @@ mod tests {
 
         // Two SCTs should fail
         let result = check_chrome_policy(lifetime, &two_scts);
-        assert!(matches!(result, Err(PolicyError::NotEnoughCompliantSCTs { .. })));
+        assert!(matches!(
+            result,
+            Err(PolicyError::NotEnoughCompliantSCTs { .. })
+        ));
 
         // Three SCTs should pass
         let result = check_chrome_policy(lifetime, &three_scts);
@@ -275,7 +280,10 @@ mod tests {
 
         // Should fail because only 2 unique logs
         let result = check_chrome_policy(lifetime, &duplicate_logs);
-        assert!(matches!(result, Err(PolicyError::NotEnoughUniqueLogs { .. })));
+        assert!(matches!(
+            result,
+            Err(PolicyError::NotEnoughUniqueLogs { .. })
+        ));
     }
 
     #[test]
@@ -299,7 +307,10 @@ mod tests {
 
         // Should fail because log1's SCT is skipped (retired before SCT)
         let result = check_chrome_policy(lifetime, &scts);
-        assert!(matches!(result, Err(PolicyError::NotEnoughCompliantSCTs { .. })));
+        assert!(matches!(
+            result,
+            Err(PolicyError::NotEnoughCompliantSCTs { .. })
+        ));
     }
 
     #[test]

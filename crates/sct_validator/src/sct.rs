@@ -32,19 +32,16 @@ pub struct SctSignature {
 }
 
 /// Signature algorithms supported by SCTs.
-/// Chrome only supports RSA and ECDSA with SHA-256.
+/// Only ECDSA P-256 with SHA-256 is supported
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureAlgorithm {
-    /// ECDSA with SHA-256 (most common for CT logs).
+    /// ECDSA with SHA-256.
     EcdsaSha256,
-    /// RSA PKCS#1 v1.5 with SHA-256.
-    RsaSha256,
 }
 
 /// Extracts SCTs and returns (scts, tbs_cert_without_sct_ext, lifetime_days).
 pub fn extract_scts_from_cert(leaf_der: &[u8]) -> Result<(Vec<ParsedSct>, Vec<u8>, u64), SctError> {
-    let cert =
-        Certificate::from_der(leaf_der).map_err(|e| SctError::Other(e.to_string()))?;
+    let cert = Certificate::from_der(leaf_der).map_err(|e| SctError::Other(e.to_string()))?;
     let lifetime_days = extract_lifetime_days(&cert)?;
 
     let mut tbs = cert.tbs_certificate;
@@ -134,10 +131,9 @@ fn parse_signature_algorithm(
     }
 
     match sig.algorithm.signature {
-        X509SigAlg::Rsa => Ok(SignatureAlgorithm::RsaSha256),
         X509SigAlg::Ecdsa => Ok(SignatureAlgorithm::EcdsaSha256),
         ref other => Err(SctError::Other(format!(
-            "unsupported signature algorithm: {:?} (only RSA and ECDSA are supported)",
+            "unsupported signature algorithm: {:?} (only ECDSA is supported)",
             other
         ))),
     }

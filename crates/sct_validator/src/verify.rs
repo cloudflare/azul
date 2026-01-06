@@ -1,16 +1,15 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! SCT signature verification per RFC 6962. Supports ECDSA P-256 and RSA with SHA-256.
+//! SCT signature verification per RFC 6962. Supports ECDSA P-256 with SHA-256
 
 use std::mem::size_of;
 
 use crate::error::SctError;
 use crate::sct::{ParsedSct, SignatureAlgorithm};
-use crate::{CtLog, VerifyingKey};
+use crate::CtLog;
 use p256::ecdsa::{signature::Verifier, Signature as P256Signature};
-use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey as RsaPkcs1VerifyingKey};
-use rsa::sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256};
 
 // RFC 6962 constants for the signed data structure
 const SCT_VERSION_V1: u8 = 0;
@@ -26,24 +25,9 @@ pub fn verify_sct_signature(
 ) -> Result<(), SctError> {
     let signed_data = build_signed_data(sct, ct_cert_der, issuer_spki_der)?;
 
-    match (&log.key, sct.signature.algorithm) {
-        (VerifyingKey::P256(key), SignatureAlgorithm::EcdsaSha256) => {
-            verify_ecdsa_p256(key, &signed_data, &sct.signature.signature)?;
-            Ok(())
-        }
-        (VerifyingKey::Rsa(key), SignatureAlgorithm::RsaSha256) => {
-            verify_rsa_sha256(key, &signed_data, &sct.signature.signature)?;
-            Ok(())
-        }
-        (VerifyingKey::P256(_), SignatureAlgorithm::RsaSha256) => {
-            Err(SctError::Other(
-                "log has P-256 key but SCT uses RSA signature".to_string(),
-            ))
-        }
-        (VerifyingKey::Rsa(_), SignatureAlgorithm::EcdsaSha256) => {
-            Err(SctError::Other(
-                "log has RSA key but SCT uses ECDSA signature".to_string(),
-            ))
+    match sct.signature.algorithm {
+        SignatureAlgorithm::EcdsaSha256 => {
+            verify_ecdsa_p256(&log.key, &signed_data, &sct.signature.signature)
         }
     }
 }
@@ -122,26 +106,10 @@ fn verify_ecdsa_p256(
     message: &[u8],
     signature_bytes: &[u8],
 ) -> Result<(), SctError> {
-    let signature = P256Signature::from_der(signature_bytes).map_err(|e| {
-        SctError::Other(format!("invalid ECDSA signature encoding: {e}"))
-    })?;
-    key.verify(message, &signature).map_err(|e| {
-        SctError::Other(format!("ECDSA signature verification failed: {e}"))
-    })
-}
-
-fn verify_rsa_sha256(
-    key: &rsa::RsaPublicKey,
-    message: &[u8],
-    signature_bytes: &[u8],
-) -> Result<(), SctError> {
-    let verifying_key = RsaPkcs1VerifyingKey::<Sha256>::new(key.clone());
-    let signature = RsaSignature::try_from(signature_bytes).map_err(|e| {
-        SctError::Other(format!("invalid RSA signature: {e}"))
-    })?;
-    verifying_key.verify(message, &signature).map_err(|e| {
-        SctError::Other(format!("RSA signature verification failed: {e}"))
-    })
+    let signature = P256Signature::from_der(signature_bytes)
+        .map_err(|e| SctError::Other(format!("invalid ECDSA signature encoding: {e}")))?;
+    key.verify(message, &signature)
+        .map_err(|e| SctError::Other(format!("ECDSA signature verification failed: {e}")))
 }
 
 #[cfg(test)]

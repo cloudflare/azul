@@ -27,15 +27,9 @@ use base64::prelude::*;
 use der::Encode;
 use hashbrown::HashMap;
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
-use x509_cert::der::Decode;
-use rsa::traits::PublicKeyParts;
-use rsa::RsaPublicKey;
 use serde::Deserialize;
 use spki::SubjectPublicKeyInfoRef;
-
-/// Minimum RSA key size in bytes (2048 bits = 256 bytes).
-/// Chrome only supports RSA keys of 2048 bits or more.
-const MIN_RSA_KEY_SIZE_BYTES: usize = 256;
+use x509_cert::der::Decode;
 
 /// Log list freshness period in seconds (70 days).
 /// If the log list is older than this, SCT validation auto-succeeds.
@@ -64,7 +58,10 @@ impl LogState {
     /// Qualified, Usable, and ReadOnly logs can issue compliant SCTs.
     #[must_use]
     pub fn is_compliant(&self) -> bool {
-        matches!(self, LogState::Qualified | LogState::Usable | LogState::ReadOnly)
+        matches!(
+            self,
+            LogState::Qualified | LogState::Usable | LogState::ReadOnly
+        )
     }
 }
 
@@ -82,14 +79,8 @@ impl core::fmt::Display for LogState {
 }
 
 /// A public key used for verifying SCT signatures.
-/// CT logs use either ECDSA P-256 or RSA keys.
-#[derive(Clone, Debug)]
-pub enum VerifyingKey {
-    /// ECDSA P-256 key (most common for CT logs).
-    P256(P256VerifyingKey),
-    /// RSA key (minimum 2048 bits).
-    Rsa(RsaPublicKey),
-}
+/// CT logs use ECDSA P-256.
+pub type VerifyingKey = P256VerifyingKey;
 
 /// A Certificate Transparency log.
 #[derive(Clone, Debug)]
@@ -159,25 +150,12 @@ fn parse_verifying_key(description: &str, key_der: &[u8]) -> Result<VerifyingKey
     let spki = SubjectPublicKeyInfoRef::try_from(key_der)
         .map_err(|e| SctError::Other(format!("invalid log key '{}': {e}", description)))?;
 
-    if let Ok(key) = P256VerifyingKey::try_from(spki.clone()) {
-        return Ok(VerifyingKey::P256(key));
-    }
-
-    if let Ok(key) = RsaPublicKey::try_from(spki.clone()) {
-        let key_size = key.size();
-        if key_size >= MIN_RSA_KEY_SIZE_BYTES {
-            return Ok(VerifyingKey::Rsa(key));
-        }
-        return Err(SctError::Other(format!(
-            "invalid log key '{}': RSA key too small: {} bytes (minimum {} bytes)",
-            description, key_size, MIN_RSA_KEY_SIZE_BYTES
-        )));
-    }
-
-    Err(SctError::Other(format!(
-        "invalid log key '{}': key is neither P-256 ECDSA nor RSA",
-        description
-    )))
+    P256VerifyingKey::try_from(spki).map_err(|e| {
+        SctError::Other(format!(
+            "invalid log key '{}': not a valid P-256 key: {e}",
+            description
+        ))
+    })
 }
 
 /// A collection of CT logs indexed by their ID.
@@ -245,25 +223,26 @@ impl CtLogList {
 fn parse_raw_log(operator_name: &str, raw_log: &RawLog) -> Result<CtLog, SctError> {
     let desc = raw_log.description.clone().unwrap_or_default();
 
-    let log_id_bytes = BASE64_STANDARD
-        .decode(&raw_log.log_id)
-        .map_err(|e| SctError::Other(format!(
+    let log_id_bytes = BASE64_STANDARD.decode(&raw_log.log_id).map_err(|e| {
+        SctError::Other(format!(
             "invalid log key '{}': invalid base64 log_id: {e}",
             desc
-        )))?;
+        ))
+    })?;
     let id: [u8; 32] = log_id_bytes.try_into().map_err(|v: Vec<u8>| {
         SctError::Other(format!(
             "invalid log key '{}': log_id has invalid length: {} (expected 32)",
-            desc, v.len()
+            desc,
+            v.len()
         ))
     })?;
 
-    let key_der = BASE64_STANDARD
-        .decode(&raw_log.key)
-        .map_err(|e| SctError::Other(format!(
+    let key_der = BASE64_STANDARD.decode(&raw_log.key).map_err(|e| {
+        SctError::Other(format!(
             "invalid log key '{}': invalid base64 key: {e}",
             desc
-        )))?;
+        ))
+    })?;
 
     let (state, state_entered_at) = raw_log.state.to_state_and_timestamp()?;
     let previous_operators = raw_log
@@ -352,17 +331,27 @@ struct RawTemporalInterval {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RawLogState {
-    Pending { timestamp: String },
-    Qualified { timestamp: String },
-    Usable { timestamp: String },
+    Pending {
+        timestamp: String,
+    },
+    Qualified {
+        timestamp: String,
+    },
+    Usable {
+        timestamp: String,
+    },
     #[serde(rename = "readonly")]
     ReadOnly {
         timestamp: String,
         #[allow(dead_code)]
         final_tree_head: RawFinalTreeHead,
     },
-    Retired { timestamp: String },
-    Rejected { timestamp: String },
+    Retired {
+        timestamp: String,
+    },
+    Rejected {
+        timestamp: String,
+    },
 }
 
 impl RawLogState {
