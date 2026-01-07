@@ -137,6 +137,15 @@ impl CertPool {
             None
         }
     }
+
+    /// Find a certificate by its subject Distinguished Name.
+    pub fn find_by_subject(&self, subject: &x509_cert::name::Name) -> Option<&Certificate> {
+        if let Some(indices) = self.by_name.get(&subject.to_string()) {
+            indices.first().and_then(|&idx| self.certs.get(idx))
+        } else {
+            None
+        }
+    }
 }
 
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
@@ -683,4 +692,51 @@ mod tests {
 
     test_validate_chain!(intermediate_as_accepted_root; "../../static_ct_api/tests/fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 1; false);
     test_validate_chain!(leaf_as_accepted_root; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 0; false);
+
+    #[test]
+    fn test_find_by_subject() {
+        // Load a root CA certificate
+        let root =
+            Certificate::from_pem(include_bytes!("../../static_ct_api/tests/fake-ca-cert.pem"))
+                .unwrap();
+
+        // Get the subject DN before moving into pool
+        let subject_dn = root.tbs_certificate.subject.clone();
+
+        // Create a pool with this root
+        let pool = CertPool::new(vec![root]).unwrap();
+
+        // Should find the cert by its subject
+        let found = pool.find_by_subject(&subject_dn);
+        assert!(found.is_some(), "Should find certificate by subject DN");
+
+        // Verify it's the same cert (compare subjects)
+        assert_eq!(
+            found.unwrap().tbs_certificate.subject.to_string(),
+            subject_dn.to_string()
+        );
+    }
+
+    #[test]
+    fn test_find_by_subject_not_found() {
+        // Load a certificate
+        let cert = Certificate::from_pem(include_bytes!(
+            "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"
+        ))
+        .unwrap();
+
+        // Create pool with just this leaf cert
+        let pool = CertPool::new(vec![cert]).unwrap();
+
+        // Try to find by a different subject (use the leaf's issuer, which isn't in pool)
+        let leaf = &pool.certs[0];
+        let issuer_dn = &leaf.tbs_certificate.issuer;
+
+        // The issuer is not in the pool, so this should return None
+        let not_found = pool.find_by_subject(issuer_dn);
+        assert!(
+            not_found.is_none(),
+            "Should not find certificate not in pool"
+        );
+    }
 }

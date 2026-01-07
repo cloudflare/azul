@@ -327,18 +327,38 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         let validator = SctValidator::new(ct_logs);
 
         // Get leaf and issuer DER for SCT validation
-        // TODO: Handle single-cert chains where root directly signs leaf (issuer not in chain)
         let leaf_der = req.chain.first().ok_or("Chain is empty")?;
-        let issuer_der = req.chain.get(1).ok_or("Chain must have at least 2 certificates")?;
+        let issuer_der: Vec<u8> = if req.chain.len() > 1 {
+            // Issuer is in the chain
+            req.chain[1].clone()
+        } else {
+            // Single-cert chain: look up issuer (root) from roots pool
+            use der::{Decode, Encode};
+            use x509_cert::Certificate;
+
+            let leaf = Certificate::from_der(leaf_der)
+                .map_err(|e| format!("failed to parse leaf: {e}"))?;
+
+            let issuer_dn = &leaf.tbs_certificate.issuer;
+
+            roots
+                .find_by_subject(issuer_dn)
+                .ok_or_else(|| format!("issuer not found in roots pool: {issuer_dn}"))?
+                .to_der()
+                .map_err(|e| format!("failed to encode issuer {e}"))?
+        };
 
         let validation_time_secs = now_millis() / 1000;
 
-        match validator.validate_embedded_scts(leaf_der, issuer_der, validation_time_secs) {
+        match validator.validate_embedded_scts(leaf_der, &issuer_der, validation_time_secs) {
             Ok(SctValidationResult::Valid) => {
                 log::info!("{name}: SCT validation passed");
             }
             Ok(SctValidationResult::ValidWithWarnings(warnings)) => {
-                log::info!("{name}: SCT validation passed with {} warnings", warnings.len());
+                log::info!(
+                    "{name}: SCT validation passed with {} warnings",
+                    warnings.len()
+                );
                 for warning in &warnings {
                     log::debug!("{name}: SCT warning: {:?}", warning);
                 }
