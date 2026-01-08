@@ -8,7 +8,7 @@ use config::TemporalInterval;
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket, obs::Wshim, put_cache_entry_metadata,
-    serialize, ObjectBucket, ENTRY_ENDPOINT,
+    serialize, with_retry, ObjectBucket, R2_BASE_DELAY_MS, R2_MAX_RETRIES, ENTRY_ENDPOINT,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -135,7 +135,11 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                     // monitoring_url is unspecified.
                     if CONFIG.logs[name].monitoring_url.is_empty() {
                         let bucket = load_public_bucket(&ctx.env, name)?;
-                        if let Some(obj) = bucket.get(key).execute().await? {
+                        let obj_opt = with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
+                            bucket.get(key).execute().await
+                        })
+                        .await?;
+                        if let Some(obj) = obj_opt {
                             Response::from_body(
                                 obj.body()
                                     .ok_or("R2 object missing body")?
