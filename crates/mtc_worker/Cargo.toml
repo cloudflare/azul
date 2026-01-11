@@ -64,6 +64,7 @@ worker.workspace = true
 x509-cert.workspace = true
 x509_util.workspace = true
 mtc_api.workspace = true
+sct_validator.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

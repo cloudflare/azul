@@ -277,35 +277,71 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     response
 }
 
+/// Builds the issuer RDN with the trust anchor ID.
+fn build_issuer_rdn(log_id: &str) -> std::result::Result<RdnSequence, String> {
+    let utf8_value = Utf8StringRef::new(log_id).map_err(|e| e.to_string())?;
+    let any_value = Any::new(Tag::Utf8String, utf8_value.as_bytes()).map_err(|e| e.to_string())?;
+
+    let attr = AttributeTypeAndValue {
+        oid: ID_RDNA_TRUSTANCHOR_ID,
+        value: any_value,
+    };
+
+    let rdn = RelativeDistinguishedName(
+        SetOfVec::from_iter([attr]).expect("single attribute should always succeed"),
+    );
+
+    Ok(RdnSequence::from(vec![rdn]))
+}
+
+fn build_validity(now_millis: u64, max_lifetime_secs: u64) -> std::result::Result<Validity, String> {
+    let now = Duration::from_millis(now_millis);
+    let not_before = UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?;
+    let not_after =
+        UtcTime::from_unix_duration(now + Duration::from_secs(max_lifetime_secs)).map_err(|e| e.to_string())?;
+
+    Ok(Validity {
+        not_before: Time::UtcTime(not_before),
+        not_after: Time::UtcTime(not_after),
+    })
+}
+
+/// Returns the issuer cert for SCT validation. For multi-cert chains, that's
+/// chain[1]. For single-cert chains, we look it up from the roots pool.
+fn resolve_issuer_for_sct(
+    chain: &[Vec<u8>],
+    roots: &x509_util::CertPool,
+) -> std::result::Result<Vec<u8>, String> {
+    use der::{Decode, Encode};
+    use x509_cert::Certificate;
+
+    if chain.is_empty() {
+        return Err("chain is empty".into());
+    }
+
+    if chain.len() > 1 {
+        return Ok(chain[1].clone());
+    }
+
+    // Single-cert chain: look up issuer from roots pool
+    let leaf = Certificate::from_der(&chain[0]).map_err(|e| format!("failed to parse leaf: {e}"))?;
+    let issuer_dn = &leaf.tbs_certificate.issuer;
+
+    roots
+        .find_by_subject(issuer_dn)
+        .ok_or_else(|| format!("issuer not found in roots pool: {issuer_dn}"))?
+        .to_der()
+        .map_err(|e| format!("failed to encode issuer: {e}"))
+}
+
 #[allow(clippy::too_many_lines)]
 async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> {
     let params = &CONFIG.logs[name];
     let req: AddEntryRequest = req.json().await?;
 
-    let issuer = RdnSequence::from(vec![RelativeDistinguishedName(
-        SetOfVec::from_iter([AttributeTypeAndValue {
-            oid: ID_RDNA_TRUSTANCHOR_ID,
-            value: Any::new(
-                Tag::Utf8String,
-                Utf8StringRef::new(&params.log_id)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())?,
-        }])
-        .unwrap(),
-    )]);
-
-    let now = Duration::from_millis(now_millis());
-    let mut validity = Validity {
-        not_before: Time::UtcTime(UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?),
-        not_after: Time::UtcTime(
-            UtcTime::from_unix_duration(
-                now + Duration::from_secs(params.max_certificate_lifetime_secs as u64),
-            )
-            .map_err(|e| e.to_string())?,
-        ),
-    };
+    let issuer = build_issuer_rdn(&params.log_id).map_err(|e| e.to_string())?;
+    let mut validity =
+        build_validity(now_millis(), params.max_certificate_lifetime_secs as u64).map_err(|e| e.to_string())?;
 
     let roots = load_roots(env, name).await?;
     let (pending_entry, found_root_idx) =
@@ -316,6 +352,44 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
                 return Response::error("Bad request", 400);
             }
         };
+
+    // SCT validation (if enabled for this log shard)
+    if params.enable_sct_validation {
+        use crate::ct_logs_cron::load_ct_logs;
+        use sct_validator::{SctValidationResult, SctValidator};
+
+        // Load the CT log list from KV
+        let ct_logs = load_ct_logs(env).await?;
+        let validator = SctValidator::new(ct_logs);
+
+        // Get leaf and issuer DER for SCT validation
+        let leaf_der = req.chain.first().ok_or("Chain is empty")?;
+        let issuer_der = resolve_issuer_for_sct(&req.chain, roots).map_err(|e| e.to_string())?;
+
+        let validation_time_secs = now_millis() / 1000;
+
+        match validator.validate_embedded_scts(leaf_der, &issuer_der, validation_time_secs) {
+            Ok(SctValidationResult::Valid) => {
+                log::info!("{name}: SCT validation passed");
+            }
+            Ok(SctValidationResult::ValidWithWarnings(warnings)) => {
+                log::info!(
+                    "{name}: SCT validation passed with {} warnings",
+                    warnings.len()
+                );
+                for warning in &warnings {
+                    log::debug!("{name}: SCT warning: {:?}", warning);
+                }
+            }
+            Ok(SctValidationResult::StaleLogList) => {
+                log::warn!("{name}: SCT validation skipped (stale log list)");
+            }
+            Err(e) => {
+                log::warn!("{name}: SCT validation failed: {e}");
+                return Response::error(format!("SCT validation failed: {e}"), 400);
+            }
+        }
+    }
 
     // Retrieve the sequenced entry for this pending log entry by sending a request to the DO to
     // sequence the entry.
@@ -443,4 +517,57 @@ fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
         h.append("Content-Type", &hdr).unwrap();
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use der::Encode;
+
+    #[test]
+    fn test_build_issuer_rdn() {
+        let rdn = build_issuer_rdn("test-log-id").unwrap();
+        assert_eq!(rdn.0.len(), 1);
+
+        let attr = rdn.0[0].0.iter().next().unwrap();
+        assert_eq!(attr.oid, ID_RDNA_TRUSTANCHOR_ID);
+
+        let encoded = attr.value.to_der().unwrap();
+        assert_eq!(encoded[0], 0x0C); // UTF8String tag
+    }
+
+    #[test]
+    fn test_build_validity() {
+        let now_ms = 1_700_000_000_000_u64; // Nov 2023
+        let lifetime_secs = 86400_u64; // 1 day
+
+        let validity = build_validity(now_ms, lifetime_secs).unwrap();
+
+        assert_eq!(validity.not_before.to_unix_duration().as_secs(), now_ms / 1000);
+        assert_eq!(validity.not_after.to_unix_duration().as_secs(), now_ms / 1000 + lifetime_secs);
+    }
+
+    #[test]
+    fn test_resolve_issuer_empty_chain() {
+        let chain: Vec<Vec<u8>> = vec![];
+        let roots = x509_util::CertPool::new(vec![]).unwrap();
+        assert!(resolve_issuer_for_sct(&chain, &roots).is_err());
+    }
+
+    #[test]
+    fn test_resolve_issuer_multi_cert_chain() {
+        let leaf = vec![1, 2, 3];
+        let issuer = vec![4, 5, 6];
+        let chain = vec![leaf, issuer.clone()];
+        let roots = x509_util::CertPool::new(vec![]).unwrap();
+
+        assert_eq!(resolve_issuer_for_sct(&chain, &roots).unwrap(), issuer);
+    }
+
+    #[test]
+    fn test_resolve_issuer_invalid_der() {
+        let chain = vec![vec![0xFF, 0xFF, 0xFF]];
+        let roots = x509_util::CertPool::new(vec![]).unwrap();
+        assert!(resolve_issuer_for_sct(&chain, &roots).is_err());
+    }
 }

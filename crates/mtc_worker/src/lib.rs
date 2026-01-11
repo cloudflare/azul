@@ -21,6 +21,7 @@ use x509_util::CertPool;
 mod batcher_do;
 mod ccadb_roots_cron;
 mod cleaner_do;
+mod ct_logs_cron;
 mod frontend_worker;
 mod sequencer_do;
 
