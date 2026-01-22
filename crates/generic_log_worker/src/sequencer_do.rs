@@ -110,7 +110,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     ) -> Result<Response, WorkerError> {
         if !*self.initialized.borrow() {
             info!("{}: Initializing log from fetch handler", self.config.name);
-            self.initialize().await?;
+            self.initialize(&metrics).await?;
         }
 
         let start = now_millis();
@@ -163,7 +163,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     async fn alarm_impl(&self, metrics: SequencerMetrics) -> Result<Response, WorkerError> {
         if !*self.initialized.borrow() {
             info!("{}: Initializing log from alarm handler", self.config.name);
-            self.initialize().await?;
+            self.initialize(&metrics).await?;
         }
 
         // Schedule the next sequencing.
@@ -214,7 +214,7 @@ impl<L: LogEntry> GenericSequencer<L> {
 
 impl<L: LogEntry> GenericSequencer<L> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
-    async fn initialize(&self) -> Result<(), WorkerError> {
+    async fn initialize(&self, metrics: &SequencerMetrics) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
         let _lock = self.init_mux.lock().await;
         let name = &self.config.name;
@@ -224,8 +224,13 @@ impl<L: LogEntry> GenericSequencer<L> {
             return Ok(());
         }
 
-        if let Err(e) = self.cache.load(name).await {
-            error!("Failed to load short-term dedup cache from DO storage: {e}");
+        if let Err(e) = self.cache.load(name, metrics).await {
+            error!(
+                "{name}: Failed to load dedup cache: {e}. \
+                Service will continue without short-term deduplication. \
+                This may result in duplicate entries but is not fatal."
+            );
+            metrics.dedup_cache_load_errors.inc();
         }
 
         match log_ops::create_log(
