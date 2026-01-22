@@ -99,6 +99,11 @@
                             "minimum": 1,
                             "default": 60,
                             "description": "How long to wait in between runs of the partial tile cleaner."
+                        },
+                        "enable_sct_validation": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Enable SCT (Signed Certificate Timestamp) validation for bootstrap certificates. When enabled, submitted certificates must have valid embedded SCTs compliant with Chrome's CT policy."
                         }
                     },
                     "required": [
