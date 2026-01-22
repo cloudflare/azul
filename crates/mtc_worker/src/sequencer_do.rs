@@ -9,8 +9,8 @@ use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
 use generic_log_worker::{
     get_durable_object_name, load_public_bucket,
     log_ops::{prove_subtree_consistency, ProofError},
-    with_retry, CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket,
-    SequencerConfig, R2_BASE_DELAY_MS, R2_MAX_RETRIES, SEQUENCER_BINDING,
+    CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
+    SEQUENCER_BINDING,
 };
 use mtc_api::{
     BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
@@ -132,47 +132,28 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     // https://github.com/cloudflare/workers-rs/issues/876
 
                     // Load current landmark sequence.
-                    let landmark_bytes: Option<Vec<u8>> =
-                        with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
-                            match bucket_clone.get(LANDMARK_KEY).execute().await? {
-                                Some(obj) => {
-                                    let bytes =
-                                        obj.body().ok_or("missing object body")?.bytes().await?;
-                                    Ok(Some(bytes))
-                                }
-                                None => Ok(None),
-                            }
-                        })
-                        .await?;
-                    let mut seq = if let Some(bytes) = landmark_bytes {
-                        LandmarkSequence::from_bytes(&bytes, max_landmarks)
-                            .map_err(|e| e.to_string())?
-                    } else {
-                        LandmarkSequence::create(max_landmarks)
-                    };
-
+                    let mut seq =
+                        if let Some(obj) = bucket_clone.get(LANDMARK_KEY).execute().await? {
+                            let bytes = obj.body().ok_or("missing object body")?.bytes().await?;
+                            LandmarkSequence::from_bytes(&bytes, max_landmarks)
+                                .map_err(|e| e.to_string())?
+                        } else {
+                            LandmarkSequence::create(max_landmarks)
+                        };
                     // Add the new landmark.
                     if seq.add(tree_size).map_err(|e| e.to_string())? {
                         // The landmark sequence was updated. Publish the result.
-                        let seq_bytes = seq.to_bytes().map_err(|e| e.to_string())?;
-                        with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
-                            bucket_clone
-                                .put(LANDMARK_KEY, seq_bytes.clone())
-                                .execute()
-                                .await
-                        })
-                        .await?;
+                        bucket_clone
+                            .put(LANDMARK_KEY, seq.to_bytes().map_err(|e| e.to_string())?)
+                            .execute()
+                            .await?;
                     }
 
                     // Update the landmark checkpoint.
-                    let checkpoint_str = new_checkpoint_str.clone();
-                    with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
-                        bucket_clone
-                            .put(LANDMARK_CHECKPOINT_KEY, checkpoint_str.clone())
-                            .execute()
-                            .await
-                    })
-                    .await?;
+                    bucket_clone
+                        .put(LANDMARK_CHECKPOINT_KEY, new_checkpoint_str.clone())
+                        .execute()
+                        .await?;
 
                     // Compute the landmark bundle and save it
                     let subtrees =
@@ -183,15 +164,11 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                         subtrees,
                         landmarks: seq.landmarks,
                     };
-                    // Can unwrap here because we use the autoderived Serialize impl for LandmarkBundle.
-                    let bundle_bytes = serde_json::to_vec(&bundle).unwrap();
-                    with_retry(R2_MAX_RETRIES, R2_BASE_DELAY_MS, || async {
-                        bucket_clone
-                            .put(LANDMARK_BUNDLE_KEY, bundle_bytes.clone())
-                            .execute()
-                            .await
-                    })
-                    .await?;
+                    bucket_clone
+                        // Can unwrap here because we use the autoderived Serialize impl for LandmarkBundle
+                        .put(LANDMARK_BUNDLE_KEY, serde_json::to_vec(&bundle).unwrap())
+                        .execute()
+                        .await?;
 
                     Ok(())
                 }

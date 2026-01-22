@@ -1,0 +1,29 @@
+# Copyright (c) 2025 Cloudflare, Inc. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+[package]
+name = "sct_validator"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM-compatible SCT (Signed Certificate Timestamp) validation for CT compliance"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+const-oid = "0.9.6"
+der.workspace = true
+hashbrown = "0.15"
+log.workspace = true
+p256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+signature.workspace = true
+spki = "0.7"
+thiserror.workspace = true
+x509-cert = { version = "0.2.5", features = ["sct"] }
+
+[dev-dependencies]
+x509-cert = { version = "0.2.5", features = ["pem"] }
