@@ -16,6 +16,9 @@ use prometheus::{
 // Reference: <https://github.com/FiloSottile/sunlight/blob/main/internal/ctlog/metrics.go>
 #[derive(Debug)]
 pub(crate) struct SequencerMetrics {
+    pub(crate) dedup_cache_size: Gauge,
+    pub(crate) dedup_cache_load_errors: Counter,
+
     pub(crate) req_count: CounterVec,
     pub(crate) req_in_flight: Gauge,
     pub(crate) req_duration: HistogramVec,
@@ -36,6 +39,18 @@ pub(crate) struct SequencerMetrics {
 impl SequencerMetrics {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn new(r: &Registry) -> Self {
+        let dedup_cache_size = register_gauge_with_registry!(
+            "dedup_cache_size",
+            "Current size of the dedup cache.",
+            r
+        )
+        .unwrap();
+        let dedup_cache_load_errors = register_counter_with_registry!(
+            "dedup_cache_load_errors_total",
+            "Number of errors encountered while loading the dedup cache.",
+            r
+        )
+        .unwrap();
         let req_count = register_counter_vec_with_registry!(
             "do_requests_total",
             "Requests served by the Durable Object, by endpoint.",
@@ -126,6 +141,8 @@ impl SequencerMetrics {
         )
         .unwrap();
         Self {
+            dedup_cache_size,
+            dedup_cache_load_errors,
             req_count,
             req_in_flight,
             req_duration,

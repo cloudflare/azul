@@ -17,7 +17,7 @@ pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
 use byteorder::{BigEndian, WriteBytesExt};
-use log::error;
+use log::{error, info};
 use log_ops::UploadOptions;
 use obs::metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
 use serde::de::DeserializeOwned;
@@ -35,6 +35,8 @@ use worker::{
     js_sys, kv, kv::KvStore, wasm_bindgen, Bucket, Env, Error, HttpMetadata, Result, State,
     Storage, Stub,
 };
+
+use crate::obs::metrics::SequencerMetrics;
 
 pub const SEQUENCER_BINDING: &str = "SEQUENCER";
 pub const BATCHER_BINDING: &str = "BATCHER";
@@ -246,6 +248,65 @@ impl CacheRead for DedupCache {
     }
 }
 
+/// Result of validating head/tail indices for the dedup cache ring buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeadTailValidation {
+    /// The validated/corrected head index.
+    head: u32,
+    /// The original tail index (unchanged).
+    tail: u32,
+    /// Whether the head needed to be corrected.
+    head_corrected: bool,
+}
+
+/// Validates and normalizes head/tail values for the dedup cache ring buffer.
+/// Returns the corrected head value and whether a correction was needed.
+fn validate_head_tail(
+    head: u32,
+    tail: u32,
+    max_batches: u32,
+    log_name: &str,
+) -> HeadTailValidation {
+    let mut corrected_head = head;
+    let mut head_corrected = false;
+
+    // Check that the head isn't somehow ahead of the tail. This should never happen.
+    // At one batch per second, the tail would take 136 years to overflow.
+    if corrected_head > tail {
+        error!("{log_name}: cache head ({head}) is greater than tail ({tail}), setting to equal");
+        corrected_head = tail;
+        head_corrected = true;
+    }
+
+    // Check that tail is not too far ahead of head.
+    // We can subtract safely because we checked for underflow above.
+    if tail - corrected_head > max_batches {
+        error!(
+            "{log_name}: delta too high ({} > {}), setting head to tail - max_batches",
+            tail - corrected_head,
+            max_batches
+        );
+        corrected_head = tail.saturating_sub(max_batches);
+        head_corrected = true;
+    }
+
+    HeadTailValidation {
+        head: corrected_head,
+        tail,
+        head_corrected,
+    }
+}
+
+/// Computes the storage keys to load for the dedup cache, bounded by max_batches.
+/// Uses modular indexing to map logical indices to physical storage keys.
+fn compute_cache_keys_to_load(head: u32, tail: u32, max_batches: u32) -> Vec<String> {
+    // Ensure we never load more than max_batches keys, even if head/tail are corrupted
+    let delta = tail.saturating_sub(head).min(max_batches);
+    (0..delta)
+        .map(|i| DedupCache::fifo_key((head.wrapping_add(i)) % max_batches))
+        .collect()
+}
+
 impl DedupCache {
     // Batches are written at most once per second, and we only need them to
     // deduplicate entries long enough for KV's eventual consistency guarantees
@@ -262,48 +323,49 @@ impl DedupCache {
 
     // Load batches of cache entries from DO storage into the in-memory cache. log_name is the name
     // of the log this dedup cache belongs to (for debugging purposes)
-    async fn load(&self, log_name: &str) -> Result<()> {
+    async fn load(&self, log_name: &str, metrics: &SequencerMetrics) -> Result<()> {
         // TODO: Find a cleaner way to do a dedup cache without an ever growing head/tail and error
         // conditions to manage. The storage SQL API with a time-based cache might be a good choice
 
         // Get the head and tail of the dedup cache, picking 0 if uninitialized
-        let mut head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
+        let head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
             .await?
             .unwrap_or_default();
         let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
             .await?
             .unwrap_or_default();
 
-        // Check that the head isn't somehow ahead of the tail. This should never happen. At one
-        // batch per second, the tail would take 136 years to overflow
-        if head > tail {
-            error!(
-                "{log_name}: cache head ({head}) is greater than tail ({tail}), setting to equal"
-            );
-            // Set the head equal to the tail. This effectively clears the cache. Not ideal, but
-            // we're allowed to have dupes in the CT log, so this is fine.
-            head = tail;
-            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
+        info!(
+            "{log_name}: Dedup cache state: head={:?}, tail={:?}",
+            head, tail
+        );
+
+        // Validate and correct head/tail if needed
+        let validation = validate_head_tail(head, tail, Self::MAX_BATCHES, log_name);
+        if validation.head_corrected {
+            self.storage
+                .put(Self::FIFO_HEAD_KEY, validation.head)
+                .await?;
         }
 
-        // Check that tail is not too far ahead of head
-        // We can subtract because we checked for underflow above
-        if tail - head > Self::MAX_BATCHES {
-            // If the head is somehow very far behind the tail, move it up
-            error!("{log_name}: delta too high, setting head to tail - MAX_BATCHES ({head})");
-            head = tail.saturating_sub(Self::MAX_BATCHES);
-            self.storage.put(Self::FIFO_HEAD_KEY, head).await?;
-        }
-
-        // Collect all the recent values from storage and put them in the memory backend
-        // We can subtract because we checked for underflow above
-        let keys = (0..(tail - head)).map(Self::fifo_key).collect::<Vec<_>>();
+        // Collect all the recent values from storage and put them in the memory backend.
+        // compute_cache_keys_to_load guarantees we never load more than MAX_BATCHES keys.
+        let keys = compute_cache_keys_to_load(validation.head, validation.tail, Self::MAX_BATCHES);
         let map = self.storage.get_multiple(keys).await?;
         for value in map.values() {
             let batch = serde_wasm_bindgen::from_value::<ByteBuf>(value?)?;
             self.memory
                 .put_entries(&deserialize_entries(&batch.into_vec())?);
         }
+
+        info!(
+            "{log_name}: Loaded {} entries into dedup cache",
+            self.memory.map.borrow().len()
+        );
+        metrics
+            .dedup_cache_size
+            .set(self.memory.map.borrow().len() as f64);
+
         Ok(())
     }
 
@@ -661,5 +723,253 @@ impl ObjectBackend for CachedRoObjectBucket {
                 Ok(val)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== HeadTailValidation Tests ====================
+
+    #[test]
+    fn test_validate_head_tail_normal() {
+        // Normal case: head < tail, delta within bounds
+        let result = validate_head_tail(10, 20, 128, "test");
+        assert_eq!(result.head, 10);
+        assert_eq!(result.tail, 20);
+        assert!(!result.head_corrected);
+    }
+
+    #[test]
+    fn test_validate_head_tail_empty_cache() {
+        // Empty cache: head == tail == 0
+        let result = validate_head_tail(0, 0, 128, "test");
+        assert_eq!(result.head, 0);
+        assert_eq!(result.tail, 0);
+        assert!(!result.head_corrected);
+    }
+
+    #[test]
+    fn test_validate_head_tail_head_equals_tail() {
+        // head == tail (empty cache after some operations)
+        let result = validate_head_tail(100, 100, 128, "test");
+        assert_eq!(result.head, 100);
+        assert_eq!(result.tail, 100);
+        assert!(!result.head_corrected);
+    }
+
+    #[test]
+    fn test_validate_head_tail_head_greater_than_tail() {
+        // Corrupted state: head > tail
+        let result = validate_head_tail(100, 50, 128, "test");
+        assert_eq!(result.head, 50); // head reset to tail
+        assert_eq!(result.tail, 50);
+        assert!(result.head_corrected);
+    }
+
+    #[test]
+    fn test_validate_head_tail_delta_too_large() {
+        // INCIDENT SCENARIO: head=0, tail=4_000_000
+        // This was the root cause of the 20-day outage
+        let result = validate_head_tail(0, 4_000_000, 128, "test");
+        assert_eq!(result.head, 4_000_000 - 128); // head moved up
+        assert_eq!(result.tail, 4_000_000);
+        assert!(result.head_corrected);
+        assert!(result.tail - result.head <= 128);
+    }
+
+    #[test]
+    fn test_validate_head_tail_delta_exactly_max() {
+        // Edge case: delta exactly equals max_batches
+        let result = validate_head_tail(0, 128, 128, "test");
+        assert_eq!(result.head, 0);
+        assert_eq!(result.tail, 128);
+        assert!(!result.head_corrected);
+    }
+
+    #[test]
+    fn test_validate_head_tail_delta_one_over_max() {
+        // Edge case: delta is max_batches + 1
+        let result = validate_head_tail(0, 129, 128, "test");
+        assert_eq!(result.head, 1); // head moved up by 1
+        assert_eq!(result.tail, 129);
+        assert!(result.head_corrected);
+    }
+
+    #[test]
+    fn test_validate_head_tail_with_different_max_batches() {
+        // Test with a smaller max_batches value
+        let result = validate_head_tail(0, 100, 10, "test");
+        assert_eq!(result.head, 90);
+        assert_eq!(result.tail, 100);
+        assert!(result.head_corrected);
+    }
+
+    // ==================== compute_cache_keys_to_load Tests ====================
+
+    #[test]
+    fn test_compute_cache_keys_empty() {
+        // Empty cache: head == tail
+        let keys = compute_cache_keys_to_load(0, 0, 128);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn test_compute_cache_keys_single_entry() {
+        let keys = compute_cache_keys_to_load(0, 1, 128);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0], "fifo:0");
+    }
+
+    #[test]
+    fn test_compute_cache_keys_multiple_entries() {
+        let keys = compute_cache_keys_to_load(5, 10, 128);
+        assert_eq!(keys.len(), 5);
+        assert_eq!(keys[0], "fifo:5");
+        assert_eq!(keys[1], "fifo:6");
+        assert_eq!(keys[2], "fifo:7");
+        assert_eq!(keys[3], "fifo:8");
+        assert_eq!(keys[4], "fifo:9");
+    }
+
+    #[test]
+    fn test_compute_cache_keys_bounded_by_max_batches() {
+        // Even with a huge delta, keys should be bounded
+        let keys = compute_cache_keys_to_load(0, 4_000_000, 128);
+        assert_eq!(keys.len(), 128);
+    }
+
+    #[test]
+    fn test_compute_cache_keys_wrapping() {
+        // Test modular indexing when head is near the wrap point
+        let keys = compute_cache_keys_to_load(126, 130, 128);
+        assert_eq!(keys.len(), 4);
+        assert_eq!(keys[0], "fifo:126");
+        assert_eq!(keys[1], "fifo:127");
+        assert_eq!(keys[2], "fifo:0"); // wrapped
+        assert_eq!(keys[3], "fifo:1"); // wrapped
+    }
+
+    #[test]
+    fn test_compute_cache_keys_head_greater_than_tail_returns_empty() {
+        // If head > tail (corrupted), saturating_sub returns 0
+        let keys = compute_cache_keys_to_load(100, 50, 128);
+        assert!(keys.is_empty());
+    }
+
+    // ==================== serialize/deserialize_entries Tests ====================
+
+    #[test]
+    fn test_serialize_deserialize_entries_roundtrip() {
+        let entries = vec![
+            ([1u8; 16], (100u64, 200u64)),
+            ([2u8; 16], (300u64, 400u64)),
+            ([0xffu8; 16], (u64::MAX, u64::MAX)),
+        ];
+        let serialized = serialize_entries(&entries);
+        let deserialized = deserialize_entries(&serialized).unwrap();
+        assert_eq!(entries, deserialized);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_empty() {
+        let entries: Vec<(LookupKey, SequenceMetadata)> = vec![];
+        let serialized = serialize_entries(&entries);
+        assert!(serialized.is_empty());
+        let deserialized = deserialize_entries(&serialized).unwrap();
+        assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_invalid_length() {
+        let buf = vec![0u8; 31]; // Not a multiple of 32
+        assert!(deserialize_entries(&buf).is_err());
+    }
+
+    #[test]
+    fn test_deserialize_invalid_length_one_extra() {
+        let buf = vec![0u8; 33]; // 32 + 1
+        assert!(deserialize_entries(&buf).is_err());
+    }
+
+    // ==================== MemoryCache Tests ====================
+
+    #[test]
+    fn test_memory_cache_basic_get_put() {
+        let cache = MemoryCache::new(10);
+        let key = [1u8; 16];
+        let metadata = (42u64, 1000u64);
+
+        assert!(cache.get_entry(&key).is_none());
+        cache.put_entries(&[(key, metadata)]);
+        assert_eq!(cache.get_entry(&key), Some(metadata));
+    }
+
+    #[test]
+    fn test_memory_cache_multiple_entries() {
+        let cache = MemoryCache::new(10);
+        let entries: Vec<(LookupKey, SequenceMetadata)> = (0..5u8)
+            .map(|i| ([i; 16], (i as u64, i as u64 * 100)))
+            .collect();
+
+        cache.put_entries(&entries);
+
+        for (key, metadata) in &entries {
+            assert_eq!(cache.get_entry(key), Some(*metadata));
+        }
+    }
+
+    #[test]
+    fn test_memory_cache_eviction() {
+        let cache = MemoryCache::new(3);
+
+        // Add 5 entries to a cache with max size 3
+        for i in 0..5u8 {
+            let key = [i; 16];
+            cache.put_entries(&[(key, (i as u64, 0))]);
+        }
+
+        // First 2 entries should be evicted (FIFO order)
+        assert!(cache.get_entry(&[0u8; 16]).is_none());
+        assert!(cache.get_entry(&[1u8; 16]).is_none());
+        // Last 3 should remain
+        assert!(cache.get_entry(&[2u8; 16]).is_some());
+        assert!(cache.get_entry(&[3u8; 16]).is_some());
+        assert!(cache.get_entry(&[4u8; 16]).is_some());
+    }
+
+    #[test]
+    fn test_memory_cache_duplicate_key_not_added() {
+        let cache = MemoryCache::new(10);
+        let key = [1u8; 16];
+
+        cache.put_entries(&[(key, (100, 200))]);
+        cache.put_entries(&[(key, (999, 999))]); // Duplicate, should be ignored
+
+        // Original value should be preserved
+        assert_eq!(cache.get_entry(&key), Some((100, 200)));
+    }
+
+    #[test]
+    fn test_memory_cache_batch_put() {
+        let cache = MemoryCache::new(5);
+        let entries: Vec<(LookupKey, SequenceMetadata)> =
+            (0..3u8).map(|i| ([i; 16], (i as u64, 0))).collect();
+
+        cache.put_entries(&entries);
+
+        assert_eq!(cache.map.borrow().len(), 3);
+        assert_eq!(cache.fifo.borrow().len(), 3);
+    }
+
+    // ==================== DedupCache::fifo_key Tests ====================
+
+    #[test]
+    fn test_fifo_key_generation() {
+        assert_eq!(DedupCache::fifo_key(0), "fifo:0");
+        assert_eq!(DedupCache::fifo_key(127), "fifo:127");
+        assert_eq!(DedupCache::fifo_key(128), "fifo:128");
+        assert_eq!(DedupCache::fifo_key(u32::MAX), format!("fifo:{}", u32::MAX));
     }
 }
