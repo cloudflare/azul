@@ -39,7 +39,14 @@ pub enum SignatureAlgorithm {
     EcdsaSha256,
 }
 
-/// Extracts SCTs and returns (scts, tbs_cert_without_sct_ext, lifetime_days).
+/// Extracts SCTs and returns (`scts`, `tbs_cert_without_sct_ext`,
+/// `lifetime_days`).
+///
+/// # Errors
+///
+/// Will return an error if there is an issue parsing the leaf cert, if the SCT
+/// extension is missing or malformed, or if there are issues generating the
+/// `TBSCertificate` from the leaf.
 pub fn extract_scts_from_cert(leaf_der: &[u8]) -> Result<(Vec<ParsedSct>, Vec<u8>, u64), SctError> {
     let cert = Certificate::from_der(leaf_der).map_err(|e| SctError::Other(e.to_string()))?;
     let lifetime_days = extract_lifetime_days(&cert)?;
@@ -133,8 +140,7 @@ fn parse_signature_algorithm(
     match sig.algorithm.signature {
         X509SigAlg::Ecdsa => Ok(SignatureAlgorithm::EcdsaSha256),
         ref other => Err(SctError::Other(format!(
-            "unsupported signature algorithm: {:?} (only ECDSA is supported)",
-            other
+            "unsupported signature algorithm: {other:?} (only ECDSA is supported)",
         ))),
     }
 }

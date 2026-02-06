@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! Cron job to fetch CT log list from Google. Same pattern as ccadb_roots_cron.
+//! Cron job to fetch CT log list from Google. Same pattern as `ccadb_roots_cron`.
 
 use sct_validator::CtLogList;
 use worker::{kv::KvStore, Env, Fetch, Headers, Method, Request, RequestInit, Result};
@@ -37,7 +37,9 @@ pub(crate) async fn update_ct_logs(kv: &KvStore) -> Result<()> {
         log_list.log_list_timestamp
     );
 
-    kv.put_bytes(CT_LOGS_FILENAME, &resp_bytes)?.execute().await?;
+    kv.put_bytes(CT_LOGS_FILENAME, &resp_bytes)?
+        .execute()
+        .await?;
     Ok(())
 }
 

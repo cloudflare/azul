@@ -285,7 +285,7 @@ fn validate_head_tail(
     }
 }
 
-/// Computes the storage keys to load for the dedup cache, bounded by max_batches.
+/// Computes the storage keys to load for the dedup cache, bounded by `max_batches`.
 /// Uses modular indexing to map logical indices to physical storage keys.
 fn compute_cache_keys_to_load(head: u32, tail: u32, max_batches: u32) -> Vec<String> {
     // Ensure we never load more than max_batches keys, even if head/tail are corrupted
@@ -327,10 +327,7 @@ impl DedupCache {
             .await?
             .unwrap_or_default();
 
-        info!(
-            "{log_name}: Dedup cache state: head={:?}, tail={:?}",
-            head, tail
-        );
+        info!("{log_name}: Dedup cache state: head={head:?}, tail={tail:?}");
 
         // Validate and correct head/tail if needed
         let validation = validate_head_tail(head, tail, Self::MAX_BATCHES, log_name);
@@ -354,6 +351,7 @@ impl DedupCache {
             "{log_name}: Loaded {} entries into dedup cache",
             self.memory.map.borrow().len()
         );
+        #[allow(clippy::cast_precision_loss)]
         metrics
             .dedup_cache_size
             .set(self.memory.map.borrow().len() as f64);
@@ -690,7 +688,7 @@ impl ObjectBackend for ObjectBucket {
     }
 }
 
-/// A read-only ObjectBucket that caches every fetch no matter how big
+/// A read-only `ObjectBucket` that caches every fetch no matter how big
 ///
 /// **NOTE:** The cache here has no size limit. If you use a `CachedRoObjectBucket` for too many
 /// fetches, you will run out of memory.
@@ -917,7 +915,7 @@ mod tests {
     fn test_memory_cache_multiple_entries() {
         let cache = MemoryCache::new(10);
         let entries: Vec<(LookupKey, SequenceMetadata)> = (0..5u8)
-            .map(|i| ([i; 16], (i as u64, i as u64 * 100)))
+            .map(|i| ([i; 16], (u64::from(i), u64::from(i) * 100)))
             .collect();
 
         cache.put_entries(&entries);
@@ -934,7 +932,7 @@ mod tests {
         // Add 5 entries to a cache with max size 3
         for i in 0..5u8 {
             let key = [i; 16];
-            cache.put_entries(&[(key, (i as u64, 0))]);
+            cache.put_entries(&[(key, (u64::from(i), 0))]);
         }
 
         // First 2 entries should be evicted (FIFO order)
@@ -962,7 +960,7 @@ mod tests {
     fn test_memory_cache_batch_put() {
         let cache = MemoryCache::new(5);
         let entries: Vec<(LookupKey, SequenceMetadata)> =
-            (0..3u8).map(|i| ([i; 16], (i as u64, 0))).collect();
+            (0..3u8).map(|i| ([i; 16], (u64::from(i), 0))).collect();
 
         cache.put_entries(&entries);
 

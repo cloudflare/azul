@@ -120,8 +120,8 @@ use sha2::{Digest, Sha256};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use std::io::Read;
 use tlog_tiles::{
-    CheckpointText, CheckpointSigner, Hash, LeafIndex, LogEntry, LookupKey, PathElem, PendingLogEntry,
-    SequenceMetadata, UnixTimestamp,
+    CheckpointSigner, CheckpointText, Hash, LeafIndex, LogEntry, LookupKey, PathElem,
+    PendingLogEntry, SequenceMetadata, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -183,7 +183,7 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
                 .unwrap();
 
             // Add issuer key hash
-            buffer.extend_from_slice(&precert_data.issuer_key_hash);
+            buffer.extend(&precert_data.issuer_key_hash);
         } else {
             // Add entry type
             buffer
@@ -253,7 +253,7 @@ impl StaticCTLogEntry {
             buffer
                 .write_u16::<BigEndian>(EntryType::PrecertEntry as u16)
                 .unwrap();
-            buffer.extend_from_slice(&precert_data.issuer_key_hash);
+            buffer.extend(&precert_data.issuer_key_hash);
         } else {
             buffer
                 .write_u16::<BigEndian>(EntryType::X509Entry as u16)
@@ -637,7 +637,7 @@ pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     digitally_signed
         .write_u16::<BigEndian>(u16::try_from(sig_bytes.len() & 0xFFFF).unwrap())
         .unwrap();
-    digitally_signed.extend_from_slice(sig_bytes);
+    digitally_signed.extend(sig_bytes);
 
     digitally_signed
 }
@@ -743,7 +743,7 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
         note_sig
             .write_u64::<BigEndian>(timestamp_unix_millis)
             .unwrap();
-        note_sig.extend_from_slice(&tree_head_sig);
+        note_sig.extend(&tree_head_sig);
 
         // Return the note signature. We can unwrap() here because the only cause for error is if
         // the name is invalid, which is checked in the constructor

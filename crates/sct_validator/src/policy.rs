@@ -31,6 +31,10 @@ pub struct ValidatedSct<'a> {
 }
 
 /// Checks if SCTs satisfy Chrome's policy. Skips SCTs from logs retired before signing.
+///
+/// # Errors
+///
+/// Will return an error if the SCTs do not satisfy Chrome's CT policy.
 pub fn check_chrome_policy(
     cert_lifetime_days: u64,
     validated_scts: &[ValidatedSct],

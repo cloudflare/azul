@@ -2200,6 +2200,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der",
  "hashbrown 0.15.5",
+ "length_prefixed",
  "log",
  "p256",
  "serde",
