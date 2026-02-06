@@ -71,7 +71,7 @@ thiserror = "2.0"
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }
 url = "2.2"
-worker = "0.6.6"
+worker = "0.7.4"
 x509-cert = "0.2.5"
 x509-verify = { version = "0.4.4", features = [
     "md2",
