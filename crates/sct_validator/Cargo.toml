@@ -16,6 +16,7 @@ const-oid = "0.9.6"
 der.workspace = true
 hashbrown = "0.15"
 log.workspace = true
+length_prefixed.workspace = true
 p256.workspace = true
 serde.workspace = true
 serde_json.workspace = true

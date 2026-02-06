@@ -41,7 +41,7 @@ async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     log::info!("Updating CT logs");
     match env.kv(crate::ct_logs_cron::CT_LOGS_NAMESPACE) {
         Ok(kv) => match crate::ct_logs_cron::update_ct_logs(&kv).await {
-            Ok(_) => log::info!("Successfully updated CT logs"),
+            Ok(()) => log::info!("Successfully updated CT logs"),
             Err(e) => log::warn!("Failed to update CT logs: {e}"),
         },
         Err(e) => log::warn!(

@@ -40,6 +40,11 @@ pub static LOGGER: Logger = Logger {
     entries: Mutex::new(Vec::new()),
 };
 
+/// Initialize the logger.
+///
+/// # Panics
+///
+/// Will panic if setting the global logger with `set_logger` fails.
 pub fn init(level: Option<&str>) {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -57,15 +62,6 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        console_log::log(record);
-        let mut fields = HashMap::new();
-        if let Some(module) = record.module_path() {
-            if let Some(file) = record.file() {
-                if let Some(line) = record.line() {
-                    fields.insert("location".to_owned(), format!("{module}::{file}:{line}"));
-                }
-            }
-        }
         struct Visitor<'m>(&'m mut HashMap<String, String>);
         impl<'kvs> log::kv::VisitSource<'kvs> for Visitor<'_> {
             fn visit_pair(
@@ -75,6 +71,16 @@ impl log::Log for Logger {
             ) -> Result<(), log::kv::Error> {
                 self.0.insert(key.as_str().to_owned(), value.to_string());
                 Ok(())
+            }
+        }
+
+        console_log::log(record);
+        let mut fields = HashMap::new();
+        if let Some(module) = record.module_path() {
+            if let Some(file) = record.file() {
+                if let Some(line) = record.line() {
+                    fields.insert("location".to_owned(), format!("{module}::{file}:{line}"));
+                }
             }
         }
         record

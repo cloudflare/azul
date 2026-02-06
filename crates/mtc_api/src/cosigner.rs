@@ -114,12 +114,17 @@ pub struct MtcNoteVerifier {
 
 impl MtcNoteVerifier {
     /// Return a checkpoint verifier.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if the trust anchor ID cannot be parsed as a valid key name
+    /// according to <https://c2sp.org/signed-note#format>.
     pub fn new_checkpoint(
         cosigner_id: TrustAnchorID,
         log_id: TrustAnchorID,
         verifying_key: Ed25519VerifyingKey,
     ) -> Self {
-        let name = KeyName::new(format!("oid/{}.{}", ID_RDNA_TRUSTANCHOR_ID, log_id)).unwrap();
+        let name = KeyName::new(format!("oid/{ID_RDNA_TRUSTANCHOR_ID}.{log_id}")).unwrap();
 
         let id = {
             let mut hasher = Sha256::new();

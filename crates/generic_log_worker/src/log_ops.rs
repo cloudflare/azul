@@ -266,7 +266,7 @@ pub(crate) async fn create_log(
     if object
         .fetch(CHECKPOINT_KEY)
         .await
-        .map_err(|e| anyhow!("failed to retrieve checkpoint from object storage: {}", e))?
+        .map_err(|e| anyhow!("failed to retrieve checkpoint from object storage: {e}"))?
         .is_some()
     {
         return Err(
@@ -293,14 +293,14 @@ pub(crate) async fn create_log(
             &dyn_signers,
             &mut rand::thread_rng(),
         )
-        .map_err(|e| anyhow!("failed to sign checkpoint: {}", e))?;
+        .map_err(|e| anyhow!("failed to sign checkpoint: {e}"))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
-        .map_err(|e| anyhow!("failed to upload checkpoint to lock backend: {}", e))?;
+        .map_err(|e| anyhow!("failed to upload checkpoint to lock backend: {e}"))?;
     object
         .upload(CHECKPOINT_KEY, sth, &OPTS_CHECKPOINT)
         .await
-        .map_err(|e| anyhow!("failed to upload checkpoint to object backend: {}", e))?;
+        .map_err(|e| anyhow!("failed to upload checkpoint to object backend: {e}"))?;
 
     info!("{name}: Created log; timestamp={timestamp}");
     Ok(())

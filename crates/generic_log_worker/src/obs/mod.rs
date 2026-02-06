@@ -13,6 +13,12 @@ pub trait WshimData {
 }
 
 impl Wshim {
+    /// Return an instance of `Wshim` initialized from environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if the `WSHIM_TOKEN` environment variable is not
+    /// set, or if the `WSHIM_SOCKET` binding is not available.
     pub fn from_env(env: &worker::Env) -> worker::Result<Self> {
         Ok(Self {
             token: env.var("WSHIM_TOKEN")?.to_string(),

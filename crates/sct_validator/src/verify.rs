@@ -8,6 +8,7 @@ use std::mem::size_of;
 use crate::error::SctError;
 use crate::sct::{ParsedSct, SignatureAlgorithm};
 use crate::CtLog;
+use length_prefixed::WriteLengthPrefixedBytesExt;
 use p256::ecdsa::{signature::Verifier, Signature as P256Signature};
 use sha2::{Digest, Sha256};
 
@@ -17,6 +18,10 @@ const SIGNATURE_TYPE_CERTIFICATE_TIMESTAMP: u8 = 0;
 const LOG_ENTRY_TYPE_PRECERT_ENTRY: [u8; 2] = [0, 1];
 
 /// Verifies an SCT signature. `ct_cert_der` is the TBS cert with SCT extension removed.
+///
+/// # Errors
+///
+/// Will return an error if serializing the signed data fails.
 pub fn verify_sct_signature(
     sct: &ParsedSct,
     log: &CtLog,
@@ -45,25 +50,17 @@ fn build_signed_data(
     let cert_len = ct_cert_der.len();
     if cert_len > 0xFF_FFFF {
         return Err(SctError::Other(format!(
-            "certificate too large: {} bytes (max 16MB)",
-            cert_len
+            "certificate too large: {cert_len} bytes (max 16MB)"
         )));
     }
-    let cert_len_bytes = [
-        (cert_len >> 16) as u8,
-        (cert_len >> 8) as u8,
-        cert_len as u8,
-    ];
 
     // Extensions length must fit in 16 bits (2 bytes)
     let ext_len = sct.extensions.len();
     if ext_len > 0xFFFF {
         return Err(SctError::Other(format!(
-            "extensions too large: {} bytes (max 64KB)",
-            ext_len
+            "extensions too large: {ext_len} bytes (max 64KB)"
         )));
     }
-    let ext_len_bytes = [(ext_len >> 8) as u8, ext_len as u8];
 
     // Build the signed data (pre-allocate exact size)
     let mut data = Vec::with_capacity(
@@ -71,8 +68,8 @@ fn build_signed_data(
             + size_of::<u64>()  // timestamp
             + LOG_ENTRY_TYPE_PRECERT_ENTRY.len()
             + issuer_key_hash.len()
-            + cert_len_bytes.len() + cert_len
-            + ext_len_bytes.len() + ext_len,
+            + 3 + cert_len
+            + 2 + ext_len,
     );
 
     // Version (1 byte)
@@ -82,21 +79,21 @@ fn build_signed_data(
     data.push(SIGNATURE_TYPE_CERTIFICATE_TIMESTAMP);
 
     // Timestamp (8 bytes, big-endian)
-    data.extend_from_slice(&sct.timestamp.to_be_bytes());
+    data.extend(&sct.timestamp.to_be_bytes());
 
     // Entry type (2 bytes)
-    data.extend_from_slice(&LOG_ENTRY_TYPE_PRECERT_ENTRY);
+    data.extend(&LOG_ENTRY_TYPE_PRECERT_ENTRY);
 
     // Issuer key hash (32 bytes)
-    data.extend_from_slice(&issuer_key_hash);
+    data.extend(&issuer_key_hash);
 
     // Certificate length (3 bytes) + certificate
-    data.extend_from_slice(&cert_len_bytes);
-    data.extend_from_slice(ct_cert_der);
+    data.write_length_prefixed(ct_cert_der, 3)
+        .map_err(|e| SctError::Other(e.to_string()))?;
 
     // Extensions length (2 bytes) + extensions
-    data.extend_from_slice(&ext_len_bytes);
-    data.extend_from_slice(&sct.extensions);
+    data.write_length_prefixed(&sct.extensions, 2)
+        .map_err(|e| SctError::Other(e.to_string()))?;
 
     Ok(data)
 }
@@ -121,7 +118,7 @@ mod tests {
         // Test that we build the signed data correctly
         let sct = ParsedSct {
             log_id: [0u8; 32],
-            timestamp: 1234567890123, // Some timestamp in ms
+            timestamp: 1_234_567_890_123, // Some timestamp in ms
             extensions: vec![],
             signature: crate::sct::SctSignature {
                 algorithm: SignatureAlgorithm::EcdsaSha256,

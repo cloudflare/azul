@@ -46,7 +46,7 @@ impl RelativeOid {
 impl std::fmt::Display for RelativeOid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for arc in self.arcs.iter().take(self.arcs.len() - 1) {
-            write!(f, "{}.", arc)?;
+            write!(f, "{arc}.")?;
         }
         write!(f, "{}", self.arcs[self.arcs.len() - 1])
     }

@@ -294,11 +294,14 @@ fn build_issuer_rdn(log_id: &str) -> std::result::Result<RdnSequence, String> {
     Ok(RdnSequence::from(vec![rdn]))
 }
 
-fn build_validity(now_millis: u64, max_lifetime_secs: u64) -> std::result::Result<Validity, String> {
+fn build_validity(
+    now_millis: u64,
+    max_lifetime_secs: u64,
+) -> std::result::Result<Validity, String> {
     let now = Duration::from_millis(now_millis);
     let not_before = UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?;
-    let not_after =
-        UtcTime::from_unix_duration(now + Duration::from_secs(max_lifetime_secs)).map_err(|e| e.to_string())?;
+    let not_after = UtcTime::from_unix_duration(now + Duration::from_secs(max_lifetime_secs))
+        .map_err(|e| e.to_string())?;
 
     Ok(Validity {
         not_before: Time::UtcTime(not_before),
@@ -324,7 +327,8 @@ fn resolve_issuer_for_sct(
     }
 
     // Single-cert chain: look up issuer from roots pool
-    let leaf = Certificate::from_der(&chain[0]).map_err(|e| format!("failed to parse leaf: {e}"))?;
+    let leaf =
+        Certificate::from_der(&chain[0]).map_err(|e| format!("failed to parse leaf: {e}"))?;
     let issuer_dn = &leaf.tbs_certificate.issuer;
 
     roots
@@ -340,8 +344,8 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let req: AddEntryRequest = req.json().await?;
 
     let issuer = build_issuer_rdn(&params.log_id).map_err(|e| e.to_string())?;
-    let mut validity =
-        build_validity(now_millis(), params.max_certificate_lifetime_secs as u64).map_err(|e| e.to_string())?;
+    let mut validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)
+        .map_err(|e| e.to_string())?;
 
     let roots = load_roots(env, name).await?;
     let (pending_entry, found_root_idx) =
@@ -378,7 +382,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
                     warnings.len()
                 );
                 for warning in &warnings {
-                    log::debug!("{name}: SCT warning: {:?}", warning);
+                    log::debug!("{name}: SCT warning: {warning:?}");
                 }
             }
             Ok(SctValidationResult::StaleLogList) => {
@@ -543,8 +547,14 @@ mod tests {
 
         let validity = build_validity(now_ms, lifetime_secs).unwrap();
 
-        assert_eq!(validity.not_before.to_unix_duration().as_secs(), now_ms / 1000);
-        assert_eq!(validity.not_after.to_unix_duration().as_secs(), now_ms / 1000 + lifetime_secs);
+        assert_eq!(
+            validity.not_before.to_unix_duration().as_secs(),
+            now_ms / 1000
+        );
+        assert_eq!(
+            validity.not_after.to_unix_duration().as_secs(),
+            now_ms / 1000 + lifetime_secs
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! - Stale log list (> 70 days): auto-succeed
 //!
 //! Note: Does not enforce the legacy "one RFC 6962 log" requirement
-//! (dropped April 15th 2025 per Chrome policy update).
+//! (dropped April 15th 2026 per Chrome policy update).
 
 pub mod error;
 pub mod policy;
@@ -55,7 +55,7 @@ pub enum LogState {
 
 impl LogState {
     /// Returns true if this state counts as "compliant" for Chrome's CT policy.
-    /// Qualified, Usable, and ReadOnly logs can issue compliant SCTs.
+    /// `Qualified`, `Usable`, and `ReadOnly` logs can issue compliant SCTs.
     #[must_use]
     pub fn is_compliant(&self) -> bool {
         matches!(
@@ -97,11 +97,16 @@ pub struct CtLog {
     pub state_entered_at: u64,
     /// Current operator of the log.
     pub current_operator: String,
-    /// Previous operators, as (end_timestamp, operator_name) pairs, sorted by timestamp.
+    /// Previous operators, as (`end_timestamp`, `operator_name`) pairs, sorted by timestamp.
     pub previous_operators: Vec<(u64, String)>,
 }
 
 impl CtLog {
+    /// Return a new CT log with the given parameters.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if the verifying key is invalid.
     pub fn new(
         description: String,
         id: [u8; 32],
@@ -126,7 +131,7 @@ impl CtLog {
     }
 
     /// Returns the operator of this log at the given timestamp.
-    /// The end_timestamp in previous_operators is inclusive (operator was active at that instant).
+    /// The `end_timestamp` in `previous_operators` is inclusive (operator was active at that instant).
     #[must_use]
     pub fn operator_at(&self, timestamp_secs: u64) -> &str {
         for (end_timestamp, operator) in &self.previous_operators {
@@ -148,12 +153,11 @@ impl CtLog {
 
 fn parse_verifying_key(description: &str, key_der: &[u8]) -> Result<VerifyingKey, SctError> {
     let spki = SubjectPublicKeyInfoRef::try_from(key_der)
-        .map_err(|e| SctError::Other(format!("invalid log key '{}': {e}", description)))?;
+        .map_err(|e| SctError::Other(format!("invalid log key '{description}': {e}")))?;
 
     P256VerifyingKey::try_from(spki).map_err(|e| {
         SctError::Other(format!(
-            "invalid log key '{}': not a valid P-256 key: {e}",
-            description
+            "invalid log key '{description}': not a valid P-256 key: {e}"
         ))
     })
 }
@@ -178,6 +182,10 @@ impl CtLogList {
     }
 
     /// Parses a CT log list from Chrome's JSON format.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if Chrome CT log list or any entries in it are malformed.
     pub fn from_chrome_log_list(json_bytes: &[u8]) -> Result<Self, SctError> {
         let raw: RawLogList =
             serde_json::from_slice(json_bytes).map_err(|e| SctError::Other(e.to_string()))?;
@@ -225,23 +233,18 @@ fn parse_raw_log(operator_name: &str, raw_log: &RawLog) -> Result<CtLog, SctErro
 
     let log_id_bytes = BASE64_STANDARD.decode(&raw_log.log_id).map_err(|e| {
         SctError::Other(format!(
-            "invalid log key '{}': invalid base64 log_id: {e}",
-            desc
+            "invalid log key '{desc}': invalid base64 log_id: {e}"
         ))
     })?;
     let id: [u8; 32] = log_id_bytes.try_into().map_err(|v: Vec<u8>| {
         SctError::Other(format!(
-            "invalid log key '{}': log_id has invalid length: {} (expected 32)",
-            desc,
+            "invalid log key '{desc}': log_id has invalid length: {} (expected 32)",
             v.len()
         ))
     })?;
 
     let key_der = BASE64_STANDARD.decode(&raw_log.key).map_err(|e| {
-        SctError::Other(format!(
-            "invalid log key '{}': invalid base64 key: {e}",
-            desc
-        ))
+        SctError::Other(format!("invalid log key '{desc}': invalid base64 key: {e}"))
     })?;
 
     let (state, state_entered_at) = raw_log.state.to_state_and_timestamp()?;
@@ -274,7 +277,7 @@ fn parse_raw_log(operator_name: &str, raw_log: &RawLog) -> Result<CtLog, SctErro
 fn parse_rfc3339_to_unix(s: &str) -> Result<u64, SctError> {
     let dt = chrono::DateTime::parse_from_rfc3339(s)
         .map_err(|e| SctError::Other(format!("invalid timestamp '{s}': {e}")))?;
-    Ok(dt.timestamp() as u64)
+    u64::try_from(dt.timestamp()).map_err(|e| SctError::Other(e.to_string()))
 }
 
 // JSON deserialization structures for Chrome's log list format
@@ -416,6 +419,16 @@ impl SctValidator {
     }
 
     /// Validates embedded SCTs in a certificate against Chrome's CT policy.
+    ///
+    /// Returns a `SctValidationResult` indicating whether the validation
+    /// succeeded (possibly with warnings) or was skipped due to a stale log
+    /// list.
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if there are issues parsing the leaf or issuer
+    /// certificates, if the SCTs extension is malformed or missing from the
+    /// leaf, or if SCT signature validation fails.
     pub fn validate_embedded_scts(
         &self,
         leaf_der: &[u8],
@@ -461,8 +474,7 @@ impl SctValidator {
                 warnings.push(SctWarning::InvalidSct {
                     index,
                     reason: format!(
-                        "SCT timestamp {} is in the future (validation time: {})",
-                        sct_time_secs, validation_time_secs
+                        "SCT timestamp {sct_time_secs} is in the future (validation time: {validation_time_secs})"
                     ),
                 });
                 continue;
@@ -498,7 +510,7 @@ mod integration_tests {
     use x509_cert::Certificate;
 
     // Oct 1, 2025 (within cloudflare.pem validity window)
-    const VALIDATION_TIME: u64 = 1759276800;
+    const VALIDATION_TIME: u64 = 1_759_276_800;
 
     fn load_test_log_list() -> CtLogList {
         CtLogList::from_chrome_log_list(include_bytes!("../tests/log_list.json"))
@@ -525,7 +537,10 @@ mod integration_tests {
         let result = validator.validate_embedded_scts(&leaf, &issuer, VALIDATION_TIME);
 
         assert!(
-            matches!(result, Ok(SctValidationResult::Valid | SctValidationResult::ValidWithWarnings(_))),
+            matches!(
+                result,
+                Ok(SctValidationResult::Valid | SctValidationResult::ValidWithWarnings(_))
+            ),
             "expected valid result, got: {result:?}"
         );
     }
@@ -555,7 +570,10 @@ mod integration_tests {
         }
 
         let result = validator.validate_embedded_scts(&leaf, &issuer, VALIDATION_TIME);
-        assert!(result.is_err(), "expected error for tampered cert, got: {result:?}");
+        assert!(
+            result.is_err(),
+            "expected error for tampered cert, got: {result:?}"
+        );
     }
 
     // SCTs valid for cert's entire lifetime per Chrome policy:
@@ -570,7 +588,10 @@ mod integration_tests {
         let result = validator.validate_embedded_scts(&leaf, &issuer, future_time);
 
         assert!(
-            matches!(result, Ok(SctValidationResult::Valid | SctValidationResult::ValidWithWarnings(_))),
+            matches!(
+                result,
+                Ok(SctValidationResult::Valid | SctValidationResult::ValidWithWarnings(_))
+            ),
             "expected valid result, got: {result:?}"
         );
     }
@@ -589,7 +610,10 @@ mod integration_tests {
         let result = validator.validate_embedded_scts(&leaf, &issuer, VALIDATION_TIME);
 
         assert!(
-            matches!(result, Err(SctError::Policy(PolicyError::NoSCTsFromCompliantLog))),
+            matches!(
+                result,
+                Err(SctError::Policy(PolicyError::NoSCTsFromCompliantLog))
+            ),
             "expected policy error for empty log list, got: {result:?}"
         );
     }
