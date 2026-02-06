@@ -80,12 +80,12 @@ impl GenericCleaner {
         self.storage.set_alarm(self.config.clean_interval).await?;
 
         // Load the cleaned size, if it has been previously saved.
-        if let Ok(cleaned_size) = self.storage.get::<u64>(CLEANED_SIZE_KEY).await {
+        if let Some(cleaned_size) = self.storage.get::<u64>(CLEANED_SIZE_KEY).await? {
             *self.cleaned_size.borrow_mut() = cleaned_size;
         }
 
         // Load the current log size, if it has been previously saved.
-        if let Ok(current_size) = self.storage.get::<u64>(CURRENT_SIZE_KEY).await {
+        if let Some(current_size) = self.storage.get::<u64>(CURRENT_SIZE_KEY).await? {
             *self.current_size.borrow_mut() = current_size;
         }
 

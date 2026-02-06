@@ -20,7 +20,6 @@ use byteorder::{BigEndian, WriteBytesExt};
 use log::{error, info};
 use log_ops::UploadOptions;
 use obs::metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -136,17 +135,6 @@ pub fn get_durable_object_stub(
         Ok(object_id.get_stub_with_location_hint(hint)?)
     } else {
         Ok(object_id.get_stub()?)
-    }
-}
-
-/// Gets the value from the given DO storage backend with the given key. Returns `Ok(None)` if no such
-/// key exists.
-async fn get_maybe<T: DeserializeOwned>(storage: &Storage, key: &str) -> Result<Option<T>> {
-    match storage.get::<T>(key).await {
-        Ok(val) => Ok(Some(val)),
-        // Return None if the result of the get is "No such value in storage."
-        Err(Error::JsError(ref e)) if e == "No such value in storage." => Ok(None),
-        Err(e) => Err(e),
     }
 }
 
@@ -328,10 +316,14 @@ impl DedupCache {
         // conditions to manage. The storage SQL API with a time-based cache might be a good choice
 
         // Get the head and tail of the dedup cache, picking 0 if uninitialized
-        let head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
+        let head = self
+            .storage
+            .get::<u32>(Self::FIFO_HEAD_KEY)
             .await?
             .unwrap_or_default();
-        let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
+        let tail = self
+            .storage
+            .get::<u32>(Self::FIFO_TAIL_KEY)
             .await?
             .unwrap_or_default();
 
@@ -372,10 +364,14 @@ impl DedupCache {
     // Store a batch of cache entries in DO storage.
     async fn store(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
         // Get the head and tail of the dedup cache, picking 0 if uninitialized
-        let head = get_maybe::<u32>(&self.storage, Self::FIFO_HEAD_KEY)
+        let head = self
+            .storage
+            .get::<u32>(Self::FIFO_HEAD_KEY)
             .await?
             .unwrap_or_default();
-        let tail = get_maybe::<u32>(&self.storage, Self::FIFO_TAIL_KEY)
+        let tail = self
+            .storage
+            .get::<u32>(Self::FIFO_TAIL_KEY)
             .await?
             .unwrap_or_default();
 
@@ -528,7 +524,11 @@ impl LockBackend for State {
     // First read a manifest containing the full length and checksum, then
     // get the values.
     async fn get_multipart(&self, key: &str) -> Result<Vec<u8>> {
-        let manifest = self.storage().get::<Vec<u8>>(key).await?;
+        let manifest = self
+            .storage()
+            .get::<Vec<u8>>(key)
+            .await?
+            .ok_or("manifest not found")?;
         if manifest.len() != 4 + 32 {
             return Err("invalid manifest length".into());
         }
@@ -564,14 +564,21 @@ impl LockBackend for State {
         self.storage().put(key, value).await
     }
     async fn swap(&self, key: &str, expected_old: &[u8], new: &[u8]) -> Result<()> {
-        let old = self.storage().get::<Vec<u8>>(key).await?;
+        let old = self
+            .storage()
+            .get::<Vec<u8>>(key)
+            .await?
+            .ok_or("old value not found")?;
         if old != expected_old {
             return Err("old value does not match expected".into());
         }
         self.put(key, new).await
     }
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
-        self.storage().get::<Vec<u8>>(key).await
+        self.storage()
+            .get::<Vec<u8>>(key)
+            .await?
+            .ok_or("key not found".into())
     }
 }
 
