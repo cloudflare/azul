@@ -117,6 +117,12 @@
                     }
                 ]
             },
+            "observability": {
+                "logs": {
+                    "enabled": true,
+                    "invocation_logs": true
+                }
+            },
             "migrations": [
                 {
                     // tag should be unique for each entry
