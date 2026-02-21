@@ -1068,13 +1068,6 @@ async fn sequence_entries<L: LogEntry>(
     for tile in new.edge_tiles {
         trace!("{name}: Edge tile: {tile:?}");
     }
-    info!(
-        "{name}: Sequenced pool; tree_size={n}, entries: {}, tiles: {}, timestamp: {timestamp}, duration: {:.2}s, since_last: {:.2}s",
-        n - old_size,
-        tile_uploads.len(),
-        millis_diff_as_secs(timestamp, now_millis()),
-        millis_diff_as_secs(old_time, timestamp)
-    );
 
     metrics
         .seq_duration
