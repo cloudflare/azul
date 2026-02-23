@@ -110,7 +110,19 @@
                         "Cleaner"
                     ]
                 }
-            ]
+            ],
+            "observability": {
+                "logs": {
+                    "enabled": true,
+                    "head_sampling_rate": 1,
+                    "invocation_logs": true,
+                    "persist": true
+                },
+                "traces": {
+                    "enabled": true,
+                    "head_sampling_rate": 0.1
+                }
+            }
         },
         "cftest": {
             "account_id": "022362f27de5264a50ce60cb23293c9f",
@@ -178,7 +190,22 @@
                         "Cleaner"
                     ]
                 }
-            ]
+            ],
+            "observability": {
+                "logs": {
+                    "enabled": true,
+                    "head_sampling_rate": 1,
+                    "invocation_logs": true,
+                    "persist": true
+                },
+                "traces": {
+                    "enabled": true,
+                    "head_sampling_rate": 0.1
+                }
+            },
+            "logpush": {
+                "enabled": true
+            }
         },
         "raio": {
             "account_id": "0b7358d77426ae6413d56c1cc0499b4f",
@@ -272,7 +299,7 @@
             "observability": {
                 "logs": {
                     "enabled": true,
-                    "head_sampling_rate": 1,
+                    "head_sampling_rate": 0.05,
                     "invocation_logs": true,
                     "persist": false
                 },
@@ -280,6 +307,9 @@
                     "enabled": true,
                     "head_sampling_rate": 0.05
                 }
+            }, 
+            "logpush": {
+                "enabled": true
             }
         }
     }
