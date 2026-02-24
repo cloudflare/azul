@@ -203,9 +203,7 @@
                     "head_sampling_rate": 0.1
                 }
             },
-            "logpush": {
-                "enabled": true
-            }
+            "logpush": true
         },
         "raio": {
             "account_id": "0b7358d77426ae6413d56c1cc0499b4f",
@@ -308,9 +306,7 @@
                     "head_sampling_rate": 0.05
                 }
             }, 
-            "logpush": {
-                "enabled": true
-            }
+            "logpush": true
         }
     }
 }
