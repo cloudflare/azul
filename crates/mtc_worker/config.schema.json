@@ -43,7 +43,7 @@
                             "type": "integer",
                             "minimum": 1,
                             "default": 3600,
-                            "description": "The time between publishing landmarks. This is used to calculate `max_landmarks` as `ceil(max_certificate_timetime_secs / landmark_interval_secs) + 1`."
+                            "description": "The time between publishing landmarks. This is used to calculate `max_active_landmarks` as `ceil(max_certificate_timetime_secs / landmark_interval_secs) + 1`."
                         },
                         "submission_url": {
                             "type": "string",

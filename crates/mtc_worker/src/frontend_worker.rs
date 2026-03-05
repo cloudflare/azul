@@ -503,7 +503,7 @@ async fn get_landmark_sequence(
     };
 
     let landmark_sequence =
-        LandmarkSequence::from_bytes(&landmark_sequence_bytes, params.max_landmarks())
+        LandmarkSequence::from_bytes(&landmark_sequence_bytes, params.max_active_landmarks())
             .map_err(|e| e.to_string())?;
 
     Ok(landmark_sequence)

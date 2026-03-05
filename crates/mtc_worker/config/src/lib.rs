@@ -43,8 +43,28 @@ pub struct LogParams {
 }
 
 impl LogParams {
-    /// Return the maximum number of landmarks that cover unexpired certificates at any given time.
-    pub fn max_landmarks(&self) -> usize {
+    /// Return the maximum number of active landmarks (those covering unexpired
+    /// certificates).
+    ///
+    /// # Formula: `ceil(lifetime / interval) + 1`
+    ///
+    /// The `+ 1` accounts for landmarks not allocated at the exact start of
+    /// their time interval, which can push certificate expiry one interval
+    /// further than `ceil(lifetime / interval)` alone would bound.
+    ///
+    /// # Example
+    ///
+    /// With 7-day (168 hour) certificate lifetime and 1-hour landmark interval:
+    /// - Formula: `ceil(168 / 1) + 1 = 168 + 1 = 169`
+    /// - This means up to 169 active landmarks
+    ///
+    /// # Storage Note
+    ///
+    /// The actual landmark deque stores `max_active_landmarks + 1` entries (170
+    /// in the example above). The extra (expired) landmark is needed to compute
+    /// subtrees for all active landmarks. See `LandmarkSequence` documentation
+    /// for details.
+    pub fn max_active_landmarks(&self) -> usize {
         self.max_certificate_lifetime_secs
             .div_ceil(self.landmark_interval_secs)
             + 1
