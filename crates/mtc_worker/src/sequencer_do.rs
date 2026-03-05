@@ -122,7 +122,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     }
 
                     // Time to add a new landmark.
-                    let max_landmarks = params.max_landmarks();
+                    let max_active_landmarks = params.max_active_landmarks();
 
                     // TODO: the put operations below should all be done as part of the same
                     // transaction. Otherwise an error that occurs after this point might put us in
@@ -135,10 +135,10 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     let mut seq =
                         if let Some(obj) = bucket_clone.get(LANDMARK_KEY).execute().await? {
                             let bytes = obj.body().ok_or("missing object body")?.bytes().await?;
-                            LandmarkSequence::from_bytes(&bytes, max_landmarks)
+                            LandmarkSequence::from_bytes(&bytes, max_active_landmarks)
                                 .map_err(|e| e.to_string())?
                         } else {
-                            LandmarkSequence::create(max_landmarks)
+                            LandmarkSequence::create(max_active_landmarks)
                         };
                     // Add the new landmark.
                     if seq.add(tree_size).map_err(|e| e.to_string())? {

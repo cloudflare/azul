@@ -1,11 +1,60 @@
+//! Landmark sequence management for Merkle Tree Certificates.
+//!
+//! This module implements the landmark sequence as specified in
+//! [draft-ietf-plants-merkle-tree-certs-02, Section 6.3.1](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-02.html#section-6.3.1).
+//!
+//! # Key Concepts
+//!
+//! - **Landmarks**: Agreed-upon tree sizes used to optimize certificate construction
+//! - **Active Landmarks**: The most recent `max_active_landmarks` landmarks
+//! - **Landmark Subtrees**: Subtrees covering the interval between consecutive landmarks
+//!
+//! # Important: Landmark Storage Invariant
+//!
+//! The `landmarks` deque stores `num_active_landmarks + 1` tree sizes, which equals
+//! `max_active_landmarks + 1` at steady state. This is **correct by design** per the spec.
+//!
+//! ## Why One Extra Landmark?
+//!
+//! Landmark subtrees are defined by intervals `[prev_tree_size, tree_size)` between
+//! consecutive landmarks. To compute subtrees for ALL active landmarks, we need the
+//! tree size of the landmark immediately before the oldest active landmark (which is
+//! expired but still needed for computation).
+//!
+//! ## Example
+//!
+//! With `max_active_landmarks = 169`:
+//! - File contains `num_active_landmarks = 169` (at most)
+//! - File stores `169 + 1 = 170` tree sizes
+//! - Deque contains 170 landmarks
+//! - The 169 most recent are "active" (contain unexpired certs)
+//! - The oldest (expired) landmark is kept to compute subtrees
+//!
+//! This is validated by: `num_active_landmarks <= max_active_landmarks` (not `<`).
+
 use crate::MtcError;
 use std::{collections::VecDeque, fmt::Write};
 use tlog_tiles::Subtree;
 
+/// A sequence of landmarks used for constructing landmark certificates.
+///
+/// Landmarks are numbered consecutively from zero and define subtrees that
+/// relying parties can use to optimize certificate validation.
+///
+/// # Invariants
+///
+/// - `landmarks.len() <= max_active_landmarks + 1` (one extra for subtree computation)
+/// - Tree sizes are strictly monotonically increasing
+/// - At steady state: `landmarks.len() == max_active_landmarks + 1`
 #[derive(Debug, PartialEq, Clone)]
 pub struct LandmarkSequence {
-    pub max_landmarks: usize,
+    /// Maximum number of active landmarks (those containing unexpired certificates).
+    /// The deque may contain `max_active_landmarks + 1` total landmarks.
+    pub max_active_landmarks: usize,
+    /// The ID of the most recently added landmark.
     pub last_landmark: usize,
+    /// Tree sizes for the landmarks, from oldest to newest.
+    /// Contains up to `max_active_landmarks + 1` entries at steady state.
     pub landmarks: VecDeque<u64>,
 }
 
@@ -19,11 +68,11 @@ pub const LANDMARK_CHECKPOINT_KEY: &str = "landmark-checkpoint";
 pub const LANDMARK_BUNDLE_KEY: &str = "landmark-bundle";
 
 impl LandmarkSequence {
-    /// Create a new landmark sequence with the given `max_landmarks` and an
+    /// Create a new landmark sequence with the given `max_active_landmarks` and an
     /// initial landmark with id 0 and tree size 0.
-    pub fn create(max_landmarks: usize) -> Self {
+    pub fn create(max_active_landmarks: usize) -> Self {
         Self {
-            max_landmarks,
+            max_active_landmarks,
             last_landmark: 0,
             landmarks: VecDeque::from(vec![0]),
         }
@@ -36,14 +85,29 @@ impl LandmarkSequence {
     pub fn first_index(&self) -> u64 {
         *self.landmarks.front().expect("landmark sequence is empty")
     }
-    /// Add a new landmark with the given tree size, removing a landmark if the
-    /// maximum size would be exceeded. Returns true if the new landmark is
-    /// added, or false otherwise.
+    /// Add a new landmark with the given tree size, removing the oldest landmark
+    /// if necessary to maintain the invariant that `landmarks.len() <= max_active_landmarks + 1`.
+    ///
+    /// Returns `true` if a new landmark was added, or `false` if the tree size
+    /// matches the most recent landmark (no change).
+    ///
+    /// # Important Note
+    ///
+    /// The check `if self.landmarks.len() > self.max_active_landmarks` happens **before**
+    /// the push. This is intentional and correct per the spec! It allows the deque
+    /// to reach `max_active_landmarks + 1` elements, which is needed to compute subtrees
+    /// for all active landmarks.
+    ///
+    /// At steady state:
+    /// - Before push: `len = max_active_landmarks + 1`
+    /// - Check: `(max_active_landmarks + 1) > max_active_landmarks`? → `true` → drain 1
+    /// - After drain: `len = max_active_landmarks`
+    /// - After push: `len = max_active_landmarks + 1` ✓
     ///
     /// # Errors
     ///
-    /// Will return an error if the tree size is smaller than the last landmark
-    /// tree size.
+    /// Returns an error if the tree size is not strictly greater than the last
+    /// landmark tree size (monotonicity violation).
     pub fn add(&mut self, tree_size: u64) -> Result<bool, MtcError> {
         if let Some(last) = self.landmarks.back() {
             if tree_size == *last {
@@ -56,9 +120,12 @@ impl LandmarkSequence {
                 ));
             }
         }
-        if self.landmarks.len() > self.max_landmarks {
+        // CRITICAL: Check happens BEFORE push to allow deque to reach max_active_landmarks + 1 elements.
+        // This is correct per spec - we need the extra (oldest) landmark to compute subtrees.
+        // See module-level documentation for detailed explanation.
+        if self.landmarks.len() > self.max_active_landmarks {
             self.landmarks
-                .drain(..self.landmarks.len() - self.max_landmarks);
+                .drain(..self.landmarks.len() - self.max_active_landmarks);
         }
         self.landmarks.push_back(tree_size);
         self.last_landmark += 1;
@@ -96,8 +163,25 @@ impl LandmarkSequence {
         }
     }
 
-    /// Serialize according to
-    /// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-6.3.1>.
+    /// Serialize the landmark sequence to the wire format.
+    ///
+    /// The format is defined in
+    /// [draft-ietf-plants-merkle-tree-certs-02, Section 6.3.1](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-02.html#section-6.3.1):
+    ///
+    /// ```text
+    /// <last_landmark> <num_active_landmarks>
+    /// <tree_size_N>    // Most recent (last_landmark)
+    /// <tree_size_N-1>
+    /// ...
+    /// <tree_size_0>    // Oldest
+    /// ```
+    ///
+    /// # Important
+    ///
+    /// - `num_active_landmarks = landmarks.len() - 1`
+    /// - File contains `num_active_landmarks + 1` tree sizes
+    /// - With `max_active_landmarks = 169`, file can have `num_active_landmarks = 169`,
+    ///   which means 170 total tree sizes
     ///
     /// # Errors
     ///
@@ -110,14 +194,27 @@ impl LandmarkSequence {
         Ok(buffer.into_bytes())
     }
 
-    /// Deserialize according to
-    /// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-6.3.1>.
+    /// Deserialize a landmark sequence from the wire format.
+    ///
+    /// Validates that:
+    /// - `num_active_landmarks <= max_active_landmarks` (allows equality!)
+    /// - `num_active_landmarks <= last_landmark`
+    /// - Tree sizes are strictly monotonically decreasing in the file
+    ///
+    /// # Important: Validation Behavior
+    ///
+    /// The validation uses `num_active_landmarks <= max_active_landmarks`, not `<`.
+    /// This means with `max_active_landmarks = 169`, a file with `num_active_landmarks = 169`
+    /// is **valid** and will create a deque with 170 landmarks. This is correct
+    /// per the spec!
     ///
     /// # Errors
     ///
-    /// Will return an error if the landmark sequence is invalid or if
-    /// `data.len() > 10_000`.
-    pub fn from_bytes(data: &[u8], max_landmarks: usize) -> Result<Self, MtcError> {
+    /// Returns an error if:
+    /// - The file is malformed or too large (`> 10_000` bytes)
+    /// - Validation constraints are violated
+    /// - Tree sizes are not strictly monotonically decreasing
+    pub fn from_bytes(data: &[u8], max_active_landmarks: usize) -> Result<Self, MtcError> {
         // Note: `lines()` will return the same thing whether or not there's a
         // newline after the last line, and whether or not there are carriage
         // returns preceding each newline.
@@ -135,9 +232,12 @@ impl LandmarkSequence {
         let last_landmark = first.0.parse::<usize>()?;
         let num_active_landmarks = first.1.parse::<usize>()?;
 
-        if num_active_landmarks > max_landmarks {
+        // Note: Uses > not >= to allow num_active_landmarks == max_active_landmarks (correct per spec).
+        // This means a file with max_active_landmarks=169 can have num_active_landmarks=169,
+        // and will contain 170 tree sizes (169 active + 1 expired for subtree computation).
+        if num_active_landmarks > max_active_landmarks {
             return Err(MtcError::Dynamic(
-                "num_active_landmarks must not be greater than max_landmarks".into(),
+                "num_active_landmarks must not be greater than max_active_landmarks".into(),
             ));
         }
         if num_active_landmarks > last_landmark {
@@ -165,7 +265,7 @@ impl LandmarkSequence {
             ));
         }
         Ok(Self {
-            max_landmarks,
+            max_active_landmarks,
             last_landmark,
             landmarks,
         })
@@ -304,5 +404,178 @@ mod tests {
             Subtree::new(48, 50).unwrap(),
         ];
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_max_active_landmarks_plus_one_is_correct() {
+        // This test documents and validates the CORRECT behavior per the spec:
+        // The deque should contain max_active_landmarks + 1 entries at steady state.
+        //
+        // From draft-ietf-plants-merkle-tree-certs-02, Section 6.3.1:
+        // - "The most recent max_active_landmarks landmarks are said to be active"
+        // - File format stores "num_active_landmarks + 1 lines" of tree sizes
+        // - Validation: "num_active_landmarks <= max_active_landmarks"
+        //
+        // This means with max_active_landmarks=169, the file can have num_active=169,
+        // which results in 170 total tree sizes (169 + 1).
+
+        let max_active_landmarks = 10;
+        let mut seq = LandmarkSequence::create(max_active_landmarks);
+
+        // Fill to steady state
+        for i in 1..=20 {
+            seq.add(i * 10).unwrap();
+        }
+
+        // At steady state, we should have max_active_landmarks + 1 entries
+        assert_eq!(
+            seq.landmarks.len(),
+            max_active_landmarks + 1,
+            "Deque should contain max_active_landmarks + 1 = {} landmarks at steady state",
+            max_active_landmarks + 1
+        );
+
+        // The serialized file should have num_active = max_active_landmarks
+        let bytes = seq.to_bytes().unwrap();
+        let content = String::from_utf8(bytes).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        let num_active: usize = parts[1].parse().unwrap();
+
+        assert_eq!(
+            num_active, max_active_landmarks,
+            "Serialized file should have num_active_landmarks = {}",
+            max_active_landmarks
+        );
+
+        // File should contain num_active + 1 lines of tree sizes
+        let tree_size_lines: Vec<_> = content.lines().skip(1).collect();
+        assert_eq!(
+            tree_size_lines.len(),
+            num_active + 1,
+            "File should contain {} tree size lines",
+            num_active + 1
+        );
+    }
+
+    #[test]
+    fn test_production_config_values() {
+        // Validate the production configuration produces correct values.
+        // Production: 7 days (604800 secs), 1 hour intervals (3600 secs)
+
+        let max_cert_lifetime_secs: usize = 604_800; // 7 days
+        let landmark_interval_secs: usize = 3_600; // 1 hour
+
+        let max_active_landmarks = max_cert_lifetime_secs.div_ceil(landmark_interval_secs) + 1;
+
+        assert_eq!(
+            max_active_landmarks, 169,
+            "Production max_active_landmarks should be 169"
+        );
+
+        let mut seq = LandmarkSequence::create(max_active_landmarks);
+
+        // Simulate 200 hours of operation
+        for hour in 1..=200 {
+            seq.add(hour).unwrap();
+        }
+
+        // At steady state (after 169 additions), should have 170 landmarks
+        assert_eq!(
+            seq.landmarks.len(),
+            170,
+            "Production should maintain 170 landmarks (169 active + 1 expired)"
+        );
+
+        // Validate serialization
+        let bytes = seq.to_bytes().unwrap();
+        let content = String::from_utf8(bytes.clone()).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        let num_active: usize = parts[1].parse().unwrap();
+
+        assert_eq!(
+            num_active, 169,
+            "Production file should have num_active_landmarks = 169"
+        );
+
+        // Validate deserialization accepts this
+        let loaded = LandmarkSequence::from_bytes(&bytes, max_active_landmarks)
+            .expect("Should successfully load file with num_active=169");
+
+        assert_eq!(loaded.landmarks.len(), 170);
+    }
+
+    #[test]
+    fn test_subtrees_require_extra_landmark() {
+        // This test demonstrates WHY we need the extra (expired) landmark:
+        // to compute subtrees for the oldest active landmark.
+
+        let max_active_landmarks = 5;
+        let mut seq = LandmarkSequence::create(max_active_landmarks);
+
+        // Add landmarks up to capacity
+        for i in 1..=10 {
+            seq.add(i * 10).unwrap();
+        }
+
+        // At steady state: 6 landmarks total (5 active + 1 expired)
+        assert_eq!(seq.landmarks.len(), 6);
+
+        // The landmarks are: [50, 60, 70, 80, 90, 100]
+        // - Oldest (expired): 50
+        // - Active: 60, 70, 80, 90, 100
+
+        // To compute subtrees for landmark 60 (oldest active), we need:
+        // - The interval [50, 60) -- requires knowing landmark 50's tree size!
+        // - Without landmark 50, we couldn't compute these subtrees
+
+        let subtrees: Vec<_> = seq.subtrees().collect();
+
+        // Verify we got subtrees for all active landmarks
+        // With 5 active landmarks, we should get 10 subtrees
+        assert_eq!(
+            subtrees.len(),
+            10,
+            "Should be able to compute subtrees with the extra landmark, got {} subtrees",
+            subtrees.len()
+        );
+
+        // The oldest landmark (50) is needed to compute the first subtrees
+        // starting from the interval [50, 60)
+        assert_eq!(seq.first_index(), 50, "Oldest landmark should be 50");
+    }
+
+    #[test]
+    fn test_validation_allows_max_active_landmarks() {
+        // Verify that from_bytes accepts num_active_landmarks == max_active_landmarks
+        // This is correct per spec: "num_active_landmarks <= max_active_landmarks"
+
+        let max_active_landmarks = 169;
+
+        // Create a sequence with max_active_landmarks + 1 entries
+        let seq = LandmarkSequence {
+            max_active_landmarks: max_active_landmarks,
+            last_landmark: 200,
+            landmarks: (32..=201).collect(), // 170 landmarks
+        };
+
+        assert_eq!(seq.landmarks.len(), 170);
+
+        // Serialize
+        let bytes = seq.to_bytes().unwrap();
+        let content = String::from_utf8(bytes.clone()).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        let num_active: usize = parts[1].parse().unwrap();
+
+        // num_active should be 169
+        assert_eq!(num_active, 169);
+
+        // from_bytes should accept this (169 <= 169 is true)
+        let loaded = LandmarkSequence::from_bytes(&bytes, max_active_landmarks)
+            .expect("Should accept file with num_active == max_active_landmarks");
+
+        assert_eq!(loaded.landmarks.len(), 170);
     }
 }
