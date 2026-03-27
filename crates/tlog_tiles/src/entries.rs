@@ -8,8 +8,8 @@ use crate::{Hash, PathElem, TlogError};
 pub const LOOKUP_KEY_LEN: usize = 16;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];
 
-// Re-import UnixTimestamp, which is just a u64
-pub use x509_util::UnixTimestamp;
+/// Unix timestamp.
+pub type UnixTimestamp = u64;
 
 /// Index of a leaf in the Merkle tree.
 pub type LeafIndex = u64;

@@ -2626,7 +2626,6 @@ dependencies = [
  "signed_note",
  "thiserror 2.0.17",
  "url",
- "x509_util",
 ]
 
 [[package]]
