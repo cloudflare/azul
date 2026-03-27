@@ -1,0 +1,19 @@
+[package]
+name = "signed_note_wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen wrapper for the signed_note crate (c2sp.org/signed-note)"
+publish = false
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+signed_note = { workspace = true }
+ed25519-dalek = { workspace = true }
+wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }

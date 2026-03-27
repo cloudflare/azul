@@ -2403,6 +2403,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signed_note_wasm"
+version = "0.2.0"
+dependencies = [
+ "console_error_panic_hook",
+ "ed25519-dalek",
+ "signed_note",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2626,6 +2636,16 @@ dependencies = [
  "signed_note",
  "thiserror 2.0.17",
  "url",
+]
+
+[[package]]
+name = "tlog_tiles_wasm"
+version = "0.2.0"
+dependencies = [
+ "console_error_panic_hook",
+ "getrandom 0.2.16",
+ "tlog_tiles",
+ "wasm-bindgen",
 ]
 
 [[package]]

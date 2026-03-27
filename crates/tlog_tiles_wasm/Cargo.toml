@@ -1,0 +1,19 @@
+[package]
+name = "tlog_tiles_wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen wrapper for the tlog_tiles crate (c2sp.org/tlog-tiles, c2sp.org/tlog-checkpoint)"
+publish = false
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tlog_tiles = { workspace = true }
+wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }
+getrandom = { workspace = true }
