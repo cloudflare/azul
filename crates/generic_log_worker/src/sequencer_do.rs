@@ -58,6 +58,8 @@ pub struct SequencerConfig {
     pub enable_dedup: bool,
     pub location_hint: Option<String>,
     pub checkpoint_callback: CheckpointCallbacker,
+    /// Environment label for metrics, e.g., "dev", "cftest", "raio"
+    pub env_label: String,
 }
 
 impl<L: LogEntry> GenericSequencer<L> {
@@ -195,7 +197,11 @@ impl<L: LogEntry> GenericSequencer<L> {
     where
         F: AsyncFnOnce(SequencerMetrics) -> R,
     {
-        let registry = Registry::new();
+        let registry = Registry::new_custom(
+            None,
+            Some([("env".to_owned(), self.config.env_label.clone())].into()),
+        )
+        .expect("failed to create registry with env label");
         let metrics = SequencerMetrics::new(&registry);
         // a bit of a hack but makes the rest of the code simpler.
         // We setup metrics here so that the closure f can then use these reset metrics.
