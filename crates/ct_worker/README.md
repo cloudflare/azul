@@ -72,7 +72,7 @@ Follow these instructions to spin up a CT log on your local machine using the `d
 
     Submit a certificate from `google.com` by running `python3 scripts/add_cert_to_local_dev.py`. Note you need Python 3.13 or greater.
 
-    Use [ctclient](https://github.com/google/certificate-transparency-go/tree/master/client/ctclient) to 'cross-pollinate' entries from another log (RFC6962 logs only, until [static-ct-api support is added](https://github.com/google/certificate-transparency-go/issues/1669)) with overlapping roots and NotAfter temporal interval:
+    Use [ctclient](https://github.com/google/certificate-transparency-go/tree/master/client/ctclient) to 'cross-pollinate' entries from another log (RFC6962 logs only, until [static-ct-api support is added](https://github.com/google/certificate-transparency-go/issues/1669)) with overlapping roots and `NotAfter` temporal interval:
 
     ```text
     tmpdir=$(mktemp -d)
@@ -133,7 +133,7 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e
 
 **Alternatively, simply run the script [create-log.sh](./scripts/create-log.sh)**
 
-(Note: For mtc_worker we use ed25519 for the signing key. There is no witness.)
+(Note: For `mtc_worker` we use ed25519 for the signing key. There is no witness.)
 
 1.  Deploy the worker. The worker will be available at `https://static-ct-${ENV}.<your-team>.workers.dev/logs/${LOG_NAME}`.
 
@@ -211,5 +211,5 @@ This project ports code from [sunlight](https://github.com/FiloSottile/sunlight)
 The project is licensed under the [BSD-3-Clause License](./LICENSE).
 
 
-location-hint: https://developers.cloudflare.com/r2/reference/data-location/
-secrets-docs: https://developers.cloudflare.com/workers/configuration/secrets
+location-hint: <https://developers.cloudflare.com/r2/reference/data-location/>
+secrets-docs: <https://developers.cloudflare.com/workers/configuration/secrets>

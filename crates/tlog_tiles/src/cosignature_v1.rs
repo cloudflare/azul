@@ -17,6 +17,7 @@ pub struct CosignatureV1CheckpointSigner {
 
 impl CosignatureV1CheckpointSigner {
     /// Returns a new `CosignatureV1CheckpointSigner`.
+    #[must_use]
     pub fn new(name: KeyName, k: Ed25519SigningKey) -> Self {
         Self {
             v: CosignatureV1NoteVerifier::new(name, k.verifying_key()),
@@ -80,6 +81,7 @@ pub struct CosignatureV1NoteVerifier {
 }
 
 impl CosignatureV1NoteVerifier {
+    #[must_use]
     pub fn new(name: KeyName, verifying_key: Ed25519VerifyingKey) -> Self {
         let id = {
             let pubkey = [

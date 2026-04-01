@@ -68,6 +68,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the public bucket.
+    #[must_use]
     pub fn new(state: State, env: Env, config: SequencerConfig) -> Self {
         let public_bucket = ObjectBucket {
             bucket: load_public_bucket(&env, &config.name).unwrap(),
@@ -370,6 +371,7 @@ pub type CheckpointCallbacker = Box<
 
 /// A no-op checkpoint callback that can be used in applications like CT that
 /// don't need to perform any action after the checkpoint is updated.
+#[must_use]
 pub fn empty_checkpoint_callback() -> CheckpointCallbacker {
     Box::new(
         move |_old_time: UnixTimestamp, _new_time: UnixTimestamp, _new_checkpoint: &[u8]| {

@@ -70,6 +70,7 @@ pub const LANDMARK_BUNDLE_KEY: &str = "landmark-bundle";
 impl LandmarkSequence {
     /// Create a new landmark sequence with the given `max_active_landmarks` and an
     /// initial landmark with id 0 and tree size 0.
+    #[must_use]
     pub fn create(max_active_landmarks: usize) -> Self {
         Self {
             max_active_landmarks,
@@ -82,6 +83,7 @@ impl LandmarkSequence {
     /// # Panics
     ///
     /// Panics if the landmark sequence is empty, which should never happen.
+    #[must_use]
     pub fn first_index(&self) -> u64 {
         *self.landmarks.front().expect("landmark sequence is empty")
     }
@@ -138,6 +140,7 @@ impl LandmarkSequence {
     /// # Panics
     ///
     /// Will panic if landmarks are not sorted or are not unique.
+    #[must_use]
     pub fn subtree_for_index(&self, leaf_index: u64) -> Option<(usize, Subtree)> {
         // Find the index of the first landmark greater than the leaf index.
         let hi_index = self
@@ -272,6 +275,7 @@ impl LandmarkSequence {
     }
 
     /// Iterate over the sequence of subtrees determined by the landmark sequence.
+    #[must_use]
     pub fn subtrees(&self) -> LandmarkSubtreesIterator<'_> {
         LandmarkSubtreesIterator {
             index: 1,

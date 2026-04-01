@@ -38,6 +38,7 @@ impl RelativeOid {
     }
 
     /// Returns the DER-encoded content bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.ber
     }

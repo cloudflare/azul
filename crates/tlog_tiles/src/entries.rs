@@ -104,6 +104,7 @@ impl<L: LogEntry> std::iter::Iterator for TileIterator<'_, L> {
 impl<'a, L: LogEntry> TileIterator<'a, L> {
     /// Returns a new [`TileIterator`], which always attempts to parse exactly
     /// 'size' entries before terminating.
+    #[must_use]
     pub fn new(input: &'a [u8], size: usize) -> Self {
         Self {
             input,

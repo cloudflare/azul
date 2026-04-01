@@ -277,6 +277,7 @@ impl KeyName {
         }
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -327,6 +328,7 @@ pub trait NoteSigner {
 
 /// Computes the key ID for the given server name and encoded public key
 /// as RECOMMENDED at <https://c2sp.org/signed-note#signatures>.
+#[must_use]
 pub fn compute_key_id(name: &KeyName, key: &[u8]) -> u32 {
     let mut hasher = Sha256::new();
     hasher.update(name.0.as_bytes());
@@ -379,6 +381,7 @@ impl Verifiers for VerifierList {
 
 impl VerifierList {
     /// Returns a [Verifiers] implementation that uses the given list of verifiers.
+    #[must_use]
     pub fn new(list: Vec<Box<dyn NoteVerifier>>) -> Self {
         let mut map: VerifierMap = HashMap::new();
         for verifier in list {
@@ -390,6 +393,7 @@ impl VerifierList {
     }
 
     /// The set of all key IDs in this verifier list
+    #[must_use]
     pub fn key_ids(&self) -> BTreeSet<u32> {
         self.map.keys().map(|(_name, id)| *id).collect()
     }
@@ -422,6 +426,7 @@ impl NoteSignature {
     ///
     /// Returns [`NoteError::MalformedNote`] if the name is invalid according to [`is_key_name_valid`].
     ///
+    #[must_use]
     pub fn new(name: KeyName, id: u32, sig: Vec<u8>) -> Self {
         Self { name, id, sig }
     }
@@ -455,21 +460,25 @@ impl NoteSignature {
     }
 
     /// Return a signature's name.
+    #[must_use]
     pub fn name(&self) -> &KeyName {
         &self.name
     }
 
     /// Return a signature's key ID.
+    #[must_use]
     pub fn id(&self) -> u32 {
         self.id
     }
 
     /// Return the signature bytes.
+    #[must_use]
     pub fn signature(&self) -> &[u8] {
         &self.sig
     }
 
     /// Encode a signature for inclusion in a note.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let hbuf = self.id.to_be_bytes();
         let base64 = BASE64_STANDARD.encode([&hbuf, self.sig.as_slice()].concat());
@@ -678,6 +687,7 @@ impl Note {
     }
 
     /// Returns a well-formed signed note.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = self.text.clone();
         buf.push(b'\n');
@@ -688,6 +698,7 @@ impl Note {
     }
 
     /// Returns the note's text.
+    #[must_use]
     pub fn text(&self) -> &[u8] {
         &self.text
     }

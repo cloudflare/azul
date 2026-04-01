@@ -86,6 +86,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if any of the tile parameters are outside the valid ranges.
+    #[must_use]
     pub fn new(h: u8, l: u8, n: u64, w: u32, data_path_opt: Option<PathElem>) -> Self {
         assert!(
             (1..=30).contains(&h) && l < 64 && (1..=(1 << h)).contains(&w),
@@ -101,26 +102,31 @@ impl Tile {
     }
 
     /// Returns the tile's height.
+    #[must_use]
     pub fn height(&self) -> u8 {
         self.h
     }
 
     /// Returns the tile's level.
+    #[must_use]
     pub fn level(&self) -> u8 {
         self.l
     }
 
     /// Returns the tile's index within level.
+    #[must_use]
     pub fn level_index(&self) -> u64 {
         self.n
     }
 
     /// Returns the tile's width.
+    #[must_use]
     pub fn width(&self) -> u32 {
         self.w
     }
 
     /// Returns whether or not this is a data tile.
+    #[must_use]
     pub fn is_data(&self) -> bool {
         self.data_path_opt.is_some()
     }
@@ -132,6 +138,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if `h = 0`.
+    #[must_use]
     pub fn new_tiles(h: u8, old_tree_size: u64, new_tree_size: u64) -> Vec<Self> {
         let mut tiles = Vec::new();
         let mut l = 0;
@@ -160,6 +167,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if `h = 0`.
+    #[must_use]
     pub fn from_index(h: u8, index: u64) -> Self {
         assert!(h != 0, "invalid height {h}");
         let (t, _, _) = Tile::from_index_internal(h, index);
@@ -232,6 +240,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if integer conversion fails.
+    #[must_use]
     pub fn parent(&self, k: u8, n: u64) -> Option<Self> {
         let mut t = *self;
         t.l += k;
@@ -386,6 +395,7 @@ impl Tile {
     /// # Panics
     ///
     /// Panics if data is empty.
+    #[must_use]
     pub fn subtree_hash(data: &[u8]) -> Hash {
         assert!(!data.is_empty(), "bad math in tile hash");
 
@@ -431,18 +441,21 @@ impl TlogTile {
     /// # Panics
     ///
     /// Panics if any of the tile parameters are outside the valid ranges.
+    #[must_use]
     pub fn new(l: u8, n: u64, w: u32, data_elem: Option<PathElem>) -> Self {
         TlogTile(Tile::new(Self::HEIGHT, l, n, w, data_elem))
     }
 
     /// Returns the tile of fixed height `h = 8`
     /// and least width storing the given hash storage index.
+    #[must_use]
     pub fn from_index(index: u64) -> Self {
         TlogTile(Tile::from_index(Self::HEIGHT, index))
     }
 
     /// Returns the tile of fixed height `h = 8`
     /// and least width storing the given leaf index.
+    #[must_use]
     pub fn from_leaf_index(leaf_index: u64) -> Self {
         // Convert from leaf index to hash storage index on level 0
         let hash_index = stored_hash_index(0, leaf_index);
@@ -465,6 +478,7 @@ impl TlogTile {
     /// that it doesn't include an explicit tile height. The `data_path`
     /// parameter should be `"entries"` for tlog-tiles, and `"data"` for
     /// static-ct-api.
+    #[must_use]
     pub fn path(&self) -> String {
         self.0.path(false)
     }

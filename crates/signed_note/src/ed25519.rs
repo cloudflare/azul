@@ -42,6 +42,7 @@ impl NoteVerifier for Ed25519NoteVerifier {
 }
 
 impl Ed25519NoteVerifier {
+    #[must_use]
     pub fn new(name: KeyName, verifying_key: Ed25519VerifyingKey) -> Self {
         let id = {
             let pubkey = [
@@ -123,6 +124,7 @@ impl NoteSigner for Ed25519NoteSigner {
 }
 
 impl Ed25519NoteSigner {
+    #[must_use]
     pub fn new(name: KeyName, signing_key: Ed25519SigningKey) -> Self {
         let id = {
             let pubkey = [
@@ -224,6 +226,7 @@ pub fn generate_encoded_ed25519_key<R: CryptoRngCore + ?Sized>(
 }
 
 /// Returns an encoded verifier key using the given name and Ed25519 public key.
+#[must_use]
 pub fn new_encoded_ed25519_verifier_key(
     name: &KeyName,
     key: &ed25519_dalek::VerifyingKey,

@@ -66,6 +66,7 @@ impl GenericBatcher {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the sequencer or KV store.
+    #[must_use]
     pub fn new(state: State, env: Env, config: BatcherConfig) -> Self {
         let kv = if config.enable_dedup {
             Some(load_cache_kv(&env, &config.name).unwrap())
@@ -254,6 +255,7 @@ impl GenericBatcher {
 }
 
 /// Return a batcher ID to which the provided entry should be assigned.
+#[must_use]
 pub fn batcher_id_from_lookup_key(key: &LookupKey, num_batchers: u8) -> Option<u8> {
     if num_batchers > 0 {
         Some(key[0] % num_batchers)

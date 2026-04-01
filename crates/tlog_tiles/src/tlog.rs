@@ -146,6 +146,7 @@ fn maxpow2(n: u64) -> (u64, u8) {
 }
 
 /// Returns the content hash for the given record data.
+#[must_use]
 pub fn record_hash(data: &[u8]) -> Hash {
     // SHA256(0x00 || data)
     // https://tools.ietf.org/html/rfc6962#section-2.1
@@ -157,6 +158,7 @@ pub fn record_hash(data: &[u8]) -> Hash {
 }
 
 /// Returns the hash for an interior tree node with the given left and right hashes.
+#[must_use]
 pub fn node_hash(left: Hash, right: Hash) -> Hash {
     // SHA256(0x01 || left || right)
     // https://tools.ietf.org/html/rfc6962#section-2.1
@@ -177,6 +179,7 @@ pub fn node_hash(left: Hash, right: Hash) -> Hash {
 /// traversal of the nodes in the tree. For information, see section 3.3 of
 /// Crosby and Wallach's paper ["Efficient Data Structures for Tamper-Evident
 /// Logging"](https://www.usenix.org/legacy/event/sec09/tech/full_papers/crosby.pdf).
+#[must_use]
 pub fn stored_hash_index(level: u8, n: u64) -> u64 {
     // Level L's n'th hash is written right after level L+1's 2n+1'th hash.
     // Work our way down to the level 0 ordering.
@@ -202,6 +205,7 @@ pub fn stored_hash_index(level: u8, n: u64) -> u64 {
 /// # Panics
 ///
 /// Panics if `stored_hash_index` returns an invalid index, which should never happen.
+#[must_use]
 pub fn split_stored_hash_index(index: u64) -> (u8, u64) {
     // Determine level 0 record before index.
     // StoredHashIndex(0, n) < 2*n,
@@ -225,6 +229,7 @@ pub fn split_stored_hash_index(index: u64) -> (u8, u64) {
 }
 
 /// Returns the number of stored hashes that are expected for a tree with `n` records.
+#[must_use]
 pub fn stored_hash_count(n: u64) -> u64 {
     if n == 0 {
         return 0;
@@ -337,6 +342,7 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
 }
 
 /// Computes the indexes needed to compute the hash of the tree with `n` records.
+#[must_use]
 pub fn tree_hash_indexes(n: u64) -> Vec<u64> {
     if n == 0 {
         return vec![];
@@ -346,6 +352,7 @@ pub fn tree_hash_indexes(n: u64) -> Vec<u64> {
 
 /// Returns the storage indexes needed to compute the hash for the subtree.
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1>.
+#[must_use]
 pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
     n.hash_indexes()
 }
@@ -786,14 +793,17 @@ impl Subtree {
         Ok(Self { lo, hi })
     }
     /// Return the lower (inclusive) bound on indices in the subtree.
+    #[must_use]
     pub fn lo(&self) -> u64 {
         self.lo
     }
     /// Return the upper (exclusive) bound on indices in the subtree.
+    #[must_use]
     pub fn hi(&self) -> u64 {
         self.hi
     }
     /// Return whether or not the subtree contains the given leaf index.
+    #[must_use]
     pub fn contains(&self, leaf_index: u64) -> bool {
         (self.lo..self.hi).contains(&leaf_index)
     }

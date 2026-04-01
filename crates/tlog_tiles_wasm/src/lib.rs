@@ -28,6 +28,10 @@ impl CheckpointText {
     ///
     /// Input is the text portion of a signed note (everything before the
     /// blank line separator), ending with a newline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a JS error string if the input is not a valid checkpoint text.
     #[wasm_bindgen(js_name = "fromBytes")]
     pub fn from_bytes(data: &[u8]) -> Result<CheckpointText, JsValue> {
         tlog_tiles::CheckpointText::from_bytes(data)
@@ -36,27 +40,32 @@ impl CheckpointText {
     }
 
     /// The log's origin string (first line of the checkpoint).
+    #[must_use]
     pub fn origin(&self) -> String {
         self.inner.origin().to_string()
     }
 
     /// Number of entries in the log (tree size).
+    #[must_use]
     pub fn size(&self) -> u64 {
         self.inner.size()
     }
 
     /// The Merkle tree root hash (32 bytes, SHA-256).
+    #[must_use]
     #[wasm_bindgen(js_name = "rootHash")]
     pub fn root_hash(&self) -> Vec<u8> {
         self.inner.hash().0.to_vec()
     }
 
     /// Extension lines (may be empty). Each line is terminated by newline.
+    #[must_use]
     pub fn extension(&self) -> String {
         self.inner.extension().to_string()
     }
 
     /// Serialize back to the wire format.
+    #[must_use]
     #[wasm_bindgen(js_name = "toBytes")]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.inner.to_bytes()
@@ -73,6 +82,15 @@ impl CheckpointText {
 /// For example, a proof with 3 nodes is 96 bytes (3 x 32).
 ///
 /// Throws on verification failure. Returns nothing on success.
+///
+/// # Errors
+///
+/// Returns a JS error string if the proof is invalid or the input sizes are wrong.
+///
+/// # Panics
+///
+/// Panics if a 32-byte chunk-to-array conversion fails, which cannot happen
+/// since `proof_hashes.len()` is verified to be a multiple of 32 beforehand.
 #[wasm_bindgen(js_name = "verifyConsistencyProof")]
 pub fn verify_consistency_proof(
     proof_hashes: &[u8],
