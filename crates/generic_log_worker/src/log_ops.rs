@@ -2435,6 +2435,7 @@ mod tests {
                 sequence_skip_threshold_millis: None,
                 location_hint: None,
                 checkpoint_callback: empty_checkpoint_callback(),
+                env_label: "test".to_string(),
             };
             let pool_state = RefCell::new(PoolState::default());
             block_on(create_log(&config, &object, &lock)).unwrap();

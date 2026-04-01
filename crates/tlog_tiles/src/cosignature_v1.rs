@@ -7,7 +7,7 @@ use ed25519_dalek::{
 };
 use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 
-use crate::{CheckpointText, CheckpointSigner, UnixTimestamp};
+use crate::{CheckpointSigner, CheckpointText, UnixTimestamp};
 
 /// Implementation of [`CheckpointSigner`] that produces a timestamped Ed25519 cosignature/v1 (alg 0x04 from <c2sp.org/signed-note>).
 pub struct CosignatureV1CheckpointSigner {

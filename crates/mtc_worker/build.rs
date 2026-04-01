@@ -70,6 +70,9 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     fs::copy(config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
 
+    // Make DEPLOY_ENV available at compile time via env!()
+    println!("cargo::rustc-env=DEPLOY_ENV={env}");
+
     println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
     println!("cargo::rerun-if-changed=config.schema.json");
     println!("cargo::rerun-if-changed={config_file}");

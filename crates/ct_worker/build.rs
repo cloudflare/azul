@@ -86,6 +86,9 @@ fn main() {
         fs::write(format!("{out_dir}/roots.pem"), "").expect("failed to write empty roots file");
     }
 
+    // Make DEPLOY_ENV available at compile time via env!()
+    println!("cargo::rustc-env=DEPLOY_ENV={env}");
+
     println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
     println!("cargo::rerun-if-changed=config.schema.json");
     println!("cargo::rerun-if-changed={config_file}");
