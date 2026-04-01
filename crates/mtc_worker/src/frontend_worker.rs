@@ -343,9 +343,8 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     let params = &CONFIG.logs[name];
     let req: AddEntryRequest = req.json().await?;
 
-    let issuer = build_issuer_rdn(&params.log_id).map_err(|e| e.to_string())?;
-    let mut validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)
-        .map_err(|e| e.to_string())?;
+    let issuer = build_issuer_rdn(&params.log_id)?;
+    let mut validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)?;
 
     let roots = load_roots(env, name).await?;
     let (pending_entry, found_root_idx) =
@@ -368,7 +367,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
         // Get leaf and issuer DER for SCT validation
         let leaf_der = req.chain.first().ok_or("Chain is empty")?;
-        let issuer_der = resolve_issuer_for_sct(&req.chain, roots).map_err(|e| e.to_string())?;
+        let issuer_der = resolve_issuer_for_sct(&req.chain, roots)?;
 
         let validation_time_secs = now_millis() / 1000;
 

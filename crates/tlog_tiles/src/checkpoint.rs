@@ -139,22 +139,26 @@ impl fmt::Display for MalformedCheckpointTextError {
 
 impl CheckpointText {
     /// Return the checkpoint's origin.
+    #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
     }
 
     /// Return the size of the checkpoint's tree.
+    #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
 
     /// Return the root hash of the checkpoint's tree.
+    #[must_use]
     pub fn hash(&self) -> &Hash {
         &self.hash
     }
 
     /// Return the checkpoint's extensions. This is empty or a sequence of non-empty lines, each
     /// terminated by a newline character.
+    #[must_use]
     pub fn extension(&self) -> &str {
         &self.extension
     }
@@ -278,6 +282,7 @@ impl CheckpointText {
     }
 
     /// Returns encoded checkpoint text.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         format!(
             "{}\n{}\n{}\n{}",
@@ -427,6 +432,7 @@ pub struct TreeWithTimestamp {
 
 impl TreeWithTimestamp {
     /// Returns a new tree with the given hash.
+    #[must_use]
     pub fn new(size: u64, hash: Hash, time: UnixTimestamp) -> Self {
         Self { size, hash, time }
     }
@@ -447,16 +453,19 @@ impl TreeWithTimestamp {
     }
 
     /// Returns the size of the tree.
+    #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
 
     /// Returns the root hash of the tree.
+    #[must_use]
     pub fn hash(&self) -> &Hash {
         &self.hash
     }
 
     /// Returns the timestamp of the tree.
+    #[must_use]
     pub fn time(&self) -> UnixTimestamp {
         self.time
     }

@@ -53,6 +53,7 @@ impl GenericCleaner {
     /// # Panics
     ///
     /// Panics if we can't get a handle for the public bucket.
+    #[must_use]
     pub fn new(state: State, env: &Env, config: CleanerConfig) -> Self {
         let bucket = load_public_bucket(env, &config.name).unwrap();
         let wshim = obs::Wshim::from_env(env).ok();

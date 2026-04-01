@@ -434,6 +434,7 @@ impl Extensions {
     /// # Panics
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         // https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#sct-extension
         // enum {
@@ -625,6 +626,7 @@ pub fn signed_certificate_timestamp(
 /// # Panics
 ///
 /// Panics if writing to an internal buffer fails, which should never happen.
+#[must_use]
 pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     let sig: EcdsaSignature = signing_key.sign(msg);
     let sig_der = sig.to_der();

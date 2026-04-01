@@ -130,6 +130,7 @@ impl CertPool {
     /// # Errors
     ///
     /// Returns an error if there are issues DER-encoding the certificate.
+    #[must_use]
     pub fn by_fingerprint(&self, fingerprint: &[u8; 32]) -> Option<&Certificate> {
         if let Some(idx) = self.by_fingerprint.get(fingerprint) {
             self.certs.get(*idx)
@@ -139,6 +140,7 @@ impl CertPool {
     }
 
     /// Find a certificate by its subject Distinguished Name.
+    #[must_use]
     pub fn find_by_subject(&self, subject: &x509_cert::name::Name) -> Option<&Certificate> {
         if let Some(indices) = self.by_name.get(&subject.to_string()) {
             indices.first().and_then(|&idx| self.certs.get(idx))

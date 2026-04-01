@@ -21,6 +21,10 @@ See instructions in the [ct_worker](crates/ct_worker/README.md) crate for deploy
 
     cargo test
 
+## Lint
+
+    cargo clippy -- -D warnings -W clippy::pedantic
+
 ## Benchmark
 
     cargo bench

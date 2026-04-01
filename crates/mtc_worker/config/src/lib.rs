@@ -64,6 +64,7 @@ impl LogParams {
     /// in the example above). The extra (expired) landmark is needed to compute
     /// subtrees for all active landmarks. See `LandmarkSequence` documentation
     /// for details.
+    #[must_use]
     pub fn max_active_landmarks(&self) -> usize {
         self.max_certificate_lifetime_secs
             .div_ceil(self.landmark_interval_secs)

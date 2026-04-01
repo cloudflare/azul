@@ -23,6 +23,7 @@ pub struct MtcCosigner {
 
 impl MtcCosigner {
     /// Return a checkpoint cosigner.
+    #[must_use]
     pub fn new_checkpoint(
         cosigner_id: TrustAnchorID,
         log_id: TrustAnchorID,
@@ -61,16 +62,19 @@ impl MtcCosigner {
     }
 
     /// Return the log ID.
+    #[must_use]
     pub fn log_id(&self) -> &TrustAnchorID {
         &self.v.log_id
     }
 
     /// Return the cosigner ID.
+    #[must_use]
     pub fn cosigner_id(&self) -> &TrustAnchorID {
         &self.v.cosigner_id
     }
 
     /// Return the verifying key as bytes.
+    #[must_use]
     pub fn verifying_key(&self) -> &[u8] {
         self.v.verifying_key.as_bytes()
     }
@@ -119,6 +123,7 @@ impl MtcNoteVerifier {
     ///
     /// Will panic if the trust anchor ID cannot be parsed as a valid key name
     /// according to <https://c2sp.org/signed-note#format>.
+    #[must_use]
     pub fn new_checkpoint(
         cosigner_id: TrustAnchorID,
         log_id: TrustAnchorID,

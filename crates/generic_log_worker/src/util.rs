@@ -9,10 +9,12 @@ use parking_lot::ReentrantMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Returns the current Unix timestamp at millisecond precision.
+#[must_use]
 #[cfg(not(test))]
 pub fn now_millis() -> u64 {
     worker::Date::now().as_millis()
 }
+#[must_use]
 #[cfg(test)]
 pub fn now_millis() -> u64 {
     let _lock = TIME_MUX.lock();

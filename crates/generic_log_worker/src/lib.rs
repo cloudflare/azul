@@ -612,6 +612,7 @@ pub struct ObjectBucket {
 }
 
 impl ObjectBucket {
+    #[must_use]
     pub fn new(bucket: Bucket) -> Self {
         ObjectBucket {
             bucket,
@@ -630,7 +631,7 @@ impl ObjectBackend for ObjectBucket {
         let start = now_millis();
         let mut metadata = HttpMetadata::default();
         if let Some(content_type) = &opts.content_type {
-            metadata.content_type = Some(content_type.to_string());
+            metadata.content_type = Some(content_type.clone());
         } else {
             metadata.content_type = Some("application/octet-stream".into());
         }
@@ -698,6 +699,7 @@ pub struct CachedRoObjectBucket {
 }
 
 impl CachedRoObjectBucket {
+    #[must_use]
     pub fn new(bucket: ObjectBucket) -> Self {
         CachedRoObjectBucket {
             bucket,
