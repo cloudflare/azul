@@ -225,7 +225,15 @@ fn is_precert_signing_cert(cert: &Certificate) -> Result<bool, StaticCTError> {
 ///   - The precert's `Issuer` is changed to the Issuer of the intermediate
 ///   - The precert's `AuthorityKeyId` is changed to the `AuthorityKeyId` of the
 ///     intermediate.
-fn build_precert_tbs(
+///
+/// This function also serves as the public entry point for building the TBS
+/// used in a precert SCT (the TBS with poison removed), which is what the CT
+/// log signs over for `precert_entry` records.
+///
+/// # Errors
+///
+/// Returns an error if the certificate is not a valid precertificate.
+pub fn build_precert_tbs(
     tbs: &TbsCertificate,
     issuer_opt: Option<&TbsCertificate>,
 ) -> Result<Vec<u8>, StaticCTError> {

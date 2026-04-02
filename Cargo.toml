@@ -6,6 +6,24 @@
 # See: https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html#details
 resolver = "2"
 members = ["crates/*", "fuzz"]
+# Exclude integration_tests from the default test run — it requires a live
+# wrangler dev instance and will hang if run without one.
+# Run explicitly with: cargo test -p integration_tests --test static_ct_api
+default-members = [
+    "crates/ct_worker",
+    "crates/generic_log_worker",
+    "crates/length_prefixed",
+    "crates/mtc_api",
+    "crates/mtc_worker",
+    "crates/sct_validator",
+    "crates/signed_note",
+    "crates/signed_note_wasm",
+    "crates/static_ct_api",
+    "crates/tlog_tiles",
+    "crates/tlog_tiles_wasm",
+    "crates/x509_util",
+    "fuzz",
+]
 
 [workspace.package]
 version = "0.2.0"
@@ -63,13 +81,14 @@ serde-wasm-bindgen = "0.6.5"
 serde_bytes = "0.11"
 serde_json = "1.0"
 serde_with = { version = "3.9.0", features = ["base64"] }
-sha2 = "0.11.0-rc.2"
+sha2 = "0.10"
 signature = "2.2.0"
 signed_note = { path = "crates/signed_note", version = "0.2.0" }
 static_ct_api = { path = "crates/static_ct_api", version = "0.2.0" }
 thiserror = "2.0"
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }
+reqwest = { version = "0.12", features = ["json"] }
 url = "2.2"
 wasm-bindgen = "0.2"
 worker = "0.7.4"
