@@ -1,2 +1,2 @@
 #!/bin/sh
-rm -r .wrangler/state
+rm -rf .wrangler/state

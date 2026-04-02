@@ -20,7 +20,7 @@ fuzz/                  - cargo-fuzz targets for tlog parsing
 ```bash
 cargo build                      # build all workspace crates
 cargo clippy -- -D warnings      # lint; warnings are errors in CI
-cargo test                       # run all tests
+cargo test                       # run all unit tests (excludes integration_tests — requires wrangler dev)
 cargo bench                      # run benchmarks (criterion in signed_note)
 
 # Fuzzing (nightly required)
@@ -30,6 +30,22 @@ cargo fuzz run fuzz_parse_checkpoint
 # Worker local dev (run from crates/ct_worker/ or crates/mtc_worker/)
 npx wrangler -e=dev dev
 ./reset-dev.sh                   # clear local wrangler state between runs
+
+# Integration tests (requires wrangler dev to be running)
+
+# CT worker tests — from crates/ct_worker/:
+npx wrangler -e=dev dev &
+# From workspace root:
+cargo test -p integration_tests --test static_ct_api
+# Override defaults:
+BASE_URL=http://localhost:8787 LOG_NAME=dev2026h1a cargo test -p integration_tests --test static_ct_api
+
+# MTC worker tests — from crates/mtc_worker/:
+npx wrangler -e=dev dev &
+# From workspace root:
+cargo test -p integration_tests --test mtc_api
+# Override defaults:
+BASE_URL=http://localhost:8787 MTC_LOG_NAME=dev2 cargo test -p integration_tests --test mtc_api
 
 # Worker deploy
 npx wrangler -e=${ENV} deploy

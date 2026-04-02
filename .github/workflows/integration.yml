@@ -1,0 +1,108 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integration-ct:
+    name: CT Worker Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack@0.13.1 --locked
+
+      - name: Install worker-build
+        run: cargo install worker-build@0.7.5 --locked
+
+      - name: Build ct_worker (dev environment)
+        working-directory: crates/ct_worker
+        run: DEPLOY_ENV=dev worker-build --release
+
+      # .dev.vars contains the per-shard signing and witness keys used by
+      # wrangler dev. These are dev-only keys (not production secrets) and are
+      # committed to the repository.
+      - name: Start wrangler dev
+        working-directory: crates/ct_worker
+        run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
+
+      - name: Wait for wrangler dev to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8787/logs/dev2026h1a/ct/v1/get-roots > /dev/null 2>&1; then
+              echo "wrangler dev is ready"
+              exit 0
+            fi
+            echo "Waiting for wrangler dev... attempt $i/30"
+            sleep 2
+          done
+          echo "wrangler dev failed to start in time"
+          exit 1
+
+      - name: Run CT integration tests
+        run: cargo test -p integration_tests --test static_ct_api --verbose
+        env:
+          BASE_URL: http://localhost:8787
+          LOG_NAME: dev2026h1a
+
+  integration-mtc:
+    name: MTC Worker Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack@0.13.1 --locked
+
+      - name: Install worker-build
+        run: cargo install worker-build@0.7.5 --locked
+
+      - name: Build mtc_worker (dev environment, with dev-bootstrap-roots)
+        working-directory: crates/mtc_worker
+        # wrangler.jsonc dev build already includes --features dev-bootstrap-roots
+        run: DEPLOY_ENV=dev worker-build --release --features dev-bootstrap-roots
+
+      # .dev.vars contains the per-log signing and cosigning keys used by
+      # wrangler dev. These are dev-only keys (not production secrets) and are
+      # committed to the repository.
+      - name: Start wrangler dev
+        working-directory: crates/mtc_worker
+        run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
+
+      - name: Wait for wrangler dev to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8787/logs/dev2/get-roots > /dev/null 2>&1; then
+              echo "wrangler dev is ready"
+              exit 0
+            fi
+            echo "Waiting for wrangler dev... attempt $i/30"
+            sleep 2
+          done
+          echo "wrangler dev failed to start in time"
+          exit 1
+
+      - name: Run MTC integration tests
+        run: cargo test -p integration_tests --test mtc_api --verbose
+        env:
+          BASE_URL: http://localhost:8787
+          MTC_LOG_NAME: dev2

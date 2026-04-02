@@ -221,7 +221,7 @@ pub fn serialize_signatureless_cert(
         }
     };
     let spki: SubjectPublicKeyInfo<Any, BitString> = SubjectPublicKeyInfo::from_der(spki_der)?;
-    let spki_hash = OctetString::new(Sha256::digest(spki_der).as_slice())?;
+    let spki_hash = OctetString::new(&Sha256::digest(spki_der)[..])?;
     if spki_hash != entry.subject_public_key_info_hash {
         return Err(MtcError::Dynamic("spki hash mismatch".to_string()));
     }
@@ -510,7 +510,7 @@ pub fn tbs_cert_to_log_entry(
         validity,
         subject: bootstrap.subject,
         subject_public_key_info_hash: OctetString::new(
-            Sha256::digest(bootstrap.subject_public_key_info.to_der()?).as_slice(),
+            &Sha256::digest(bootstrap.subject_public_key_info.to_der()?)[..],
         )?,
         issuer_unique_id: bootstrap.issuer_unique_id,
         subject_unique_id: bootstrap.subject_unique_id,
@@ -575,9 +575,7 @@ pub fn validate_correspondence(
             ));
         }
         if log_entry.subject_public_key_info_hash
-            != OctetString::new(
-                Sha256::digest(bootstrap.subject_public_key_info.to_der()?).as_slice(),
-            )?
+            != OctetString::new(&Sha256::digest(bootstrap.subject_public_key_info.to_der()?)[..])?
         {
             return Err(MtcError::Dynamic(
                 "entry spki hash must match hash of bootstrap spki".into(),
