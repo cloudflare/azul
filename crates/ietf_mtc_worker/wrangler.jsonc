@@ -56,18 +56,18 @@
                 }
             ]
         },
-        "ietf-mtc-ca": {
+        "draft02": {
             "build": {
-                "command": "cargo install -q worker-build@0.7.5 && DEPLOY_ENV=ietf-mtc-ca worker-build --release"
+                "command": "cargo install -q worker-build@0.7.5 && DEPLOY_ENV=prod worker-build --release"
             },
             "route": {
-                "pattern": "ietf-mtc-ca.cloudflareresearch.com",
+                "pattern": "draft02.cloudflareresearch.com",
                 "custom_domain": true
             },
             "r2_buckets": [
                 {
-                    "bucket_name": "ietf-mtc-ca-shard1",
-                    "binding": "public_shard1"
+                    "bucket_name": "draft02-shard1",
+                    "binding": "public_draft02_shard1"
                 }
             ],
             "durable_objects": {

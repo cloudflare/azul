@@ -12,7 +12,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{
     asn1::{BitString, OctetString},
     oid::{db::rfc5280::ID_CE_SUBJECT_ALT_NAME, ObjectIdentifier},
-    Any, Decode, Encode, Sequence, ValueOrd,
+    Any, Decode, Encode, Reader,
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ use x509_cert::{
     name::{Name, RdnSequence},
     request::CertReq,
     serial_number::SerialNumber,
-    spki::{AlgorithmIdentifier, SubjectPublicKeyInfo},
+    spki::{AlgorithmIdentifier, AlgorithmIdentifierOwned, SubjectPublicKeyInfo},
     time::Validity,
     Certificate, TbsCertificate,
 };
@@ -231,6 +231,9 @@ pub fn build_pending_entry(
     let spki_der = csr.info.public_key.to_der()?;
     let spki_hash = OctetString::new(&Sha256::digest(&spki_der)[..])?;
 
+    // Extract the AlgorithmIdentifier from the SPKI (new field in plants-02).
+    let spki_algorithm = csr.info.public_key.algorithm;
+
     // Extract SubjectAltName from the CSR's extensionRequest attribute (RFC 2985 §5.4.2).
     let extensions = extract_san_from_csr(&csr.info.attributes)?;
 
@@ -239,6 +242,7 @@ pub fn build_pending_entry(
         issuer,
         validity,
         subject,
+        subject_public_key_info_algorithm: spki_algorithm,
         subject_public_key_info_hash: spki_hash,
         issuer_unique_id: None,
         subject_unique_id: None,
@@ -400,13 +404,15 @@ impl MerkleTreeCertEntry {
             Self::NullEntry => Ok((MerkleTreeCertEntryType::NullEntry as u16)
                 .to_be_bytes()
                 .to_vec()),
-            Self::TbsCertEntry(tbs_cert_entry) => Ok([
-                (MerkleTreeCertEntryType::TbsCertEntry as u16)
+            Self::TbsCertEntry(tbs_cert_entry) => {
+                // plants-02: fields are written directly after the u16 type tag,
+                // without an outer ASN.1 SEQUENCE wrapper (dropped in davidben-10).
+                let mut out = (MerkleTreeCertEntryType::TbsCertEntry as u16)
                     .to_be_bytes()
-                    .to_vec(),
-                tbs_cert_entry.to_der()?,
-            ]
-            .concat()),
+                    .to_vec();
+                out.extend(tbs_cert_entry.encode_fields()?);
+                Ok(out)
+            }
         }
     }
 
@@ -427,31 +433,178 @@ impl MerkleTreeCertEntry {
                 }
             }
             MerkleTreeCertEntryType::TbsCertEntry => {
-                let tbs_cert_entry = TbsCertificateLogEntry::from_der(data)?;
+                // plants-02: the remaining bytes are raw field DER (no SEQUENCE wrapper).
+                let tbs_cert_entry = TbsCertificateLogEntry::decode_fields(data)?;
                 Ok(Self::TbsCertEntry(tbs_cert_entry))
             }
         }
     }
 }
 
-/// A `TBSCertificateLogEntry` as defined in draft-ietf-plants-merkle-tree-certs §5.3.
+/// A `TBSCertificateLogEntry` as defined in draft-ietf-plants-merkle-tree-certs §5.3
+/// (plants-02).
 ///
 /// Differs from a standard `TBSCertificate` in that `subject_public_key_info`
-/// is replaced by `subject_public_key_info_hash` (SHA-256 of the DER-encoded SPKI).
-#[derive(Clone, Debug, Eq, PartialEq, Sequence, ValueOrd)]
+/// is replaced by two separate fields:
+/// - `subject_public_key_info_algorithm`: the `AlgorithmIdentifier` from the SPKI
+///   (new in plants-02; not present in davidben-09)
+/// - `subject_public_key_info_hash`: SHA-256 of the full DER-encoded SPKI
+///
+/// Unlike in davidben-09, the entry is **not** wrapped in an ASN.1 SEQUENCE —
+/// the fields are encoded as raw concatenated DER values (the SEQUENCE wrapper
+/// was dropped in davidben-10).  For this reason we implement `Encode`/`Decode`
+/// manually rather than using `#[derive(Sequence)]`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TbsCertificateLogEntry {
-    #[asn1(context_specific = "0", default = "Default::default")]
     pub version: Version,
     pub issuer: Name,
     pub validity: Validity,
     pub subject: Name,
+    /// The `AlgorithmIdentifier` from the submitted SPKI (new in plants-02).
+    pub subject_public_key_info_algorithm: AlgorithmIdentifierOwned,
+    /// SHA-256 of the full DER-encoded `SubjectPublicKeyInfo`.
     pub subject_public_key_info_hash: OctetString,
-    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
     pub issuer_unique_id: Option<BitString>,
-    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
     pub subject_unique_id: Option<BitString>,
-    #[asn1(context_specific = "3", tag_mode = "EXPLICIT", optional = "true")]
     pub extensions: Option<Extensions>,
+}
+
+impl TbsCertificateLogEntry {
+    /// Encode all fields as raw concatenated DER (no outer SEQUENCE wrapper).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `der::Error` if any field cannot be encoded.
+    pub fn encode_fields(&self) -> der::Result<Vec<u8>> {
+        // Manually encode each field using der::Encode and collect into a Vec.
+        // This is equivalent to the content bytes of a SEQUENCE, but without
+        // the SEQUENCE tag and length prefix.
+        let mut buf = Vec::new();
+
+        // version [0] EXPLICIT INTEGER DEFAULT 0 — omit if V1 (default)
+        if self.version != Version::V1 {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<Version> {
+                tag_number: der::TagNumber::N0,
+                tag_mode: TagMode::Explicit,
+                value: self.version,
+            };
+            tagged.encode_to_vec(&mut buf)?;
+        }
+
+        self.issuer.encode_to_vec(&mut buf)?;
+        self.validity.encode_to_vec(&mut buf)?;
+        self.subject.encode_to_vec(&mut buf)?;
+        self.subject_public_key_info_algorithm
+            .encode_to_vec(&mut buf)?;
+        self.subject_public_key_info_hash.encode_to_vec(&mut buf)?;
+
+        // issuerUniqueID [1] IMPLICIT BIT STRING OPTIONAL
+        if let Some(ref v) = self.issuer_unique_id {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<BitString> {
+                tag_number: der::TagNumber::N1,
+                tag_mode: TagMode::Implicit,
+                value: v.clone(),
+            };
+            tagged.encode_to_vec(&mut buf)?;
+        }
+
+        // subjectUniqueID [2] IMPLICIT BIT STRING OPTIONAL
+        if let Some(ref v) = self.subject_unique_id {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<BitString> {
+                tag_number: der::TagNumber::N2,
+                tag_mode: TagMode::Implicit,
+                value: v.clone(),
+            };
+            tagged.encode_to_vec(&mut buf)?;
+        }
+
+        // extensions [3] EXPLICIT Extensions OPTIONAL
+        if let Some(ref exts) = self.extensions {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<Extensions> {
+                tag_number: der::TagNumber::N3,
+                tag_mode: TagMode::Explicit,
+                value: exts.clone(),
+            };
+            tagged.encode_to_vec(&mut buf)?;
+        }
+
+        Ok(buf)
+    }
+
+    /// Decode all fields from raw concatenated DER (no outer SEQUENCE wrapper).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MtcError` if the data is malformed.
+    pub fn decode_fields(data: &[u8]) -> Result<Self, MtcError> {
+        use der::{asn1::ContextSpecific, SliceReader, TagNumber};
+
+        let mut reader = SliceReader::new(data)?;
+
+        // version [0] EXPLICIT INTEGER DEFAULT V1
+        let version = if reader.peek_tag().ok().is_some_and(|t| {
+            t == der::Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber::N0,
+            }
+        }) {
+            let cs = ContextSpecific::<Version>::decode(&mut reader)?;
+            cs.value
+        } else {
+            Version::V1
+        };
+
+        let issuer = Name::decode(&mut reader)?;
+        let validity = Validity::decode(&mut reader)?;
+        let subject = Name::decode(&mut reader)?;
+        let subject_public_key_info_algorithm = AlgorithmIdentifierOwned::decode(&mut reader)?;
+        let subject_public_key_info_hash = OctetString::decode(&mut reader)?;
+
+        // issuerUniqueID [1] IMPLICIT BIT STRING OPTIONAL
+        let issuer_unique_id =
+            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber::N1)?
+                .map(|cs| cs.value);
+
+        // subjectUniqueID [2] IMPLICIT BIT STRING OPTIONAL
+        let subject_unique_id =
+            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber::N2)?
+                .map(|cs| cs.value);
+
+        // extensions [3] EXPLICIT Extensions OPTIONAL
+        let extensions = if reader.peek_tag().ok().is_some_and(|t| {
+            t == der::Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber::N3,
+            }
+        }) {
+            let cs = ContextSpecific::<Extensions>::decode(&mut reader)?;
+            Some(cs.value)
+        } else {
+            None
+        };
+
+        reader
+            .finish(Self {
+                version,
+                issuer,
+                validity,
+                subject,
+                subject_public_key_info_algorithm,
+                subject_public_key_info_hash,
+                issuer_unique_id,
+                subject_unique_id,
+                extensions,
+            })
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
