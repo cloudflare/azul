@@ -1435,29 +1435,28 @@ dependencies = [
 name = "ietf_mtc_api"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "byteorder",
  "der",
  "ed25519-dalek",
  "length_prefixed",
  "rand",
  "serde",
+ "serde_json",
  "serde_with",
  "sha2",
  "signed_note",
  "thiserror 2.0.17",
  "tlog_tiles",
  "x509-cert",
- "x509_util",
 ]
 
 [[package]]
 name = "ietf_mtc_worker"
 version = "0.2.0"
 dependencies = [
- "base64",
  "base64ct",
  "chrono",
- "csv",
  "der",
  "ed25519-dalek",
  "futures-executor",
@@ -1471,7 +1470,6 @@ dependencies = [
  "p256",
  "parking_lot",
  "rand",
- "sct_validator",
  "serde",
  "serde_json",
  "serde_with",
@@ -1481,13 +1479,13 @@ dependencies = [
  "url",
  "worker",
  "x509-cert",
- "x509_util",
 ]
 
 [[package]]
 name = "ietf_mtc_worker_config"
 version = "0.2.0"
 dependencies = [
+ "ietf_mtc_api",
  "serde",
 ]
 

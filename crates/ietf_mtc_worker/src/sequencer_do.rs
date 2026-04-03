@@ -13,7 +13,7 @@ use generic_log_worker::{
     SEQUENCER_BINDING,
 };
 use ietf_mtc_api::{
-    BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
+    IetfMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
     LANDMARK_KEY,
 };
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use tlog_tiles::{CheckpointText, Hash, UnixTimestamp};
 use worker::*;
 
 #[durable_object(alarm)]
-struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
+struct Sequencer(GenericSequencer<IetfMtcLogEntry>);
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {

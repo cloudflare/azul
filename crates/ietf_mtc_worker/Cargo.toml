@@ -11,9 +11,6 @@ description = "An implementation of IETF Merkle Tree Certificates on Cloudflare 
 categories = ["cryptography"]
 keywords = ["certificate", "transparency", "crypto", "pki"]
 
-[features]
-dev-bootstrap-roots = []
-
 [package.metadata.release]
 release = false
 
@@ -43,11 +40,9 @@ parking_lot.workspace = true
 futures-executor.workspace = true
 
 [dependencies]
-base64.workspace = true
 base64ct.workspace = true
 chrono.workspace = true
 config = { path = "./config", package = "ietf_mtc_worker_config" }
-csv.workspace = true
 der.workspace = true
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
@@ -62,9 +57,7 @@ tlog_tiles.workspace = true
 tokio.workspace = true
 worker.workspace = true
 x509-cert.workspace = true
-x509_util.workspace = true
 ietf_mtc_api.workspace = true
-sct_validator.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
