@@ -6,7 +6,7 @@
 use config::AppConfig;
 use der::asn1::Utf8StringRef;
 use der::{asn1::SetOfVec, Any, Tag};
-use mtc_api::ID_RDNA_TRUSTANCHOR_ID;
+use bootstrap_mtc_api::ID_RDNA_TRUSTANCHOR_ID;
 use std::env;
 use std::fs;
 use url::Url;

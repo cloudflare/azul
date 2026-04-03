@@ -679,10 +679,10 @@ pub fn validate_correspondence(
 ///   chain must start with a leaf certificate and end with a certificate that
 ///   is a trusted root or is signed by a trusted root.
 /// * `roots` - A certificate pool containing the trusted roots.
-/// * `issuer` - The issuer name of the Merkle Tree CA, to replace the issuer in
+/// * `issuer` - The issuer name of the MTC CA, to replace the issuer in
 ///   the bootstrap certificate.
 /// * `validity` - A bound on the maximum validity period for the returned
-///   Merkle Tree log entry, based on the Merkle Tree CA's parameters. This
+///   Merkle Tree log entry, based on the MTC CA's parameters. This
 ///   bound is further adjusted to ensure that it is covered by the bootstrap
 ///   chain.
 ///

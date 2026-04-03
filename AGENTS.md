@@ -8,7 +8,7 @@ Azul is a Rust workspace implementing tiled Certificate Transparency logs and Me
 
 ```
 crates/ct_worker/      - Static CT API Worker (deployable); wrangler.jsonc here
-crates/mtc_worker/     - Merkle Tree CA Worker (deployable); wrangler.jsonc here
+crates/bootstrap_mtc_worker/     - Bootstrap MTC CA Worker (deployable); wrangler.jsonc here
 crates/generic_log_worker/ - Shared Durable Object logic (Sequencer, Batcher, Cleaner)
 crates/tlog_tiles/     - C2SP tlog-tiles spec impl (published to crates.io)
 crates/static_ct_api/  - C2SP static-ct-api spec impl (published to crates.io)
@@ -27,7 +27,7 @@ cargo bench                      # run benchmarks (criterion in signed_note)
 cargo fuzz run fuzz_parse_tile_path
 cargo fuzz run fuzz_parse_checkpoint
 
-# Worker local dev (run from crates/ct_worker/ or crates/mtc_worker/)
+# Worker local dev (run from crates/ct_worker/ or crates/bootstrap_mtc_worker/)
 npx wrangler -e=dev dev
 ./reset-dev.sh                   # clear local wrangler state between runs
 
@@ -40,12 +40,12 @@ cargo test -p integration_tests --test static_ct_api
 # Override defaults:
 BASE_URL=http://localhost:8787 LOG_NAME=dev2026h1a cargo test -p integration_tests --test static_ct_api
 
-# MTC worker tests — from crates/mtc_worker/:
+# Bootstrap MTC worker tests — from crates/bootstrap_mtc_worker/:
 npx wrangler -e=dev dev &
 # From workspace root:
-cargo test -p integration_tests --test mtc_api
+cargo test -p integration_tests --test bootstrap_mtc_api
 # Override defaults:
-BASE_URL=http://localhost:8787 MTC_LOG_NAME=dev2 cargo test -p integration_tests --test mtc_api
+BASE_URL=http://localhost:8787 BOOTSTRAP_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test bootstrap_mtc_api
 
 # Worker deploy
 npx wrangler -e=${ENV} deploy
@@ -56,7 +56,7 @@ npx wrangler -e=${ENV} tail
 
 - Worker crates use `crate-type = ["cdylib"]`; library crates use `rlib`
 - Worker build is handled by `worker-build`, not `cargo build` directly — wrangler.jsonc invokes it automatically
-- Config types live in separate sub-crates: `crates/ct_worker/config/`, `crates/mtc_worker/config/`
+- Config types live in separate sub-crates: `crates/ct_worker/config/`, `crates/bootstrap_mtc_worker/config/`
 - `DEPLOY_ENV=<env>` env var must be set when invoking `worker-build` manually; wrangler.jsonc sets it per environment
 - `der` crate is patched to a private fork in `Cargo.toml` `[patch.crates-io]` — do not remove or alter this
 

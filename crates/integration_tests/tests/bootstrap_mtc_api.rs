@@ -1,12 +1,12 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! Integration tests for the MTC API (`mtc_worker`).
+//! Integration tests for the MTC API (`bootstrap_mtc_worker`).
 //!
 //! These tests require a running `wrangler dev` instance built with the
 //! `dev-bootstrap-roots` feature (already configured in `wrangler.jsonc`).
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
-//! Set `MTC_LOG_NAME` to choose which log shard; defaults to `dev2`.
+//! Set `BOOTSTRAP_MTC_LOG_NAME` to choose which log shard; defaults to `dev2`.
 //!
 //! `dev2` is preferred because its `landmark_interval_secs: 10` makes the
 //! landmark-dependent `get_certificate` test feasible without a long wait.
@@ -14,18 +14,18 @@
 //! # Running
 //!
 //! ```text
-//! # From crates/mtc_worker/:
+//! # From crates/bootstrap_mtc_worker/:
 //! npx wrangler -e=dev dev &
 //!
 //! # From workspace root:
-//! cargo test -p integration_tests --test mtc_api
+//! cargo test -p integration_tests --test bootstrap_mtc_api
 //! ```
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use integration_tests::{
-    client::MtcClient,
-    fixtures::{garbage_chain, make_mtc_chain},
+    client::BootstrapMtcClient,
+    fixtures::{garbage_chain, make_bootstrap_mtc_chain},
 };
 use tokio::sync::OnceCell;
 use x509_cert::{der::Decode, Certificate};
@@ -57,9 +57,9 @@ async fn ensure_initialized() {
             const MAX_ATTEMPTS: u32 = 30;
             const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-            let log_name = integration_tests::client::mtc_log_name();
-            let client = MtcClient::new(&log_name);
-            let mtc_chain = make_mtc_chain(&log_name).expect("make_mtc_chain for warmup");
+            let log_name = integration_tests::client::bootstrap_mtc_log_name();
+            let client = BootstrapMtcClient::new(&log_name);
+            let mtc_chain = make_bootstrap_mtc_chain(&log_name).expect("make_bootstrap_mtc_chain for warmup");
 
             // Wait until get-roots succeeds before attempting add-entry.
             // get-roots triggers the CCADB fetch that populates the ROOTS
@@ -73,7 +73,7 @@ async fn ensure_initialized() {
                 }
             }
             if !roots_ready {
-                panic!("mtc_worker get-roots never succeeded after {MAX_ATTEMPTS}s");
+                panic!("bootstrap_mtc_worker get-roots never succeeded after {MAX_ATTEMPTS}s");
             }
 
             for attempt in 0..MAX_ATTEMPTS {
@@ -100,7 +100,7 @@ async fn ensure_initialized() {
                 tokio::time::sleep(RETRY_DELAY).await;
             }
 
-            panic!("mtc_worker failed to initialize after {MAX_ATTEMPTS}s");
+            panic!("bootstrap_mtc_worker failed to initialize after {MAX_ATTEMPTS}s");
         })
         .await;
 }
@@ -114,7 +114,7 @@ async fn ensure_initialized() {
 #[tokio::test]
 async fn get_roots_returns_valid_certs() {
     ensure_initialized().await;
-    let client = MtcClient::default_log();
+    let client = BootstrapMtcClient::default_log();
     let roots = client.get_roots().await.expect("get-roots failed");
 
     assert!(
@@ -131,7 +131,7 @@ async fn get_roots_returns_valid_certs() {
 /// `GET /logs/:log/metadata` returns 200 with all required fields.
 #[tokio::test]
 async fn metadata_returns_valid_fields() {
-    let client = MtcClient::default_log();
+    let client = BootstrapMtcClient::default_log();
     let meta = client.get_metadata().await.expect("metadata failed");
 
     // log_id and cosigner_id are dotted-decimal relative OIDs.
@@ -170,12 +170,12 @@ async fn metadata_returns_valid_fields() {
 }
 
 /// `POST /logs/:log/add-entry` with a valid bootstrap chain returns 200 with
-/// a structurally valid `AddEntryResponse`.
+/// a structurally valid `BootstrapMtcAddEntryResponse`.
 #[tokio::test]
 async fn add_entry_returns_valid_response() {
     ensure_initialized().await;
-    let client = MtcClient::default_log();
-    let mtc_chain = make_mtc_chain(&client.log).expect("generating MTC chain");
+    let client = BootstrapMtcClient::default_log();
+    let mtc_chain = make_bootstrap_mtc_chain(&client.log).expect("generating MTC chain");
 
     let (status, resp) = client
         .add_entry(mtc_chain.chain)
@@ -204,7 +204,7 @@ async fn add_entry_returns_valid_response() {
 #[tokio::test]
 async fn add_entry_with_garbage_chain_returns_400() {
     ensure_initialized().await;
-    let client = MtcClient::default_log();
+    let client = BootstrapMtcClient::default_log();
     let (status, _) = client
         .add_entry(garbage_chain())
         .await
@@ -215,7 +215,7 @@ async fn add_entry_with_garbage_chain_returns_400() {
 /// Requesting an unknown log name returns 400.
 #[tokio::test]
 async fn unknown_log_returns_400() {
-    let client = MtcClient::new("this-log-does-not-exist");
+    let client = BootstrapMtcClient::new("this-log-does-not-exist");
     let status = client
         .get_status("get-roots")
         .await
@@ -227,8 +227,8 @@ async fn unknown_log_returns_400() {
 #[tokio::test]
 async fn add_entry_appears_in_checkpoint() {
     ensure_initialized().await;
-    let client = MtcClient::default_log();
-    let mtc_chain = make_mtc_chain(&client.log).expect("generating MTC chain");
+    let client = BootstrapMtcClient::default_log();
+    let mtc_chain = make_bootstrap_mtc_chain(&client.log).expect("generating MTC chain");
 
     let (status, resp) = client
         .add_entry(mtc_chain.chain)
@@ -273,20 +273,20 @@ async fn add_entry_appears_in_checkpoint() {
 /// certificate once a landmark has been produced.
 ///
 /// This test uses `dev2` (10s landmark interval) and retries for up to 30s.
-/// It is skipped if `MTC_LOG_NAME` is set to a log with a longer interval.
+/// It is skipped if `BOOTSTRAP_MTC_LOG_NAME` is set to a log with a longer interval.
 #[tokio::test]
 async fn get_certificate_returns_valid_cert() {
     ensure_initialized().await;
     // This test only makes sense against a fast-landmark shard (dev2).
     // If someone overrides to a slow shard, skip rather than timeout.
-    let log_name = integration_tests::client::mtc_log_name();
+    let log_name = integration_tests::client::bootstrap_mtc_log_name();
     if log_name != "dev2" {
-        eprintln!("Skipping get_certificate test: MTC_LOG_NAME={log_name} (not dev2)");
+        eprintln!("Skipping get_certificate test: BOOTSTRAP_MTC_LOG_NAME={log_name} (not dev2)");
         return;
     }
 
-    let client = MtcClient::new(&log_name);
-    let mtc_chain = make_mtc_chain(&log_name).expect("generating MTC chain");
+    let client = BootstrapMtcClient::new(&log_name);
+    let mtc_chain = make_bootstrap_mtc_chain(&log_name).expect("generating MTC chain");
     let leaf_spki_der = mtc_chain.leaf_spki_der.clone();
 
     let (status, resp) = client

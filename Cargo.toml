@@ -5,7 +5,22 @@
 # This is needed to avoid pulling in tokio features in wasm targets, due to new features in version 0.0.18 of the `worker` crate
 # See: https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html#details
 resolver = "2"
-members = ["crates/*", "fuzz"]
+members = [
+    "crates/bootstrap_mtc_api",
+    "crates/bootstrap_mtc_worker",
+    "crates/ct_worker",
+    "crates/generic_log_worker",
+    "crates/integration_tests",
+    "crates/length_prefixed",
+    "crates/sct_validator",
+    "crates/signed_note",
+    "crates/signed_note_wasm",
+    "crates/static_ct_api",
+    "crates/tlog_tiles",
+    "crates/tlog_tiles_wasm",
+    "crates/x509_util",
+    "fuzz",
+]
 # Exclude integration_tests from the default test run — it requires a live
 # wrangler dev instance and will hang if run without one.
 # Run explicitly with: cargo test -p integration_tests --test static_ct_api
@@ -13,8 +28,8 @@ default-members = [
     "crates/ct_worker",
     "crates/generic_log_worker",
     "crates/length_prefixed",
-    "crates/mtc_api",
-    "crates/mtc_worker",
+    "crates/bootstrap_mtc_api",
+    "crates/bootstrap_mtc_worker",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
@@ -70,7 +85,7 @@ jsonschema = "0.30"
 length_prefixed = { path = "crates/length_prefixed" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
-mtc_api = { version = "0.2.0", path = "crates/mtc_api" }
+bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
 p256 = { version = "0.13", features = ["ecdsa"] }
 parking_lot = "0.12"
 prometheus = "0.14"

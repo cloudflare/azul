@@ -12,7 +12,7 @@ use generic_log_worker::{
     CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
     SEQUENCER_BINDING,
 };
-use mtc_api::{
+use bootstrap_mtc_api::{
     BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
     LANDMARK_KEY,
 };
