@@ -41,8 +41,8 @@ pub enum StaticCTError {
     InvalidCTPoison,
     #[error("missing precertificate issuer")]
     MissingPrecertIssuer,
-    #[error("missing precertificate signing certificate issuer")]
-    MissingPrecertSigningCertificateIssuer,
+    #[error("precertificate signing certificates are not accepted")]
+    PrecertSigningCertNotAccepted,
     #[error(
         "{}certificate submitted to add-{}chain", if *.is_precert { "pre-" } else { "final " }, if *.is_precert { "" } else { "pre-" }
     )]

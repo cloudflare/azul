@@ -22,9 +22,9 @@
 
 use crate::{PrecertData, StaticCTError, StaticCTPendingLogEntry};
 use der::{
-    asn1::{Null, OctetString},
+    asn1::Null,
     oid::{
-        db::rfc5280::{ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_KP_SERVER_AUTH},
+        db::rfc5280::ID_KP_SERVER_AUTH,
         db::rfc6962::{CT_PRECERT_POISON, CT_PRECERT_SIGNING_CERT},
         AssociatedOid, ObjectIdentifier,
     },
@@ -34,12 +34,7 @@ use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use tlog_tiles::UnixTimestamp;
 use x509_cert::{
-    der::Encode,
-    ext::{
-        pkix::{AuthorityKeyIdentifier, ExtendedKeyUsage},
-        Extension,
-    },
-    impl_newtype, Certificate, TbsCertificate,
+    der::Encode, ext::pkix::ExtendedKeyUsage, impl_newtype, Certificate, TbsCertificate,
 };
 use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
 
@@ -126,16 +121,14 @@ pub fn partially_validate_chain(
             if chain_certs.is_empty() {
                 return Err(StaticCTError::MissingPrecertIssuer);
             }
-            // Handle (rarely used) precertificate signing certificates.
-            let (pre_issuer, issuer) = if is_precert_signing_cert(chain_certs[0])? {
-                // Reject if the precertificate signing certificate doesn't have an issuer.
-                if chain_certs.len() < 2 {
-                    return Err(StaticCTError::MissingPrecertSigningCertificateIssuer);
-                }
-                (Some(&chain_certs[0].tbs_certificate), chain_certs[1])
-            } else {
-                (None, chain_certs[0])
-            };
+            // Reject precertificate signing certificates.  As of 2026-03-15,
+            // CAs are no longer permitted to use them, and the static-ct-api
+            // spec (https://github.com/C2SP/C2SP/pull/218) allows logs to
+            // reject any chain that includes one.
+            if is_precert_signing_cert(chain_certs[0])? {
+                return Err(StaticCTError::PrecertSigningCertNotAccepted);
+            }
+            let issuer = chain_certs[0];
             (
                 Some(PrecertData {
                     issuer_key_hash: Sha256::digest(
@@ -144,7 +137,7 @@ pub fn partially_validate_chain(
                     .into(),
                     pre_certificate: leaf.to_der()?,
                 }),
-                build_precert_tbs(&leaf.tbs_certificate, pre_issuer)?,
+                build_precert_tbs(&leaf.tbs_certificate)?,
             )
         } else {
             (None, leaf.to_der()?)
@@ -210,33 +203,22 @@ fn is_precert_signing_cert(cert: &Certificate) -> Result<bool, StaticCTError> {
     }
 }
 
-/// Builds a Certificate Transparency pre-certificate (RFC 6962
-/// s3.1) from the given DER-encoded `TBSCertificate`, returning a DER-encoded
-/// `TBSCertificate`.
+/// Builds a Certificate Transparency pre-certificate TBS (RFC 6962 §3.1) from
+/// the given `TBSCertificate`, returning the DER-encoded result.
 ///
-/// This function removes the CT poison extension (there must be exactly 1 of
-/// these), preserving the order of other extensions.
+/// Removes the CT poison extension (there must be exactly one), preserving the
+/// order of other extensions.
 ///
-/// If `issuer_opt` is provided, this should be a Precertificate Signing Certificate
-/// that was used to sign the precert (indicated by having the special
-/// `CertificateTransparency` extended key usage).  In this case, the issuance
-/// information of the pre-cert is updated to reflect the next issuer in the
-/// chain, i.e. the issuer of this special intermediate:
-///   - The precert's `Issuer` is changed to the Issuer of the intermediate
-///   - The precert's `AuthorityKeyId` is changed to the `AuthorityKeyId` of the
-///     intermediate.
-///
-/// This function also serves as the public entry point for building the TBS
-/// used in a precert SCT (the TBS with poison removed), which is what the CT
-/// log signs over for `precert_entry` records.
+/// Note: Precertificate Signing Certificates are not supported.  CA/Browser
+/// Forum Ballot SC-092 (effective 2026-03-15) sunsetted their use:
+/// <https://cabforum.org/2025/09/02/ballot-sc-092-sunset-use-of-precertificate-signing-cas/>
+/// Chains containing a Precertificate Signing Certificate are rejected by
+/// `partially_validate_chain` before this function is called.
 ///
 /// # Errors
 ///
 /// Returns an error if the certificate is not a valid precertificate.
-pub fn build_precert_tbs(
-    tbs: &TbsCertificate,
-    issuer_opt: Option<&TbsCertificate>,
-) -> Result<Vec<u8>, StaticCTError> {
+pub fn build_precert_tbs(tbs: &TbsCertificate) -> Result<Vec<u8>, StaticCTError> {
     let mut tbs = tbs.clone();
 
     let exts = tbs
@@ -244,47 +226,12 @@ pub fn build_precert_tbs(
         .as_mut()
         .ok_or(StaticCTError::InvalidCTPoison)?;
 
-    // Remove CT poison extension.
+    // Remove CT poison extension (there must be exactly 1).
     let ct_poison_idx = exts
         .iter()
         .position(|v| v.extn_id == CT_PRECERT_POISON)
         .ok_or(StaticCTError::InvalidCTPoison)?;
     exts.remove(ct_poison_idx);
-
-    if let Some(issuer) = issuer_opt {
-        // Update the precert's Issuer field.
-        tbs.issuer = issuer.issuer.clone();
-
-        // Also need to update the cert's AuthorityKeyID extension
-        // to that of the preIssuer.
-        let issuer_auth_key_id = match issuer.get::<AuthorityKeyIdentifier>()? {
-            Some((_, aki)) => Some(OctetString::new(aki.to_der()?)?),
-            None => None,
-        };
-
-        let mut key_at: Option<usize> = None;
-        for (idx, ext) in exts.iter().enumerate() {
-            if ext.extn_id == ID_CE_AUTHORITY_KEY_IDENTIFIER {
-                key_at = Some(idx);
-            }
-        }
-
-        if let Some(idx) = key_at {
-            // PreCert has an auth-key-id; replace it with the value from the preIssuer
-            if let Some(key_id) = issuer_auth_key_id {
-                exts[idx].extn_value = key_id;
-            } else {
-                exts.remove(idx);
-            }
-        } else if let Some(key_id) = issuer_auth_key_id {
-            // PreCert did not have an auth-key-id, but the preIssuer does, so add it at the end.
-            exts.push(Extension {
-                extn_id: ID_CE_AUTHORITY_KEY_IDENTIFIER,
-                critical: false,
-                extn_value: key_id,
-            });
-        }
-    }
 
     Ok(tbs.to_der()?)
 }
@@ -293,7 +240,8 @@ pub fn build_precert_tbs(
 mod tests {
     use super::*;
     use chrono::prelude::*;
-    use der::Decode;
+    use der::{asn1::OctetString, Decode};
+    use x509_cert::ext::Extension;
     use x509_verify::x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
@@ -399,7 +347,8 @@ mod tests {
     test_not_after!(not_after_after_end; None; Some(parse_datetime("1999-01-01T00:00:00Z")); true);
     test_validate_chain!(missing_server_auth_eku_not_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; false; false; 3);
     test_validate_chain!(missing_server_auth_eku_required; "../tests/fake-root-ca-cert.pem"; "../tests/subleaf.chain"; None; None; false; true; true; 0);
-    test_validate_chain!(preissuer_chain; "../tests/test-roots.pem"; "../tests/preissuer-chain.pem"; None; None; true; true; false; 3);
+    // Precertificate Signing Certificates are now rejected unconditionally.
+    test_validate_chain!(preissuer_chain; "../tests/test-roots.pem"; "../tests/preissuer-chain.pem"; None; None; true; true; true; 0);
 
     test_validate_chain!(intermediate_as_accepted_root; "../tests/fake-intermediate-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; true; false; 1);
 
@@ -415,26 +364,13 @@ mod tests {
         let precert_chain =
             Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
         let precert = &precert_chain[0].tbs_certificate;
-        let pre_issuer = &precert_chain[1].tbs_certificate;
 
-        let der = build_precert_tbs(precert, Some(pre_issuer)).unwrap();
-
+        let der = build_precert_tbs(precert).unwrap();
         let tbs = TbsCertificate::from_der(&der).unwrap();
 
         // Ensure CT poison is removed.
         assert!(precert.get::<CTPrecertPoison>().unwrap().is_some());
         assert!(tbs.get::<CTPrecertPoison>().unwrap().is_none());
-
-        // Ensure issuer has been updated.
-        assert_ne!(precert.issuer, tbs.issuer);
-        assert_eq!(tbs.issuer, pre_issuer.issuer);
-
-        // Ensure authority key ID has been updated.
-        let old_aki = precert.get::<AuthorityKeyIdentifier>().unwrap().unwrap();
-        let aki = tbs.get::<AuthorityKeyIdentifier>().unwrap().unwrap();
-        let pre_aki = pre_issuer.get::<AuthorityKeyIdentifier>().unwrap().unwrap();
-        assert_ne!(aki, old_aki);
-        assert_eq!(aki, pre_aki);
     }
 
     fn wipe_extensions(cert: &mut Certificate) -> &Certificate {
