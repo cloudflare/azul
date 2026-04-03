@@ -1432,6 +1432,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "ietf_mtc_api"
+version = "0.2.0"
+dependencies = [
+ "byteorder",
+ "der",
+ "ed25519-dalek",
+ "length_prefixed",
+ "rand",
+ "serde",
+ "serde_with",
+ "sha2",
+ "signed_note",
+ "thiserror 2.0.17",
+ "tlog_tiles",
+ "x509-cert",
+ "x509_util",
+]
+
+[[package]]
+name = "ietf_mtc_worker"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "base64ct",
+ "chrono",
+ "csv",
+ "der",
+ "ed25519-dalek",
+ "futures-executor",
+ "generic_log_worker",
+ "getrandom 0.2.16",
+ "ietf_mtc_api",
+ "ietf_mtc_worker_config",
+ "itertools 0.14.0",
+ "jsonschema",
+ "log",
+ "p256",
+ "parking_lot",
+ "rand",
+ "sct_validator",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "signed_note",
+ "tlog_tiles",
+ "tokio",
+ "url",
+ "worker",
+ "x509-cert",
+ "x509_util",
+]
+
+[[package]]
+name = "ietf_mtc_worker_config"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

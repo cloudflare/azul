@@ -30,6 +30,8 @@ default-members = [
     "crates/length_prefixed",
     "crates/bootstrap_mtc_api",
     "crates/bootstrap_mtc_worker",
+    "crates/ietf_mtc_api",
+    "crates/ietf_mtc_worker",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
@@ -86,6 +88,7 @@ length_prefixed = { path = "crates/length_prefixed" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
 bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
+ietf_mtc_api = { version = "0.2.0", path = "crates/ietf_mtc_api" }
 p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p384 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p521 = { version = "0.14.0-rc.8", features = ["ecdsa"] }

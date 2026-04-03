@@ -1,0 +1,21 @@
+{
+    "logging_level": "info",
+    "logs": {
+        "dev1": {
+            "description": "MTCA Dev1",
+            "log_id": "44363.48.1",
+            "cosigner_id": "44363.48.2",
+            "submission_url": "http://localhost:8787/logs/dev1/",
+            "location_hint": "enam"
+        },
+        "dev2": {
+            "description": "MTCA Dev2",
+            "log_id": "44363.48.3",
+            "cosigner_id": "44363.48.4",
+            "submission_url": "http://localhost:8787/logs/dev2/",
+            "location_hint": "enam",
+            "max_certificate_lifetime_secs": 100,
+            "landmark_interval_secs": 10
+        }
+    }
+}
