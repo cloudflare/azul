@@ -47,6 +47,13 @@ cargo test -p integration_tests --test bootstrap_mtc_api
 # Override defaults:
 BASE_URL=http://localhost:8787 BOOTSTRAP_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test bootstrap_mtc_api
 
+# IETF MTC worker tests — from crates/ietf_mtc_worker/:
+npx wrangler -e=dev dev &
+# From workspace root:
+cargo test -p integration_tests --test ietf_mtc_api
+# Override defaults:
+BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
+
 # Worker deploy
 npx wrangler -e=${ENV} deploy
 npx wrangler -e=${ENV} tail
