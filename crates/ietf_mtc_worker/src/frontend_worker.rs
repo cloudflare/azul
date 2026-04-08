@@ -46,8 +46,11 @@ struct MetadataResponse<'a> {
     description: &'a Option<String>,
     log_id: String,
     cosigner_id: String,
+    /// DER-encoded `SubjectPublicKeyInfo` of the cosigner's verifying key,
+    /// base64-encoded. Includes the algorithm identifier so clients can
+    /// determine the signing algorithm without out-of-band information.
     #[serde_as(as = "Base64")]
-    cosigner_public_key: &'a [u8],
+    cosigner_public_key: Vec<u8>,
     submission_url: &'a str,
     monitoring_url: &'a str,
 }

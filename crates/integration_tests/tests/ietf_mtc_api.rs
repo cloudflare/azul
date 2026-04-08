@@ -106,18 +106,19 @@ async fn metadata_returns_valid_fields() {
         meta.log_id
     );
     assert!(!meta.cosigner_id.is_empty(), "cosigner_id must be non-empty");
-    assert_eq!(
-        meta.cosigner_public_key.len(),
-        32,
-        "cosigner_public_key must be 32 bytes"
+    // cosigner_public_key is a DER-encoded SubjectPublicKeyInfo. The algorithm
+    // identifier is included so clients can determine the signing algorithm.
+    assert!(
+        !meta.cosigner_public_key.is_empty(),
+        "cosigner_public_key must be non-empty"
     );
-    ed25519_dalek::VerifyingKey::from_bytes(
-        meta.cosigner_public_key
-            .as_slice()
-            .try_into()
-            .expect("already checked 32 bytes"),
-    )
-    .expect("cosigner_public_key must be a valid Ed25519 public key");
+    {
+        use pkcs8::DecodePublicKey;
+        ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(
+            &meta.cosigner_public_key,
+        )
+        .expect("cosigner_public_key must be a valid ML-DSA-44 SubjectPublicKeyInfo");
+    }
     assert!(!meta.submission_url.is_empty(), "submission_url must be set");
 }
 
