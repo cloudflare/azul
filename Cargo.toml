@@ -10,6 +10,8 @@ members = [
     "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
+    "crates/ietf_mtc_worker",
     "crates/integration_tests",
     "crates/length_prefixed",
     "crates/sct_validator",
@@ -25,13 +27,13 @@ members = [
 # wrangler dev instance and will hang if run without one.
 # Run explicitly with: cargo test -p integration_tests --test static_ct_api
 default-members = [
-    "crates/ct_worker",
-    "crates/generic_log_worker",
-    "crates/length_prefixed",
     "crates/bootstrap_mtc_api",
     "crates/bootstrap_mtc_worker",
+    "crates/ct_worker",
+    "crates/generic_log_worker",
     "crates/ietf_mtc_api",
     "crates/ietf_mtc_worker",
+    "crates/length_prefixed",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
