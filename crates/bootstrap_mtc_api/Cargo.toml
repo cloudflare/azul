@@ -1,5 +1,5 @@
 [package]
-name = "mtc_api"
+name = "bootstrap_mtc_api"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

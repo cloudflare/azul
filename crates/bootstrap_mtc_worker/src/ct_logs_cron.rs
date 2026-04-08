@@ -14,7 +14,7 @@ pub(crate) async fn update_ct_logs(kv: &KvStore) -> Result<()> {
     log::info!("Fetching CT log list from Google");
 
     let headers = Headers::new();
-    headers.set("User-Agent", "Cloudflare MTCA (ct-logs@cloudflare.com)")?;
+    headers.set("User-Agent", "Cloudflare MTC CA (ct-logs@cloudflare.com)")?;
 
     let req = Request::new_with_init(
         CT_LOG_LIST_URL,

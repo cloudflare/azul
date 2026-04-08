@@ -10,7 +10,7 @@
 //!   log shard's temporal interval (read from `ct_worker/config.dev.json`).
 //! - For MTC tests the leaf's `notAfter` is set to
 //!   `now + max_certificate_lifetime_secs / 2` (read from
-//!   `mtc_worker/config.dev.json`).
+//!   `bootstrap_mtc_worker/config.dev.json`).
 //!
 //! Both approaches ensure the fixtures are always valid regardless of when the
 //! tests run.
@@ -20,8 +20,8 @@
 //! `tests/fixtures/ca-key.pem` and the corresponding CA cert are dev-only
 //! keys — **not** production secrets.  The CA cert is trusted by both workers'
 //! `wrangler dev` instances: it appears in `ct_worker/roots.dev.pem` and in
-//! `mtc_worker/dev-bootstrap-roots.pem` (the latter requires the
-//! `dev-bootstrap-roots` feature, already set in `mtc_worker/wrangler.jsonc`).
+//! `bootstrap_mtc_worker/dev-bootstrap-roots.pem` (the latter requires the
+//! `dev-bootstrap-roots` feature, already set in `bootstrap_mtc_worker/wrangler.jsonc`).
 
 // These are test helpers — doc exhaustiveness is not required.
 #![allow(clippy::missing_errors_doc)]
@@ -118,7 +118,7 @@ const CA_KEY_PEM: &str = include_str!("../tests/fixtures/ca-key.pem");
 /// PEM-encoded "Azul Integration Test Root" CA certificate.
 ///
 /// Embedded from `tests/fixtures/ca-cert.pem`, which is extracted verbatim
-/// from `ct_worker/roots.dev.pem` and `mtc_worker/dev-bootstrap-roots.pem`.
+/// from `ct_worker/roots.dev.pem` and `bootstrap_mtc_worker/dev-bootstrap-roots.pem`.
 /// Using the same PEM bytes ensures the DER fingerprint matches what the
 /// root pool loads, so `CertPool::includes()` succeeds during chain validation.
 const CA_CERT_PEM: &str = include_str!("../tests/fixtures/ca-cert.pem");
@@ -211,12 +211,12 @@ fn default_max_cert_lifetime() -> u64 {
     604_800 // 7 days
 }
 
-// NOTE: compile-time dependency on mtc_worker/config.dev.json. If that file is
-// moved or renamed, the error will surface here rather than in mtc_worker.
-const MTC_DEV_CONFIG_JSON: &str = include_str!("../../mtc_worker/config.dev.json");
+// NOTE: compile-time dependency on bootstrap_mtc_worker/config.dev.json. If that file is
+// moved or renamed, the error will surface here rather than in bootstrap_mtc_worker.
+const MTC_DEV_CONFIG_JSON: &str = include_str!("../../bootstrap_mtc_worker/config.dev.json");
 
 /// A bootstrap cert chain generated for a specific MTC log shard.
-pub struct MtcChain {
+pub struct BootstrapMtcChain {
     /// DER-encoded certificates: `[leaf, CA]`
     pub chain: Vec<Vec<u8>>,
     /// DER-encoded `SubjectPublicKeyInfo` of the leaf certificate, for use with
@@ -229,7 +229,7 @@ pub struct MtcChain {
 /// The leaf cert's `notAfter` is set to `now + max_certificate_lifetime_secs / 2`
 /// for the given `log_name`, ensuring it is always within the log's accepted
 /// window regardless of when the test runs.
-pub fn make_mtc_chain(log_name: &str) -> Result<MtcChain> {
+pub fn make_bootstrap_mtc_chain(log_name: &str) -> Result<BootstrapMtcChain> {
     let config: MtcDevConfig =
         serde_json::from_str(MTC_DEV_CONFIG_JSON).context("parsing mtc config.dev.json")?;
     let log = config
@@ -249,7 +249,7 @@ pub fn make_mtc_chain(log_name: &str) -> Result<MtcChain> {
     let (leaf_der, leaf_spki_der) = build_cert_with_spki(&ca_key, not_before, not_after, false)
         .context("building MTC bootstrap leaf cert")?;
 
-    Ok(MtcChain {
+    Ok(BootstrapMtcChain {
         chain: vec![leaf_der, ca_cert_der_bytes()],
         leaf_spki_der,
     })

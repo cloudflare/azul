@@ -229,14 +229,14 @@ impl CtClient {
 /// Log shard name to use for MTC tests.  Defaults to `dev2` (the fast-interval
 /// shard with `landmark_interval_secs: 10`).
 #[must_use]
-pub fn mtc_log_name() -> String {
-    std::env::var("MTC_LOG_NAME").unwrap_or_else(|_| "dev2".to_string())
+pub fn bootstrap_mtc_log_name() -> String {
+    std::env::var("BOOTSTRAP_MTC_LOG_NAME").unwrap_or_else(|_| "dev2".to_string())
 }
 
 /// Response body from `GET /logs/:log/metadata`.
 #[serde_as]
 #[derive(Deserialize, Debug)]
-pub struct MtcMetadataResponse {
+pub struct BootstrapMtcMetadataResponse {
     pub description: Option<String>,
     pub log_id: String,
     pub cosigner_id: String,
@@ -248,7 +248,7 @@ pub struct MtcMetadataResponse {
 
 /// Response body from `POST /logs/:log/add-entry`.
 #[derive(Deserialize, Debug, Clone)]
-pub struct AddEntryResponse {
+pub struct BootstrapMtcAddEntryResponse {
     pub leaf_index: u64,
     pub timestamp: u64,
     pub not_before: u64,
@@ -258,19 +258,19 @@ pub struct AddEntryResponse {
 /// Response body from `POST /logs/:log/get-certificate`.
 #[serde_as]
 #[derive(Deserialize, Debug)]
-pub struct GetCertificateResponse {
+pub struct BootstrapMtcGetCertificateResponse {
     #[serde_as(as = "Base64")]
     pub data: Vec<u8>,
     pub landmark_id: usize,
 }
 
 /// HTTP client bound to a particular MTC log shard.
-pub struct MtcClient {
+pub struct BootstrapMtcClient {
     client: reqwest::Client,
     pub log: String,
 }
 
-impl MtcClient {
+impl BootstrapMtcClient {
     /// Creates a new client targeting the given MTC log shard name.
     #[must_use]
     pub fn new(log: impl Into<String>) -> Self {
@@ -280,10 +280,10 @@ impl MtcClient {
         }
     }
 
-    /// Creates a client for the default MTC log (from `MTC_LOG_NAME` env / `dev2`).
+    /// Creates a client for the default MTC log (from `BOOTSTRAP_MTC_LOG_NAME` env / `dev2`).
     #[must_use]
     pub fn default_log() -> Self {
-        Self::new(mtc_log_name())
+        Self::new(bootstrap_mtc_log_name())
     }
 
     fn url(&self, path: &str) -> String {
@@ -306,7 +306,7 @@ impl MtcClient {
     }
 
     /// `GET /logs/:log/metadata`
-    pub async fn get_metadata(&self) -> Result<MtcMetadataResponse> {
+    pub async fn get_metadata(&self) -> Result<BootstrapMtcMetadataResponse> {
         let resp = self
             .client
             .get(self.url("metadata"))
@@ -321,7 +321,7 @@ impl MtcClient {
     }
 
     /// `POST /logs/:log/add-entry`
-    pub async fn add_entry(&self, chain: Vec<Vec<u8>>) -> Result<(u16, Option<AddEntryResponse>)> {
+    pub async fn add_entry(&self, chain: Vec<Vec<u8>>) -> Result<(u16, Option<BootstrapMtcAddEntryResponse>)> {
         let body = AddChainRequest { chain };
         let resp = self
             .client
@@ -332,7 +332,7 @@ impl MtcClient {
             .context("POST add-entry")?;
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: AddEntryResponse =
+            let body: BootstrapMtcAddEntryResponse =
                 resp.json().await.context("parsing add-entry response")?;
             Ok((status, Some(body)))
         } else {
@@ -345,7 +345,7 @@ impl MtcClient {
         &self,
         leaf_index: u64,
         spki_der: Vec<u8>,
-    ) -> Result<(u16, Option<GetCertificateResponse>)> {
+    ) -> Result<(u16, Option<BootstrapMtcGetCertificateResponse>)> {
         #[serde_as]
         #[derive(serde::Serialize)]
         struct Req {
@@ -362,7 +362,7 @@ impl MtcClient {
             .context("POST get-certificate")?;
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: GetCertificateResponse = resp
+            let body: BootstrapMtcGetCertificateResponse = resp
                 .json()
                 .await
                 .context("parsing get-certificate response")?;

@@ -17,7 +17,7 @@ use generic_log_worker::{
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
 };
-use mtc_api::{
+use bootstrap_mtc_api::{
     serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
     GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
 };
@@ -348,7 +348,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     let roots = load_roots(env, name).await?;
     let (pending_entry, found_root_idx) =
-        match mtc_api::validate_chain(&req.chain, roots, issuer, &mut validity) {
+        match bootstrap_mtc_api::validate_chain(&req.chain, roots, issuer, &mut validity) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("{name}: Bad request: {e}");

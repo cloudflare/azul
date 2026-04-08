@@ -10,7 +10,7 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Integration tests for ct_worker (static CT API) and mtc_worker (MTC API)"
+description = "Integration tests for ct_worker (static CT API) and bootstrap_mtc_worker (MTC API)"
 
 [lib]
 # rlib (default) — not cdylib, so it runs in native cargo test
@@ -24,7 +24,7 @@ ed25519-dalek.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
 static_ct_api.workspace = true
-mtc_api.workspace = true
+bootstrap_mtc_api.workspace = true
 tlog_tiles.workspace = true
 sct_validator.workspace = true
 serde.workspace = true

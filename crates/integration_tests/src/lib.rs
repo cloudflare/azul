@@ -7,7 +7,7 @@
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
 //!
 //! CT tests: set `LOG_NAME` to choose the log shard (default: `dev2026h1a`).
-//! MTC tests: set `MTC_LOG_NAME` to choose the log shard (default: `dev2`).
+//! MTC tests: set `BOOTSTRAP_MTC_LOG_NAME` to choose the log shard (default: `dev2`).
 
 pub mod assertions;
 pub mod client;

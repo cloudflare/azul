@@ -58,8 +58,8 @@ jobs:
           BASE_URL: http://localhost:8787
           LOG_NAME: dev2026h1a
 
-  integration-mtc:
-    name: MTC Worker Integration Tests
+  integration-bootstrap-mtc:
+    name: Bootstrap MTC Worker Integration Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -76,8 +76,8 @@ jobs:
       - name: Install worker-build
         run: cargo install worker-build@0.7.5 --locked
 
-      - name: Build mtc_worker (dev environment, with dev-bootstrap-roots)
-        working-directory: crates/mtc_worker
+      - name: Build bootstrap_mtc_worker (dev environment, with dev-bootstrap-roots)
+        working-directory: crates/bootstrap_mtc_worker
         # wrangler.jsonc dev build already includes --features dev-bootstrap-roots
         run: DEPLOY_ENV=dev worker-build --release --features dev-bootstrap-roots
 
@@ -85,7 +85,7 @@ jobs:
       # wrangler dev. These are dev-only keys (not production secrets) and are
       # committed to the repository.
       - name: Start wrangler dev
-        working-directory: crates/mtc_worker
+        working-directory: crates/bootstrap_mtc_worker
         run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
 
       - name: Wait for wrangler dev to be ready
@@ -101,8 +101,8 @@ jobs:
           echo "wrangler dev failed to start in time"
           exit 1
 
-      - name: Run MTC integration tests
-        run: cargo test -p integration_tests --test mtc_api --verbose
+      - name: Run Bootstrap MTC integration tests
+        run: cargo test -p integration_tests --test bootstrap_mtc_api --verbose
         env:
           BASE_URL: http://localhost:8787
-          MTC_LOG_NAME: dev2
+          BOOTSTRAP_MTC_LOG_NAME: dev2
