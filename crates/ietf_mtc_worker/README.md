@@ -1,52 +1,51 @@
-# Merkle Tree CA Worker
+# IETF Merkle Tree CA Worker
 
-A Rust implementation of a [Merkle Tree CA](https://github.com/davidben/merkle-tree-certs/) (MTCA) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
+A Rust implementation of an [IETF Merkle Tree Certificate CA](https://github.com/ietf-plants-wg/merkle-tree-certs/) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
 
-Much of the API and the internal architecture of the Merkle Tree CA is shared by the [Static CT Log](../ct_worker/README.md). This Worker also implements issuance of Merkle Tree Certificates (MTCs). The issuance API should be considered unstable. For now, its primary purpose is to support an experimental deployment of the MTC specification.
+This worker implements [draft-ietf-plants-merkle-tree-certs-02](https://datatracker.ietf.org/doc/draft-ietf-plants-merkle-tree-certs/). For the older bootstrap experiment, see [`bootstrap_mtc_worker`](../bootstrap_mtc_worker/README.md).
+
+The internal log architecture (Sequencer, Batcher, Cleaner Durable Objects, tiled R2 storage) is shared with the [Static CT Log](../ct_worker/README.md).
+
+## How it works
+
+Subscribers submit a PKCS#10 CSR (base64url-encoded, no padding) to the `add-entry` endpoint, matching the ACME `finalize` format (RFC 8555 §7.4). The CA extracts the subject, SPKI, and SANs from the CSR and logs them as a `TBSCertificateLogEntry`. The validity window is set server-side to `[now, now + max_certificate_lifetime_secs]`.
+
+Once a landmark interval elapses, the sequencer produces a landmark subtree and the CA can issue **landmark-relative MTC certificates** — DER-encoded X.509 structures whose `signatureValue` encodes a Merkle inclusion proof into the landmark subtree rather than a traditional signature.
+
+## Known limitations
+
+- Standalone certificates (with cosignatures in the `signatures` field) are not yet implemented.
+- ML-DSA signing is not yet implemented.
+- The subtree signing oracle (for external cosigners) is not yet implemented.
+- ACME order `notBefore`/`notAfter` fields are not currently supported.
 
 ## Development
 
-`node` and `npm` are required to run the Worker locally. First, use `npm` to install `wrangler`:
+Requires `node` and `npm`.
 
 ```bash
-npm install -g wrangler@latest
+# Run locally
+npx wrangler -e=dev dev
+
+# Reset local state between runs
+./reset-dev.sh
 ```
 
-Then use `wrangler` to run the Worker locally from this directory:
+### Integration tests
 
 ```bash
-npx wrangler dev -e=dev
+BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
 ```
-
-The Worker doesn't implement a full-blown MTCA. Instead, it implements what we call a **bootstrap MTCA**. For every MTC requested, the requester must provide a **bootstrap certificate**. A bootstrap certificate is a standard X.509 certificate chain that must have a path to a root certificate trusted by `bootstrap_mtc_worker`. By default, the root store used is the intersection of Chrome's and Mozilla's trust stores.
-
-To test the basic functionality, run the following script from this directory:
-
-```bash
-./test-dev.sh
-```
-
-This script does the following:
-
-1. Fetch a bootstrap certificate chain.
-
-1. Submit the bootstrap certificate chain to the MTCA running locally.
-
-1. Wait for the next landmark to be minted. The landmark interval is defined in [`config.dev.json`](./config.dev.json).
-
-1. Request the signatureless MTC from the MTCA running locally
-
-### Overriding the trust store
-
-It may be useful to provide your own roots for testing. To do so:
-
-1. Build the Worker with the `"dev-bootstrap-roots"` feature. Note that `wrangler` invokes `cargo` with a custom build script, so the simplest thing to do is to edit the `Cargo.toml` file by adding `"dev-boostrap-roots"` to the default feature set.
-
-1. Append your roots to [`dev-bootstrap-roots.pem`](./dev-bootstrap-roots.pem).
 
 ## Deployment
 
 See the [`ct_worker` documentation](../ct_worker/README.md#deployment-to-a-custom-domain) for deployment to a custom domain.
+
+The production environment is `prod` (maps to `config.prod.json`):
+
+```bash
+npx wrangler -e=prod deploy
+```
 
 ## License
 

@@ -219,7 +219,7 @@ async fn add_entry_appears_in_checkpoint() {
     );
 }
 
-/// After `add-entry`, `get-certificate` returns a parseable signatureless DER
+/// After `add-entry`, `get-certificate` returns a parseable landmark-relative DER
 /// certificate once a landmark has been produced.
 ///
 /// This test uses `dev2` (10s landmark interval) and retries for up to 30s.

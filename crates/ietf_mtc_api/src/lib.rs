@@ -288,14 +288,14 @@ fn extract_san_from_csr(
     Ok(None)
 }
 
-/// Return the serialized DER-encoded bytes of a signatureless landmark
+/// Return the serialized DER-encoded bytes of a landmark-relative landmark
 /// certificate (draft-ietf-plants-merkle-tree-certs §6.3).
 ///
 /// # Errors
 ///
 /// Returns an error if the SPKI hash does not match the entry, or if there
 /// are any serialization errors.
-pub fn serialize_signatureless_cert(
+pub fn serialize_landmark_relative_cert(
     log_entry: &IetfMtcLogEntry,
     leaf_index: LeafIndex,
     spki_der: &[u8],

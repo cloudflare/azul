@@ -179,7 +179,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
 }
 
 // Computes the sequence of landmark subtrees and, for each subtree, a proof of consistency with the
-// checkpoint. Each signatureless MTC includes an inclusion proof in one of these subtrees.
+// checkpoint. Each landmark-relative MTC includes an inclusion proof in one of these subtrees.
 async fn get_landmark_subtrees(
     landmark_sequence: &LandmarkSequence,
     checkpoint_hash: Hash,

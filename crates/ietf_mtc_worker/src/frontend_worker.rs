@@ -18,7 +18,7 @@ use generic_log_worker::{
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
 };
 use ietf_mtc_api::{
-    build_pending_entry, serialize_signatureless_cert, AddEntryRequest, AddEntryResponse,
+    build_pending_entry, serialize_landmark_relative_cert, AddEntryRequest, AddEntryResponse,
     IetfMtcLogEntry, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
 };
 use serde::{Deserialize, Serialize};
@@ -160,7 +160,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                         Err(ProofError::Other(e)) => return Err(e.to_string().into()),
                     };
 
-                    let data = match serialize_signatureless_cert(
+                    let data = match serialize_landmark_relative_cert(
                         &log_entry,
                         leaf_index,
                         &spki_der,
@@ -170,7 +170,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                         Ok(data) => data,
                         Err(e) => {
                             return Response::error(
-                                format!("Failed to serialize signatureless cert: {e}"),
+                                format!("Failed to serialize landmark-relative cert: {e}"),
                                 422,
                             )
                         }
