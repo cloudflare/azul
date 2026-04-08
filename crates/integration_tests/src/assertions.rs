@@ -160,11 +160,8 @@ pub fn assert_sct_signature(
     let effective_cert_der: &[u8];
     let effective_issuer_spki: &[u8];
     if is_precert {
-        cert_to_sign = static_ct_api::build_precert_tbs(
-            &leaf_cert.tbs_certificate,
-            None, // no precert signing certificate in our test chains
-        )
-        .context("building precert TBS for signature verification")?;
+        cert_to_sign = static_ct_api::build_precert_tbs(&leaf_cert.tbs_certificate)
+            .context("building precert TBS for signature verification")?;
         effective_cert_der = &cert_to_sign;
         effective_issuer_spki = &issuer_spki_der;
     } else {
