@@ -13,9 +13,11 @@ use generic_log_worker::{
     SEQUENCER_BINDING,
 };
 use ietf_mtc_api::{
-    IetfMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
-    LANDMARK_KEY,
+    subtree_sig_key, IetfMtcLogEntry, LandmarkSequence, SignedSubtree, TrustAnchorID,
+    LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY,
 };
+use std::str::FromStr;
+use tlog_tiles::Subtree;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::Note;
@@ -85,8 +87,17 @@ pub struct LandmarkBundle {
 fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
     let params = &CONFIG.logs[name];
     let bucket = load_public_bucket(env, name).unwrap();
+    // Capture the signing key parts so the cosigner can be reconstructed
+    // on each callback invocation (MtcCosigner is not Clone).
+    let (sk, vk) = crate::load_key_pair(env, name).unwrap();
+    let log_id = TrustAnchorID::from_str(&CONFIG.logs[name].log_id).unwrap();
+    let cosigner_id_str = CONFIG.logs[name].cosigner_id.clone();
     Box::new(
-        move |old_time: UnixTimestamp, new_time: UnixTimestamp, new_checkpoint_bytes: &[u8]| {
+        move |old_time: UnixTimestamp,
+              new_time: UnixTimestamp,
+              old_tree_size: u64,
+              new_tree_size: u64,
+              new_checkpoint_bytes: &[u8]| {
             let new_checkpoint = {
                 // TODO: Make more efficient. There are two unnecessary allocations here.
 
@@ -107,10 +118,31 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                 // We have to clone each time since the bucket gets moved into
                 // the async function.
                 let bucket_clone = bucket.clone();
+                let sk_clone = sk.clone();
+                let vk_clone = vk.clone();
+                let log_id_clone = log_id.clone();
+                let cosigner_id_clone = TrustAnchorID::from_str(&cosigner_id_str).unwrap();
                 async move {
                     if old_time > new_time {
                         return Err("condition not met: `old_time <= new_time`".into());
                     }
+
+                    // Sign and cache the subtree(s) covering entries added in
+                    // this batch (§4.5).  This enables the add-entry endpoint to
+                    // return a standalone certificate immediately after sequencing.
+                    Box::pin(sign_and_cache_batch_subtrees(
+                        old_tree_size,
+                        new_tree_size,
+                        tree_size,
+                        root_hash,
+                        &cosigner_id_clone,
+                        &log_id_clone,
+                        &sk_clone,
+                        &vk_clone,
+                        &bucket_clone,
+                    ))
+                    .await?;
+
                     // Check if we crossed a landmark epoch between the old and
                     // new checkpoints. (Ideally `old_time` would be the time
                     // that the last landmark was added, but we don't have that
@@ -157,12 +189,29 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                         .await?;
 
                     // Compute the landmark bundle and save it
-                    let subtrees =
+                    let landmark_subtrees =
                         get_landmark_subtrees(&seq, root_hash, tree_size, bucket_clone.clone())
                             .await?;
+
+                    // Sign and cache each active landmark subtree so that
+                    // build_standalone_cert can serve certificates for entries
+                    // from older batches, not just the current one.
+                    Box::pin(sign_and_cache_landmark_subtrees(
+                        &seq,
+                        root_hash,
+                        tree_size,
+                        &cosigner_id_clone,
+                        &log_id_clone,
+                        &sk_clone,
+                        &vk_clone,
+                        &landmark_subtrees,
+                        &bucket_clone,
+                    ))
+                    .await?;
+
                     let bundle = LandmarkBundle {
                         checkpoint: new_checkpoint_str,
-                        subtrees,
+                        subtrees: landmark_subtrees,
                         landmarks: seq.landmarks,
                     };
                     bucket_clone
@@ -210,4 +259,121 @@ async fn get_landmark_subtrees(
     }
 
     Ok(subtrees)
+}
+
+/// Sign the subtree(s) covering `[old_tree_size, new_tree_size)` and store
+/// each signature in R2.  Called from the checkpoint callback.
+///
+/// The subtree root hash is computed from the checkpoint tiles via
+/// `prove_subtree_consistency` so that the signature covers the actual
+/// subtree head, not the full checkpoint hash.
+#[allow(clippy::too_many_arguments)]
+async fn sign_and_cache_batch_subtrees(
+    old_tree_size: u64,
+    new_tree_size: u64,
+    checkpoint_size: u64,
+    checkpoint_hash: Hash,
+    cosigner_id: &TrustAnchorID,
+    log_id: &TrustAnchorID,
+    sk: &ietf_mtc_api::MtcSigningKey,
+    vk: &ietf_mtc_api::MtcVerifyingKey,
+    bucket: &Bucket,
+) -> Result<()> {
+    if old_tree_size >= new_tree_size {
+        return Ok(());
+    }
+    let cosigner = ietf_mtc_api::MtcCosigner::new_checkpoint(
+        cosigner_id.clone(),
+        log_id.clone(),
+        sk.clone(),
+        vk.clone(),
+    );
+    let object_bucket = CachedRoObjectBucket::new(ObjectBucket::new(bucket.clone()));
+    let (left, right) =
+        Subtree::split_interval(old_tree_size, new_tree_size).map_err(|e| e.to_string())?;
+    for subtree in [Some(left), right].into_iter().flatten() {
+        // Compute the actual subtree root hash from the checkpoint tiles.
+        let (_, subtree_hash) = match prove_subtree_consistency(
+            checkpoint_hash,
+            checkpoint_size,
+            subtree.lo(),
+            subtree.hi(),
+            &object_bucket,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(ProofError::Tlog(s)) => return Err(s.to_string().into()),
+            Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+        };
+        let sig = cosigner
+            .sign_subtree(subtree.lo(), subtree.hi(), &subtree_hash)
+            .map_err(|e| e.to_string())?;
+        let signed = SignedSubtree {
+            lo: subtree.lo(),
+            hi: subtree.hi(),
+            hash: subtree_hash.0,
+            checkpoint_hash: checkpoint_hash.0,
+            checkpoint_size,
+            signature: sig,
+            cosigner_id: cosigner_id.to_string(),
+        };
+        bucket
+            .put(
+                subtree_sig_key(subtree.lo(), subtree.hi()),
+                serde_json::to_vec(&signed).map_err(|e| e.to_string())?,
+            )
+            .execute()
+            .await?;
+    }
+    Ok(())
+}
+
+/// Sign and cache each active landmark subtree so that `build_standalone_cert`
+/// can serve certificates for entries from prior batches.
+///
+/// Like batch subtrees, landmark subtrees are signed with their own Merkle
+/// root hash (obtained from `get_landmark_subtrees` via `prove_subtree_consistency`)
+/// rather than the full checkpoint hash.
+#[allow(clippy::too_many_arguments)]
+async fn sign_and_cache_landmark_subtrees(
+    seq: &LandmarkSequence,
+    checkpoint_hash: Hash,
+    checkpoint_size: u64,
+    cosigner_id: &TrustAnchorID,
+    log_id: &TrustAnchorID,
+    sk: &ietf_mtc_api::MtcSigningKey,
+    vk: &ietf_mtc_api::MtcVerifyingKey,
+    landmark_subtrees: &[SubtreeWithConsistencyProof],
+    bucket: &Bucket,
+) -> Result<()> {
+    let cosigner = ietf_mtc_api::MtcCosigner::new_checkpoint(
+        cosigner_id.clone(),
+        log_id.clone(),
+        sk.clone(),
+        vk.clone(),
+    );
+    for (subtree, proof) in seq.subtrees().zip(landmark_subtrees.iter()) {
+        let subtree_hash = Hash(proof.hash);
+        let sig = cosigner
+            .sign_subtree(subtree.lo(), subtree.hi(), &subtree_hash)
+            .map_err(|e| e.to_string())?;
+        let signed = SignedSubtree {
+            lo: subtree.lo(),
+            hi: subtree.hi(),
+            hash: proof.hash,
+            checkpoint_hash: checkpoint_hash.0,
+            checkpoint_size,
+            signature: sig,
+            cosigner_id: cosigner_id.to_string(),
+        };
+        bucket
+            .put(
+                subtree_sig_key(subtree.lo(), subtree.hi()),
+                serde_json::to_vec(&signed).map_err(|e| e.to_string())?,
+            )
+            .execute()
+            .await?;
+    }
+    Ok(())
 }

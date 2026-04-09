@@ -6,7 +6,7 @@
 use crate::{load_checkpoint_cosigner, load_origin, SequenceMetadata, CONFIG};
 use der::{
     asn1::{SetOfVec, UtcTime, Utf8StringRef},
-    Any, Tag,
+    Any, Decode, Tag,
 };
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_durable_object_stub, init_logging,
@@ -18,9 +18,11 @@ use generic_log_worker::{
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
 };
 use ietf_mtc_api::{
-    build_pending_entry, serialize_landmark_relative_cert, AddEntryRequest, AddEntryResponse,
-    IetfMtcLogEntry, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
+    build_pending_entry, serialize_mtc_cert, AddEntryRequest, AddEntryResponse, IetfMtcLogEntry,
+    LandmarkSequence, SignedSubtree, TrustAnchorID, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY,
+    LANDMARK_KEY,
 };
+use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
@@ -163,12 +165,13 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                         Err(ProofError::Other(e)) => return Err(e.to_string().into()),
                     };
 
-                    let data = match serialize_landmark_relative_cert(
+                    let data = match serialize_mtc_cert(
                         &log_entry,
                         leaf_index,
                         &spki_der,
                         &landmark_subtree,
                         proof,
+                        &[], // landmark-relative: no cosignatures
                     ) {
                         Ok(data) => data,
                         Err(e) => {
@@ -356,12 +359,127 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         return Ok(response);
     }
     let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
-    Response::from_json(&AddEntryResponse {
-        leaf_index: metadata.0,
-        timestamp: metadata.1,
-        not_before: validity.not_before.to_unix_duration().as_secs(),
-        not_after: validity.not_after.to_unix_duration().as_secs(),
-    })
+    let leaf_index = metadata.0;
+
+    // Build the standalone certificate from the subtree signature cached by
+    // the sequencer.  The checkpoint_callback runs before the sequencer
+    // returns, so the signature should always be present at this point.
+    let Some(certificate) = build_standalone_cert(env, name, leaf_index, &req).await else {
+        log::warn!("{name}: subtree sig not found for leaf {leaf_index} after sequencing");
+        return Response::error("Service unavailable: subtree signature not yet available", 503);
+    };
+
+    Response::from_json(&AddEntryResponse { certificate })
+}
+
+/// Try to build a standalone certificate for `leaf_index` using a cached
+/// subtree signature.  Returns `None` if no matching signature is available
+/// yet (the client should retry); logs warnings on unexpected errors.
+/// Maximum number of retries waiting for a subtree signature to appear in R2.
+const MAX_SIG_RETRIES: u32 = 6;
+/// Delay between retries in milliseconds.
+const SIG_RETRY_DELAY_MS: u64 = 250;
+
+/// Compute the candidate subtree sig keys that could contain `leaf_index`.
+///
+/// Per §4.5, a batch is covered by at most two subtrees from
+/// `Subtree::split_interval(old, new)`.  The subtree containing a given
+/// `leaf_index` is the smallest power-of-2-aligned subtree that includes it
+/// and whose `hi` is `<= leaf_index + 1` rounded up to the next alignment
+/// boundary.  Rather than knowing `old`/`new`, we enumerate the O(log n)
+/// candidate subtrees of increasing size that are valid (`start` is a multiple
+/// of `BIT_CEIL(end - start)`) and contain `leaf_index`, from smallest to largest.
+/// The sequencer always picks the smallest applicable subtree, so we check in
+/// increasing size order.
+fn candidate_subtree_keys(leaf_index: LeafIndex) -> Vec<String> {
+    use ietf_mtc_api::subtree_sig_key;
+    let mut keys = Vec::new();
+    let mut size: u64 = 1;
+    while size <= leaf_index + 1 {
+        // The subtree of this size that contains leaf_index:
+        // start = floor(leaf_index / size) * size
+        let start = (leaf_index / size) * size;
+        let end = start + size;
+        // Check it is a valid subtree: start must be a multiple of BIT_CEIL(size).
+        // For power-of-2 sizes BIT_CEIL(size) == size, so start % size == 0, always true.
+        keys.push(subtree_sig_key(start, end));
+        size <<= 1;
+    }
+    keys
+}
+
+async fn build_standalone_cert(
+    env: &Env,
+    name: &str,
+    leaf_index: LeafIndex,
+    req: &AddEntryRequest,
+) -> Option<Vec<u8>> {
+    let object_bucket = ObjectBucket::new(load_public_bucket(env, name).ok()?);
+
+    // The checkpoint_callback signs and caches subtrees asynchronously after
+    // the sequencer responds.  We know the key deterministically from leaf_index,
+    // so retry fetching directly rather than listing.
+    let candidates = candidate_subtree_keys(leaf_index);
+    let mut signed: Option<SignedSubtree> = None;
+    'retry: for _ in 0..MAX_SIG_RETRIES {
+        for key in &candidates {
+            let Some(raw) = object_bucket.fetch(key).await.ok().flatten() else {
+                continue;
+            };
+            if let Ok(s) = serde_json::from_slice::<SignedSubtree>(&raw) {
+                signed = Some(s);
+                break 'retry;
+            }
+        }
+        worker::Delay::from(std::time::Duration::from_millis(SIG_RETRY_DELAY_MS)).await;
+    }
+    let signed = signed?;
+
+    let subtree = signed.as_subtree().ok()?;
+    let cosigner_id = TrustAnchorID::from_str(&signed.cosigner_id).ok()?;
+    let checkpoint_hash = tlog_tiles::Hash(signed.checkpoint_hash);
+
+    // Parse the CSR to extract the SPKI.
+    let csr = x509_cert::request::CertReq::from_der(&req.csr).ok()?;
+    let spki_der = der::Encode::to_der(&csr.info.public_key).ok()?;
+
+    // Read the sequenced log entry from the data tile.
+    let log_entry = generic_log_worker::log_ops::read_leaf::<IetfMtcLogEntry>(
+        &object_bucket,
+        leaf_index,
+        signed.checkpoint_size,
+        &checkpoint_hash,
+    )
+    .await
+    .ok()?;
+
+    // Compute an inclusion proof of leaf_index into the subtree.
+    let proof = match generic_log_worker::log_ops::prove_subtree_inclusion(
+        signed.checkpoint_size,
+        checkpoint_hash,
+        subtree.lo(),
+        subtree.hi(),
+        leaf_index,
+        &object_bucket,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("{name}: subtree inclusion proof failed for leaf {leaf_index}: {e:?}");
+            return None;
+        }
+    };
+
+    serialize_mtc_cert(
+        &log_entry,
+        leaf_index,
+        &spki_der,
+        &subtree,
+        proof,
+        &[(cosigner_id, signed.signature)],
+    )
+    .ok()
 }
 
 async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {

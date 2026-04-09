@@ -5,6 +5,7 @@
 
 use config::AppConfig;
 use ietf_mtc_api::{MtcCosigner, MtcSigningKey, MtcVerifyingKey, TrustAnchorID};
+#[cfg(feature = "ml-dsa")]
 use ml_dsa::{KeyPair, MlDsa44, MlDsa65, MlDsa87};
 use pkcs8::{DecodePrivateKey, PrivateKeyInfo};
 use signed_note::KeyName;
@@ -23,10 +24,13 @@ mod sequencer_do;
 // Algorithm OID constants.
 const OID_ED25519: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
+#[cfg(feature = "ml-dsa")]
 const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
+#[cfg(feature = "ml-dsa")]
 const OID_ML_DSA_65: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
+#[cfg(feature = "ml-dsa")]
 const OID_ML_DSA_87: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
 
@@ -36,14 +40,16 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
         .expect("Failed to parse config")
 });
 
-/// Cached (`MtcSigningKey`, `MtcVerifyingKey`) pair per log.
-///
-/// Both types implement `Clone`, so we can cache them directly and avoid
-/// re-parsing PKCS#8 on every request.
 type CachedKeys = (MtcSigningKey, MtcVerifyingKey);
-
 static KEY_MAP: OnceLock<HashMap<String, OnceLock<CachedKeys>>> = OnceLock::new();
 
+/// Return the key pair for the given log, using a per-log cache.
+///
+/// Uses `OnceLock::get()` to check the cache without blocking.  If the cache
+/// is not yet populated (either empty or being initialized by another request),
+/// the key pair is parsed directly from the secret without waiting.  This
+/// avoids the cross-request `OnceLock::get_or_init` deadlock that the Workers
+/// runtime detects when two requests concurrently initialize the same cell.
 pub(crate) fn load_key_pair(env: &Env, name: &str) -> Result<CachedKeys> {
     let once = &KEY_MAP.get_or_init(|| {
         CONFIG
@@ -53,58 +59,59 @@ pub(crate) fn load_key_pair(env: &Env, name: &str) -> Result<CachedKeys> {
             .collect()
     })[name];
 
+    // Fast path: already cached.
     if let Some(keys) = once.get() {
         return Ok(keys.clone());
     }
 
+    // Slow path: parse from secret.  We do not call get_or_init here because
+    // that would block if another request is currently initializing the cell,
+    // which the Workers runtime detects and cancels as a cross-request deadlock.
+    // Instead, parse directly and attempt to store the result; if another
+    // request beat us to it, use its cached value.
     let pem = env.secret(&format!("SIGNING_KEY_{name}"))?.to_string();
-    let cached = parse_key_pair(&pem).map_err(worker::Error::from)?;
-    Ok(once.get_or_init(|| cached).clone())
+    let keys = parse_key_pair(&pem).map_err(worker::Error::from)?;
+    Ok(once.get_or_init(|| keys).clone())
 }
 
 /// Parse a PKCS#8 PEM key, dispatching to the correct algorithm based on the
 /// `AlgorithmIdentifier` OID embedded in the `PrivateKeyInfo`.
-fn parse_key_pair(pem: &str) -> std::result::Result<CachedKeys, String> {
-    // Strip the PEM armor and decode the DER to inspect the AlgorithmIdentifier OID,
-    // without yet committing to a specific key type.
-    let (_label, doc) = pkcs8::SecretDocument::from_pem(pem)
-        .map_err(|e| e.to_string())?;
-    let pki = PrivateKeyInfo::try_from(doc.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let oid = pki.algorithm.oid;
+fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifyingKey), String> {
+    let (_label, doc) = pkcs8::SecretDocument::from_pem(pem).map_err(|e| e.to_string())?;
+    let pki = PrivateKeyInfo::try_from(doc.as_bytes()).map_err(|e| e.to_string())?;
 
-    match oid {
+    match pki.algorithm.oid {
         OID_ED25519 => {
             let sk = ed25519_dalek::SigningKey::from_pkcs8_pem(pem)
                 .map_err(|e| e.to_string())?;
             let vk = sk.verifying_key();
             Ok((MtcSigningKey::Ed25519(sk), MtcVerifyingKey::Ed25519(vk)))
         }
+        #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_44 => {
-            let kp = KeyPair::<MlDsa44>::from_pkcs8_pem(pem)
-                .map_err(|e| e.to_string())?;
+            let kp = KeyPair::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
                 MtcSigningKey::MlDsa44(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa44(kp.verifying_key().clone()),
             ))
         }
+        #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_65 => {
-            let kp = KeyPair::<MlDsa65>::from_pkcs8_pem(pem)
-                .map_err(|e| e.to_string())?;
+            let kp = KeyPair::<MlDsa65>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
                 MtcSigningKey::MlDsa65(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa65(kp.verifying_key().clone()),
             ))
         }
+        #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_87 => {
-            let kp = KeyPair::<MlDsa87>::from_pkcs8_pem(pem)
-                .map_err(|e| e.to_string())?;
+            let kp = KeyPair::<MlDsa87>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
                 MtcSigningKey::MlDsa87(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa87(kp.verifying_key().clone()),
             ))
         }
-        _ => Err(format!("unsupported signing algorithm OID: {oid}")),
+        oid => Err(format!("unsupported signing algorithm OID: {oid}")),
     }
 }
 

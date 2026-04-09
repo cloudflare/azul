@@ -4,9 +4,12 @@
 use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::Signer as Ed25519Signer;
 use length_prefixed::WriteLengthPrefixedBytesExt;
+#[cfg(feature = "ml-dsa")]
 use ml_dsa::{signature::Verifier as MlDsaVerifier, MlDsa44, MlDsa65, MlDsa87};
 use sha2::{Digest, Sha256};
+use signature::Error as SignatureError;
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
+use std::collections::HashMap;
 use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
 
 use crate::{RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
@@ -18,22 +21,34 @@ pub type TrustAnchorID = RelativeOid;
 // ---------------------------------------------------------------------------
 
 /// A signing key for MTC subtree cosignatures.
+///
+/// ML-DSA variants require the `ml-dsa` feature. They are disabled by default
+/// in Worker binaries because ML-DSA's large stack frames cause WASM
+/// memory out-of-bounds errors in the Workers runtime.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum MtcSigningKey {
     Ed25519(ed25519_dalek::SigningKey),
+    #[cfg(feature = "ml-dsa")]
     MlDsa44(ml_dsa::SigningKey<MlDsa44>),
+    #[cfg(feature = "ml-dsa")]
     MlDsa65(ml_dsa::SigningKey<MlDsa65>),
+    #[cfg(feature = "ml-dsa")]
     MlDsa87(ml_dsa::SigningKey<MlDsa87>),
 }
 
 /// A verifying key for MTC subtree cosignatures.
+///
+/// ML-DSA variants require the `ml-dsa` feature.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum MtcVerifyingKey {
     Ed25519(ed25519_dalek::VerifyingKey),
+    #[cfg(feature = "ml-dsa")]
     MlDsa44(ml_dsa::VerifyingKey<MlDsa44>),
+    #[cfg(feature = "ml-dsa")]
     MlDsa65(ml_dsa::VerifyingKey<MlDsa65>),
+    #[cfg(feature = "ml-dsa")]
     MlDsa87(ml_dsa::VerifyingKey<MlDsa87>),
 }
 
@@ -45,11 +60,14 @@ impl MtcSigningKey {
     /// Returns an error if signing fails. Not possible with current variants,
     /// but future algorithms (e.g. randomized schemes requiring entropy) may
     /// be fallible.
-    pub fn try_sign(&self, msg: &[u8]) -> Result<Vec<u8>, ml_dsa::signature::Error> {
+    pub fn try_sign(&self, msg: &[u8]) -> Result<Vec<u8>, SignatureError> {
         Ok(match self {
             Self::Ed25519(sk) => sk.sign(msg).to_bytes().to_vec(),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(sk) => sk.sign(msg).encode().as_slice().to_vec(),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(sk) => sk.sign(msg).encode().as_slice().to_vec(),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(sk) => sk.sign(msg).encode().as_slice().to_vec(),
         })
     }
@@ -72,8 +90,11 @@ impl MtcVerifyingKey {
     fn signature_type_bytes(&self) -> &'static [u8] {
         match self {
             Self::Ed25519(_) => &[0x01],
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(_) => b"\xff2.16.840.1.101.3.4.3.17",
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(_) => b"\xff2.16.840.1.101.3.4.3.18",
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(_) => b"\xff2.16.840.1.101.3.4.3.19",
         }
     }
@@ -87,18 +108,15 @@ impl MtcVerifyingKey {
                 let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
                 ed25519_dalek::Verifier::verify(vk, msg, &sig).is_ok()
             }
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(vk) => verify_ml_dsa(vk, msg, sig_bytes),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(vk) => verify_ml_dsa(vk, msg, sig_bytes),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(vk) => verify_ml_dsa(vk, msg, sig_bytes),
         }
     }
 
-    /// Return the DER-encoded `SubjectPublicKeyInfo` for this key.
-    ///
-    /// Including the `AlgorithmIdentifier` allows clients to determine the
-    /// algorithm without out-of-band information, which is important now that
-    /// the CA supports multiple signing algorithms.
-    ///
     /// # Panics
     ///
     /// Panics if PKCS#8 encoding fails, which should never happen for a valid key.
@@ -110,14 +128,17 @@ impl MtcVerifyingKey {
                 .to_public_key_der()
                 .expect("Ed25519 SPKI encoding failed")
                 .to_vec(),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-44 SPKI encoding failed")
                 .to_vec(),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-65 SPKI encoding failed")
                 .to_vec(),
+            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-87 SPKI encoding failed")
@@ -127,6 +148,7 @@ impl MtcVerifyingKey {
 }
 
 /// Generic ML-DSA signature verification helper.
+#[cfg(feature = "ml-dsa")]
 fn verify_ml_dsa<P>(vk: &ml_dsa::VerifyingKey<P>, msg: &[u8], sig_bytes: &[u8]) -> bool
 where
     P: ml_dsa::MlDsaParams,
@@ -174,7 +196,7 @@ impl MtcCosigner {
         start: LeafIndex,
         end: LeafIndex,
         root_hash: &Hash,
-    ) -> Result<Vec<u8>, ml_dsa::signature::Error> {
+    ) -> Result<Vec<u8>, SignatureError> {
         let serialized = serialize_mtc_subtree_signature_input(
             &self.v.cosigner_id,
             &self.v.log_id,
@@ -309,6 +331,121 @@ impl NoteVerifier for MtcNoteVerifier {
 }
 
 // ---------------------------------------------------------------------------
+// Proof parsing and verification
+// ---------------------------------------------------------------------------
+
+/// A decoded `MTCProof` extracted from a certificate's `signatureValue`.
+///
+/// See draft-ietf-plants-merkle-tree-certs §6.1.
+#[derive(Debug)]
+pub struct ParsedMtcProof {
+    /// Start of the covering subtree interval (inclusive).
+    pub start: u64,
+    /// End of the covering subtree interval (exclusive).
+    pub end: u64,
+    /// Merkle inclusion proof hashes.
+    pub inclusion_proof: Vec<Hash>,
+    /// Cosignatures keyed by `cosigner_id`.
+    pub signatures: HashMap<TrustAnchorID, Vec<u8>>,
+}
+
+impl ParsedMtcProof {
+    /// Parse an `MTCProof` from the raw `signatureValue` bytes of an MTC certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes are malformed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a 32-byte hash slice cannot be converted to a fixed-size array,
+    /// which cannot happen since `chunks_exact(32)` guarantees the length.
+    pub fn from_bytes(mut bytes: &[u8]) -> Result<Self, crate::MtcError> {
+        use byteorder::ReadBytesExt;
+
+        let start = bytes.read_u64::<BigEndian>()?;
+        let end = bytes.read_u64::<BigEndian>()?;
+
+        // inclusion_proof: uint16-prefixed list of 32-byte hashes
+        let proof_len = bytes.read_u16::<BigEndian>()? as usize;
+        if bytes.len() < proof_len {
+            return Err(crate::MtcError::Dynamic("truncated inclusion proof".into()));
+        }
+        let (proof_bytes, rest) = bytes.split_at(proof_len);
+        bytes = rest;
+        let inclusion_proof = proof_bytes
+            .chunks_exact(32)
+            .map(|c| Hash(c.try_into().unwrap()))
+            .collect();
+
+        // signatures: uint16-prefixed list of MtcSignature
+        let sigs_len = bytes.read_u16::<BigEndian>()? as usize;
+        if bytes.len() < sigs_len {
+            return Err(crate::MtcError::Dynamic("truncated signatures".into()));
+        }
+        let mut sig_bytes = &bytes[..sigs_len];
+        let mut signatures = HashMap::new();
+        while !sig_bytes.is_empty() {
+            let id_len = sig_bytes.read_u8()? as usize;
+            if sig_bytes.len() < id_len {
+                return Err(crate::MtcError::Dynamic("truncated cosigner_id".into()));
+            }
+            let id_raw = &sig_bytes[..id_len];
+            sig_bytes = &sig_bytes[id_len..];
+            let cosigner_id = TrustAnchorID::from_ber_bytes(id_raw)
+                .map_err(|e| crate::MtcError::Dynamic(format!("invalid cosigner_id: {e}")))?;
+
+            let signature_len = sig_bytes.read_u16::<BigEndian>()? as usize;
+            if sig_bytes.len() < signature_len {
+                return Err(crate::MtcError::Dynamic("truncated signature".into()));
+            }
+            let sig = sig_bytes[..signature_len].to_vec();
+            sig_bytes = &sig_bytes[signature_len..];
+            signatures.insert(cosigner_id, sig);
+        }
+
+        Ok(Self {
+            start,
+            end,
+            inclusion_proof,
+            signatures,
+        })
+    }
+
+    /// Verify that one of the proof's cosignatures is valid for the given
+    /// subtree hash, cosigner verifying key, cosigner ID, and log ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no matching cosignature is found or verification fails.
+    pub fn verify_cosignature(
+        &self,
+        subtree_hash: &Hash,
+        verifying_key: &MtcVerifyingKey,
+        cosigner_id: &TrustAnchorID,
+        log_id: &TrustAnchorID,
+    ) -> Result<(), crate::MtcError> {
+        let sig_bytes = self.signatures.get(cosigner_id).ok_or_else(|| {
+            crate::MtcError::Dynamic(format!("no signature found for cosigner_id {cosigner_id}"))
+        })?;
+        let msg = serialize_mtc_subtree_signature_input(
+            cosigner_id,
+            log_id,
+            self.start,
+            self.end,
+            subtree_hash,
+        );
+        if verifying_key.verify(&msg, sig_bytes) {
+            Ok(())
+        } else {
+            Err(crate::MtcError::Dynamic(
+                "cosignature verification failed".into(),
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Serialization
 // ---------------------------------------------------------------------------
 
@@ -365,6 +502,7 @@ mod tests {
     use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp};
 
     use super::*;
+    #[cfg(feature = "ml-dsa")]
     use ml_dsa::KeyGen;
     use rand::rngs::OsRng;
     use signed_note::VerifierList;
@@ -398,6 +536,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_44() {
         let kp = MlDsa44::key_gen(&mut OsRng);
@@ -409,6 +548,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_65() {
         let kp = ml_dsa::MlDsa65::key_gen(&mut OsRng);
@@ -420,6 +560,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_87() {
         let kp = ml_dsa::MlDsa87::key_gen(&mut OsRng);

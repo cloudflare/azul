@@ -46,7 +46,6 @@ config = { path = "./config", package = "ietf_mtc_worker_config" }
 der.workspace = true
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
-ml-dsa.workspace = true
 pkcs8.workspace = true
 getrandom.workspace = true
 log.workspace = true
@@ -64,6 +63,7 @@ ietf_mtc_api.workspace = true
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(wasm_bindgen_unstable_test_coverage)',
+    'cfg(feature, values("ml-dsa"))',
 ] }
 
 [package.metadata.cargo-machete]

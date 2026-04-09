@@ -210,7 +210,7 @@ impl CtClient {
             .with_context(|| format!("reading body for {path}"))
     }
 
-    /// `GET /logs/:log/{path}` — returns the HTTP status code (does not fail on 4xx/5xx).
+    /// `GET /logs/:log/{path}` — returns the HTTP status code without failing on 4xx/5xx.
     pub async fn get_status(&self, path: &str) -> Result<u16> {
         let resp = self
             .client
@@ -222,6 +222,8 @@ impl CtClient {
     }
 }
 
+// ===========================================================================
+// IETF MTC client
 // ===========================================================================
 // MTC client
 // ===========================================================================
@@ -418,12 +420,12 @@ pub fn ietf_mtc_log_name() -> String {
 }
 
 /// Add-entry response from the IETF MTC worker.
+#[serde_as]
 #[derive(Deserialize, Debug, Clone)]
 pub struct IetfMtcAddEntryResponse {
-    pub leaf_index: u64,
-    pub timestamp: u64,
-    pub not_before: u64,
-    pub not_after: u64,
+    /// DER-encoded standalone MTC certificate, base64-encoded.
+    #[serde_as(as = "Base64")]
+    pub certificate: Vec<u8>,
 }
 
 /// Get-certificate response from the IETF MTC worker.
@@ -571,6 +573,23 @@ impl IetfMtcClient {
             .await
             .with_context(|| format!("GET {path} (status probe)"))?;
         Ok(resp.status().as_u16())
+    }
+
+    /// Fetch a `SignedSubtree` from R2 for the subtree covering `[lo, hi)`.
+    pub async fn get_signed_subtree(
+        &self,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Option<ietf_mtc_api::SignedSubtree>> {
+        let key = ietf_mtc_api::subtree_sig_key(lo, hi);
+        match self.get_raw(&key).await {
+            Ok(bytes) => {
+                let s: ietf_mtc_api::SignedSubtree =
+                    serde_json::from_slice(&bytes).context("parsing SignedSubtree")?;
+                Ok(Some(s))
+            }
+            Err(_) => Ok(None),
+        }
     }
 }
 
