@@ -214,6 +214,11 @@ pub fn serialize_signatureless_cert(
     subtree: &Subtree,
     inclusion_proof: Proof,
 ) -> Result<Vec<u8>, MtcError> {
+    use der::{
+        asn1::{ContextSpecific, ContextSpecificRef},
+        TagMode, TagNumber,
+    };
+
     let entry = match MerkleTreeCertEntry::decode(&log_entry.0.inner.data)? {
         MerkleTreeCertEntry::TbsCertEntry(entry) => entry,
         MerkleTreeCertEntry::NullEntry => {
@@ -225,37 +230,92 @@ pub fn serialize_signatureless_cert(
     if spki_hash != entry.subject_public_key_info_hash {
         return Err(MtcError::Dynamic("spki hash mismatch".to_string()));
     }
-    let signature_algorithm = AlgorithmIdentifier {
+    let signature_algorithm: AlgorithmIdentifier<Any> = AlgorithmIdentifier {
         oid: ID_ALG_MTCPROOF,
         parameters: None,
     };
 
-    let tbs_certificate = TbsCertificate {
-        version: entry.version,
-        serial_number: SerialNumber::new(&leaf_index.to_be_bytes())?,
-        signature: signature_algorithm.clone(),
-        issuer: entry.issuer,
-        validity: entry.validity,
-        subject: entry.subject,
-        subject_public_key_info: spki,
-        issuer_unique_id: entry.issuer_unique_id,
-        subject_unique_id: entry.subject_unique_id,
-        extensions: entry.extensions,
-    };
-    let certificate = Certificate {
-        tbs_certificate,
-        signature_algorithm,
-        signature: BitString::from_bytes(
-            &MtcProof {
-                start: subtree.lo(),
-                end: subtree.hi(),
-                inclusion_proof,
-                signatures: Vec::new(),
-            }
-            .to_bytes(),
-        )?,
-    };
-    Ok(certificate.to_der()?)
+    // Build TBSCertificate DER field-by-field (x509-cert 0.3 fields are private).
+    let mut tbs_content = Vec::new();
+    if entry.version != x509_cert::certificate::Version::V1 {
+        let tagged = ContextSpecific {
+            tag_number: TagNumber(0),
+            tag_mode: TagMode::Explicit,
+            value: entry.version,
+        };
+        tagged.encode_to_vec(&mut tbs_content)?;
+    }
+    SerialNumber::<x509_cert::certificate::Rfc5280>::new(&leaf_index.to_be_bytes())?
+        .encode_to_vec(&mut tbs_content)?;
+    signature_algorithm.encode_to_vec(&mut tbs_content)?;
+    entry.issuer.encode_to_vec(&mut tbs_content)?;
+    entry.validity.encode_to_vec(&mut tbs_content)?;
+    entry.subject.encode_to_vec(&mut tbs_content)?;
+    spki.encode_to_vec(&mut tbs_content)?;
+    if let Some(uid) = &entry.issuer_unique_id {
+        // issuerUniqueID [1] IMPLICIT UniqueIdentifier OPTIONAL
+        ContextSpecificRef {
+            tag_number: TagNumber(1),
+            tag_mode: TagMode::Implicit,
+            value: uid,
+        }
+        .encode_to_vec(&mut tbs_content)?;
+    }
+    if let Some(uid) = &entry.subject_unique_id {
+        // subjectUniqueID [2] IMPLICIT UniqueIdentifier OPTIONAL
+        ContextSpecificRef {
+            tag_number: TagNumber(2),
+            tag_mode: TagMode::Implicit,
+            value: uid,
+        }
+        .encode_to_vec(&mut tbs_content)?;
+    }
+    if let Some(exts) = &entry.extensions {
+        let mut exts_items = Vec::new();
+        for ext in exts {
+            exts_items.extend(ext.to_der()?);
+        }
+        let mut exts_seq = Vec::new();
+        der::Header::new(der::Tag::Sequence, der::Length::try_from(exts_items.len())?)
+            .encode_to_vec(&mut exts_seq)?;
+        exts_seq.extend(exts_items);
+        let exts_any = der::asn1::Any::from_der(&exts_seq)?;
+        let tagged = ContextSpecific {
+            tag_number: TagNumber(3),
+            tag_mode: TagMode::Explicit,
+            value: exts_any,
+        };
+        tagged.encode_to_vec(&mut tbs_content)?;
+    }
+    let mut tbs_der = Vec::new();
+    der::Header::new(
+        der::Tag::Sequence,
+        der::Length::try_from(tbs_content.len())?,
+    )
+    .encode_to_vec(&mut tbs_der)?;
+    tbs_der.extend(&tbs_content);
+
+    // Build Certificate DER: SEQUENCE { tbs_der, signature_algorithm, signature }.
+    let sig_bytes = MtcProof {
+        start: subtree.lo(),
+        end: subtree.hi(),
+        inclusion_proof,
+        signatures: Vec::new(),
+    }
+    .to_bytes();
+    let sig_bitstring = BitString::from_bytes(&sig_bytes)?;
+    let mut cert_content = Vec::new();
+    cert_content.extend(&tbs_der);
+    signature_algorithm.encode_to_vec(&mut cert_content)?;
+    sig_bitstring.encode_to_vec(&mut cert_content)?;
+    let mut cert_der = Vec::new();
+    der::Header::new(
+        der::Tag::Sequence,
+        der::Length::try_from(cert_content.len())?,
+    )
+    .encode_to_vec(&mut cert_der)?;
+    cert_der.extend(cert_content);
+    Ok(cert_der)
 }
 
 #[derive(Debug, Error)]
@@ -471,17 +531,17 @@ fn filter_extensions(extensions: &mut Vec<Extension>) -> Result<(), MtcError> {
 /// Errors if the bootstrap certificate contains unsupported fields or
 /// extensions.
 pub fn tbs_cert_to_log_entry(
-    bootstrap: TbsCertificate,
-    issuer: RdnSequence,
+    bootstrap: &TbsCertificate,
+    issuer: &RdnSequence,
     validity: Validity,
 ) -> Result<TbsCertificateLogEntry, MtcError> {
-    if bootstrap.version != Version::V3 {
+    if bootstrap.version() != Version::V3 {
         return Err(MtcError::Dynamic("bootstrap version must be v3".into()));
     }
     if validity
         .not_before
         .to_unix_duration()
-        .lt(&bootstrap.validity.not_before.to_unix_duration())
+        .lt(&bootstrap.validity().not_before.to_unix_duration())
     {
         return Err(MtcError::Dynamic(
             "entry not_before must not be less than bootstrap not_before".into(),
@@ -490,30 +550,34 @@ pub fn tbs_cert_to_log_entry(
     if validity
         .not_after
         .to_unix_duration()
-        .gt(&bootstrap.validity.not_after.to_unix_duration())
+        .gt(&bootstrap.validity().not_after.to_unix_duration())
     {
         return Err(MtcError::Dynamic(
             "entry not_after must not be greater than bootstrap not_after".into(),
         ));
     }
 
-    let extensions = if let Some(mut bootstrap_extensions) = bootstrap.extensions {
-        filter_extensions(&mut bootstrap_extensions)?;
-        Some(bootstrap_extensions)
+    let extensions = if let Some(bootstrap_extensions) = bootstrap.extensions() {
+        let mut exts = bootstrap_extensions.clone();
+        filter_extensions(&mut exts)?;
+        Some(exts)
     } else {
         None
     };
 
+    // Convert RdnSequence → Name via DER round-trip (Name is a newtype over RdnSequence).
+    let issuer = Name::from_der(&issuer.to_der()?)?;
+
     Ok(TbsCertificateLogEntry {
-        version: bootstrap.version,
+        version: bootstrap.version(),
         issuer,
         validity,
-        subject: bootstrap.subject,
+        subject: bootstrap.subject().clone(),
         subject_public_key_info_hash: OctetString::new(
-            &Sha256::digest(bootstrap.subject_public_key_info.to_der()?)[..],
+            &Sha256::digest(bootstrap.subject_public_key_info().to_der()?)[..],
         )?,
-        issuer_unique_id: bootstrap.issuer_unique_id,
-        subject_unique_id: bootstrap.subject_unique_id,
+        issuer_unique_id: bootstrap.issuer_unique_id().clone(),
+        subject_unique_id: bootstrap.subject_unique_id().clone(),
         extensions,
     })
 }
@@ -532,24 +596,24 @@ pub fn validate_correspondence(
 ) -> Result<(), MtcError> {
     // We will run ordinary chain validation on the given chain. After, we will do additional
     // validation, expressed in the below closure.
-    let validator_hook = |leaf: Certificate,
+    let validator_hook = |bootstrap: Certificate,
                           chain_certs: Vec<&Certificate>,
                           _chain_fingerprints: Vec<[u8; 32]>,
                           _found_root_idx: Option<usize>|
      -> Result<(), MtcError> {
-        let bootstrap = leaf.tbs_certificate.clone();
-
-        if !(log_entry.version == bootstrap.version && log_entry.version == Version::V3) {
+        if !(log_entry.version == bootstrap.tbs_certificate().version()
+            && log_entry.version == Version::V3)
+        {
             return Err(MtcError::Dynamic(
                 "entry and bootstrap versions must be v3".into(),
             ));
         }
         // Make sure the validity is contained within the validity of every cert in
         // the chain.
-        for cert in core::iter::once(&leaf).chain(chain_certs) {
+        for cert in core::iter::once(&bootstrap).chain(chain_certs) {
             if log_entry.validity.not_before.to_unix_duration().lt(&cert
-                .tbs_certificate
-                .validity
+                .tbs_certificate()
+                .validity()
                 .not_before
                 .to_unix_duration())
             {
@@ -558,8 +622,8 @@ pub fn validate_correspondence(
                 ));
             }
             if log_entry.validity.not_after.to_unix_duration().gt(&cert
-                .tbs_certificate
-                .validity
+                .tbs_certificate()
+                .validity()
                 .not_after
                 .to_unix_duration())
             {
@@ -569,41 +633,50 @@ pub fn validate_correspondence(
                 ));
             }
         }
-        if log_entry.subject != bootstrap.subject {
+        if log_entry.subject != *bootstrap.tbs_certificate().subject() {
             return Err(MtcError::Dynamic(
                 "entry subject must match bootstrap subject".into(),
             ));
         }
         if log_entry.subject_public_key_info_hash
-            != OctetString::new(&Sha256::digest(bootstrap.subject_public_key_info.to_der()?)[..])?
+            != OctetString::new(
+                &Sha256::digest(
+                    bootstrap
+                        .tbs_certificate()
+                        .subject_public_key_info()
+                        .to_der()?,
+                )[..],
+            )?
         {
             return Err(MtcError::Dynamic(
                 "entry spki hash must match hash of bootstrap spki".into(),
             ));
         }
-        if log_entry.issuer_unique_id != bootstrap.issuer_unique_id {
+        if log_entry.issuer_unique_id != *bootstrap.tbs_certificate().issuer_unique_id() {
             return Err(MtcError::Dynamic(
                 "entry issuer unique ID must match bootstrap issuer unique ID".into(),
             ));
         }
-        if log_entry.subject_unique_id != bootstrap.subject_unique_id {
+        if log_entry.subject_unique_id != *bootstrap.tbs_certificate().subject_unique_id() {
             return Err(MtcError::Dynamic(
                 "entry subject unique ID must match bootstrap subject unique ID".into(),
             ));
         }
 
-        let (log_entry_extensions, mut bootstrap_extensions) =
-            match (&log_entry.extensions, bootstrap.extensions) {
-                // If no extensions in either entry or bootstrap, we're done.
-                (None, None) => return Ok(()),
-                // If mismatched, that's an error.
-                (Some(_), None) | (None, Some(_)) => {
-                    return Err(MtcError::Dynamic("mismatched extensions".into()))
-                }
-                // Otherwise both the log entry and bootstrap cert have
-                // extensions. Check them below.
-                (Some(log_ext), Some(boot_ext)) => (log_ext, boot_ext),
-            };
+        let (log_entry_extensions, mut bootstrap_extensions) = match (
+            &log_entry.extensions,
+            bootstrap.tbs_certificate().extensions().cloned(),
+        ) {
+            // If no extensions in either entry or bootstrap, we're done.
+            (None, None) => return Ok(()),
+            // If mismatched, that's an error.
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(MtcError::Dynamic("mismatched extensions".into()))
+            }
+            // Otherwise both the log entry and bootstrap cert have
+            // extensions. Check them below.
+            (Some(log_ext), Some(boot_ext)) => (log_ext, boot_ext),
+        };
 
         // Check and filter bootstrap extensions.
         filter_extensions(&mut bootstrap_extensions)?;
@@ -698,7 +771,7 @@ pub fn validate_correspondence(
 pub fn validate_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
-    issuer: RdnSequence,
+    issuer: &RdnSequence,
     validity: &mut Validity,
 ) -> Result<(BootstrapMtcPendingLogEntry, Option<usize>), MtcError> {
     // We will run the ordinary chain validation on our input, but we have some post-processing we
@@ -712,20 +785,20 @@ pub fn validate_chain(
         // all certificates in the chain.
         for cert in std::iter::once(&leaf).chain(chain_certs) {
             if validity.not_before.to_unix_duration().lt(&cert
-                .tbs_certificate
-                .validity
+                .tbs_certificate()
+                .validity()
                 .not_before
                 .to_unix_duration())
             {
-                validity.not_before = cert.tbs_certificate.validity.not_before;
+                validity.not_before = cert.tbs_certificate().validity().not_before;
             }
             if validity.not_after.to_unix_duration().gt(&cert
-                .tbs_certificate
-                .validity
+                .tbs_certificate()
+                .validity()
                 .not_after
                 .to_unix_duration())
             {
-                validity.not_after = cert.tbs_certificate.validity.not_after;
+                validity.not_after = cert.tbs_certificate().validity().not_after;
             }
             // Check that we still have a non-empty validity period.
             if validity
@@ -754,7 +827,7 @@ pub fn validate_chain(
             bootstrap: bootstrap_tile_entry,
             entry: TlogTilesPendingLogEntry {
                 data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
-                    leaf.tbs_certificate,
+                    leaf.tbs_certificate(),
                     issuer,
                     *validity,
                 )?)
@@ -808,19 +881,14 @@ mod tests {
         ))
         .unwrap();
 
-        let validity = Validity {
-            not_before: Time::UtcTime(
-                UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap(),
-            ),
-            not_after: Time::UtcTime(
-                UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap(),
-            ),
-        };
+        let validity = Validity::new(
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap()),
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap()),
+        );
 
         let mut log_entry = {
-            let bootstrap = &bootstrap_chain[0].tbs_certificate;
             let issuer = RdnSequence::default();
-            tbs_cert_to_log_entry(bootstrap.clone(), issuer, validity).unwrap()
+            tbs_cert_to_log_entry(bootstrap_chain[0].tbs_certificate(), &issuer, validity).unwrap()
         };
 
         // Valid.
@@ -866,23 +934,119 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_signatureless_cert() {
+        use der::Decode as _;
+        use sha2::Digest as _;
+        use tlog_tiles::{Proof, Subtree, TlogTilesLogEntry, TlogTilesPendingLogEntry};
+
+        let certs =
+            Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
+                .unwrap();
+        let cert = &certs[0];
+        let tbs = cert.tbs_certificate();
+        let issuer = RdnSequence::default();
+        let validity = Validity::new(
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap()),
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap()),
+        );
+        let log_entry = tbs_cert_to_log_entry(tbs, &issuer, validity).unwrap();
+        let spki_der = tbs.subject_public_key_info().to_der().unwrap();
+
+        // Construct a BootstrapMtcLogEntry wrapping the log entry.
+        let mtc_entry = MerkleTreeCertEntry::TbsCertEntry(log_entry);
+        let bootstrap_log_entry = BootstrapMtcLogEntry(TlogTilesLogEntry {
+            inner: TlogTilesPendingLogEntry {
+                data: mtc_entry.encode().unwrap(),
+            },
+        });
+
+        let leaf_index: LeafIndex = 42;
+        let subtree = Subtree::new(0, 64).unwrap();
+        let proof: Proof = vec![];
+
+        let cert_der = serialize_signatureless_cert(
+            &bootstrap_log_entry,
+            leaf_index,
+            &spki_der,
+            &subtree,
+            proof,
+        )
+        .unwrap();
+
+        // Parse the output as a Certificate and verify key fields.
+        let out = Certificate::from_der(&cert_der).unwrap();
+        let out_tbs = out.tbs_certificate();
+
+        // Serial number must equal leaf_index encoded as big-endian bytes.
+        // Leading zeros may differ due to DER integer sign-bit encoding.
+        let trim_leading_zeros =
+            |b: &[u8]| -> Vec<u8> { b.iter().copied().skip_while(|&x| x == 0).collect() };
+        assert_eq!(
+            trim_leading_zeros(out_tbs.serial_number().as_bytes()),
+            trim_leading_zeros(&leaf_index.to_be_bytes()),
+            "serial_number must encode leaf_index"
+        );
+
+        // Signature algorithm must be id-alg-mtcproof.
+        assert_eq!(
+            out_tbs.signature().oid,
+            ID_ALG_MTCPROOF,
+            "signature algorithm must be id-alg-mtcproof"
+        );
+
+        // Subject must match the original cert's subject.
+        assert_eq!(out_tbs.subject(), tbs.subject(), "subject must round-trip");
+
+        // SPKI in the output must match the input spki_der.
+        assert_eq!(
+            out_tbs.subject_public_key_info().to_der().unwrap(),
+            spki_der,
+            "subject_public_key_info must round-trip"
+        );
+
+        // Verify the issuer is encoded (empty RdnSequence → Name with no RDNs).
+        // This exercises the Name→issuer round-trip via DER.
+        let issuer_der = out_tbs.issuer().to_der().unwrap();
+        let expected_issuer_der = Name::from_der(&RdnSequence::default().to_der().unwrap())
+            .unwrap()
+            .to_der()
+            .unwrap();
+        assert_eq!(
+            issuer_der, expected_issuer_der,
+            "issuer must encode correctly"
+        );
+
+        // Validity must match what we passed in.
+        assert_eq!(
+            out_tbs.validity().not_before.to_unix_duration().as_secs(),
+            1_518_521_919,
+            "not_before must round-trip"
+        );
+        assert_eq!(
+            out_tbs.validity().not_after.to_unix_duration().as_secs(),
+            1_743_161_919,
+            "not_after must round-trip"
+        );
+
+        // Unique IDs: the source cert has none, so the output should have none.
+        assert!(out_tbs.issuer_unique_id().is_none());
+        assert!(out_tbs.subject_unique_id().is_none());
+    }
+
+    #[test]
     fn test_encode() {
         let certs =
             Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
                 .unwrap();
-        let bootstrap = &certs[0].tbs_certificate;
         let issuer = RdnSequence::default();
 
-        let validity = Validity {
-            not_before: Time::UtcTime(
-                UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap(),
-            ),
-            not_after: Time::UtcTime(
-                UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap(),
-            ),
-        };
+        let validity = Validity::new(
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap()),
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap()),
+        );
 
-        let log_entry = tbs_cert_to_log_entry(bootstrap.clone(), issuer, validity).unwrap();
+        let log_entry =
+            tbs_cert_to_log_entry(certs[0].tbs_certificate(), &issuer, validity).unwrap();
         let decoded = TbsCertificateLogEntry::from_der(&log_entry.to_der().unwrap()).unwrap();
 
         assert_eq!(log_entry, decoded);

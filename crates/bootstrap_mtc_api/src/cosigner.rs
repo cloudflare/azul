@@ -242,14 +242,11 @@ mod tests {
     use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp};
 
     use super::*;
-    use rand::rngs::OsRng;
     use signed_note::VerifierList;
     use std::str::FromStr;
 
     #[test]
     fn test_cosignature_v1_sign_verify() {
-        let mut rng = OsRng;
-
         let origin = "example.com/origin";
         let timestamp = 100;
         let tree_size = 4;
@@ -257,14 +254,16 @@ mod tests {
         // Make a tree head and sign it
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
-            let sk = Ed25519SigningKey::generate(&mut rng);
+            let sk = Ed25519SigningKey::generate(&mut rand::rng());
             MtcCosigner::new_checkpoint(
                 TrustAnchorID::from_str("1.2.3").unwrap(),
                 TrustAnchorID::from_str("4.5.6").unwrap(),
                 sk,
             )
         };
-        let checkpoint = tree.sign(origin, &[], &[&signer], &mut rng).unwrap();
+        let checkpoint = tree
+            .sign(origin, &[], &[&signer], &mut rand::rng())
+            .unwrap();
 
         // Now verify the signed checkpoint
         let verifier = signer.verifier();

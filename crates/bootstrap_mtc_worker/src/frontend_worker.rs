@@ -5,7 +5,7 @@
 
 use crate::{load_checkpoint_cosigner, load_origin, load_roots, SequenceMetadata, CONFIG};
 use der::{
-    asn1::{SetOfVec, UtcTime, Utf8StringRef},
+    asn1::{UtcTime, Utf8StringRef},
     Any, Encode, Tag,
 };
 use generic_log_worker::{
@@ -287,9 +287,8 @@ fn build_issuer_rdn(log_id: &str) -> std::result::Result<RdnSequence, String> {
         value: any_value,
     };
 
-    let rdn = RelativeDistinguishedName(
-        SetOfVec::from_iter([attr]).expect("single attribute should always succeed"),
-    );
+    let rdn = RelativeDistinguishedName::try_from(vec![attr])
+        .expect("single attribute should always succeed");
 
     Ok(RdnSequence::from(vec![rdn]))
 }
@@ -303,10 +302,7 @@ fn build_validity(
     let not_after = UtcTime::from_unix_duration(now + Duration::from_secs(max_lifetime_secs))
         .map_err(|e| e.to_string())?;
 
-    Ok(Validity {
-        not_before: Time::UtcTime(not_before),
-        not_after: Time::UtcTime(not_after),
-    })
+    Ok(Validity::new(Time::UtcTime(not_before), Time::UtcTime(not_after)))
 }
 
 /// Returns the issuer cert for SCT validation. For multi-cert chains, that's
@@ -329,7 +325,7 @@ fn resolve_issuer_for_sct(
     // Single-cert chain: look up issuer from roots pool
     let leaf =
         Certificate::from_der(&chain[0]).map_err(|e| format!("failed to parse leaf: {e}"))?;
-    let issuer_dn = &leaf.tbs_certificate.issuer;
+    let issuer_dn = leaf.tbs_certificate().issuer();
 
     roots
         .find_by_subject(issuer_dn)
@@ -348,7 +344,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
 
     let roots = load_roots(env, name).await?;
     let (pending_entry, found_root_idx) =
-        match bootstrap_mtc_api::validate_chain(&req.chain, roots, issuer, &mut validity) {
+        match bootstrap_mtc_api::validate_chain(&req.chain, roots, &issuer, &mut validity) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("{name}: Bad request: {e}");
@@ -530,9 +526,9 @@ mod tests {
     #[test]
     fn test_build_issuer_rdn() {
         let rdn = build_issuer_rdn("test-log-id").unwrap();
-        assert_eq!(rdn.0.len(), 1);
+        assert_eq!(rdn.as_ref().len(), 1);
 
-        let attr = rdn.0[0].0.iter().next().unwrap();
+        let attr = rdn.as_ref()[0].as_ref().iter().next().unwrap();
         assert_eq!(attr.oid, ID_RDNA_TRUSTANCHOR_ID);
 
         let encoded = attr.value.to_der().unwrap();

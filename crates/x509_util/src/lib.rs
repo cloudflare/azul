@@ -5,12 +5,12 @@
 
 use der::{Decode, Encode, Error as DerError};
 use sha2::{Digest, Sha256};
+use signature::Verifier;
 use std::collections::{hash_map::Entry, HashMap};
 use x509_cert::{
     ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
     Certificate,
 };
-use x509_verify::VerifyingKey;
 
 /// Converts a vector of certificates into an array of DER-encoded certificates.
 ///
@@ -59,12 +59,18 @@ impl CertPool {
     ///
     /// Returns an error if there are issues DER-encoding certificate extensions.
     pub fn find_potential_parents(&self, cert: &Certificate) -> Result<&[usize], DerError> {
-        if let Some((_, aki)) = cert.tbs_certificate.get::<AuthorityKeyIdentifier>()? {
+        if let Some((_, aki)) = cert
+            .tbs_certificate()
+            .get_extension::<AuthorityKeyIdentifier>()?
+        {
             if let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?) {
                 return Ok(indexes);
             }
         }
-        if let Some(indexes) = self.by_name.get(&cert.tbs_certificate.issuer.to_string()) {
+        if let Some(indexes) = self
+            .by_name
+            .get(&cert.tbs_certificate().issuer().to_string())
+        {
             return Ok(indexes);
         }
         Ok(&[])
@@ -82,10 +88,13 @@ impl CertPool {
             let idx = self.certs.len();
             e.insert(idx);
             self.by_name
-                .entry(cert.tbs_certificate.subject.to_string())
+                .entry(cert.tbs_certificate().subject().to_string())
                 .or_default()
                 .push(idx);
-            if let Some((_, ski)) = cert.tbs_certificate.get::<SubjectKeyIdentifier>()? {
+            if let Some((_, ski)) = cert
+                .tbs_certificate()
+                .get_extension::<SubjectKeyIdentifier>()?
+            {
                 self.by_subject_key_id
                     .entry(ski.to_der()?)
                     .or_default()
@@ -264,8 +273,8 @@ where
 
     // Check whether the leaf expiry date is within the acceptable range.
     let not_after = u64::try_from(
-        leaf.tbs_certificate
-            .validity
+        leaf.tbs_certificate()
+            .validity()
             .not_after
             .to_unix_duration()
             .as_millis(),
@@ -335,7 +344,7 @@ where
         let Some(path) = find_path_to_root(current_cert, roots, validated_intermediates.len())?
         else {
             return Err(ValidationError::NoPathToTrustedRoot {
-                to_verify_issuer: current_cert.tbs_certificate.issuer.to_string(),
+                to_verify_issuer: current_cert.tbs_certificate().issuer().to_string(),
             }
             .into());
         };
@@ -417,7 +426,7 @@ fn find_path_to_root(
 /// Verify that a cert is well-formed according to RFC 5280.
 fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
     // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
-    if cert.signature_algorithm != cert.tbs_certificate.signature {
+    if cert.signature_algorithm() != cert.tbs_certificate().signature() {
         return Err(ValidationError::MismatchingSigAlg);
     }
     Ok(())
@@ -431,23 +440,99 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// root CA certificate, using the chain of intermediate CA certificates
 /// provided by the submitter.
 /// ```
+/// Verify that `issuer` signed `child` by dispatching on the signature algorithm OID.
+///
+/// Supported algorithms: ECDSA P-256, ECDSA P-384, ECDSA P-521, RSA PKCS#1 v1.5.
+/// Returns `false` for unsupported algorithms or on verification failure.
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
-    // Currently paths are built by comparing
-    //   child.tbs_certificate.issuer.to_string()
+    // Note: chain links are discovered by comparing
+    //   child.tbs_certificate().issuer().to_string()
     // to
-    //   issuer.tbs_certificate.subject.to_string().
+    //   issuer.tbs_certificate().subject().to_string().
     // When these are equal, there is a plausible link between these. This is NOT the actual
     // algorithm for determining whether a link is valid. A discussion on the correct algorithm can
-    // be found here
+    // be found here:
     //   https://github.com/golang/go/issues/31440#issuecomment-537222858
     // The short version is: many clients do byte-by-byte comparison. This to_string() comparison is
     // strictly laxer than that. Which is probably fine for MTC and (static) CT use cases.
 
-    // Verify the issuer's signature on the child cert
-    if let Ok(key) = VerifyingKey::try_from(issuer) {
-        key.verify_strict(child).is_ok()
-    } else {
-        false
+    use const_oid::db::rfc5912::{
+        ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ECDSA_WITH_SHA_512, SHA_256_WITH_RSA_ENCRYPTION,
+        SHA_384_WITH_RSA_ENCRYPTION, SHA_512_WITH_RSA_ENCRYPTION,
+    };
+
+    let Ok(tbs_der) = child.tbs_certificate().to_der() else {
+        return false;
+    };
+    let Some(sig_bytes) = child.signature().as_bytes() else {
+        return false;
+    };
+    let Ok(spki_der) = issuer.tbs_certificate().subject_public_key_info().to_der() else {
+        return false;
+    };
+    let sig_alg = child.signature_algorithm().oid;
+
+    match sig_alg {
+        ECDSA_WITH_SHA_256 | ECDSA_WITH_SHA_384 | ECDSA_WITH_SHA_512 => {
+            let Ok(spki) = spki::SubjectPublicKeyInfoRef::try_from(spki_der.as_ref()) else {
+                return false;
+            };
+            if let Ok(vk) = p256::ecdsa::VerifyingKey::try_from(spki) {
+                p256::ecdsa::DerSignature::try_from(sig_bytes)
+                    .map(|sig| vk.verify(&tbs_der, &sig).is_ok())
+                    .unwrap_or(false)
+            } else if let Ok(spki) = spki::SubjectPublicKeyInfoRef::try_from(spki_der.as_ref()) {
+                if let Ok(vk) = p384::ecdsa::VerifyingKey::try_from(spki) {
+                    p384::ecdsa::DerSignature::try_from(sig_bytes)
+                        .map(|sig| vk.verify(&tbs_der, &sig).is_ok())
+                        .unwrap_or(false)
+                } else if let Ok(spki) = spki::SubjectPublicKeyInfoRef::try_from(spki_der.as_ref())
+                {
+                    if let Ok(vk) = p521::ecdsa::VerifyingKey::try_from(spki) {
+                        p521::ecdsa::DerSignature::try_from(sig_bytes)
+                            .map(|sig| vk.verify(&tbs_der, &sig).is_ok())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+
+        SHA_256_WITH_RSA_ENCRYPTION | SHA_384_WITH_RSA_ENCRYPTION | SHA_512_WITH_RSA_ENCRYPTION => {
+            use rsa::{
+                pkcs1v15::VerifyingKey as RsaVerifyingKey, pkcs8::DecodePublicKey, RsaPublicKey,
+            };
+            use sha2::{Sha256, Sha384, Sha512};
+            let Ok(rsa_key) = RsaPublicKey::from_public_key_der(&spki_der) else {
+                return false;
+            };
+            match sig_alg {
+                SHA_256_WITH_RSA_ENCRYPTION => {
+                    let vk = RsaVerifyingKey::<Sha256>::new(rsa_key);
+                    rsa::pkcs1v15::Signature::try_from(sig_bytes)
+                        .map(|sig| vk.verify(&tbs_der, &sig).is_ok())
+                        .unwrap_or(false)
+                }
+                SHA_384_WITH_RSA_ENCRYPTION => {
+                    let vk = RsaVerifyingKey::<Sha384>::new(rsa_key);
+                    rsa::pkcs1v15::Signature::try_from(sig_bytes)
+                        .map(|sig| vk.verify(&tbs_der, &sig).is_ok())
+                        .unwrap_or(false)
+                }
+                _ => {
+                    let vk = RsaVerifyingKey::<Sha512>::new(rsa_key);
+                    rsa::pkcs1v15::Signature::try_from(sig_bytes)
+                        .map(|sig| vk.verify(&tbs_der, &sig).is_ok())
+                        .unwrap_or(false)
+                }
+            }
+        }
+        _ => false,
     }
 }
 
@@ -464,8 +549,8 @@ fn check_ca_basic_constraints(
 ) -> Result<(), ValidationError> {
     // Check the cert's basic constraints.
     if ca_cert
-        .tbs_certificate
-        .get::<BasicConstraints>()
+        .tbs_certificate()
+        .get_extension::<BasicConstraints>()
         .map_err(ValidationError::from)?
         .is_none_or(|(_, bc)| {
             // If the path length constraint is specified, check it. The
@@ -504,7 +589,7 @@ mod tests {
     use super::*;
     use chrono::prelude::*;
     use der::DecodePem;
-    use x509_verify::x509_cert::Certificate;
+    use x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
@@ -681,6 +766,12 @@ mod tests {
         "../../static_ct_api/tests/subleaf.misordered.chain";
         false
     );
+    test_validate_chain!(
+        valid_p521_chain;
+        "../../static_ct_api/tests/p521-root-cert.pem";
+        "../../static_ct_api/tests/p521-leaf-cert.pem";
+        None; None; false; 1; false
+    );
 
     macro_rules! test_not_after {
         ($name:ident; $start:expr; $end:expr; $want_err:expr) => {
@@ -703,7 +794,7 @@ mod tests {
                 .unwrap();
 
         // Get the subject DN before moving into pool
-        let subject_dn = root.tbs_certificate.subject.clone();
+        let subject_dn = root.tbs_certificate().subject().clone();
 
         // Create a pool with this root
         let pool = CertPool::new(vec![root]).unwrap();
@@ -714,7 +805,7 @@ mod tests {
 
         // Verify it's the same cert (compare subjects)
         assert_eq!(
-            found.unwrap().tbs_certificate.subject.to_string(),
+            found.unwrap().tbs_certificate().subject().to_string(),
             subject_dn.to_string()
         );
     }
@@ -732,7 +823,7 @@ mod tests {
 
         // Try to find by a different subject (use the leaf's issuer, which isn't in pool)
         let leaf = &pool.certs[0];
-        let issuer_dn = &leaf.tbs_certificate.issuer;
+        let issuer_dn = &leaf.tbs_certificate().issuer();
 
         // The issuer is not in the pool, so this should return None
         let not_found = pool.find_by_subject(issuer_dn);

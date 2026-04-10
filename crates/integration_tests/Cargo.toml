@@ -19,6 +19,7 @@ name = "integration_tests"
 [dependencies]
 # Crypto / protocol types reused from the workspace
 base64.workspace = true
+crypto-common = "0.2"
 p256.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
@@ -45,4 +46,3 @@ const-oid.workspace = true
 reqwest = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 x509_util.workspace = true
-x509-verify.workspace = true
