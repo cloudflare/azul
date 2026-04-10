@@ -145,6 +145,45 @@ fn parse_signature_algorithm(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Golden-file regression test for `extract_scts_from_cert`.
+    ///
+    /// The golden file contains the expected TBS DER output after the SCT extension
+    /// is removed from `cloudflare.pem`.  Re-generate with:
+    ///
+    /// ```sh
+    /// UPDATE_GOLDEN=1 cargo test -p sct_validator test_tbs_without_sct_golden
+    /// ```
+    #[test]
+    fn test_tbs_without_sct_golden() {
+        use der::Encode as _;
+        use x509_cert::Certificate;
+
+        const GOLDEN: &str = "tests/golden/cloudflare-tbs-without-sct.der";
+
+        let cert = Certificate::load_pem_chain(include_bytes!("../tests/cloudflare.pem"))
+            .unwrap()
+            .remove(0);
+        let cert_der = cert.to_der().unwrap();
+        let (_, tbs_der, _) = extract_scts_from_cert(&cert_der).unwrap();
+
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN);
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::write(&golden_path, &tbs_der).expect("failed to write golden file");
+            return;
+        }
+        let expected =
+            std::fs::read(&golden_path).expect("golden file missing — run with UPDATE_GOLDEN=1");
+        assert_eq!(
+            tbs_der, expected,
+            "TBS DER mismatch — if intentional, re-run with UPDATE_GOLDEN=1"
+        );
+    }
+}
+
 fn extract_lifetime_days(cert: &Certificate) -> Result<u64, SctError> {
     let validity = &cert.tbs_certificate.validity;
     let not_before_secs = validity.not_before.to_unix_duration().as_secs();
