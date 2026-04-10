@@ -288,15 +288,15 @@ pub fn make_ietf_mtc_csr(log_name: &str) -> Result<IetfMtcCsr> {
         format!("log '{log_name}' not found in ietf_mtc_worker config.dev.json")
     })?;
 
-    let leaf_key = SigningKey::random(&mut OsRng);
-    let leaf_spki = SubjectPublicKeyInfoOwned::from_key(*leaf_key.verifying_key())
+    let leaf_key = SigningKey::generate_from_rng(&mut rand::rng());
+    let leaf_spki = SubjectPublicKeyInfoOwned::from_key(leaf_key.verifying_key())
         .context("encoding leaf SPKI")?;
     let spki_der = leaf_spki.to_der().context("encoding leaf SPKI to DER")?;
 
     let subject = Name::from_str("CN=integration-test.example.com,O=Test,C=US")
         .context("building subject name")?;
 
-    let mut builder = RequestBuilder::new(subject, &leaf_key).context("creating RequestBuilder")?;
+    let mut builder = RequestBuilder::new(subject).context("creating RequestBuilder")?;
 
     // Add a subjectAltName extension.
     let san = x509_cert::ext::pkix::SubjectAltName(vec![
@@ -307,7 +307,7 @@ pub fn make_ietf_mtc_csr(log_name: &str) -> Result<IetfMtcCsr> {
     builder.add_extension(&san).context("adding SAN")?;
 
     let csr = builder
-        .build::<p256::ecdsa::DerSignature>()
+        .build::<_, p256::ecdsa::DerSignature>(&leaf_key)
         .context("building CSR")?;
     let csr_der = csr.to_der().context("encoding CSR to DER")?;
 

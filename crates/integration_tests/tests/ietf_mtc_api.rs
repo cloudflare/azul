@@ -46,7 +46,7 @@ const ID_ALG_MTCPROOF: der::asn1::ObjectIdentifier =
 /// content octets (the unused-bits byte is handled by the `der` crate
 /// internally), which are exactly the `MTCProof` bytes.
 fn extract_mtc_proof_bytes(cert: &Certificate) -> Vec<u8> {
-    cert.signature
+    cert.signature()
         .as_bytes()
         .expect("signatureValue BIT STRING must have 0 unused bits")
         .to_vec()
@@ -70,8 +70,8 @@ fn compute_entry_hash(cert: &Certificate, leaf_index: u64) -> Hash {
     use sha2::Digest;
 
     // §7.2 step 3: serial number encodes `index`.
-    let tbs = &cert.tbs_certificate;
-    let serial_bytes = tbs.serial_number.as_bytes();
+    let tbs = cert.tbs_certificate();
+    let serial_bytes = tbs.serial_number().as_bytes();
     let mut padded = [0u8; 8];
     let len = serial_bytes.len().min(8);
     padded[8 - len..].copy_from_slice(&serial_bytes[serial_bytes.len() - len..]);
@@ -82,21 +82,21 @@ fn compute_entry_hash(cert: &Certificate, leaf_index: u64) -> Hash {
     );
 
     // §7.2 steps 4a-4c: reconstruct TBSCertificateLogEntry.
-    let spki_der = tbs.subject_public_key_info.to_der().expect("encoding SPKI");
+    let spki_der = tbs.subject_public_key_info().to_der().expect("encoding SPKI");
     let spki_hash =
         der::asn1::OctetString::new(&sha2::Sha256::digest(&spki_der)[..]).expect("OctetString");
     let log_entry = TbsCertificateLogEntry {
-        version: tbs.version,
-        issuer: tbs.issuer.clone(),
-        validity: tbs.validity,
-        subject: tbs.subject.clone(),
+        version: tbs.version(),
+        issuer: tbs.issuer().clone(),
+        validity: *tbs.validity(),
+        subject: tbs.subject().clone(),
         // §7.2 step 4b
-        subject_public_key_info_algorithm: tbs.subject_public_key_info.algorithm.clone(),
+        subject_public_key_info_algorithm: tbs.subject_public_key_info().algorithm.clone(),
         // §7.2 step 4c
         subject_public_key_info_hash: spki_hash,
-        issuer_unique_id: tbs.issuer_unique_id.clone(),
-        subject_unique_id: tbs.subject_unique_id.clone(),
-        extensions: tbs.extensions.clone(),
+        issuer_unique_id: tbs.issuer_unique_id().clone(),
+        subject_unique_id: tbs.subject_unique_id().clone(),
+        extensions: tbs.extensions().cloned(),
     };
 
     // §7.2 step 5: entry_hash = MTH({entry}) = record_hash(entry_bytes).
@@ -111,22 +111,22 @@ fn assert_valid_mtc_cert(cert_der: &[u8], context: &str) -> Certificate {
         .unwrap_or_else(|e| panic!("{context}: not a valid DER certificate: {e}"));
 
     assert_eq!(
-        cert.signature_algorithm.oid,
+        cert.signature_algorithm().oid,
         ID_ALG_MTCPROOF,
         "{context}: expected id-alg-mtcproof signature algorithm, got {}",
-        cert.signature_algorithm.oid
+        cert.signature_algorithm().oid
     );
     assert_eq!(
-        cert.tbs_certificate.signature.oid,
+        cert.tbs_certificate().signature().oid,
         ID_ALG_MTCPROOF,
         "{context}: TBSCertificate.signature algorithm mismatch"
     );
     assert!(
-        !cert.signature.raw_bytes().is_empty(),
+        !cert.signature().as_bytes().unwrap_or(&[]).is_empty(),
         "{context}: signatureValue (MTCProof) must be non-empty"
     );
     assert!(
-        !cert.tbs_certificate.subject.0.is_empty(),
+        !cert.tbs_certificate().subject().as_ref().is_empty(),
         "{context}: subject must be non-empty"
     );
 
@@ -391,7 +391,7 @@ async fn add_entry_returns_valid_response() {
 
     // The response is a DER-encoded standalone MTC certificate.
     let cert = assert_valid_mtc_cert(&resp.certificate, "add-entry standalone cert");
-    let serial_bytes = cert.tbs_certificate.serial_number.as_bytes();
+    let serial_bytes = cert.tbs_certificate().serial_number().as_bytes();
     let mut padded = [0u8; 8];
     let len = serial_bytes.len().min(8);
     padded[8 - len..].copy_from_slice(&serial_bytes[serial_bytes.len() - len..]);
@@ -431,7 +431,7 @@ async fn add_entry_appears_in_checkpoint() {
 
     // The leaf_index is encoded as the certificate's serial number.
     let cert = assert_valid_mtc_cert(&resp.certificate, "add-entry standalone cert");
-    let serial_bytes = cert.tbs_certificate.serial_number.as_bytes();
+    let serial_bytes = cert.tbs_certificate().serial_number().as_bytes();
     let mut padded = [0u8; 8];
     let len = serial_bytes.len().min(8);
     padded[8 - len..].copy_from_slice(&serial_bytes[serial_bytes.len() - len..]);
@@ -492,7 +492,7 @@ async fn get_certificate_returns_valid_cert() {
     let resp = resp.unwrap();
 
     let cert = assert_valid_mtc_cert(&resp.certificate, "add-entry standalone cert");
-    let serial_bytes = cert.tbs_certificate.serial_number.as_bytes();
+    let serial_bytes = cert.tbs_certificate().serial_number().as_bytes();
     let mut padded = [0u8; 8];
     let len = serial_bytes.len().min(8);
     padded[8 - len..].copy_from_slice(&serial_bytes[serial_bytes.len() - len..]);
