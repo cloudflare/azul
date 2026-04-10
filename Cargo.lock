@@ -1546,6 +1546,7 @@ dependencies = [
  "sha2",
  "signature",
  "signed_note",
+ "spki",
  "static_ct_api",
  "tlog_tiles",
  "tokio",

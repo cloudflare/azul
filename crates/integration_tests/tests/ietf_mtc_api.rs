@@ -188,14 +188,27 @@ async fn ensure_initialized() {
 
 /// Fetch metadata and build an `MtcVerifyingKey` for the log's cosigner.
 async fn fetch_verifying_key(client: &IetfMtcClient) -> (MtcVerifyingKey, TrustAnchorID, TrustAnchorID) {
+    use const_oid::db::{fips204::ID_ML_DSA_44, rfc8410::ID_ED_25519};
+    use spki::SubjectPublicKeyInfoRef;
     use std::str::FromStr;
+
     let meta = client.get_metadata().await.expect("metadata");
-    // cosigner_public_key is SPKI DER — decode as Ed25519 verifying key.
-    let vk = {
-        use pkcs8::DecodePublicKey;
-        let ed_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
-            .expect("cosigner_public_key must be a valid Ed25519 SPKI");
-        MtcVerifyingKey::Ed25519(ed_vk)
+    // Determine the algorithm from the SPKI algorithm identifier OID.
+    let spki = SubjectPublicKeyInfoRef::try_from(meta.cosigner_public_key.as_ref())
+        .expect("cosigner_public_key must be a valid SPKI");
+    let vk = match spki.algorithm.oid {
+        ID_ED_25519 => {
+            use pkcs8::DecodePublicKey;
+            let ed_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
+                .expect("cosigner_public_key must be a valid Ed25519 SPKI");
+            MtcVerifyingKey::Ed25519(ed_vk)
+        }
+        ID_ML_DSA_44 => {
+            let ml_dsa_vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::try_from(spki)
+                .expect("cosigner_public_key must be a valid ML-DSA-44 SPKI");
+            MtcVerifyingKey::MlDsa44(ml_dsa_vk)
+        }
+        oid => panic!("unsupported cosigner algorithm OID: {oid}"),
     };
     let cosigner_id = TrustAnchorID::from_str(&meta.cosigner_id).expect("cosigner_id");
     let log_id = TrustAnchorID::from_str(&meta.log_id).expect("log_id");

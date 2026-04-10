@@ -5,7 +5,7 @@
 
 use config::AppConfig;
 use ietf_mtc_api::{MtcCosigner, MtcSigningKey, MtcVerifyingKey, TrustAnchorID};
-use ml_dsa::{signature::Keypair as _, MlDsa44, MlDsa65, MlDsa87, SigningKey as MlDsaSigningKey};
+use ml_dsa::{signature::Keypair as _, MlDsa44, SigningKey as MlDsaSigningKey};
 use pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
@@ -25,10 +25,6 @@ const OID_ED25519: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
 const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
-const OID_ML_DSA_65: der::asn1::ObjectIdentifier =
-    der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
-const OID_ML_DSA_87: der::asn1::ObjectIdentifier =
-    der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
 
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
@@ -88,20 +84,6 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
             Ok((
                 MtcSigningKey::MlDsa44(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa44(kp.verifying_key().clone()),
-            ))
-        }
-        OID_ML_DSA_65 => {
-            let kp = MlDsaSigningKey::<MlDsa65>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
-            Ok((
-                MtcSigningKey::MlDsa65(kp.signing_key().clone()),
-                MtcVerifyingKey::MlDsa65(kp.verifying_key().clone()),
-            ))
-        }
-        OID_ML_DSA_87 => {
-            let kp = MlDsaSigningKey::<MlDsa87>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
-            Ok((
-                MtcSigningKey::MlDsa87(kp.signing_key().clone()),
-                MtcVerifyingKey::MlDsa87(kp.verifying_key().clone()),
             ))
         }
         oid => Err(format!("unsupported signing algorithm OID: {oid}")),

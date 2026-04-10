@@ -4,10 +4,10 @@
 use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::Signer as Ed25519Signer;
 use length_prefixed::WriteLengthPrefixedBytesExt;
-use ml_dsa::{signature::Verifier as MlDsaVerifier, MlDsa44, MlDsa65, MlDsa87};
-use sha2::{Digest, Sha256};
+use ml_dsa::{signature::Verifier as MlDsaVerifier, MlDsa44};
+
 use signature::Error as SignatureError;
-use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
+use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier};
 use std::collections::HashMap;
 use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
 
@@ -25,8 +25,6 @@ pub type TrustAnchorID = RelativeOid;
 pub enum MtcSigningKey {
     Ed25519(ed25519_dalek::SigningKey),
     MlDsa44(ml_dsa::ExpandedSigningKey<MlDsa44>),
-    MlDsa65(ml_dsa::ExpandedSigningKey<MlDsa65>),
-    MlDsa87(ml_dsa::ExpandedSigningKey<MlDsa87>),
 }
 
 /// A verifying key for MTC subtree cosignatures.
@@ -35,8 +33,6 @@ pub enum MtcSigningKey {
 pub enum MtcVerifyingKey {
     Ed25519(ed25519_dalek::VerifyingKey),
     MlDsa44(ml_dsa::VerifyingKey<MlDsa44>),
-    MlDsa65(ml_dsa::VerifyingKey<MlDsa65>),
-    MlDsa87(ml_dsa::VerifyingKey<MlDsa87>),
 }
 
 impl MtcSigningKey {
@@ -51,8 +47,6 @@ impl MtcSigningKey {
         Ok(match self {
             Self::Ed25519(sk) => sk.sign(msg).to_bytes().to_vec(),
             Self::MlDsa44(sk) => sk.sign(msg).encode().as_slice().to_vec(),
-            Self::MlDsa65(sk) => sk.sign(msg).encode().as_slice().to_vec(),
-            Self::MlDsa87(sk) => sk.sign(msg).encode().as_slice().to_vec(),
         })
     }
 }
@@ -69,14 +63,28 @@ impl MtcVerifyingKey {
     /// followed by the algorithm OID in dotted-decimal ASCII, as RECOMMENDED by the
     /// spec for types without an assigned identifier byte.
     ///
-    /// TODO: Replace ML-DSA entries with their allocated single-byte identifiers
-    /// once c2sp.org/signed-note assigns them.
+    /// TODO(C2SP/C2SP#237): Once https://github.com/C2SP/C2SP/pull/237 merges, update
+    /// the ML-DSA-44 cosignature to the finalised format:
+    ///   - algorithm byte: 0x06 (replacing 0xff + dotted-decimal OID)
+    ///   - signed message label: "subtree/v1\n\0" (replacing "mtc-subtree/v1\n\0")
+    ///   - add 8-byte POSIX-seconds timestamp prefix to signature bytes
+    ///   - cosigner_name / log_origin OID encoding: "oid/" + DER content bytes
+    ///     (replacing BER-encoded relative OID bytes)
+    ///   - extract_timestamp_millis: return Some(timestamp_secs * 1000)
+    ///   - CheckpointSigner::sign: use the provided timestamp (currently ignored)
+
+    /// Returns the raw public key bytes (without algorithm prefix or DER wrapping).
+    fn to_raw_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Ed25519(vk) => vk.to_bytes().to_vec(),
+            Self::MlDsa44(vk) => vk.encode().as_slice().to_vec(),
+        }
+    }
+
     fn signature_type_bytes(&self) -> &'static [u8] {
         match self {
             Self::Ed25519(_) => &[0x01],
             Self::MlDsa44(_) => b"\xff2.16.840.1.101.3.4.3.17",
-            Self::MlDsa65(_) => b"\xff2.16.840.1.101.3.4.3.18",
-            Self::MlDsa87(_) => b"\xff2.16.840.1.101.3.4.3.19",
         }
     }
 
@@ -90,8 +98,6 @@ impl MtcVerifyingKey {
                 ed25519_dalek::Verifier::verify(vk, msg, &sig).is_ok()
             }
             Self::MlDsa44(vk) => verify_ml_dsa(vk, msg, sig_bytes),
-            Self::MlDsa65(vk) => verify_ml_dsa(vk, msg, sig_bytes),
-            Self::MlDsa87(vk) => verify_ml_dsa(vk, msg, sig_bytes),
         }
     }
 
@@ -109,14 +115,6 @@ impl MtcVerifyingKey {
             Self::MlDsa44(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-44 SPKI encoding failed")
-                .to_vec(),
-            Self::MlDsa65(vk) => vk
-                .to_public_key_der()
-                .expect("ML-DSA-65 SPKI encoding failed")
-                .to_vec(),
-            Self::MlDsa87(vk) => vk
-                .to_public_key_der()
-                .expect("ML-DSA-87 SPKI encoding failed")
                 .to_vec(),
         }
     }
@@ -255,13 +253,10 @@ impl MtcNoteVerifier {
         let name = KeyName::new(format!("oid/{ID_RDNA_TRUSTANCHOR_ID}.{log_id}")).unwrap();
 
         let id = {
-            let mut hasher = Sha256::new();
-            hasher.update(name.as_str().as_bytes());
-            hasher.update([0x0a]);
-            hasher.update(signature_type_bytes);
-            hasher.update(b"mtc-checkpoint/v1");
-            let result = hasher.finalize();
-            u32::from_be_bytes(result[0..4].try_into().unwrap())
+            // Key ID = SHA-256(name || 0x0A || signature_type_bytes || raw_pubkey_bytes)[:4]
+            // per https://c2sp.org/signed-note (compute_key_id convention).
+            let pubkey_bytes = verifying_key.to_raw_bytes();
+            compute_key_id(&name, &[signature_type_bytes, &pubkey_bytes].concat())
         };
 
         Self {
@@ -476,7 +471,7 @@ mod tests {
     use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp};
 
     use super::*;
-    use ml_dsa::{signature::Keypair as _, KeyGen};
+    use ml_dsa::{signature::Keypair as _, KeyGen, MlDsa44};
     use signed_note::VerifierList;
     use std::str::FromStr;
 
@@ -517,28 +512,6 @@ mod tests {
             TrustAnchorID::from_str("4.5.6").unwrap(),
             MtcSigningKey::MlDsa44(kp.signing_key().clone()),
             MtcVerifyingKey::MlDsa44(kp.verifying_key().clone()),
-        ));
-    }
-
-    #[test]
-    fn test_cosignature_ml_dsa_65() {
-        let kp = ml_dsa::MlDsa65::key_gen(&mut rand::rng());
-        run_sign_verify_test(MtcCosigner::new_checkpoint(
-            TrustAnchorID::from_str("1.2.3").unwrap(),
-            TrustAnchorID::from_str("4.5.6").unwrap(),
-            MtcSigningKey::MlDsa65(kp.signing_key().clone()),
-            MtcVerifyingKey::MlDsa65(kp.verifying_key().clone()),
-        ));
-    }
-
-    #[test]
-    fn test_cosignature_ml_dsa_87() {
-        let kp = ml_dsa::MlDsa87::key_gen(&mut rand::rng());
-        run_sign_verify_test(MtcCosigner::new_checkpoint(
-            TrustAnchorID::from_str("1.2.3").unwrap(),
-            TrustAnchorID::from_str("4.5.6").unwrap(),
-            MtcSigningKey::MlDsa87(kp.signing_key().clone()),
-            MtcVerifyingKey::MlDsa87(kp.verifying_key().clone()),
         ));
     }
 }

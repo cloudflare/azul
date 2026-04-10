@@ -1,2 +1,6 @@
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-args=-z stack-size=1048576"]
+# ML-DSA key expansion (KeyGen::from_seed) requires more stack than the default 1MB.
+# 4MB is sufficient and has no impact on bundle size or production deployment limits
+# (the stack is carved from WASM linear memory at runtime, not stored in the binary).
+# See: https://github.com/RustCrypto/signatures/issues/1024
+rustflags = ["-C", "link-args=-z stack-size=4194304"]
