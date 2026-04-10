@@ -378,6 +378,36 @@ mod tests {
         cert
     }
 
+    /// Golden-file regression test for `build_precert_tbs`.
+    ///
+    /// The golden file contains the expected TBS DER output after the CT poison
+    /// extension is removed from the precertificate in `preissuer-chain.pem`.
+    /// Re-generate with:
+    ///
+    /// ```sh
+    /// UPDATE_GOLDEN=1 cargo test -p static_ct_api test_build_precert_tbs_golden
+    /// ```
+    #[test]
+    fn test_build_precert_tbs_golden() {
+        const GOLDEN: &str = "tests/golden/preissuer-precert-tbs.der";
+
+        let precert_chain =
+            Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
+        let tbs_der = build_precert_tbs(&precert_chain[0].tbs_certificate).unwrap();
+
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN);
+        if std::env::var("UPDATE_GOLDEN").is_ok() {
+            std::fs::write(&golden_path, &tbs_der).expect("failed to write golden file");
+            return;
+        }
+        let expected =
+            std::fs::read(&golden_path).expect("golden file missing — run with UPDATE_GOLDEN=1");
+        assert_eq!(
+            tbs_der, expected,
+            "TBS DER mismatch — if intentional, re-run with UPDATE_GOLDEN=1"
+        );
+    }
+
     fn make_poison_non_critical(cert: &mut Certificate) -> &Certificate {
         cert.tbs_certificate.extensions = Some(vec![Extension {
             extn_id: CT_PRECERT_POISON,
