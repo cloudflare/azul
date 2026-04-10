@@ -6,7 +6,7 @@
 use config::AppConfig;
 use ietf_mtc_api::{MtcCosigner, MtcSigningKey, MtcVerifyingKey, TrustAnchorID};
 #[cfg(feature = "ml-dsa")]
-use ml_dsa::{KeyPair, MlDsa44, MlDsa65, MlDsa87};
+use ml_dsa::{MlDsa44, MlDsa65, MlDsa87, SigningKey as MlDsaSigningKey};
 use pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
@@ -89,7 +89,7 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
         }
         #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_44 => {
-            let kp = KeyPair::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
+            let kp = MlDsaSigningKey::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
                 MtcSigningKey::MlDsa44(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa44(kp.verifying_key().clone()),
@@ -97,7 +97,7 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
         }
         #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_65 => {
-            let kp = KeyPair::<MlDsa65>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
+            let kp = MlDsaSigningKey::<MlDsa65>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
                 MtcSigningKey::MlDsa65(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa65(kp.verifying_key().clone()),
@@ -105,7 +105,7 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
         }
         #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_87 => {
-            let kp = KeyPair::<MlDsa87>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
+            let kp = MlDsaSigningKey::<MlDsa87>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
                 MtcSigningKey::MlDsa87(kp.signing_key().clone()),
                 MtcVerifyingKey::MlDsa87(kp.verifying_key().clone()),

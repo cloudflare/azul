@@ -30,11 +30,11 @@ pub type TrustAnchorID = RelativeOid;
 pub enum MtcSigningKey {
     Ed25519(ed25519_dalek::SigningKey),
     #[cfg(feature = "ml-dsa")]
-    MlDsa44(ml_dsa::SigningKey<MlDsa44>),
+    MlDsa44(ml_dsa::ExpandedSigningKey<MlDsa44>),
     #[cfg(feature = "ml-dsa")]
-    MlDsa65(ml_dsa::SigningKey<MlDsa65>),
+    MlDsa65(ml_dsa::ExpandedSigningKey<MlDsa65>),
     #[cfg(feature = "ml-dsa")]
-    MlDsa87(ml_dsa::SigningKey<MlDsa87>),
+    MlDsa87(ml_dsa::ExpandedSigningKey<MlDsa87>),
 }
 
 /// A verifying key for MTC subtree cosignatures.
@@ -503,7 +503,7 @@ mod tests {
 
     use super::*;
     #[cfg(feature = "ml-dsa")]
-    use ml_dsa::KeyGen;
+    use ml_dsa::{signature::Keypair as _, KeyGen};
     use signed_note::VerifierList;
     use std::str::FromStr;
 
@@ -563,7 +563,7 @@ mod tests {
     #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_87() {
-        let kp = ml_dsa::MlDsa87::key_gen(&mut OsRng);
+        let kp = ml_dsa::MlDsa87::key_gen(&mut rand::rng());
         run_sign_verify_test(MtcCosigner::new_checkpoint(
             TrustAnchorID::from_str("1.2.3").unwrap(),
             TrustAnchorID::from_str("4.5.6").unwrap(),
