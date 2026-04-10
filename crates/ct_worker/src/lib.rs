@@ -101,36 +101,44 @@ pub(crate) fn load_origin(name: &str) -> KeyName {
 }
 
 async fn load_roots(env: &Env, name: &str) -> Result<&'static CertPool> {
-    // Load embedded roots.
-    ROOTS
-        .get_or_try_init(|| async {
-            let pem = include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem"));
-            let mut pool = CertPool::default();
-            // load_pem_chain fails on empty input: https://github.com/RustCrypto/formats/pull/1965
-            if !pem.is_empty() {
-                pool.append_certs_from_pem(pem)
-                    .map_err(|e| format!("failed to load PEM chain: {e}"))?;
-            }
+    // Fast path: already initialized.
+    if let Some(pool) = ROOTS.get() {
+        return Ok(pool);
+    }
 
-            // Load additional roots from the CCADB roots file in Workers KV.
-            if CONFIG.logs[name].enable_ccadb_roots {
-                let key = ccadb_roots_filename(name);
-                let kv = env.kv(CCADB_ROOTS_NAMESPACE)?;
-                let pem = if let Some(pem) = kv.get(&key).text().await? {
-                    pem
-                } else {
-                    // The roots file might not exist if the CCADB roots cron job hasn't
-                    // run yet. Try to create it once before failing.
-                    update_ccadb_roots(&[&key], &kv).await?;
-                    kv.get(&key)
-                        .text()
-                        .await?
-                        .ok_or(format!("{name}: '{key}' not found in KV"))?
-                };
-                pool.append_certs_from_pem(pem.as_bytes())
-                    .map_err(|e| format!("failed to add CCADB certs to pool: {e}"))?;
-            }
-            Ok(pool)
-        })
-        .await
+    // Build the pool for this request. If another request concurrently built
+    // and stored one first, we discard ours and return the stored value.
+    // This avoids awaiting a OnceCell initialized by another request context,
+    // which the Workers runtime would cancel as a cross-request deadlock.
+    let pem = include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem"));
+    let mut pool = CertPool::default();
+    // load_pem_chain fails on empty input: https://github.com/RustCrypto/formats/pull/1965
+    if !pem.is_empty() {
+        pool.append_certs_from_pem(pem)
+            .map_err(|e| format!("failed to load PEM chain: {e}"))?;
+    }
+
+    // Load additional roots from the CCADB roots file in Workers KV.
+    if CONFIG.logs[name].enable_ccadb_roots {
+        let key = ccadb_roots_filename(name);
+        let kv = env.kv(CCADB_ROOTS_NAMESPACE)?;
+        let pem = if let Some(pem) = kv.get(&key).text().await? {
+            pem
+        } else {
+            // The roots file might not exist if the CCADB roots cron job hasn't
+            // run yet. Try to create it once before failing.
+            update_ccadb_roots(&[&key], &kv).await?;
+            kv.get(&key)
+                .text()
+                .await?
+                .ok_or(format!("{name}: '{key}' not found in KV"))?
+        };
+        pool.append_certs_from_pem(pem.as_bytes())
+            .map_err(|e| format!("failed to add CCADB certs to pool: {e}"))?;
+    }
+
+    // Store the pool if no other request got there first; either way return
+    // the value now in the cell.
+    let _ = ROOTS.set(pool);
+    Ok(ROOTS.get().expect("just set"))
 }

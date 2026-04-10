@@ -113,7 +113,6 @@ async fn ensure_initialized() {
 /// DER-encoded X.509 certificates.
 #[tokio::test]
 async fn get_roots_returns_valid_certs() {
-    ensure_initialized().await;
     let client = BootstrapMtcClient::default_log();
     let roots = client.get_roots().await.expect("get-roots failed");
 
