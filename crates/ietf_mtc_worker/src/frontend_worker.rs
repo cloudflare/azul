@@ -3,7 +3,8 @@
 
 //! Frontend worker for the IETF MTC submission API.
 
-use crate::{load_checkpoint_cosigner, load_origin, SequenceMetadata, CONFIG};
+use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
+use ietf_mtc_api::IetfSequenceMetadata;
 use der::{
     asn1::{UtcTime, Utf8StringRef},
     Any, Decode, Tag,
@@ -353,13 +354,13 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
     if response.status_code() != 200 {
         return Ok(response);
     }
-    let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
-    let leaf_index = metadata.0;
+    let metadata = deserialize::<IetfSequenceMetadata>(&response.bytes().await?)?;
+    let leaf_index = metadata.leaf_index;
 
     // Build the standalone certificate from the subtree signature cached by
     // the sequencer.  The checkpoint_callback runs before the sequencer
     // returns, so the signature should always be present at this point.
-    let Some(certificate) = build_standalone_cert(env, name, leaf_index, &req).await else {
+    let Some(certificate) = build_standalone_cert(env, name, leaf_index, metadata.old_tree_size, metadata.new_tree_size, &req).await else {
         log::warn!("{name}: subtree sig not found for leaf {leaf_index} after sequencing");
         return Response::error("Service unavailable: subtree signature not yet available", 503);
     };
@@ -375,56 +376,36 @@ const MAX_SIG_RETRIES: u32 = 6;
 /// Delay between retries in milliseconds.
 const SIG_RETRY_DELAY_MS: u64 = 250;
 
-/// Compute the candidate subtree sig keys that could contain `leaf_index`.
-///
-/// Per §4.5, a batch is covered by at most two subtrees from
-/// `Subtree::split_interval(old, new)`.  The subtree containing a given
-/// `leaf_index` is the smallest power-of-2-aligned subtree that includes it
-/// and whose `hi` is `<= leaf_index + 1` rounded up to the next alignment
-/// boundary.  Rather than knowing `old`/`new`, we enumerate the O(log n)
-/// candidate subtrees of increasing size that are valid (`start` is a multiple
-/// of `BIT_CEIL(end - start)`) and contain `leaf_index`, from smallest to largest.
-/// The sequencer always picks the smallest applicable subtree, so we check in
-/// increasing size order.
-fn candidate_subtree_keys(leaf_index: LeafIndex) -> Vec<String> {
-    use ietf_mtc_api::subtree_sig_key;
-    let mut keys = Vec::new();
-    let mut size: u64 = 1;
-    while size <= leaf_index + 1 {
-        // The subtree of this size that contains leaf_index:
-        // start = floor(leaf_index / size) * size
-        let start = (leaf_index / size) * size;
-        let end = start + size;
-        // Check it is a valid subtree: start must be a multiple of BIT_CEIL(size).
-        // For power-of-2 sizes BIT_CEIL(size) == size, so start % size == 0, always true.
-        keys.push(subtree_sig_key(start, end));
-        size <<= 1;
-    }
-    keys
-}
-
 async fn build_standalone_cert(
     env: &Env,
     name: &str,
     leaf_index: LeafIndex,
+    old_tree_size: u64,
+    new_tree_size: u64,
     req: &AddEntryRequest,
 ) -> Option<Vec<u8>> {
+    use ietf_mtc_api::subtree_sig_key;
+
     let object_bucket = ObjectBucket::new(load_public_bucket(env, name).ok()?);
 
-    // The checkpoint_callback signs and caches subtrees asynchronously after
-    // the sequencer responds.  We know the key deterministically from leaf_index,
-    // so retry fetching directly rather than listing.
-    let candidates = candidate_subtree_keys(leaf_index);
+    // Compute the exact subtree containing leaf_index using the batch tree
+    // size range from IetfSequenceMetadata.
+    let (left, right) = tlog_tiles::Subtree::split_interval(old_tree_size, new_tree_size).ok()?;
+    let subtree = [Some(left), right]
+        .into_iter()
+        .flatten()
+        .find(|s| s.lo() <= leaf_index && leaf_index < s.hi())?;
+    let key = subtree_sig_key(subtree.lo(), subtree.hi());
+
     let mut signed: Option<SignedSubtree> = None;
-    'retry: for _ in 0..MAX_SIG_RETRIES {
-        for key in &candidates {
-            let Some(raw) = object_bucket.fetch(key).await.ok().flatten() else {
-                continue;
-            };
-            if let Ok(s) = serde_json::from_slice::<SignedSubtree>(&raw) {
-                signed = Some(s);
-                break 'retry;
-            }
+    for _ in 0..MAX_SIG_RETRIES {
+        let Some(raw) = object_bucket.fetch(&key).await.ok().flatten() else {
+            worker::Delay::from(std::time::Duration::from_millis(SIG_RETRY_DELAY_MS)).await;
+            continue;
+        };
+        if let Ok(s) = serde_json::from_slice::<SignedSubtree>(&raw) {
+            signed = Some(s);
+            break;
         }
         worker::Delay::from(std::time::Duration::from_millis(SIG_RETRY_DELAY_MS)).await;
     }

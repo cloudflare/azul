@@ -25,8 +25,8 @@ use sha2::{Digest, Sha256};
 use std::{io::Read, num::ParseIntError};
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, SequenceMetadata, Subtree,
-    TlogError, TlogTilesLogEntry, TlogTilesPendingLogEntry,
+    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, Subtree, TlogError,
+    TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
 };
 use x509_cert::{
     certificate::Version,
@@ -60,6 +60,28 @@ pub enum DraftVersion {
     #[default]
     Draft02,
 }
+
+/// Sequence metadata for IETF MTC log entries.
+///
+/// Extends the standard `(LeafIndex, UnixTimestamp)` with the previous and new
+/// tree sizes, allowing the frontend to compute the exact subtree signature key
+/// for a newly sequenced entry via `Subtree::split_interval(old, new)` without
+/// enumerating candidates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct IetfSequenceMetadata {
+    /// The index of the sequenced entry in the Merkle tree.
+    pub leaf_index: LeafIndex,
+    /// The sequencing timestamp in milliseconds since Unix epoch.
+    pub timestamp: UnixTimestamp,
+    /// The tree size immediately before this batch was sequenced.
+    pub old_tree_size: u64,
+    /// The tree size immediately after this batch was sequenced.
+    pub new_tree_size: u64,
+}
+
+// IetfMtcWorker is a new deployment with no existing DO storage, so serde_json
+// serialization for the dedup cache ring buffer is fine.
+generic_log_worker::impl_json_cache_serialize!(IetfSequenceMetadata);
 
 // MTCSignature from draft-ietf-plants-merkle-tree-certs §6.1.
 struct MtcSignature {
@@ -180,6 +202,21 @@ impl LogEntry for IetfMtcLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
     type Pending = IetfMtcPendingLogEntry;
     type ParseError = MtcError;
+    type Metadata = IetfSequenceMetadata;
+
+    fn make_metadata(
+        leaf_index: LeafIndex,
+        timestamp: UnixTimestamp,
+        old_tree_size: u64,
+        new_tree_size: u64,
+    ) -> Self::Metadata {
+        IetfSequenceMetadata {
+            leaf_index,
+            timestamp,
+            old_tree_size,
+            new_tree_size,
+        }
+    }
 
     fn initial_entry() -> Option<Self::Pending> {
         Some(Self::Pending {
@@ -189,8 +226,13 @@ impl LogEntry for IetfMtcLogEntry {
         })
     }
 
-    fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self {
-        Self(TlogTilesLogEntry::new(pending.entry, metadata))
+    fn new(pending: Self::Pending, metadata: Self::Metadata) -> Self {
+        // Convert IetfSequenceMetadata to SequenceMetadata for TlogTilesLogEntry
+        // (which only uses leaf_index and timestamp internally).
+        Self(TlogTilesLogEntry::new(
+            pending.entry,
+            (metadata.leaf_index, metadata.timestamp),
+        ))
     }
 
     fn merkle_tree_leaf(&self) -> Hash {

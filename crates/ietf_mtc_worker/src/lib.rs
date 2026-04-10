@@ -11,7 +11,6 @@ use signed_note::KeyName;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::SequenceMetadata;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

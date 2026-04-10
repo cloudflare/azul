@@ -52,27 +52,6 @@ impl MtcSigningKey {
 }
 
 impl MtcVerifyingKey {
-    /// The signature type identifier bytes for this algorithm, as used in the
-    /// c2sp.org/signed-note key ID computation:
-    ///
-    /// `key ID = SHA-256(key name || 0x0A || signature_type_bytes || public key)[:4]`
-    ///
-    /// Ed25519 uses the allocated single byte `0x01`.
-    ///
-    /// ML-DSA variants use `0xff` (unassigned per c2sp.org/signed-note §Signature types)
-    /// followed by the algorithm OID in dotted-decimal ASCII, as RECOMMENDED by the
-    /// spec for types without an assigned identifier byte.
-    ///
-    /// TODO(C2SP/C2SP#237): Once https://github.com/C2SP/C2SP/pull/237 merges, update
-    /// the ML-DSA-44 cosignature to the finalised format:
-    ///   - algorithm byte: 0x06 (replacing 0xff + dotted-decimal OID)
-    ///   - signed message label: "subtree/v1\n\0" (replacing "mtc-subtree/v1\n\0")
-    ///   - add 8-byte POSIX-seconds timestamp prefix to signature bytes
-    ///   - cosigner_name / log_origin OID encoding: "oid/" + DER content bytes
-    ///     (replacing BER-encoded relative OID bytes)
-    ///   - extract_timestamp_millis: return Some(timestamp_secs * 1000)
-    ///   - CheckpointSigner::sign: use the provided timestamp (currently ignored)
-
     /// Returns the raw public key bytes (without algorithm prefix or DER wrapping).
     fn to_raw_bytes(&self) -> Vec<u8> {
         match self {
@@ -81,6 +60,24 @@ impl MtcVerifyingKey {
         }
     }
 
+    /// The signature type identifier bytes for this algorithm, as used in the
+    /// c2sp.org/signed-note key ID computation:
+    ///
+    /// `key ID = SHA-256(key name || 0x0A || signature_type_bytes || public key)[:4]`
+    ///
+    /// Ed25519 uses the allocated single byte `0x01`. ML-DSA variants use `0xff`
+    /// (unassigned per c2sp.org/signed-note §Signature types) followed by the
+    /// algorithm OID in dotted-decimal ASCII, as RECOMMENDED by the spec for types
+    /// without an assigned identifier byte.
+    // TODO(C2SP/C2SP#237): Once https://github.com/C2SP/C2SP/pull/237 merges, update
+    // the ML-DSA-44 cosignature to the finalised format:
+    //   - algorithm byte: 0x06 (replacing 0xff + dotted-decimal OID)
+    //   - signed message label: "subtree/v1\n\0" (replacing "mtc-subtree/v1\n\0")
+    //   - add 8-byte POSIX-seconds timestamp prefix to signature bytes
+    //   - cosigner_name / log_origin OID encoding: "oid/" + DER content bytes
+    //     (replacing BER-encoded relative OID bytes)
+    //   - extract_timestamp_millis: return Some(timestamp_secs * 1000)
+    //   - CheckpointSigner::sign: use the provided timestamp (currently ignored)
     fn signature_type_bytes(&self) -> &'static [u8] {
         match self {
             Self::Ed25519(_) => &[0x01],

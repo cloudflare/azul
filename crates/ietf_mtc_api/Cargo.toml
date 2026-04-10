@@ -11,6 +11,8 @@ description.workspace = true
 
 [dependencies]
 base64.workspace = true
+generic_log_worker.workspace = true
+serde_json.workspace = true
 byteorder.workspace = true
 rand.workspace = true
 der.workspace = true
@@ -28,4 +30,3 @@ tlog_tiles.workspace = true
 x509-cert.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true

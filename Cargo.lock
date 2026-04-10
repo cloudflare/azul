@@ -1439,6 +1439,7 @@ dependencies = [
  "byteorder",
  "der",
  "ed25519-dalek",
+ "generic_log_worker",
  "length_prefixed",
  "ml-dsa",
  "pkcs8",
