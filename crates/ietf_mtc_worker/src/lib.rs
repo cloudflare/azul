@@ -5,8 +5,7 @@
 
 use config::AppConfig;
 use ietf_mtc_api::{MtcCosigner, MtcSigningKey, MtcVerifyingKey, TrustAnchorID};
-#[cfg(feature = "ml-dsa")]
-use ml_dsa::{MlDsa44, MlDsa65, MlDsa87, SigningKey as MlDsaSigningKey};
+use ml_dsa::{signature::Keypair as _, MlDsa44, MlDsa65, MlDsa87, SigningKey as MlDsaSigningKey};
 use pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
@@ -24,13 +23,10 @@ mod sequencer_do;
 // Algorithm OID constants.
 const OID_ED25519: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
-#[cfg(feature = "ml-dsa")]
 const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
-#[cfg(feature = "ml-dsa")]
 const OID_ML_DSA_65: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
-#[cfg(feature = "ml-dsa")]
 const OID_ML_DSA_87: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
 
@@ -87,7 +83,6 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
             let vk = sk.verifying_key();
             Ok((MtcSigningKey::Ed25519(sk), MtcVerifyingKey::Ed25519(vk)))
         }
-        #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_44 => {
             let kp = MlDsaSigningKey::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
@@ -95,7 +90,6 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
                 MtcVerifyingKey::MlDsa44(kp.verifying_key().clone()),
             ))
         }
-        #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_65 => {
             let kp = MlDsaSigningKey::<MlDsa65>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((
@@ -103,7 +97,6 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
                 MtcVerifyingKey::MlDsa65(kp.verifying_key().clone()),
             ))
         }
-        #[cfg(feature = "ml-dsa")]
         OID_ML_DSA_87 => {
             let kp = MlDsaSigningKey::<MlDsa87>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             Ok((

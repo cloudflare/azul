@@ -4,7 +4,6 @@
 use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::Signer as Ed25519Signer;
 use length_prefixed::WriteLengthPrefixedBytesExt;
-#[cfg(feature = "ml-dsa")]
 use ml_dsa::{signature::Verifier as MlDsaVerifier, MlDsa44, MlDsa65, MlDsa87};
 use sha2::{Digest, Sha256};
 use signature::Error as SignatureError;
@@ -21,34 +20,22 @@ pub type TrustAnchorID = RelativeOid;
 // ---------------------------------------------------------------------------
 
 /// A signing key for MTC subtree cosignatures.
-///
-/// ML-DSA variants require the `ml-dsa` feature. They are disabled by default
-/// in Worker binaries because ML-DSA's large stack frames cause WASM
-/// memory out-of-bounds errors in the Workers runtime.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum MtcSigningKey {
     Ed25519(ed25519_dalek::SigningKey),
-    #[cfg(feature = "ml-dsa")]
     MlDsa44(ml_dsa::ExpandedSigningKey<MlDsa44>),
-    #[cfg(feature = "ml-dsa")]
     MlDsa65(ml_dsa::ExpandedSigningKey<MlDsa65>),
-    #[cfg(feature = "ml-dsa")]
     MlDsa87(ml_dsa::ExpandedSigningKey<MlDsa87>),
 }
 
 /// A verifying key for MTC subtree cosignatures.
-///
-/// ML-DSA variants require the `ml-dsa` feature.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum MtcVerifyingKey {
     Ed25519(ed25519_dalek::VerifyingKey),
-    #[cfg(feature = "ml-dsa")]
     MlDsa44(ml_dsa::VerifyingKey<MlDsa44>),
-    #[cfg(feature = "ml-dsa")]
     MlDsa65(ml_dsa::VerifyingKey<MlDsa65>),
-    #[cfg(feature = "ml-dsa")]
     MlDsa87(ml_dsa::VerifyingKey<MlDsa87>),
 }
 
@@ -63,11 +50,8 @@ impl MtcSigningKey {
     pub fn try_sign(&self, msg: &[u8]) -> Result<Vec<u8>, SignatureError> {
         Ok(match self {
             Self::Ed25519(sk) => sk.sign(msg).to_bytes().to_vec(),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(sk) => sk.sign(msg).encode().as_slice().to_vec(),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(sk) => sk.sign(msg).encode().as_slice().to_vec(),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(sk) => sk.sign(msg).encode().as_slice().to_vec(),
         })
     }
@@ -90,11 +74,8 @@ impl MtcVerifyingKey {
     fn signature_type_bytes(&self) -> &'static [u8] {
         match self {
             Self::Ed25519(_) => &[0x01],
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(_) => b"\xff2.16.840.1.101.3.4.3.17",
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(_) => b"\xff2.16.840.1.101.3.4.3.18",
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(_) => b"\xff2.16.840.1.101.3.4.3.19",
         }
     }
@@ -108,11 +89,8 @@ impl MtcVerifyingKey {
                 let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
                 ed25519_dalek::Verifier::verify(vk, msg, &sig).is_ok()
             }
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(vk) => verify_ml_dsa(vk, msg, sig_bytes),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(vk) => verify_ml_dsa(vk, msg, sig_bytes),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(vk) => verify_ml_dsa(vk, msg, sig_bytes),
         }
     }
@@ -128,17 +106,14 @@ impl MtcVerifyingKey {
                 .to_public_key_der()
                 .expect("Ed25519 SPKI encoding failed")
                 .to_vec(),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa44(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-44 SPKI encoding failed")
                 .to_vec(),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa65(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-65 SPKI encoding failed")
                 .to_vec(),
-            #[cfg(feature = "ml-dsa")]
             Self::MlDsa87(vk) => vk
                 .to_public_key_der()
                 .expect("ML-DSA-87 SPKI encoding failed")
@@ -148,7 +123,6 @@ impl MtcVerifyingKey {
 }
 
 /// Generic ML-DSA signature verification helper.
-#[cfg(feature = "ml-dsa")]
 fn verify_ml_dsa<P>(vk: &ml_dsa::VerifyingKey<P>, msg: &[u8], sig_bytes: &[u8]) -> bool
 where
     P: ml_dsa::MlDsaParams,
@@ -502,7 +476,6 @@ mod tests {
     use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp};
 
     use super::*;
-    #[cfg(feature = "ml-dsa")]
     use ml_dsa::{signature::Keypair as _, KeyGen};
     use signed_note::VerifierList;
     use std::str::FromStr;
@@ -536,7 +509,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_44() {
         let kp = MlDsa44::key_gen(&mut rand::rng());
@@ -548,7 +520,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_65() {
         let kp = ml_dsa::MlDsa65::key_gen(&mut rand::rng());
@@ -560,7 +531,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_87() {
         let kp = ml_dsa::MlDsa87::key_gen(&mut rand::rng());

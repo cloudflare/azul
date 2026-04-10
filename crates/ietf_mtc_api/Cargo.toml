@@ -9,12 +9,6 @@ homepage.workspace = true
 repository.workspace = true
 description.workspace = true
 
-[features]
-# Enable ML-DSA signing key variants. Disabled by default in Worker binaries
-# because ML-DSA's large stack frames cause WASM memory out-of-bounds errors
-# in the Workers runtime. Enable once the WASM stack issue is resolved.
-ml-dsa = ["dep:ml-dsa"]
-
 [dependencies]
 base64.workspace = true
 byteorder.workspace = true
@@ -22,7 +16,7 @@ rand.workspace = true
 der.workspace = true
 ed25519-dalek.workspace = true
 signature.workspace = true
-ml-dsa = { workspace = true, optional = true }
+ml-dsa.workspace = true
 pkcs8.workspace = true
 length_prefixed.workspace = true
 serde.workspace = true
