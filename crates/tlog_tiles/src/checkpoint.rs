@@ -37,7 +37,7 @@
 use crate::{tlog::Hash, HashReader, TlogError, UnixTimestamp};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng, RngExt};
 use sha2::{Digest, Sha256};
 use signed_note::{
     Ed25519NoteVerifier, KeyName, Note, NoteError, NoteSignature, NoteVerifier, VerifierList,
@@ -508,13 +508,13 @@ impl TreeWithTimestamp {
 /// Clients MUST ignore unknown signatures, and including some "grease" ones
 /// ensures they do.
 fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature> {
-    let mut g1 = vec![0u8; 5 + rng.gen_range(0..100)];
+    let mut g1 = vec![0u8; 5 + rng.random_range(0..100)];
     rng.fill(&mut g1[..]);
 
-    let mut g2 = vec![0u8; 5 + rng.gen_range(0..100)];
+    let mut g2 = vec![0u8; 5 + rng.random_range(0..100)];
     let mut hasher = Sha256::new();
     hasher.update(b"grease\n");
-    hasher.update([rng.gen()]);
+    hasher.update([rng.random::<u8>()]);
     let h = hasher.finalize();
     g2[..4].copy_from_slice(&h[..4]);
     rng.fill(&mut g2[4..]);
@@ -547,8 +547,6 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 
 #[cfg(test)]
 mod tests {
-    use rand::rngs::OsRng;
-
     use super::*;
     use crate::tlog::record_hash;
 
@@ -643,8 +641,6 @@ mod tests {
 
     #[test]
     fn test_sign_verify() {
-        let mut rng = OsRng;
-
         let origin = "example.com/origin";
         let timestamp = 100;
         let tree_size = 4;
@@ -652,10 +648,12 @@ mod tests {
         // Make a tree head and sign it
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
-            let sk = Ed25519SigningKey::generate(&mut rng);
+            let sk = Ed25519SigningKey::generate(&mut rand::rng());
             Ed25519CheckpointSigner::new(KeyName::new("my-signer".into()).unwrap(), sk).unwrap()
         };
-        let checkpoint = tree.sign(origin, &[], &[&signer], &mut rng).unwrap();
+        let checkpoint = tree
+            .sign(origin, &[], &[&signer], &mut rand::rng())
+            .unwrap();
 
         // Now verify the checkpoint
         let verifier = signer.verifier();

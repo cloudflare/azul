@@ -34,7 +34,9 @@ use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use tlog_tiles::UnixTimestamp;
 use x509_cert::{
-    der::Encode, ext::pkix::ExtendedKeyUsage, impl_newtype, Certificate, TbsCertificate,
+    der::Encode,
+    ext::{pkix::ExtendedKeyUsage, Extension},
+    impl_newtype, Certificate, TbsCertificate,
 };
 use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
 
@@ -106,8 +108,8 @@ pub fn partially_validate_chain(
         // reason for a CT log to reject a submission: <https://googlechrome.github.io/CertificateTransparency/log_policy.html>.
         if require_server_auth_eku
             && !leaf
-                .tbs_certificate
-                .get::<ExtendedKeyUsage>()?
+                .tbs_certificate()
+                .get_extension::<ExtendedKeyUsage>()?
                 .is_some_and(|(_, eku)| eku.0.contains(&ID_KP_SERVER_AUTH))
         {
             return Err(StaticCTError::InvalidLeaf);
@@ -132,12 +134,15 @@ pub fn partially_validate_chain(
             (
                 Some(PrecertData {
                     issuer_key_hash: Sha256::digest(
-                        issuer.tbs_certificate.subject_public_key_info.to_der()?,
+                        issuer
+                            .tbs_certificate()
+                            .subject_public_key_info()
+                            .to_der()?,
                     )
                     .into(),
                     pre_certificate: leaf.to_der()?,
                 }),
-                build_precert_tbs(&leaf.tbs_certificate)?,
+                build_precert_tbs(leaf.tbs_certificate())?,
             )
         } else {
             (None, leaf.to_der()?)
@@ -181,7 +186,7 @@ impl_newtype!(CTPrecertPoison, Null);
 
 /// Returns whether or not the certificate contains the precertificate poison extension.
 fn is_precert(cert: &Certificate) -> Result<bool, StaticCTError> {
-    match cert.tbs_certificate.get::<CTPrecertPoison>()? {
+    match cert.tbs_certificate().get_extension::<CTPrecertPoison>()? {
         Some((true, _)) => Ok(true),
         Some((false, _)) => Err(StaticCTError::InvalidCTPoison),
         None => Ok(false),
@@ -190,7 +195,7 @@ fn is_precert(cert: &Certificate) -> Result<bool, StaticCTError> {
 
 /// Returns whether or not the certificate is a precertificate signing certificate.
 fn is_precert_signing_cert(cert: &Certificate) -> Result<bool, StaticCTError> {
-    match cert.tbs_certificate.get::<ExtendedKeyUsage>()? {
+    match cert.tbs_certificate().get_extension::<ExtendedKeyUsage>()? {
         Some((_, eku)) => {
             for usage in eku.0 {
                 if usage == CT_PRECERT_SIGNING_CERT {
@@ -219,21 +224,22 @@ fn is_precert_signing_cert(cert: &Certificate) -> Result<bool, StaticCTError> {
 ///
 /// Returns an error if the certificate is not a valid precertificate.
 pub fn build_precert_tbs(tbs: &TbsCertificate) -> Result<Vec<u8>, StaticCTError> {
-    let mut tbs = tbs.clone();
-
-    let exts = tbs
-        .extensions
-        .as_mut()
-        .ok_or(StaticCTError::InvalidCTPoison)?;
+    let extensions = tbs.extensions().ok_or(StaticCTError::InvalidCTPoison)?;
 
     // Remove CT poison extension (there must be exactly 1).
-    let ct_poison_idx = exts
+    let ct_poison_idx = extensions
         .iter()
         .position(|v| v.extn_id == CT_PRECERT_POISON)
         .ok_or(StaticCTError::InvalidCTPoison)?;
-    exts.remove(ct_poison_idx);
 
-    Ok(tbs.to_der()?)
+    let filtered: Vec<&Extension> = extensions
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != ct_poison_idx)
+        .map(|(_, ext)| ext)
+        .collect();
+
+    Ok(x509_util::encode_tbs_with_extensions(tbs, &filtered)?)
 }
 
 #[cfg(test)]
@@ -242,7 +248,7 @@ mod tests {
     use chrono::prelude::*;
     use der::{asn1::OctetString, Decode};
     use x509_cert::ext::Extension;
-    use x509_verify::x509_cert::Certificate;
+    use x509_cert::{Certificate, TbsCertificate};
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
@@ -279,9 +285,8 @@ mod tests {
 
     test_is_precert!(
         remove_exts_from_precert,
-        wipe_extensions(
-            &mut Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()
-                [0]
+        &wipe_extensions(
+            &Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0]
         ),
         false,
         false
@@ -289,9 +294,8 @@ mod tests {
 
     test_is_precert!(
         poison_non_critical,
-        make_poison_non_critical(
-            &mut Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()
-                [0]
+        &make_poison_non_critical(
+            &Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0]
         ),
         false,
         true
@@ -299,9 +303,8 @@ mod tests {
 
     test_is_precert!(
         poison_non_null,
-        make_poison_non_null(
-            &mut Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()
-                [0]
+        &make_poison_non_null(
+            &Certificate::load_pem_chain(include_bytes!("../tests/precert-valid.pem")).unwrap()[0]
         ),
         false,
         true
@@ -359,25 +362,6 @@ mod tests {
     // CT does not allow extra certs at the end of the chain.
     test_validate_chain!(unrelated_cert_after_chain_inc_root;  "../../static_ct_api/tests/fake-ca-cert.pem"; "../tests/leaf-signed-by-fake-intermediate-cert.pem", "../tests/fake-intermediate-cert.pem", "../tests/fake-ca-cert.pem", "../tests/test-cert.pem"; None; None; false; true; true; 0);
 
-    #[test]
-    fn test_build_precert_tbs() {
-        let precert_chain =
-            Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
-        let precert = &precert_chain[0].tbs_certificate;
-
-        let der = build_precert_tbs(precert).unwrap();
-        let tbs = TbsCertificate::from_der(&der).unwrap();
-
-        // Ensure CT poison is removed.
-        assert!(precert.get::<CTPrecertPoison>().unwrap().is_some());
-        assert!(tbs.get::<CTPrecertPoison>().unwrap().is_none());
-    }
-
-    fn wipe_extensions(cert: &mut Certificate) -> &Certificate {
-        cert.tbs_certificate.extensions = None;
-        cert
-    }
-
     /// Golden-file regression test for `build_precert_tbs`.
     ///
     /// The golden file contains the expected TBS DER output after the CT poison
@@ -393,7 +377,7 @@ mod tests {
 
         let precert_chain =
             Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
-        let tbs_der = build_precert_tbs(&precert_chain[0].tbs_certificate).unwrap();
+        let tbs_der = build_precert_tbs(precert_chain[0].tbs_certificate()).unwrap();
 
         let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN);
         if std::env::var("UPDATE_GOLDEN").is_ok() {
@@ -408,21 +392,208 @@ mod tests {
         );
     }
 
-    fn make_poison_non_critical(cert: &mut Certificate) -> &Certificate {
-        cert.tbs_certificate.extensions = Some(vec![Extension {
+    #[test]
+    fn test_build_precert_tbs() {
+        let precert_chain =
+            Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
+        let precert = precert_chain[0].tbs_certificate();
+
+        let der = build_precert_tbs(precert).unwrap();
+        let tbs = TbsCertificate::from_der(&der).unwrap();
+
+        // Ensure CT poison is removed.
+        assert!(precert
+            .get_extension::<CTPrecertPoison>()
+            .unwrap()
+            .is_some());
+        assert!(tbs.get_extension::<CTPrecertPoison>().unwrap().is_none());
+    }
+
+    /// Build a Certificate DER from the given `precert_tbs_der` (which contains a CT
+    /// poison extension) by wrapping it with a dummy signature, suitable for passing
+    /// to `build_precert_tbs`.  Used to inject synthetic fields (e.g. unique IDs) that
+    /// don't appear in committed test fixtures.
+    fn make_cert_from_tbs_der(tbs_der: Vec<u8>) -> Certificate {
+        use der::{asn1::BitString, Encode};
+        use x509_cert::der::Decode;
+        // Dummy AlgorithmIdentifier (sha256WithRSAEncryption OID, NULL params) and empty BIT STRING.
+        let sig_alg_der: &[u8] = &[
+            0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05,
+            0x00,
+        ];
+        let sig_bs = BitString::from_bytes(&[]).unwrap();
+        let mut cert_content = tbs_der;
+        cert_content.extend(sig_alg_der);
+        sig_bs.encode_to_vec(&mut cert_content).unwrap();
+        let mut cert_der = Vec::new();
+        der::Header::new(
+            der::Tag::Sequence,
+            der::Length::try_from(cert_content.len()).unwrap(),
+        )
+        .encode_to_vec(&mut cert_der)
+        .unwrap();
+        cert_der.extend(cert_content);
+        Certificate::from_der(&cert_der).unwrap()
+    }
+
+    /// Construct a TBS DER for a precertificate identical to `tbs` but with
+    /// `issuerUniqueID` and `subjectUniqueID` injected, for round-trip testing.
+    fn inject_unique_ids_into_precert_tbs(tbs: &TbsCertificate) -> Vec<u8> {
+        use der::{
+            asn1::{BitString, ContextSpecific, ContextSpecificRef},
+            Encode, TagMode, TagNumber,
+        };
+        let issuer_uid = BitString::from_bytes(&[0xDE, 0xAD]).unwrap();
+        let subject_uid = BitString::from_bytes(&[0xBE, 0xEF]).unwrap();
+        let mut content = Vec::new();
+        // [0] EXPLICIT version (V3)
+        ContextSpecific {
+            tag_number: TagNumber(0),
+            tag_mode: TagMode::Explicit,
+            value: tbs.version(),
+        }
+        .encode_to_vec(&mut content)
+        .unwrap();
+        tbs.serial_number().encode_to_vec(&mut content).unwrap();
+        tbs.signature().encode_to_vec(&mut content).unwrap();
+        tbs.issuer().encode_to_vec(&mut content).unwrap();
+        tbs.validity().encode_to_vec(&mut content).unwrap();
+        tbs.subject().encode_to_vec(&mut content).unwrap();
+        tbs.subject_public_key_info()
+            .encode_to_vec(&mut content)
+            .unwrap();
+        // [1] IMPLICIT issuerUniqueID
+        ContextSpecificRef {
+            tag_number: TagNumber(1),
+            tag_mode: TagMode::Implicit,
+            value: &issuer_uid,
+        }
+        .encode_to_vec(&mut content)
+        .unwrap();
+        // [2] IMPLICIT subjectUniqueID
+        ContextSpecificRef {
+            tag_number: TagNumber(2),
+            tag_mode: TagMode::Implicit,
+            value: &subject_uid,
+        }
+        .encode_to_vec(&mut content)
+        .unwrap();
+        // [3] EXPLICIT extensions (copy from original, including CT poison)
+        if let Some(exts) = tbs.extensions() {
+            let mut exts_items = Vec::new();
+            for ext in exts {
+                exts_items.extend(ext.to_der().unwrap());
+            }
+            let mut exts_seq = Vec::new();
+            der::Header::new(
+                der::Tag::Sequence,
+                der::Length::try_from(exts_items.len()).unwrap(),
+            )
+            .encode_to_vec(&mut exts_seq)
+            .unwrap();
+            exts_seq.extend(exts_items);
+            let exts_any = der::asn1::Any::from_der(&exts_seq).unwrap();
+            ContextSpecific {
+                tag_number: TagNumber(3),
+                tag_mode: TagMode::Explicit,
+                value: exts_any,
+            }
+            .encode_to_vec(&mut content)
+            .unwrap();
+        }
+        let mut tbs_der = Vec::new();
+        der::Header::new(
+            der::Tag::Sequence,
+            der::Length::try_from(content.len()).unwrap(),
+        )
+        .encode_to_vec(&mut tbs_der)
+        .unwrap();
+        tbs_der.extend(content);
+        tbs_der
+    }
+
+    #[test]
+    fn test_build_precert_tbs_unique_ids_round_trip() {
+        let precert_chain =
+            Certificate::load_pem_chain(include_bytes!("../tests/preissuer-chain.pem")).unwrap();
+        let precert_tbs = precert_chain[0].tbs_certificate();
+
+        let tbs_der = inject_unique_ids_into_precert_tbs(precert_tbs);
+        let cert = make_cert_from_tbs_der(tbs_der);
+        let tbs_with_uids = cert.tbs_certificate();
+
+        // Sanity-check that the injected unique IDs are present in the parsed input cert.
+        assert!(tbs_with_uids.issuer_unique_id().is_some());
+        assert!(tbs_with_uids.subject_unique_id().is_some());
+
+        let rebuilt_der = build_precert_tbs(tbs_with_uids).unwrap();
+        let rebuilt = TbsCertificate::from_der(&rebuilt_der).unwrap();
+
+        // CT poison must be stripped.
+        assert!(rebuilt
+            .get_extension::<CTPrecertPoison>()
+            .unwrap()
+            .is_none());
+
+        // Unique IDs must survive the reconstruction with correct IMPLICIT tags.
+        assert_eq!(
+            rebuilt.issuer_unique_id(),
+            tbs_with_uids.issuer_unique_id(),
+            "issuerUniqueID was dropped or corrupted"
+        );
+        assert_eq!(
+            rebuilt.subject_unique_id(),
+            tbs_with_uids.subject_unique_id(),
+            "subjectUniqueID was dropped or corrupted"
+        );
+    }
+
+    /// Rebuild a `Certificate` replacing its TBS extensions with `new_exts`.
+    fn rebuild_cert_with_extensions(
+        cert: &Certificate,
+        new_exts: Option<&[Extension]>,
+    ) -> Certificate {
+        use der::Encode;
+        let exts_refs: Vec<&Extension> = new_exts.unwrap_or_default().iter().collect();
+        let tbs_der =
+            x509_util::encode_tbs_with_extensions(cert.tbs_certificate(), &exts_refs).unwrap();
+
+        let mut cert_content = Vec::new();
+        cert_content.extend(&tbs_der);
+        cert.signature_algorithm()
+            .encode_to_vec(&mut cert_content)
+            .unwrap();
+        cert.signature().encode_to_vec(&mut cert_content).unwrap();
+        let mut cert_der = Vec::new();
+        der::Header::new(
+            der::Tag::Sequence,
+            der::Length::try_from(cert_content.len()).unwrap(),
+        )
+        .encode_to_vec(&mut cert_der)
+        .unwrap();
+        cert_der.extend(cert_content);
+        Certificate::from_der(&cert_der).unwrap()
+    }
+
+    fn wipe_extensions(cert: &Certificate) -> Certificate {
+        rebuild_cert_with_extensions(cert, None)
+    }
+
+    fn make_poison_non_critical(cert: &Certificate) -> Certificate {
+        let exts = vec![Extension {
             extn_id: CT_PRECERT_POISON,
             critical: false,
             extn_value: OctetString::new(Null.to_der().unwrap()).unwrap(),
-        }]);
-        cert
+        }];
+        rebuild_cert_with_extensions(cert, Some(&exts))
     }
 
-    fn make_poison_non_null(cert: &mut Certificate) -> &Certificate {
-        cert.tbs_certificate.extensions = Some(vec![Extension {
+    fn make_poison_non_null(cert: &Certificate) -> Certificate {
+        let exts = vec![Extension {
             extn_id: CT_PRECERT_POISON,
             critical: true,
             extn_value: OctetString::new([]).unwrap(),
-        }]);
-        cert
+        }];
+        rebuild_cert_with_extensions(cert, Some(&exts))
     }
 }
