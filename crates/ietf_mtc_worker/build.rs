@@ -5,7 +5,7 @@
 
 use config::AppConfig;
 use der::asn1::Utf8StringRef;
-use der::{asn1::SetOfVec, Any, Tag};
+use der::{Any, Tag};
 use ietf_mtc_api::ID_RDNA_TRUSTANCHOR_ID;
 use std::env;
 use std::fs;
@@ -39,17 +39,17 @@ fn main() {
     });
     for (name, params) in conf.logs {
         // Make sure we can create the RDN sequence for the issuer log ID.
-        let _ = RdnSequence::from(vec![RelativeDistinguishedName(
-            SetOfVec::from_iter([AttributeTypeAndValue {
+        let _ = RdnSequence::from(vec![RelativeDistinguishedName::try_from(vec![
+            AttributeTypeAndValue {
                 oid: ID_RDNA_TRUSTANCHOR_ID,
                 value: Any::new(
                     Tag::Utf8String,
                     Utf8StringRef::new(&params.log_id).unwrap().as_bytes(),
                 )
                 .unwrap(),
-            }])
-            .unwrap(),
-        )]);
+            },
+        ])
+        .unwrap()]);
 
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {

@@ -504,16 +504,16 @@ mod tests {
     use super::*;
     #[cfg(feature = "ml-dsa")]
     use ml_dsa::KeyGen;
-    use rand::rngs::OsRng;
     use signed_note::VerifierList;
     use std::str::FromStr;
 
     fn run_sign_verify_test(signer: MtcCosigner) {
-        let mut rng = OsRng;
         let origin = "example.com/origin";
         let timestamp = 100;
         let tree = TreeWithTimestamp::new(4, record_hash(b"hello world"), timestamp);
-        let checkpoint = tree.sign(origin, &[], &[&signer], &mut rng).unwrap();
+        let checkpoint = tree
+            .sign(origin, &[], &[&signer], &mut rand::rng())
+            .unwrap();
         let verifier = signer.verifier();
         open_checkpoint(
             origin,
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_cosignature_ed25519() {
-        let sk = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rng());
         let vk = sk.verifying_key();
         run_sign_verify_test(MtcCosigner::new_checkpoint(
             TrustAnchorID::from_str("1.2.3").unwrap(),
@@ -539,7 +539,7 @@ mod tests {
     #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_44() {
-        let kp = MlDsa44::key_gen(&mut OsRng);
+        let kp = MlDsa44::key_gen(&mut rand::rng());
         run_sign_verify_test(MtcCosigner::new_checkpoint(
             TrustAnchorID::from_str("1.2.3").unwrap(),
             TrustAnchorID::from_str("4.5.6").unwrap(),
@@ -551,7 +551,7 @@ mod tests {
     #[cfg(feature = "ml-dsa")]
     #[test]
     fn test_cosignature_ml_dsa_65() {
-        let kp = ml_dsa::MlDsa65::key_gen(&mut OsRng);
+        let kp = ml_dsa::MlDsa65::key_gen(&mut rand::rng());
         run_sign_verify_test(MtcCosigner::new_checkpoint(
             TrustAnchorID::from_str("1.2.3").unwrap(),
             TrustAnchorID::from_str("4.5.6").unwrap(),

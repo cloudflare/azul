@@ -5,7 +5,7 @@
 
 use crate::{load_checkpoint_cosigner, load_origin, SequenceMetadata, CONFIG};
 use der::{
-    asn1::{SetOfVec, UtcTime, Utf8StringRef},
+    asn1::{UtcTime, Utf8StringRef},
     Any, Decode, Tag,
 };
 use generic_log_worker::{
@@ -265,9 +265,8 @@ fn build_issuer_rdn(log_id: &str) -> std::result::Result<RdnSequence, String> {
         oid: ID_RDNA_TRUSTANCHOR_ID,
         value: any_value,
     };
-    let rdn = RelativeDistinguishedName(
-        SetOfVec::from_iter([attr]).expect("single attribute should always succeed"),
-    );
+    let rdn = RelativeDistinguishedName::try_from(vec![attr])
+        .expect("single attribute should always succeed");
     Ok(RdnSequence::from(vec![rdn]))
 }
 
@@ -285,14 +284,10 @@ fn build_validity(
     let not_before = Duration::from_millis(now_millis);
     let not_after = not_before + Duration::from_secs(max_lifetime_secs);
 
-    Ok(Validity {
-        not_before: Time::UtcTime(
-            UtcTime::from_unix_duration(not_before).map_err(|e| e.to_string())?,
-        ),
-        not_after: Time::UtcTime(
-            UtcTime::from_unix_duration(not_after).map_err(|e| e.to_string())?,
-        ),
-    })
+    Ok(Validity::new(
+        Time::UtcTime(UtcTime::from_unix_duration(not_before).map_err(|e| e.to_string())?),
+        Time::UtcTime(UtcTime::from_unix_duration(not_after).map_err(|e| e.to_string())?),
+    ))
 }
 
 async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> {
@@ -317,7 +312,7 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         }
     };
 
-    let pending_entry = match build_pending_entry(&req, issuer, validity) {
+    let pending_entry = match build_pending_entry(&req, &issuer, validity) {
         Ok(e) => e,
         Err(e) => {
             log::warn!("{name}: Bad request: {e}");
@@ -545,8 +540,8 @@ mod tests {
     #[test]
     fn test_build_issuer_rdn() {
         let rdn = build_issuer_rdn("test-log-id").unwrap();
-        assert_eq!(rdn.0.len(), 1);
-        let attr = rdn.0[0].0.iter().next().unwrap();
+        assert_eq!(rdn.as_ref().len(), 1);
+        let attr = rdn.as_ref()[0].as_ref().iter().next().unwrap();
         assert_eq!(attr.oid, ID_RDNA_TRUSTANCHOR_ID);
         let encoded = attr.value.to_der().unwrap();
         assert_eq!(encoded[0], 0x0C); // UTF8String tag

@@ -36,7 +36,6 @@ use x509_cert::{
     serial_number::SerialNumber,
     spki::{AlgorithmIdentifier, AlgorithmIdentifierOwned, SubjectPublicKeyInfo},
     time::Validity,
-    Certificate, TbsCertificate,
 };
 
 /// OID for Trust Anchor IDs, as specified in draft-ietf-plants-merkle-tree-certs-02.
@@ -219,7 +218,7 @@ impl LogEntry for IetfMtcLogEntry {
 /// or the resulting entry cannot be encoded.
 pub fn build_pending_entry(
     req: &AddEntryRequest,
-    issuer: RdnSequence,
+    issuer: &RdnSequence,
     validity: Validity,
 ) -> Result<IetfMtcPendingLogEntry, MtcError> {
     let csr =
@@ -234,6 +233,10 @@ pub fn build_pending_entry(
 
     // Extract SubjectAltName from the CSR's extensionRequest attribute (RFC 2985 §5.4.2).
     let extensions = extract_san_from_csr(&csr.info.attributes)?;
+
+    // Convert RdnSequence → Name via DER round-trip (Name is a newtype over RdnSequence
+    // in x509-cert 0.3; its inner field is pub(crate) so direct construction isn't possible).
+    let issuer = Name::from_der(&issuer.to_der()?)?;
 
     let log_entry = TbsCertificateLogEntry {
         version: Version::V3,
@@ -340,6 +343,80 @@ impl SignedSubtree {
     }
 }
 
+/// Build `TBSCertificate` DER field-by-field.
+///
+/// `x509-cert` 0.3 makes all `TbsCertificateInner` fields private, so we cannot
+/// use struct-literal construction from external crates.
+fn encode_tbs_certificate_der(
+    entry: &TbsCertificateLogEntry,
+    leaf_index: LeafIndex,
+    signature_algorithm: &AlgorithmIdentifier<Any>,
+    spki: &SubjectPublicKeyInfo<Any, BitString>,
+) -> Result<Vec<u8>, MtcError> {
+    use der::{
+        asn1::{ContextSpecific, ContextSpecificRef},
+        Encode, TagMode, TagNumber,
+    };
+
+    let mut tbs_content = Vec::new();
+    if entry.version != x509_cert::certificate::Version::V1 {
+        ContextSpecific {
+            tag_number: TagNumber(0),
+            tag_mode: TagMode::Explicit,
+            value: entry.version,
+        }
+        .encode_to_vec(&mut tbs_content)?;
+    }
+    SerialNumber::<x509_cert::certificate::Rfc5280>::new(&leaf_index.to_be_bytes())?
+        .encode_to_vec(&mut tbs_content)?;
+    signature_algorithm.encode_to_vec(&mut tbs_content)?;
+    entry.issuer.encode_to_vec(&mut tbs_content)?;
+    entry.validity.encode_to_vec(&mut tbs_content)?;
+    entry.subject.encode_to_vec(&mut tbs_content)?;
+    spki.encode_to_vec(&mut tbs_content)?;
+    if let Some(uid) = &entry.issuer_unique_id {
+        ContextSpecificRef {
+            tag_number: TagNumber(1),
+            tag_mode: TagMode::Implicit,
+            value: uid,
+        }
+        .encode_to_vec(&mut tbs_content)?;
+    }
+    if let Some(uid) = &entry.subject_unique_id {
+        ContextSpecificRef {
+            tag_number: TagNumber(2),
+            tag_mode: TagMode::Implicit,
+            value: uid,
+        }
+        .encode_to_vec(&mut tbs_content)?;
+    }
+    if let Some(exts) = &entry.extensions {
+        let mut exts_items = Vec::new();
+        for ext in exts {
+            exts_items.extend(ext.to_der()?);
+        }
+        let mut exts_seq = Vec::new();
+        der::Header::new(der::Tag::Sequence, der::Length::try_from(exts_items.len())?)
+            .encode_to_vec(&mut exts_seq)?;
+        exts_seq.extend(exts_items);
+        let exts_any = der::asn1::Any::from_der(&exts_seq)?;
+        ContextSpecific {
+            tag_number: TagNumber(3),
+            tag_mode: TagMode::Explicit,
+            value: exts_any,
+        }
+        .encode_to_vec(&mut tbs_content)?;
+    }
+    let mut tbs_der = Vec::new();
+    der::Header::new(
+        der::Tag::Sequence,
+        der::Length::try_from(tbs_content.len())?,
+    )
+    .encode_to_vec(&mut tbs_der)?;
+    tbs_der.extend(tbs_content);
+    Ok(tbs_der)
+}
+
 /// Serialize a DER-encoded MTC certificate (draft-ietf-plants-merkle-tree-certs §6.1).
 ///
 /// Pass an empty `cosignatures` slice for a landmark-relative certificate (§6.3)
@@ -368,23 +445,14 @@ pub fn serialize_mtc_cert(
     if spki_hash != entry.subject_public_key_info_hash {
         return Err(MtcError::Dynamic("spki hash mismatch".to_string()));
     }
-    let signature_algorithm = AlgorithmIdentifier {
+
+    let signature_algorithm: AlgorithmIdentifier<Any> = AlgorithmIdentifier {
         oid: ID_ALG_MTCPROOF,
         parameters: None,
     };
+    let tbs_der = encode_tbs_certificate_der(&entry, leaf_index, &signature_algorithm, &spki)?;
 
-    let tbs_certificate = TbsCertificate {
-        version: entry.version,
-        serial_number: SerialNumber::new(&leaf_index.to_be_bytes())?,
-        signature: signature_algorithm.clone(),
-        issuer: entry.issuer,
-        validity: entry.validity,
-        subject: entry.subject,
-        subject_public_key_info: spki,
-        issuer_unique_id: entry.issuer_unique_id,
-        subject_unique_id: entry.subject_unique_id,
-        extensions: entry.extensions,
-    };
+    // Build Certificate DER: SEQUENCE { tbs_der, signature_algorithm, signature }.
     let signatures = cosignatures
         .iter()
         .map(|(cosigner_id, sig)| MtcSignature {
@@ -392,20 +460,26 @@ pub fn serialize_mtc_cert(
             signature: sig.clone(),
         })
         .collect();
-    let certificate = Certificate {
-        tbs_certificate,
-        signature_algorithm,
-        signature: BitString::from_bytes(
-            &MtcProof {
-                start: subtree.lo(),
-                end: subtree.hi(),
-                inclusion_proof,
-                signatures,
-            }
-            .to_bytes(),
-        )?,
-    };
-    Ok(certificate.to_der()?)
+    let sig_bytes = MtcProof {
+        start: subtree.lo(),
+        end: subtree.hi(),
+        inclusion_proof,
+        signatures,
+    }
+    .to_bytes();
+    let sig_bitstring = BitString::from_bytes(&sig_bytes)?;
+    let mut cert_content = Vec::new();
+    cert_content.extend(&tbs_der);
+    signature_algorithm.encode_to_vec(&mut cert_content)?;
+    sig_bitstring.encode_to_vec(&mut cert_content)?;
+    let mut cert_der = Vec::new();
+    der::Header::new(
+        der::Tag::Sequence,
+        der::Length::try_from(cert_content.len())?,
+    )
+    .encode_to_vec(&mut cert_der)?;
+    cert_der.extend(cert_content);
+    Ok(cert_der)
 }
 
 #[derive(Debug, Error)]
@@ -548,7 +622,7 @@ impl TbsCertificateLogEntry {
             use der::asn1::ContextSpecific;
             use der::TagMode;
             let tagged = ContextSpecific::<Version> {
-                tag_number: der::TagNumber::N0,
+                tag_number: der::TagNumber(0),
                 tag_mode: TagMode::Explicit,
                 value: self.version,
             };
@@ -564,26 +638,26 @@ impl TbsCertificateLogEntry {
 
         // issuerUniqueID [1] IMPLICIT BIT STRING OPTIONAL
         if let Some(ref v) = self.issuer_unique_id {
-            use der::asn1::ContextSpecific;
+            use der::asn1::ContextSpecificRef;
             use der::TagMode;
-            let tagged = ContextSpecific::<BitString> {
-                tag_number: der::TagNumber::N1,
+            ContextSpecificRef::<BitString> {
+                tag_number: der::TagNumber(1),
                 tag_mode: TagMode::Implicit,
-                value: v.clone(),
-            };
-            tagged.encode_to_vec(&mut buf)?;
+                value: v,
+            }
+            .encode_to_vec(&mut buf)?;
         }
 
         // subjectUniqueID [2] IMPLICIT BIT STRING OPTIONAL
         if let Some(ref v) = self.subject_unique_id {
-            use der::asn1::ContextSpecific;
+            use der::asn1::ContextSpecificRef;
             use der::TagMode;
-            let tagged = ContextSpecific::<BitString> {
-                tag_number: der::TagNumber::N2,
+            ContextSpecificRef::<BitString> {
+                tag_number: der::TagNumber(2),
                 tag_mode: TagMode::Implicit,
-                value: v.clone(),
-            };
-            tagged.encode_to_vec(&mut buf)?;
+                value: v,
+            }
+            .encode_to_vec(&mut buf)?;
         }
 
         // extensions [3] EXPLICIT Extensions OPTIONAL
@@ -591,7 +665,7 @@ impl TbsCertificateLogEntry {
             use der::asn1::ContextSpecific;
             use der::TagMode;
             let tagged = ContextSpecific::<Extensions> {
-                tag_number: der::TagNumber::N3,
+                tag_number: der::TagNumber(3),
                 tag_mode: TagMode::Explicit,
                 value: exts.clone(),
             };
@@ -612,10 +686,10 @@ impl TbsCertificateLogEntry {
         let mut reader = SliceReader::new(data)?;
 
         // version [0] EXPLICIT INTEGER DEFAULT V1
-        let version = if reader.peek_tag().ok().is_some_and(|t| {
+        let version = if der::Tag::peek(&reader).ok().is_some_and(|t| {
             t == der::Tag::ContextSpecific {
                 constructed: true,
-                number: TagNumber::N0,
+                number: TagNumber(0),
             }
         }) {
             let cs = ContextSpecific::<Version>::decode(&mut reader)?;
@@ -632,19 +706,19 @@ impl TbsCertificateLogEntry {
 
         // issuerUniqueID [1] IMPLICIT BIT STRING OPTIONAL
         let issuer_unique_id =
-            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber::N1)?
+            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber(1))?
                 .map(|cs| cs.value);
 
         // subjectUniqueID [2] IMPLICIT BIT STRING OPTIONAL
         let subject_unique_id =
-            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber::N2)?
+            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber(2))?
                 .map(|cs| cs.value);
 
         // extensions [3] EXPLICIT Extensions OPTIONAL
-        let extensions = if reader.peek_tag().ok().is_some_and(|t| {
+        let extensions = if der::Tag::peek(&reader).ok().is_some_and(|t| {
             t == der::Tag::ContextSpecific {
                 constructed: true,
-                number: TagNumber::N3,
+                number: TagNumber(3),
             }
         }) {
             let cs = ContextSpecific::<Extensions>::decode(&mut reader)?;
@@ -653,19 +727,18 @@ impl TbsCertificateLogEntry {
             None
         };
 
-        reader
-            .finish(Self {
-                version,
-                issuer,
-                validity,
-                subject,
-                subject_public_key_info_algorithm,
-                subject_public_key_info_hash,
-                issuer_unique_id,
-                subject_unique_id,
-                extensions,
-            })
-            .map_err(Into::into)
+        reader.finish().map_err(MtcError::from)?;
+        Ok(Self {
+            version,
+            issuer,
+            validity,
+            subject,
+            subject_public_key_info_algorithm,
+            subject_public_key_info_hash,
+            issuer_unique_id,
+            subject_unique_id,
+            extensions,
+        })
     }
 }
 
@@ -681,14 +754,10 @@ mod tests {
     };
 
     fn dummy_validity() -> Validity {
-        Validity {
-            not_before: Time::UtcTime(
-                UtcTime::from_unix_duration(Duration::from_secs(1_700_000_000)).unwrap(),
-            ),
-            not_after: Time::UtcTime(
-                UtcTime::from_unix_duration(Duration::from_secs(1_700_086_400)).unwrap(),
-            ),
-        }
+        Validity::new(
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_700_000_000)).unwrap()),
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_700_086_400)).unwrap()),
+        )
     }
 
     // Pre-built P-256 DER CSRs (base64url, no padding).
@@ -731,7 +800,7 @@ mod tests {
             csr: decode_csr(CSR_WITH_SANS_B64URL),
         };
 
-        let entry = build_pending_entry(&req, RdnSequence::default(), dummy_validity()).unwrap();
+        let entry = build_pending_entry(&req, &RdnSequence::default(), dummy_validity()).unwrap();
         let decoded = MerkleTreeCertEntry::decode(&entry.entry.data).unwrap();
 
         let MerkleTreeCertEntry::TbsCertEntry(tbs) = decoded else {
@@ -754,7 +823,7 @@ mod tests {
             csr: decode_csr(CSR_NO_SAN_B64URL),
         };
 
-        let entry = build_pending_entry(&req, RdnSequence::default(), dummy_validity()).unwrap();
+        let entry = build_pending_entry(&req, &RdnSequence::default(), dummy_validity()).unwrap();
         let decoded = MerkleTreeCertEntry::decode(&entry.entry.data).unwrap();
         let MerkleTreeCertEntry::TbsCertEntry(tbs) = decoded else {
             panic!("expected TbsCertEntry");
@@ -767,7 +836,7 @@ mod tests {
         let req = AddEntryRequest {
             csr: b"not a valid csr".to_vec(),
         };
-        assert!(build_pending_entry(&req, RdnSequence::default(), dummy_validity()).is_err());
+        assert!(build_pending_entry(&req, &RdnSequence::default(), dummy_validity()).is_err());
     }
 
     #[test]

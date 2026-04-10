@@ -7,7 +7,7 @@ use config::AppConfig;
 use ietf_mtc_api::{MtcCosigner, MtcSigningKey, MtcVerifyingKey, TrustAnchorID};
 #[cfg(feature = "ml-dsa")]
 use ml_dsa::{KeyPair, MlDsa44, MlDsa65, MlDsa87};
-use pkcs8::{DecodePrivateKey, PrivateKeyInfo};
+use pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -78,7 +78,7 @@ pub(crate) fn load_key_pair(env: &Env, name: &str) -> Result<CachedKeys> {
 /// `AlgorithmIdentifier` OID embedded in the `PrivateKeyInfo`.
 fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifyingKey), String> {
     let (_label, doc) = pkcs8::SecretDocument::from_pem(pem).map_err(|e| e.to_string())?;
-    let pki = PrivateKeyInfo::try_from(doc.as_bytes()).map_err(|e| e.to_string())?;
+    let pki = pkcs8::PrivateKeyInfoRef::try_from(doc.as_bytes()).map_err(|e| e.to_string())?;
 
     match pki.algorithm.oid {
         OID_ED25519 => {
