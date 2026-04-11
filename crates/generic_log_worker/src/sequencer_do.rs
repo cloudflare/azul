@@ -15,7 +15,7 @@ use crate::{
     },
     serialize,
     util::now_millis,
-    DedupCache, LookupKey, MemoryCache, ObjectBucket, SequenceMetadata, BATCH_ENDPOINT,
+    CacheSerialize, DedupCache, LookupKey, MemoryCache, ObjectBucket, BATCH_ENDPOINT,
     CLEANER_BINDING, ENTRY_ENDPOINT,
 };
 use futures_util::future::join_all;
@@ -33,12 +33,12 @@ const MEMORY_CACHE_SIZE: usize = 300_000;
 
 pub struct GenericSequencer<L: LogEntry> {
     env: Env,
-    do_state: State,                     // implements LockBackend
-    public_bucket: RwLock<ObjectBucket>, // implements ObjectBackend
-    cache: DedupCache,                   // implements CacheRead, CacheWrite
+    do_state: State,                                  // implements LockBackend
+    public_bucket: RwLock<ObjectBucket>,              // implements ObjectBackend
+    cache: DedupCache<L::Metadata>,                   // implements CacheRead, CacheWrite
     config: SequencerConfig,
     sequence_state: RefCell<SequenceState>,
-    pool_state: RefCell<PoolState<L::Pending>>,
+    pool_state: RefCell<PoolState<L::Pending, L::Metadata>>,
     initialized: RefCell<bool>,
     init_mux: Mutex<()>,
     wshim: Option<Wshim>,
@@ -62,7 +62,7 @@ pub struct SequencerConfig {
     pub env_label: String,
 }
 
-impl<L: LogEntry> GenericSequencer<L> {
+impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
     /// Return a new sequencer with the given config.
     ///
     /// # Panics
@@ -219,7 +219,7 @@ impl<L: LogEntry> GenericSequencer<L> {
     }
 }
 
-impl<L: LogEntry> GenericSequencer<L> {
+impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&self, metrics: &SequencerMetrics) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
@@ -313,7 +313,7 @@ impl<L: LogEntry> GenericSequencer<L> {
         &self,
         pending_entries: Vec<PendingLogEntryBlob>,
         metrics: &SequencerMetrics,
-    ) -> Result<Vec<(LookupKey, SequenceMetadata)>, WorkerError> {
+    ) -> Result<Vec<(LookupKey, L::Metadata)>, WorkerError> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());
@@ -359,11 +359,15 @@ impl<L: LogEntry> GenericSequencer<L> {
 /// The parameters are as follows:
 /// - `old_time: UnixTimestamp`: The timestamp of the previous checkpoint.
 /// - `new_time: UnixTimestamp`: The timestamp of the latest checkpoint.
+/// - `old_tree_size: u64`: The tree size of the previous checkpoint.
+/// - `new_tree_size: u64`: The tree size of the latest checkpoint.
 /// - `new_checkpoint: &[u8]`: The latest checkpoint bytes. This is a signed note.
 pub type CheckpointCallbacker = Box<
     dyn Fn(
             UnixTimestamp,
             UnixTimestamp,
+            u64,
+            u64,
             &[u8],
         ) -> Pin<Box<dyn Future<Output = Result<(), WorkerError>> + 'static>>
         + 'static,
@@ -374,8 +378,10 @@ pub type CheckpointCallbacker = Box<
 #[must_use]
 pub fn empty_checkpoint_callback() -> CheckpointCallbacker {
     Box::new(
-        move |_old_time: UnixTimestamp, _new_time: UnixTimestamp, _new_checkpoint: &[u8]| {
-            Box::pin(async move { Ok(()) })
-        },
+        move |_old_time: UnixTimestamp,
+              _new_time: UnixTimestamp,
+              _old_tree_size: u64,
+              _new_tree_size: u64,
+              _new_checkpoint: &[u8]| { Box::pin(async move { Ok(()) }) },
     )
 }

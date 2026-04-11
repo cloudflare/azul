@@ -16,7 +16,6 @@ pub use cleaner_do::*;
 pub use log_ops::upload_issuers;
 pub use sequencer_do::*;
 
-use byteorder::{BigEndian, WriteBytesExt};
 use log::{error, info};
 use log_ops::UploadOptions;
 use obs::metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
@@ -26,8 +25,12 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use serde::de::DeserializeOwned;
 use std::io::Write;
-use tlog_tiles::{LookupKey, PendingLogEntry, SequenceMetadata};
+pub use tlog_tiles::LookupKey;
+use tlog_tiles::{PendingLogEntry, SequenceMetadata};
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
@@ -166,14 +169,17 @@ pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
 /// # Errors
 ///
 /// Returns an error if there are issues retrieving the metadata.
-pub async fn get_cached_metadata(
+pub async fn get_cached_metadata<M>(
     kv: &KvStore,
     lookup_key: &LookupKey,
-) -> Result<Option<SequenceMetadata>> {
+) -> Result<Option<M>>
+where
+    M: Serialize + DeserializeOwned,
+{
     // Query the cache and return the entry metadata if it exists
     let metadata_opt = kv
         .get(&BASE64_STANDARD.encode(lookup_key))
-        .bytes_with_metadata::<SequenceMetadata>()
+        .bytes_with_metadata::<M>()
         .await?
         .1;
     Ok(metadata_opt)
@@ -186,40 +192,44 @@ pub async fn get_cached_metadata(
 ///
 /// Returns an error if either the KV namespace doesn't exist, or if there is an
 /// exception when writing the value.
-pub async fn put_cache_entry_metadata<L: PendingLogEntry>(
+pub async fn put_cache_entry_metadata<L, M>(
     kv: &KvStore,
     pending: &L,
-    metadata: SequenceMetadata,
-) -> Result<()> {
+    metadata: M,
+) -> Result<()>
+where
+    L: PendingLogEntry,
+    M: Serialize,
+{
     // Get the lookup key.
     let lookup_key = pending.lookup_key();
 
     // Store key => "", with metadata
     kv.put(&BASE64_STANDARD.encode(lookup_key), "")?
-        .metadata::<SequenceMetadata>(metadata)?
+        .metadata::<M>(metadata)?
         .execute()
         .await
         .map_err(Error::from)
 }
 
-trait CacheWrite {
+trait CacheWrite<M> {
     /// Put the provided sequenced entries into the cache. This does NOT overwrite existing entries.
-    async fn put_entries(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()>;
+    async fn put_entries(&self, entries: &[(LookupKey, M)]) -> Result<()>;
 }
 
-trait CacheRead {
+trait CacheRead<M> {
     /// Read an entry from the deduplication cache.
-    fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata>;
+    fn get_entry(&self, key: &LookupKey) -> Option<M>;
 }
 
-struct DedupCache {
-    memory: MemoryCache,
+struct DedupCache<M> {
+    memory: MemoryCache<M>,
     storage: Storage,
 }
 
-impl CacheWrite for DedupCache {
+impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default + 'static> CacheWrite<M> for DedupCache<M> {
     /// Write entries to both the short-term deduplication cache and its backup in DO Storage.
-    async fn put_entries(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
+    async fn put_entries(&self, entries: &[(LookupKey, M)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -228,10 +238,10 @@ impl CacheWrite for DedupCache {
     }
 }
 
-impl CacheRead for DedupCache {
+impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default + 'static> CacheRead<M> for DedupCache<M> {
     /// Check the short-term deduplication cache only. The long-term deduplication
     /// cache gets checked by the Worker frontend when handling add-chain requests.
-    fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
+    fn get_entry(&self, key: &LookupKey) -> Option<M> {
         self.memory.get_entry(key)
     }
 }
@@ -291,11 +301,15 @@ fn compute_cache_keys_to_load(head: u32, tail: u32, max_batches: u32) -> Vec<Str
     // Ensure we never load more than max_batches keys, even if head/tail are corrupted
     let delta = tail.saturating_sub(head).min(max_batches);
     (0..delta)
-        .map(|i| DedupCache::fifo_key((head.wrapping_add(i)) % max_batches))
+        .map(|i| dedup_cache_fifo_key((head.wrapping_add(i)) % max_batches))
         .collect()
 }
 
-impl DedupCache {
+fn dedup_cache_fifo_key(idx: u32) -> String {
+    format!("fifo:{idx}")
+}
+
+impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default + 'static> DedupCache<M> {
     // Batches are written at most once per second, and we only need them to
     // deduplicate entries long enough for KV's eventual consistency guarantees
     // (~60s). Cap at 128 so we can use a single get_multiple call to get all
@@ -306,7 +320,7 @@ impl DedupCache {
     const FIFO_TAIL_KEY: &str = "fifo:tail";
 
     fn fifo_key(idx: u32) -> String {
-        format!("fifo:{idx}")
+        dedup_cache_fifo_key(idx)
     }
 
     // Load batches of cache entries from DO storage into the in-memory cache. log_name is the name
@@ -360,7 +374,7 @@ impl DedupCache {
     }
 
     // Store a batch of cache entries in DO storage.
-    async fn store(&self, entries: &[(LookupKey, SequenceMetadata)]) -> Result<()> {
+    async fn store(&self, entries: &[(LookupKey, M)]) -> Result<()> {
         // Get the head and tail of the dedup cache, picking 0 if uninitialized
         let head = self
             .storage
@@ -401,40 +415,99 @@ impl DedupCache {
     }
 }
 
-fn serialize_entries(entries: &[(LookupKey, SequenceMetadata)]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(32 * entries.len());
-    for (k, (idx, ts)) in entries {
-        buf.write_all(k).unwrap();
-        buf.write_u64::<BigEndian>(*idx).unwrap();
-        buf.write_u64::<BigEndian>(*ts).unwrap();
-    }
-    buf
+/// Serialization format for the `DedupCache` DO storage ring buffer.
+///
+/// Each metadata type defines its own binary format so that the format can be
+/// kept stable across upgrades.  `SequenceMetadata` uses the original
+/// 32-bytes-per-entry binary format (16-byte key, 8-byte `leaf_index`,
+/// 8-byte `timestamp`, all big-endian); other types use `serde_json`.
+///
+/// **NOTE**: Changing this format for a deployed log will result in a `DedupCache::load`
+/// error during sequencer initialization. The sequencer's
+/// [current behavior](https://github.com/cloudflare/azul/blob/ddc4ec7c5432efed4cd5e4308f6026ffa91bc6f6/crates/generic_log_worker/src/sequencer_do.rs#L234)
+/// is to log the error and continue without the short-term deduplication cache.
+pub trait CacheSerialize: Sized {
+    /// Serialize a batch of `(LookupKey, Self)` pairs to bytes.
+    fn serialize_entries(entries: &[(LookupKey, Self)]) -> Vec<u8>;
+    /// Deserialize a batch of `(LookupKey, Self)` pairs from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `String` describing the error if the bytes are malformed.
+    /// The `String` can be converted to a `worker::Error` via `From<String>`.
+    fn deserialize_entries(buf: &[u8]) -> std::result::Result<Vec<(LookupKey, Self)>, String>;
 }
 
-fn deserialize_entries(buf: &[u8]) -> Result<Vec<(LookupKey, SequenceMetadata)>> {
-    if !buf.len().is_multiple_of(32) {
-        return Err("invalid buffer length".into());
+/// `SequenceMetadata` uses the original 32-byte binary format for backward
+/// compatibility with existing Durable Object storage.
+impl CacheSerialize for SequenceMetadata {
+    fn serialize_entries(entries: &[(LookupKey, Self)]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(32 * entries.len());
+        for (k, (idx, ts)) in entries {
+            buf.write_all(k).unwrap();
+            buf.write_u64::<BigEndian>(*idx).unwrap();
+            buf.write_u64::<BigEndian>(*ts).unwrap();
+        }
+        buf
     }
-    let mut entries = Vec::with_capacity(buf.len() / 32);
-    for i in 0..buf.len() / 32 {
-        let key: [u8; 16] = buf[i * 32..i * 32 + 16].try_into().unwrap();
-        let value = (
-            u64::from_be_bytes(buf[i * 32 + 16..i * 32 + 24].try_into().unwrap()),
-            u64::from_be_bytes(buf[i * 32 + 24..i * 32 + 32].try_into().unwrap()),
-        );
-        entries.push((key, value));
+
+    fn deserialize_entries(buf: &[u8]) -> std::result::Result<Vec<(LookupKey, Self)>, String> {
+        if !buf.len().is_multiple_of(32) {
+            return Err("invalid buffer length".into());
+        }
+        let mut entries = Vec::with_capacity(buf.len() / 32);
+        let mut cursor = std::io::Cursor::new(buf);
+        while usize::try_from(cursor.position()).unwrap_or(usize::MAX) < buf.len() {
+            let mut key = LookupKey::default();
+            std::io::Read::read_exact(&mut cursor, &mut key)
+                .map_err(|e| format!("reading key: {e}"))?;
+            let idx = cursor
+                .read_u64::<BigEndian>()
+                .map_err(|e| format!("reading `leaf_index`: {e}"))?;
+            let ts = cursor
+                .read_u64::<BigEndian>()
+                .map_err(|e| format!("reading `timestamp`: {e}"))?;
+            entries.push((key, (idx, ts)));
+        }
+        Ok(entries)
     }
-    Ok(entries)
 }
 
-// A fixed-size in-memory FIFO cache.
-struct MemoryCache {
+/// Implement `CacheSerialize` via `serde_json` for a given type.
+#[macro_export]
+macro_rules! impl_json_cache_serialize {
+    ($t:ty) => {
+        impl $crate::CacheSerialize for $t {
+            fn serialize_entries(entries: &[($crate::LookupKey, Self)]) -> Vec<u8> {
+                serde_json::to_vec(entries).expect("serializing cache entries to JSON")
+            }
+            fn deserialize_entries(
+                buf: &[u8],
+            ) -> ::std::result::Result<Vec<($crate::LookupKey, Self)>, String> {
+                serde_json::from_slice(buf)
+                    .map_err(|e| format!("deserializing cache entries: {e}"))
+            }
+        }
+    };
+}
+
+fn serialize_entries<M: CacheSerialize>(entries: &[(LookupKey, M)]) -> Vec<u8> {
+    M::serialize_entries(entries)
+}
+
+fn deserialize_entries<M: CacheSerialize>(buf: &[u8]) -> Result<Vec<(LookupKey, M)>> {
+    M::deserialize_entries(buf).map_err(Into::into)
+}
+
+// A fixed-size in-memory FIFO cache. `M` is the sequence metadata type stored
+// alongside each deduplicated entry's lookup key.
+struct MemoryCache<M> {
     max_size: usize,
-    map: RefCell<HashMap<LookupKey, SequenceMetadata>>,
+    map: RefCell<HashMap<LookupKey, M>>,
     fifo: RefCell<VecDeque<LookupKey>>,
 }
 
-impl MemoryCache {
+impl<M: Copy> MemoryCache<M> {
     fn new(max_size: usize) -> Self {
         assert_ne!(max_size, 0);
         Self {
@@ -445,13 +518,13 @@ impl MemoryCache {
     }
 
     // Get an entry from the in-memory cache.
-    fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
+    fn get_entry(&self, key: &LookupKey) -> Option<M> {
         self.map.borrow().get(key).copied()
     }
 
     // Put a batch of entries into the in-memory cache,
     // evicting old entries to make room if necessary.
-    fn put_entries(&self, entries: &[(LookupKey, SequenceMetadata)]) {
+    fn put_entries(&self, entries: &[(LookupKey, M)]) {
         let mut map = self.map.borrow_mut();
         let mut fifo = self.fifo.borrow_mut();
         for (key, value) in entries {
@@ -736,6 +809,13 @@ impl ObjectBackend for CachedRoObjectBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tlog_tiles::SequenceMetadata;
+
+    /// A minimal metadata type that uses the JSON cache format, for testing
+    /// `serialize_entries`/`deserialize_entries` with non-binary serialization.
+    #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+    struct TestMetadata(u64);
+    impl_json_cache_serialize!(TestMetadata);
 
     // ==================== HeadTailValidation Tests ====================
 
@@ -883,21 +963,45 @@ mod tests {
     fn test_serialize_deserialize_empty() {
         let entries: Vec<(LookupKey, SequenceMetadata)> = vec![];
         let serialized = serialize_entries(&entries);
-        assert!(serialized.is_empty());
-        let deserialized = deserialize_entries(&serialized).unwrap();
+        let deserialized = deserialize_entries::<SequenceMetadata>(&serialized).unwrap();
         assert!(deserialized.is_empty());
     }
 
     #[test]
     fn test_deserialize_invalid_length() {
+        // SequenceMetadata uses the binary format (32 bytes per entry:
+        // 16-byte LookupKey + 8-byte leaf_index + 8-byte timestamp).
+        // A buffer that is not a multiple of 32 bytes should fail.
         let buf = vec![0u8; 31]; // Not a multiple of 32
-        assert!(deserialize_entries(&buf).is_err());
+        assert!(deserialize_entries::<SequenceMetadata>(&buf).is_err());
     }
 
     #[test]
     fn test_deserialize_invalid_length_one_extra() {
         let buf = vec![0u8; 33]; // 32 + 1
-        assert!(deserialize_entries(&buf).is_err());
+        assert!(deserialize_entries::<SequenceMetadata>(&buf).is_err());
+    }
+
+    #[test]
+    fn test_serialize_deserialize_json_roundtrip() {
+        // TestMetadata uses the JSON format; verify entries survive a serialize/deserialize cycle.
+        let key1 = LookupKey::from([1u8; 16]);
+        let key2 = LookupKey::from([2u8; 16]);
+        let entries = vec![(key1, TestMetadata(42)), (key2, TestMetadata(99))];
+        let serialized = serialize_entries(&entries);
+        let deserialized = deserialize_entries::<TestMetadata>(&serialized).unwrap();
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0].0, key1);
+        assert_eq!(deserialized[0].1 .0, 42);
+        assert_eq!(deserialized[1].0, key2);
+        assert_eq!(deserialized[1].1 .0, 99);
+    }
+
+    #[test]
+    fn test_deserialize_invalid_json() {
+        // TestMetadata uses the JSON format; invalid JSON should fail deserialization.
+        let buf = b"not valid json";
+        assert!(deserialize_entries::<TestMetadata>(buf).is_err());
     }
 
     // ==================== MemoryCache Tests ====================
@@ -974,9 +1078,41 @@ mod tests {
 
     #[test]
     fn test_fifo_key_generation() {
-        assert_eq!(DedupCache::fifo_key(0), "fifo:0");
-        assert_eq!(DedupCache::fifo_key(127), "fifo:127");
-        assert_eq!(DedupCache::fifo_key(128), "fifo:128");
-        assert_eq!(DedupCache::fifo_key(u32::MAX), format!("fifo:{}", u32::MAX));
+        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(0), "fifo:0");
+        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(127), "fifo:127");
+        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(128), "fifo:128");
+        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(u32::MAX), format!("fifo:{}", u32::MAX));
+    }
+
+    /// Regression test: confirm the `SequenceMetadata` binary wire format has
+    /// not changed.  Any change here would corrupt the dedup ring buffer in
+    /// Durable Object storage for deployed CT and bootstrap MTC workers.
+    ///
+    /// Format: `[16-byte key | 8-byte leaf_index BE | 8-byte timestamp BE]`
+    #[test]
+    fn test_sequence_metadata_cache_format_unchanged() {
+        let key: LookupKey = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        ];
+        let leaf_index: u64 = 0x0102030405060708;
+        let timestamp: u64  = 0x0a0b0c0d0e0f1011;
+
+        let entries: Vec<(LookupKey, SequenceMetadata)> = vec![(key, (leaf_index, timestamp))];
+        let serialized = serialize_entries(&entries);
+
+        // Manually construct the expected 32-byte buffer.
+        let mut expected = Vec::with_capacity(32);
+        expected.extend_from_slice(&key);
+        expected.extend_from_slice(&leaf_index.to_be_bytes());
+        expected.extend_from_slice(&timestamp.to_be_bytes());
+
+        assert_eq!(serialized, expected,
+            "SequenceMetadata binary format has changed — this will corrupt \
+             existing Durable Object dedup cache storage");
+
+        // Round-trip.
+        let deserialized = deserialize_entries::<SequenceMetadata>(&serialized).unwrap();
+        assert_eq!(deserialized, entries);
     }
 }

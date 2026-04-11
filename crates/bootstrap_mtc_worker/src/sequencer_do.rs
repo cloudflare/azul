@@ -86,7 +86,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
     let params = &CONFIG.logs[name];
     let bucket = load_public_bucket(env, name).unwrap();
     Box::new(
-        move |old_time: UnixTimestamp, new_time: UnixTimestamp, new_checkpoint_bytes: &[u8]| {
+        move |old_time: UnixTimestamp, new_time: UnixTimestamp, _old_tree_size: u64, _new_tree_size: u64, new_checkpoint_bytes: &[u8]| {
             let new_checkpoint = {
                 // TODO: Make more efficient. There are two unnecessary allocations here.
 

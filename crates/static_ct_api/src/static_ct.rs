@@ -280,12 +280,22 @@ impl LogEntry for StaticCTLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = true;
     type Pending = StaticCTPendingLogEntry;
     type ParseError = StaticCTError;
+    type Metadata = SequenceMetadata;
+
+    fn make_metadata(
+        leaf_index: LeafIndex,
+        timestamp: UnixTimestamp,
+        _old_tree_size: u64,
+        _new_tree_size: u64,
+    ) -> Self::Metadata {
+        (leaf_index, timestamp)
+    }
 
     fn initial_entry() -> Option<Self::Pending> {
         None
     }
 
-    fn new(pending: StaticCTPendingLogEntry, metadata: SequenceMetadata) -> Self {
+    fn new(pending: StaticCTPendingLogEntry, metadata: Self::Metadata) -> Self {
         StaticCTLogEntry {
             inner: pending,
             leaf_index: metadata.0,
