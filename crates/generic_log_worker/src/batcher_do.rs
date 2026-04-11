@@ -7,9 +7,10 @@
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
 use crate::{
-    deserialize, get_durable_object_stub, load_cache_kv, obs, serialize, LookupKey,
-    SequenceMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
+    deserialize, get_durable_object_stub, load_cache_kv, obs, serialize, CacheSerialize,
+    LookupKey, BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use std::{
@@ -23,12 +24,12 @@ use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-pub struct GenericBatcher {
+pub struct GenericBatcher<M> {
     env: Env,
     config: BatcherConfig,
     state: State,
     kv: Option<KvStore>,
-    batch: RefCell<Batch>,
+    batch: RefCell<Batch<M>>,
     in_flight: RefCell<usize>,
     processed: RefCell<usize>,
     wshim: Option<obs::Wshim>,
@@ -43,13 +44,13 @@ pub struct BatcherConfig {
 }
 
 // A batch of entries to be submitted to the Sequencer together.
-struct Batch {
+struct Batch<M> {
     entries: Vec<PendingLogEntryBlob>,
     by_hash: HashSet<LookupKey>,
-    done: Sender<HashMap<LookupKey, SequenceMetadata>>,
+    done: Sender<HashMap<LookupKey, M>>,
 }
 
-impl Default for Batch {
+impl<M: Clone + Default> Default for Batch<M> {
     /// Returns a batch initialized with a watch channel.
     fn default() -> Self {
         Self {
@@ -60,7 +61,7 @@ impl Default for Batch {
     }
 }
 
-impl GenericBatcher {
+impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Default + Copy + 'static> GenericBatcher<M> {
     /// Returns a new batcher with the given config.
     ///
     /// # Panics
@@ -189,7 +190,7 @@ impl GenericBatcher {
     }
 }
 
-impl GenericBatcher {
+impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Default + Copy + 'static> GenericBatcher<M> {
     /// Submit the current pending batch to be sequenced.
     ///
     /// # Errors
@@ -217,8 +218,8 @@ impl GenericBatcher {
                 ..Default::default()
             },
         )?;
-        let sequenced_entries: HashMap<LookupKey, SequenceMetadata> =
-            deserialize::<Vec<(LookupKey, SequenceMetadata)>>(
+        let sequenced_entries: HashMap<LookupKey, M> =
+            deserialize::<Vec<(LookupKey, M)>>(
                 &get_durable_object_stub(
                     &self.env,
                     &self.config.name,
@@ -244,7 +245,7 @@ impl GenericBatcher {
                 .map(|(k, v)| {
                     Ok(kv
                         .put(&BASE64_STANDARD.encode(k), "")?
-                        .metadata::<SequenceMetadata>(v)?
+                        .metadata::<M>(v)?
                         .execute())
                 })
                 .collect::<Result<Vec<_>>>()?;

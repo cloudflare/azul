@@ -174,6 +174,16 @@ impl LogEntry for BootstrapMtcLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
     type Pending = BootstrapMtcPendingLogEntry;
     type ParseError = MtcError;
+    type Metadata = SequenceMetadata;
+
+    fn make_metadata(
+        leaf_index: LeafIndex,
+        timestamp: UnixTimestamp,
+        _old_tree_size: u64,
+        _new_tree_size: u64,
+    ) -> Self::Metadata {
+        (leaf_index, timestamp)
+    }
 
     fn initial_entry() -> Option<Self::Pending> {
         Some(Self::Pending {
@@ -184,7 +194,7 @@ impl LogEntry for BootstrapMtcLogEntry {
         })
     }
 
-    fn new(pending: Self::Pending, metadata: SequenceMetadata) -> Self {
+    fn new(pending: Self::Pending, metadata: Self::Metadata) -> Self {
         Self(TlogTilesLogEntry::new(pending.entry, metadata))
     }
 

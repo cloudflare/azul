@@ -21,9 +21,9 @@
 use crate::{
     obs::metrics::{millis_diff_as_secs, AsF64, SequencerMetrics},
     util::now_millis,
-    CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequenceMetadata,
-    SequencerConfig,
+    CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequencerConfig,
 };
+use serde::de::DeserializeOwned;
 use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::VerifierList;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::{
     cell::RefCell,
     cmp::{Ord, Ordering},
@@ -72,19 +73,19 @@ const MAX_POOL_SIZE: usize = 4000;
 /// they are rotated out of `in_sequencing`.
 /// <https://blog.cloudflare.com/durable-objects-easy-fast-correct-choose-three/#background-durable-objects-are-single-threaded>
 #[derive(Debug)]
-pub(crate) struct PoolState<P: PendingLogEntry> {
+pub(crate) struct PoolState<P: PendingLogEntry, M: Copy + Debug + Default + 'static> {
     // How many times sequencing has been skipped for any entries in the pool.
     sequence_skips: usize,
 
     // Entries that are ready to be sequenced, along with the Sender used to
     // send metadata to receivers once the corresponding entry is sequenced.
-    pending_entries: Vec<(P, Sender<SequenceMetadata>)>,
+    pending_entries: Vec<(P, Sender<M>)>,
 
     // Deduplication cache for entries currently pending sequencing.
-    pending_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
+    pending_dedup: HashMap<LookupKey, Receiver<M>>,
 
     // Deduplication cache for entries currently being sequenced.
-    in_sequencing_dedup: HashMap<LookupKey, Receiver<SequenceMetadata>>,
+    in_sequencing_dedup: HashMap<LookupKey, Receiver<M>>,
 
     // Ring buffer tracking insertion timestamps for the most recent entries
     // that are potentially skippable.
@@ -95,7 +96,7 @@ pub(crate) struct PoolState<P: PendingLogEntry> {
     leftover_timestamps_next_slot: usize,
 }
 
-impl<P: PendingLogEntry> Default for PoolState<P> {
+impl<P: PendingLogEntry, M: Copy + Debug + Default + 'static> Default for PoolState<P, M> {
     fn default() -> Self {
         PoolState {
             sequence_skips: 0,
@@ -108,10 +109,10 @@ impl<P: PendingLogEntry> Default for PoolState<P> {
     }
 }
 
-impl<E: PendingLogEntry> PoolState<E> {
+impl<E: PendingLogEntry, M: Serialize + DeserializeOwned + Copy + Debug + Default + 'static> PoolState<E, M> {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
-    fn check(&self, key: &LookupKey) -> Option<AddLeafResult> {
+    fn check(&self, key: &LookupKey) -> Option<AddLeafResult<M>> {
         if let Some(rx) = self.in_sequencing_dedup.get(key) {
             // Entry is being sequenced.
             Some(AddLeafResult::Pending {
@@ -128,11 +129,11 @@ impl<E: PendingLogEntry> PoolState<E> {
         }
     }
     // Add a new entry to the pool.
-    fn add(&mut self, key: LookupKey, entry: E) -> AddLeafResult {
+    fn add(&mut self, key: LookupKey, entry: E) -> AddLeafResult<M> {
         if self.pending_entries.len() >= MAX_POOL_SIZE {
             return AddLeafResult::RateLimited;
         }
-        let (tx, rx) = channel((0, 0));
+        let (tx, rx) = channel(M::default());
         self.pending_entries.push((entry, tx));
         self.pending_dedup.insert(key, rx.clone());
         self.leftover_timestamps_millis
@@ -158,7 +159,7 @@ impl<E: PendingLogEntry> PoolState<E> {
         old_size: u64,
         max_sequence_skips: usize,
         sequence_skip_threshold_millis: Option<u64>,
-    ) -> Option<Vec<(E, Sender<SequenceMetadata>)>> {
+    ) -> Option<Vec<(E, Sender<M>)>> {
         let new_size = old_size + self.pending_entries.len() as u64;
         let publishing_full_tile =
             new_size / u64::from(TlogTile::FULL_WIDTH) > old_size / u64::from(TlogTile::FULL_WIDTH);
@@ -657,19 +658,19 @@ async fn tile_reader_for_indexes(
 
 /// Result of an [`add_leaf_to_pool`] request containing either a cached log
 /// entry or a pending entry that must be resolved.
-pub(crate) enum AddLeafResult {
-    Cached(SequenceMetadata),
+pub(crate) enum AddLeafResult<M: Copy + 'static> {
+    Cached(M),
     Pending {
-        rx: Receiver<SequenceMetadata>,
+        rx: Receiver<M>,
         source: PendingSource,
     },
     RateLimited,
 }
 
-impl AddLeafResult {
+impl<M: Copy + 'static> AddLeafResult<M> {
     /// Resolve an `AddLeafResult` to a leaf entry, or None if the
     /// entry was not sequenced.
-    pub(crate) async fn resolve(self) -> Option<SequenceMetadata> {
+    pub(crate) async fn resolve(self) -> Option<M> {
         match self {
             AddLeafResult::Cached(entry) => Some(entry),
             AddLeafResult::Pending { mut rx, source: _ } => {
@@ -687,9 +688,9 @@ impl AddLeafResult {
 
     pub(crate) fn source(&self) -> &'static str {
         match self {
-            AddLeafResult::Cached(_) => "cache",
-            AddLeafResult::RateLimited => "ratelimit",
-            AddLeafResult::Pending { rx: _, source } => match source {
+            Self::Cached(_) => "cache",
+            Self::RateLimited => "ratelimit",
+            Self::Pending { rx: _, source } => match source {
                 PendingSource::InSequencing => "sequencing",
                 PendingSource::Pool => "pool",
                 PendingSource::Sequencer => "sequencer",
@@ -709,12 +710,16 @@ pub(crate) enum PendingSource {
 /// with a [`AddLeafResult::Cached`]. If the pool is full, return
 /// [`AddLeafResult::RateLimited`]. Otherwise, return a [`AddLeafResult::Pending`] which
 /// can be resolved once the entry has been sequenced.
-pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
-    state: &RefCell<PoolState<E>>,
-    cache: &impl CacheRead,
+pub(crate) fn add_leaf_to_pool<E, M>(
+    state: &RefCell<PoolState<E, M>>,
+    cache: &impl CacheRead<M>,
     config: &SequencerConfig,
     entry: E,
-) -> AddLeafResult {
+) -> AddLeafResult<M>
+where
+    E: PendingLogEntry,
+    M: Serialize + DeserializeOwned + Copy + Debug + Default + 'static,
+{
     let hash = entry.lookup_key();
     let mut state = state.borrow_mut();
 
@@ -740,12 +745,12 @@ pub(crate) fn add_leaf_to_pool<E: PendingLogEntry>(
 /// Will return an error if sequencing fails with an error that requires the
 /// sequencer to be re-initialized to get into a good state.
 pub(crate) async fn sequence<L: LogEntry>(
-    pool_state: &RefCell<PoolState<L::Pending>>,
+    pool_state: &RefCell<PoolState<L::Pending, L::Metadata>>,
     sequence_state: &RefCell<SequenceState>,
     config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &impl CacheWrite,
+    cache: &impl CacheWrite<L::Metadata>,
     metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
     let Some(entries) = pool_state.borrow_mut().take(
@@ -816,8 +821,8 @@ async fn sequence_entries<L: LogEntry>(
     config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &impl CacheWrite,
-    entries: Vec<(L::Pending, Sender<SequenceMetadata>)>,
+    cache: &impl CacheWrite<L::Metadata>,
+    entries: Vec<(L::Pending, Sender<L::Metadata>)>,
     metrics: &SequencerMetrics,
 ) -> Result<(), SequenceError> {
     let name = &config.name;
@@ -853,6 +858,7 @@ async fn sequence_entries<L: LogEntry>(
 
     let mut overlay = HashMap::new();
     let mut n = old_size;
+    let new_size = old_size + entries.len() as u64;
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
     let mut cache_metadata = Vec::with_capacity(entries.len());
 
@@ -863,8 +869,10 @@ async fn sequence_entries<L: LogEntry>(
             }
         }
 
-        // Add the entry and metadata to our lists of things sequenced
-        let metadata = (n, timestamp);
+        // Add the entry and metadata to our lists of things sequenced.
+        // L::make_metadata provides the application-specific metadata type,
+        // which may include additional fields beyond (leaf_index, timestamp).
+        let metadata = L::make_metadata(n, timestamp, old_size, new_size);
         cache_metadata.push((entry.lookup_key(), metadata));
         sequenced_metadata.push((sender, metadata));
 
@@ -918,14 +926,16 @@ async fn sequence_entries<L: LogEntry>(
         }
     }
 
+    assert_eq!(n, new_size, "loop must have processed exactly entries.len() entries");
+
     // Stage leftover partial data tile, if any.
-    if n != old_size && n % u64::from(TlogTile::FULL_WIDTH) != 0 {
+    if new_size != old_size && !new_size.is_multiple_of(u64::from(TlogTile::FULL_WIDTH)) {
         metrics
             .seq_data_tile_size
             .with_label_values(&["partial"])
             .observe(data_tile.len().as_f64());
         stage_data_tile::<L>(
-            n,
+            new_size,
             &mut edge_tiles,
             &mut tile_uploads,
             std::mem::take(&mut data_tile),
@@ -934,7 +944,7 @@ async fn sequence_entries<L: LogEntry>(
     }
 
     // Produce and stage new tree tiles.
-    let tiles = TlogTile::new_tiles(old_size, n);
+    let tiles = TlogTile::new_tiles(old_size, new_size);
     for tile in tiles {
         let data = tile
             .read_data(&HashReaderWithOverlay {
@@ -951,7 +961,7 @@ async fn sequence_entries<L: LogEntry>(
                 || (t.tile.level_index() == tile.level_index() && t.tile.width() < tile.width())
         }) {
             debug!(
-                "{name}: staging tree tile: old_tree_size={old_size}, tree_size={n}, tile={tile:?}, size={}",
+                "{name}: staging tree tile: old_tree_size={old_size}, tree_size={new_size}, tile={tile:?}, size={}",
                 data.len()
             );
             edge_tiles.insert(
@@ -973,7 +983,7 @@ async fn sequence_entries<L: LogEntry>(
     // Construct the new sequence state.
     let new = {
         let tree = TreeWithTimestamp::from_hash_reader(
-            n,
+            new_size,
             &HashReaderWithOverlay {
                 edge_tiles: &edge_tiles,
                 overlay: &overlay,
@@ -1367,6 +1377,7 @@ pub async fn upload_issuers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tlog_tiles::SequenceMetadata;
     use crate::{empty_checkpoint_callback, util};
 
     use anyhow::ensure;
@@ -2311,13 +2322,13 @@ mod tests {
 
     struct TestCacheBackend(RefCell<HashMap<LookupKey, SequenceMetadata>>);
 
-    impl CacheRead for TestCacheBackend {
+    impl CacheRead<SequenceMetadata> for TestCacheBackend {
         fn get_entry(&self, key: &LookupKey) -> Option<SequenceMetadata> {
             self.0.borrow().get(key).copied()
         }
     }
 
-    impl CacheWrite for TestCacheBackend {
+    impl CacheWrite<SequenceMetadata> for TestCacheBackend {
         async fn put_entries(
             &self,
             entries: &[(LookupKey, SequenceMetadata)],
@@ -2390,7 +2401,7 @@ mod tests {
 
     struct TestLog {
         config: SequencerConfig,
-        pool_state: RefCell<PoolState<StaticCTPendingLogEntry>>,
+        pool_state: RefCell<PoolState<StaticCTPendingLogEntry, SequenceMetadata>>,
         sequence_state: RefCell<SequenceState>,
         lock: TestLockBackend,
         object: TestObjectBackend,
@@ -2493,16 +2504,16 @@ mod tests {
             .unwrap();
             self.pool_state.borrow_mut().reset_in_sequencing_dedup();
         }
-        fn add_certificate(&mut self) -> AddLeafResult {
+        fn add_certificate(&mut self) -> AddLeafResult<SequenceMetadata> {
             self.add_certificate_with_seed(rand::rng().next_u64())
         }
-        fn add_certificate_with_seed(&mut self, seed: u64) -> AddLeafResult {
+        fn add_certificate_with_seed(&mut self, seed: u64) -> AddLeafResult<SequenceMetadata> {
             self.add_with_seed(false, seed)
         }
-        fn add(&mut self, is_precert: bool) -> AddLeafResult {
+        fn add(&mut self, is_precert: bool) -> AddLeafResult<SequenceMetadata> {
             self.add_with_seed(is_precert, rand::rng().next_u64())
         }
-        fn add_with_seed(&mut self, is_precert: bool, seed: u64) -> AddLeafResult {
+        fn add_with_seed(&mut self, is_precert: bool, seed: u64) -> AddLeafResult<SequenceMetadata> {
             let mut rng = SmallRng::seed_from_u64(seed);
             let mut certificate = vec![0; rng.random_range(8..12)];
             rng.fill(&mut certificate[..]);
