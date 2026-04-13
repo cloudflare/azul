@@ -55,8 +55,8 @@ fn now_millis() -> u64 {
 /// has sequenced at least one entry before any test that depends on sequencer
 /// state runs.
 ///
-/// `ct_worker` initializes its root pool, Durable Objects, and sequencer lazily
-/// on the first request.  Tests that run before initialization completes see
+/// `ct_worker` initializes its Durable Objects and sequencer lazily on the
+/// first request.  Tests that run before initialization completes may see
 /// 503 (sequencer busy) or missing checkpoints.  Calling `ensure_initialized`
 /// at the start of any such test avoids these races without requiring a
 /// specific test ordering.
@@ -75,25 +75,14 @@ async fn ensure_initialized() {
             let client = CtClient::default_log();
             let chains = make_chains(&client.log).expect("make_chains for warmup");
 
-            // Wait until get-roots succeeds before attempting add-chain.
-            // get-roots triggers the CCADB fetch that populates the ROOTS
-            // OnceCell.  If add-chain races with that fetch in-flight from
-            // another request, the Workers runtime cancels it with a 500
-            // (cross-request promise resolution is not permitted).  Waiting
-            // here ensures ROOTS is fully populated before add-chain is called.
-            let mut roots_ready = false;
-            for _ in 0..MAX_ATTEMPTS {
-                match client.get_roots().await {
-                    Ok(_) => { roots_ready = true; break; }
+            // Fetch log metadata (needed for checkpoint verification).
+            // Retry until the frontend is reachable.
+            let meta = loop {
+                match client.get_log_v3_json().await {
+                    Ok(m) => break m,
                     Err(_) => tokio::time::sleep(RETRY_DELAY).await,
                 }
-            }
-            if !roots_ready {
-                panic!("ct_worker get-roots never succeeded after {MAX_ATTEMPTS}s");
-            }
-
-            // Fetch log metadata (needed for checkpoint verification).
-            let meta = client.get_log_v3_json().await.expect("log.v3.json in warmup");
+            };
 
             for attempt in 0..MAX_ATTEMPTS {
                 // Submit a chain to trigger full initialization (root pool load,
@@ -148,10 +137,6 @@ async fn ensure_initialized() {
 /// valid DER-encoded X.509 certificates.
 #[tokio::test]
 async fn get_roots_returns_valid_certs() {
-    // get-roots triggers the CCADB fetch that populates the ROOTS OnceCell.
-    // ensure_initialized uses get-roots as its readiness probe, so whichever
-    // test runs first will serialize the fetch before add-chain is attempted.
-    ensure_initialized().await;
     let client = CtClient::default_log();
     let roots = client.get_roots().await.expect("get-roots failed");
 
