@@ -9,6 +9,11 @@ publish = false
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
 
+[package.metadata.cargo-machete]
+# getrandom is not called directly but must be present so its wasm_js feature
+# activates the correct WASM backend for all transitive dependents.
+ignored = ["getrandom"]
+
 [lib]
 crate-type = ["cdylib"]
 

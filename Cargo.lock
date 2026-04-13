@@ -985,7 +985,6 @@ dependencies = [
  "base64",
  "bitcode",
  "byteorder",
- "console_error_panic_hook",
  "console_log",
  "ed25519-dalek",
  "futures-executor",

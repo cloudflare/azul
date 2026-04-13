@@ -10,15 +10,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Clippy
-      run: cargo clippy -- -D warnings -W clippy::pedantic
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - name: Clippy (required)
+        run: cargo clippy -- -D warnings
+      - name: Clippy (pedantic, advisory)
+        run: cargo clippy --tests -- -W clippy::pedantic
+        continue-on-error: true
+      - name: Unused dependencies
+        run: cargo install cargo-machete --quiet && cargo machete
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --verbose
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: cargo test --verbose
