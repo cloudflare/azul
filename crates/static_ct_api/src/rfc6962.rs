@@ -242,7 +242,7 @@ mod tests {
     use chrono::prelude::*;
     use der::{asn1::OctetString, Decode};
     use x509_cert::ext::Extension;
-    use x509_verify::x509_cert::Certificate;
+    use x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()

@@ -10,11 +10,18 @@ repository.workspace = true
 description.workspace = true
 
 [dependencies]
+const-oid.workspace = true
 der.workspace = true
+p256.workspace = true
+p384.workspace = true
+p521.workspace = true
+rsa.workspace = true
+sha1.workspace = true
 sha2.workspace = true
+signature.workspace = true
+spki.workspace = true
 thiserror.workspace = true
 x509-cert.workspace = true
-x509-verify.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
