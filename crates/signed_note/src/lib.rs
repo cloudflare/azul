@@ -186,28 +186,17 @@
 //!
 //! struct ZeroRng;
 //!
-//! impl rand_core::RngCore for ZeroRng {
-//!     fn next_u32(&mut self) -> u32 {
-//!         0
-//!     }
-//!
-//!     fn next_u64(&mut self) -> u64 {
-//!         0
-//!     }
-//!
-//!     fn fill_bytes(&mut self, dest: &mut [u8]) {
-//!         for byte in dest.iter_mut() {
-//!             *byte = 0;
-//!         }
-//!     }
-//!
-//!     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-//!         self.fill_bytes(dest);
+//! impl rand_core::TryRng for ZeroRng {
+//!     type Error = core::convert::Infallible;
+//!     fn try_next_u32(&mut self) -> Result<u32, Self::Error> { Ok(0) }
+//!     fn try_next_u64(&mut self) -> Result<u64, Self::Error> { Ok(0) }
+//!     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+//!         for byte in dest.iter_mut() { *byte = 0; }
 //!         Ok(())
 //!     }
 //! }
 //!
-//! impl rand_core::CryptoRng for ZeroRng {}
+//! impl rand_core::TryCryptoRng for ZeroRng {}
 //!
 //! let (skey, _) = signed_note::generate_encoded_ed25519_key(&mut ZeroRng{}, &KeyName::new("EnochRoot".into()).unwrap());
 //! let signer = Ed25519NoteSigner::new_from_encoded_key(&skey).unwrap();
@@ -708,7 +697,7 @@ impl Note {
 mod tests {
 
     use super::*;
-    use rand::rngs::OsRng;
+
     use std::sync::LazyLock;
 
     static NAME: LazyLock<KeyName> = LazyLock::new(|| KeyName::new("EnochRoot".into()).unwrap());
@@ -729,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_generate_key() {
-        let (skey, vkey) = generate_encoded_ed25519_key(&mut OsRng, &NAME);
+        let (skey, vkey) = generate_encoded_ed25519_key(&mut rand::rng(), &NAME);
 
         let signer = Ed25519NoteSigner::new_from_encoded_key(&skey).unwrap();
         let verifier = Ed25519NoteVerifier::new_from_encoded_key(&vkey).unwrap();
@@ -739,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_from_ed25519() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rng());
 
         let pubkey = [
             &[SignatureType::Ed25519 as u8],

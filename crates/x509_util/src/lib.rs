@@ -3,9 +3,9 @@
 
 //! Utilities for X.509 operations.
 
-use der::{Decode, Encode, Error as DerError};
+use der::{Decode, Encode, Error as DerError, Sequence};
 use sha2::{Digest, Sha256};
-use signature::Verifier as _; // for vk.verify()
+use signature::Verifier;
 use std::collections::{hash_map::Entry, HashMap};
 use x509_cert::{
     ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
@@ -22,6 +22,114 @@ pub fn certs_to_bytes(certs: &[Certificate]) -> Result<Vec<Vec<u8>>, DerError> {
         .iter()
         .map(der::Encode::to_der)
         .collect::<Result<_, _>>()
+}
+
+/// An owned, freely mutable representation of an X.509 `TBSCertificate`.
+///
+/// Mirrors the field layout of `x509_cert::TbsCertificateInner` prior to
+/// [RustCrypto/formats#1505](https://github.com/RustCrypto/formats/pull/1505),
+/// which made those fields private.  Construct from a parsed `&TbsCertificate`
+/// via `From`, mutate any fields as needed, then call `to_der()`.
+#[derive(Clone, Debug, Sequence)]
+pub struct OwnedTbsCertificate {
+    #[asn1(
+        context_specific = "0",
+        tag_mode = "EXPLICIT",
+        default = "Default::default"
+    )]
+    pub version: x509_cert::certificate::Version,
+    pub serial_number: x509_cert::serial_number::SerialNumber,
+    pub signature: spki::AlgorithmIdentifierOwned,
+    pub issuer: x509_cert::name::Name,
+    pub validity: x509_cert::time::Validity,
+    pub subject: x509_cert::name::Name,
+    pub subject_public_key_info: spki::SubjectPublicKeyInfoOwned,
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
+    pub issuer_unique_id: Option<der::asn1::BitString>,
+    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
+    pub subject_unique_id: Option<der::asn1::BitString>,
+    #[asn1(context_specific = "3", tag_mode = "EXPLICIT", optional = "true")]
+    pub extensions: Option<x509_cert::ext::Extensions>,
+}
+
+impl From<&x509_cert::TbsCertificate> for OwnedTbsCertificate {
+    fn from(tbs: &x509_cert::TbsCertificate) -> Self {
+        Self {
+            version: tbs.version(),
+            serial_number: tbs.serial_number().clone(),
+            signature: tbs.signature().clone(),
+            issuer: tbs.issuer().clone(),
+            validity: *tbs.validity(),
+            subject: tbs.subject().clone(),
+            subject_public_key_info: tbs.subject_public_key_info().clone(),
+            issuer_unique_id: tbs.issuer_unique_id().clone(),
+            subject_unique_id: tbs.subject_unique_id().clone(),
+            extensions: tbs.extensions().cloned(),
+        }
+    }
+}
+
+impl OwnedTbsCertificate {
+    /// Decode a DER-encoded `TBSCertificate` into an `OwnedTbsCertificate`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `der::Error` if the DER cannot be decoded.
+    pub fn from_der(bytes: &[u8]) -> Result<Self, DerError> {
+        Decode::from_der(bytes)
+    }
+
+    /// Encode this `TBSCertificate` as DER.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `der::Error` if any field cannot be encoded.
+    pub fn to_der(&self) -> Result<Vec<u8>, DerError> {
+        Encode::to_der(self)
+    }
+}
+
+/// An owned, freely mutable representation of an X.509 `Certificate`.
+///
+/// Mirrors the field layout of `x509_cert::CertificateInner` prior to
+/// [RustCrypto/formats#1505](https://github.com/RustCrypto/formats/pull/1505).
+/// Construct from a parsed `&Certificate` via `From`, or build from components,
+/// then call `to_der()`.
+#[derive(Clone, Debug, Sequence)]
+pub struct OwnedCertificate {
+    pub tbs_certificate: OwnedTbsCertificate,
+    pub signature_algorithm: spki::AlgorithmIdentifierOwned,
+    pub signature: der::asn1::BitString,
+}
+
+impl From<&x509_cert::Certificate> for OwnedCertificate {
+    fn from(cert: &x509_cert::Certificate) -> Self {
+        Self {
+            tbs_certificate: OwnedTbsCertificate::from(cert.tbs_certificate()),
+            signature_algorithm: cert.signature_algorithm().clone(),
+            signature: cert.signature().clone(),
+        }
+    }
+}
+
+impl OwnedCertificate {
+    /// Decode a DER-encoded `Certificate` into an `OwnedCertificate`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `der::Error` if the DER cannot be decoded.
+    pub fn from_der(bytes: &[u8]) -> Result<Self, DerError> {
+        Decode::from_der(bytes)
+    }
+
+    /// Encode this `Certificate` as DER.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `der::Error` if any field cannot be encoded.
+    pub fn to_der(&self) -> Result<Vec<u8>, DerError> {
+        Encode::to_der(self)
+    }
 }
 
 /// A `CertPool` is a set of certificates.
@@ -59,12 +167,18 @@ impl CertPool {
     ///
     /// Returns an error if there are issues DER-encoding certificate extensions.
     pub fn find_potential_parents(&self, cert: &Certificate) -> Result<&[usize], DerError> {
-        if let Some((_, aki)) = cert.tbs_certificate.get::<AuthorityKeyIdentifier>()? {
+        if let Some((_, aki)) = cert
+            .tbs_certificate()
+            .get_extension::<AuthorityKeyIdentifier>()?
+        {
             if let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?) {
                 return Ok(indexes);
             }
         }
-        if let Some(indexes) = self.by_name.get(&cert.tbs_certificate.issuer.to_string()) {
+        if let Some(indexes) = self
+            .by_name
+            .get(&cert.tbs_certificate().issuer().to_string())
+        {
             return Ok(indexes);
         }
         Ok(&[])
@@ -82,10 +196,13 @@ impl CertPool {
             let idx = self.certs.len();
             e.insert(idx);
             self.by_name
-                .entry(cert.tbs_certificate.subject.to_string())
+                .entry(cert.tbs_certificate().subject().to_string())
                 .or_default()
                 .push(idx);
-            if let Some((_, ski)) = cert.tbs_certificate.get::<SubjectKeyIdentifier>()? {
+            if let Some((_, ski)) = cert
+                .tbs_certificate()
+                .get_extension::<SubjectKeyIdentifier>()?
+            {
                 self.by_subject_key_id
                     .entry(ski.to_der()?)
                     .or_default()
@@ -264,8 +381,8 @@ where
 
     // Check whether the leaf expiry date is within the acceptable range.
     let not_after = u64::try_from(
-        leaf.tbs_certificate
-            .validity
+        leaf.tbs_certificate()
+            .validity()
             .not_after
             .to_unix_duration()
             .as_millis(),
@@ -335,7 +452,7 @@ where
         let Some(path) = find_path_to_root(current_cert, roots, validated_intermediates.len())?
         else {
             return Err(ValidationError::NoPathToTrustedRoot {
-                to_verify_issuer: current_cert.tbs_certificate.issuer.to_string(),
+                to_verify_issuer: current_cert.tbs_certificate().issuer().to_string(),
             }
             .into());
         };
@@ -417,7 +534,7 @@ fn find_path_to_root(
 /// Verify that a cert is well-formed according to RFC 5280.
 fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
     // Reject mismatched signature algorithms: https://github.com/google/certificate-transparency-go/pull/702.
-    if cert.signature_algorithm != cert.tbs_certificate.signature {
+    if cert.signature_algorithm() != cert.tbs_certificate().signature() {
         return Err(ValidationError::MismatchingSigAlg);
     }
     Ok(())
@@ -431,12 +548,14 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// root CA certificate, using the chain of intermediate CA certificates
 /// provided by the submitter.
 /// ```
+/// Verify that `issuer` signed `child` by dispatching on the signature algorithm OID.
+///
 /// Supported algorithms: ECDSA P-256, ECDSA P-384, ECDSA P-521, RSA PKCS#1 v1.5 (SHA-1/256/384/512).
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     // Note: chain links are discovered by comparing
-    //   child.tbs_certificate.issuer.to_string()
+    //   child.tbs_certificate().issuer().to_string()
     // to
-    //   issuer.tbs_certificate.subject.to_string().
+    //   issuer.tbs_certificate().subject().to_string().
     // When these are equal, there is a plausible link between these. This is NOT the actual
     // algorithm for determining whether a link is valid. A discussion on the correct algorithm can
     // be found here:
@@ -449,20 +568,20 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
         SHA_256_WITH_RSA_ENCRYPTION, SHA_384_WITH_RSA_ENCRYPTION, SHA_512_WITH_RSA_ENCRYPTION,
     };
 
-    let Ok(tbs_der) = child.tbs_certificate.to_der() else {
+    let Ok(tbs_der) = child.tbs_certificate().to_der() else {
         return false;
     };
-    let Some(sig_bytes) = child.signature.as_bytes() else {
+    let Some(sig_bytes) = child.signature().as_bytes() else {
         return false;
     };
-    let Ok(spki_der) = issuer.tbs_certificate.subject_public_key_info.to_der() else {
+    let Ok(spki_der) = issuer.tbs_certificate().subject_public_key_info().to_der() else {
         return false;
     };
     let Ok(spki) = spki::SubjectPublicKeyInfoRef::try_from(spki_der.as_slice()) else {
         return false;
     };
 
-    match child.signature_algorithm.oid {
+    match child.signature_algorithm().oid {
         // ecdsa-with-SHA256 → P-256; ecdsa-with-SHA384 → P-384; ecdsa-with-SHA512 → P-521.
         ECDSA_WITH_SHA_256 => verify_p256(spki, &tbs_der, sig_bytes),
         ECDSA_WITH_SHA_384 => verify_p384(spki, &tbs_der, sig_bytes),
@@ -475,6 +594,7 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     }
 }
 
+/// Verify a P-256 ECDSA signature over `tbs_der` using the key in `spki`.
 fn verify_p256(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool {
     let Ok(vk) = p256::ecdsa::VerifyingKey::try_from(spki) else {
         return false;
@@ -484,6 +604,7 @@ fn verify_p256(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_byte
         .unwrap_or(false)
 }
 
+/// Verify a P-384 ECDSA signature over `tbs_der` using the key in `spki`.
 fn verify_p384(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool {
     let Ok(vk) = p384::ecdsa::VerifyingKey::try_from(spki) else {
         return false;
@@ -493,27 +614,20 @@ fn verify_p384(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_byte
         .unwrap_or(false)
 }
 
+/// Verify a P-521 ECDSA signature over `tbs_der` using the key in `spki`.
 fn verify_p521(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool {
-    // In p521 0.13.x, VerifyingKey is a wrapper struct rather than a type alias for
-    // ecdsa::VerifyingKey<NistP521>, so it does not inherit TryFrom<SubjectPublicKeyInfoRef>.
-    // Work around this by extracting the raw SEC1 bytes and using from_sec1_bytes directly.
-    // This workaround can be removed once we upgrade to p521 >=0.14 (currently in rc), where
-    // VerifyingKey becomes a type alias and inherits the TryFrom impl.
-    let Some(pub_key_bytes) = spki.subject_public_key.as_bytes() else {
+    let Ok(vk) = p521::ecdsa::VerifyingKey::try_from(spki) else {
         return false;
     };
-    let Ok(vk) = p521::ecdsa::VerifyingKey::from_sec1_bytes(pub_key_bytes) else {
-        return false;
-    };
-    // Convert the DER-encoded signature to a fixed-size P-521 signature.
-    p521::ecdsa::Signature::from_der(sig_bytes)
+    p521::ecdsa::DerSignature::try_from(sig_bytes)
         .map(|sig| vk.verify(tbs_der, &sig).is_ok())
         .unwrap_or(false)
 }
 
+/// Verify an RSA PKCS#1 v1.5 signature over `tbs_der` using the key in `spki`.
 fn verify_rsa<D>(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool
 where
-    D: sha2::digest::Digest + rsa::pkcs8::AssociatedOid,
+    D: digest::Digest + const_oid::AssociatedOid,
 {
     let Ok(rsa_key) = rsa::RsaPublicKey::try_from(spki) else {
         return false;
@@ -537,8 +651,8 @@ fn check_ca_basic_constraints(
 ) -> Result<(), ValidationError> {
     // Check the cert's basic constraints.
     if ca_cert
-        .tbs_certificate
-        .get::<BasicConstraints>()
+        .tbs_certificate()
+        .get_extension::<BasicConstraints>()
         .map_err(ValidationError::from)?
         .is_none_or(|(_, bc)| {
             // If the path length constraint is specified, check it. The
@@ -754,7 +868,6 @@ mod tests {
         "../../static_ct_api/tests/subleaf.misordered.chain";
         false
     );
-
     macro_rules! test_not_after {
         ($name:ident; $start:expr; $end:expr; $want_err:expr) => {
             test_validate_chain!($name; "../../static_ct_api/tests/fake-ca-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem", "../../static_ct_api/tests/fake-intermediate-cert.pem"; $start; $end; $want_err; 2; false);
@@ -796,7 +909,7 @@ mod tests {
                 .unwrap();
 
         // Get the subject DN before moving into pool
-        let subject_dn = root.tbs_certificate.subject.clone();
+        let subject_dn = root.tbs_certificate().subject().clone();
 
         // Create a pool with this root
         let pool = CertPool::new(vec![root]).unwrap();
@@ -807,7 +920,7 @@ mod tests {
 
         // Verify it's the same cert (compare subjects)
         assert_eq!(
-            found.unwrap().tbs_certificate.subject.to_string(),
+            found.unwrap().tbs_certificate().subject().to_string(),
             subject_dn.to_string()
         );
     }
@@ -825,7 +938,7 @@ mod tests {
 
         // Try to find by a different subject (use the leaf's issuer, which isn't in pool)
         let leaf = &pool.certs[0];
-        let issuer_dn = &leaf.tbs_certificate.issuer;
+        let issuer_dn = &leaf.tbs_certificate().issuer();
 
         // The issuer is not in the pool, so this should return None
         let not_found = pool.find_by_subject(issuer_dn);

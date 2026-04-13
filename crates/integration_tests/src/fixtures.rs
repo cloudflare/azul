@@ -30,23 +30,24 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use const_oid::AssociatedOid;
+use crypto_common::Generate;
 use der::{
     asn1::{Ia5String, Null},
     Decode, Encode, Length, Writer,
 };
 use p256::{ecdsa::SigningKey, pkcs8::DecodePrivateKey};
-use rand::rngs::OsRng;
 use serde::Deserialize;
 use x509_cert::{
-    builder::{Builder, CertificateBuilder, Profile},
-    certificate::Certificate,
+    builder::profile::BuilderProfile,
+    builder::{Builder, CertificateBuilder},
+    certificate::{Certificate, TbsCertificate},
     ext::{
         pkix::{name::GeneralName, ExtendedKeyUsage, SubjectAltName},
-        AsExtension, Extension,
+        Criticality, Extension,
     },
     name::Name,
     serial_number::SerialNumber,
-    spki::SubjectPublicKeyInfoOwned,
+    spki::{SubjectPublicKeyInfoOwned, SubjectPublicKeyInfoRef},
     time::Validity,
 };
 
@@ -67,8 +68,8 @@ impl AssociatedOid for CtPoisonExtension {
     const OID: der::asn1::ObjectIdentifier = CT_PRECERT_POISON_OID;
 }
 
-// `AsExtension` requires `AssociatedOid + der::Encode`.
-// We implement `Encode` directly: the extension value is ASN.1 NULL.
+// x509-cert 0.3: ToExtension is implemented for `&T` when T: Criticality + AssociatedOid + Encode.
+// We implement Encode (value = ASN.1 NULL) and Criticality (always critical).
 impl Encode for CtPoisonExtension {
     fn encoded_len(&self) -> der::Result<Length> {
         Null.encoded_len()
@@ -78,8 +79,8 @@ impl Encode for CtPoisonExtension {
     }
 }
 
-impl AsExtension for CtPoisonExtension {
-    fn critical(&self, _subject: &x509_cert::name::RdnSequence, _extensions: &[Extension]) -> bool {
+impl Criticality for CtPoisonExtension {
+    fn criticality(&self, _subject: &Name, _extensions: &[Extension]) -> bool {
         true
     }
 }
@@ -271,6 +272,29 @@ fn build_cert(
 
 /// Like `build_cert`, but also returns the DER-encoded `SubjectPublicKeyInfo` of
 /// the leaf certificate.  Used by MTC tests that need to call `get-certificate`.
+/// Minimal leaf certificate profile for integration tests.
+struct LeafProfile {
+    issuer: Name,
+    subject: Name,
+}
+
+impl BuilderProfile for LeafProfile {
+    fn get_issuer(&self, _subject: &Name) -> Name {
+        self.issuer.clone()
+    }
+    fn get_subject(&self) -> Name {
+        self.subject.clone()
+    }
+    fn build_extensions(
+        &self,
+        _spk: SubjectPublicKeyInfoRef<'_>,
+        _issuer_spk: SubjectPublicKeyInfoRef<'_>,
+        _tbs: &TbsCertificate,
+    ) -> Result<Vec<Extension>, x509_cert::builder::Error> {
+        Ok(vec![])
+    }
+}
+
 fn build_cert_with_spki(
     ca_key: &SigningKey,
     not_before: chrono::DateTime<chrono::Utc>,
@@ -281,40 +305,30 @@ fn build_cert_with_spki(
 
     let serial = SerialNumber::from(rand::random::<u32>());
 
-    let validity = Validity {
-        not_before: Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(to_der_datetime(
+    let validity = Validity::new(
+        Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(to_der_datetime(
             not_before,
         )?)),
-        not_after: Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(to_der_datetime(
+        Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(to_der_datetime(
             not_after,
         )?)),
-    };
+    );
 
     let subject = Name::from_str("CN=integration-test.example.com,O=Test,C=US")
         .context("building subject name")?;
 
     // Generate a fresh key for this leaf.
-    let leaf_key = SigningKey::random(&mut OsRng);
-    let leaf_spki = SubjectPublicKeyInfoOwned::from_key(*leaf_key.verifying_key())
+    let leaf_key = SigningKey::generate_from_rng(&mut rand::rng());
+    let leaf_spki = SubjectPublicKeyInfoOwned::from_key(leaf_key.verifying_key())
         .context("encoding leaf SPKI")?;
     let leaf_spki_der = leaf_spki.to_der().context("encoding leaf SPKI to DER")?;
-    // leaf_spki was moved into CertificateBuilder::new; we keep the DER copy above.
 
     let ca_cert = Certificate::from_der(&ca_cert_der_bytes()).context("parsing CA cert")?;
+    let issuer = ca_cert.tbs_certificate().subject().clone();
 
-    let mut builder = CertificateBuilder::new(
-        Profile::Leaf {
-            issuer: ca_cert.tbs_certificate.subject.clone(),
-            enable_key_agreement: false,
-            enable_key_encipherment: false,
-        },
-        serial,
-        validity,
-        subject,
-        leaf_spki,
-        ca_key,
-    )
-    .context("creating CertificateBuilder")?;
+    let profile = LeafProfile { issuer, subject };
+    let mut builder = CertificateBuilder::new(profile, serial, validity, leaf_spki)
+        .context("creating CertificateBuilder")?;
 
     let san = SubjectAltName(vec![GeneralName::DnsName(
         Ia5String::new("integration-test.example.com").context("building SAN")?,
@@ -334,7 +348,7 @@ fn build_cert_with_spki(
     }
 
     let cert_der = builder
-        .build_with_rng::<p256::ecdsa::DerSignature>(&mut OsRng)
+        .build_with_rng::<_, p256::ecdsa::DerSignature, _>(ca_key, &mut rand::rng())
         .context("signing certificate")?
         .to_der()
         .context("encoding certificate to DER")?;
