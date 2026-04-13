@@ -12,6 +12,7 @@ description.workspace = true
 [dependencies]
 const-oid.workspace = true
 der.workspace = true
+digest.workspace = true
 p256.workspace = true
 p384.workspace = true
 p521.workspace = true

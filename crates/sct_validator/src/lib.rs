@@ -24,12 +24,11 @@ pub use sct::{extract_scts_from_cert, ParsedSct};
 pub use verify::verify_sct_signature;
 
 use base64::prelude::*;
-use der::Encode;
+use der::{Decode, Encode};
 use hashbrown::HashMap;
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use serde::Deserialize;
 use spki::SubjectPublicKeyInfoRef;
-use x509_cert::der::Decode;
 
 /// Log list freshness period in seconds (70 days).
 /// If the log list is older than this, SCT validation auto-succeeds.
@@ -447,8 +446,8 @@ impl SctValidator {
         let issuer_cert = x509_cert::Certificate::from_der(issuer_der)
             .map_err(|e| SctError::Other(format!("issuer: {e}")))?;
         let issuer_spki_der = issuer_cert
-            .tbs_certificate
-            .subject_public_key_info
+            .tbs_certificate()
+            .subject_public_key_info()
             .to_der()
             .map_err(|e| SctError::Other(format!("issuer SPKI: {e}")))?;
 

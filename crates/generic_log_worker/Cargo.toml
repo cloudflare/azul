@@ -13,7 +13,8 @@ categories = ["cryptography"]
 keywords = ["transparency", "crypto"]
 
 [dev-dependencies]
-rand = { workspace = true, features = ["small_rng"] }
+crypto-common.workspace = true
+rand.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true
 futures-executor.workspace = true

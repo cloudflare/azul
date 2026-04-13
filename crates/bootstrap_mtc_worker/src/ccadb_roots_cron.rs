@@ -78,7 +78,7 @@ pub(crate) async fn update_ccadb_roots(kv: &KvStore) -> Result<()> {
         write!(
             &mut buf,
             "\n# {}\n# added on {} from CCADB\n{}\n",
-            cert.tbs_certificate.subject,
+            cert.tbs_certificate().subject(),
             DateTime::from_timestamp_millis(
                 now_millis()
                     .try_into()

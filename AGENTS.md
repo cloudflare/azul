@@ -58,7 +58,7 @@ npx wrangler -e=${ENV} tail
 - Worker build is handled by `worker-build`, not `cargo build` directly — wrangler.jsonc invokes it automatically
 - Config types live in separate sub-crates: `crates/ct_worker/config/`, `crates/bootstrap_mtc_worker/config/`
 - `DEPLOY_ENV=<env>` env var must be set when invoking `worker-build` manually; wrangler.jsonc sets it per environment
-- `der` crate is patched to a private fork in `Cargo.toml` `[patch.crates-io]` — do not remove or alter this
+
 
 ## Workflow
 
@@ -77,4 +77,4 @@ npx wrangler -e=${ENV} tail
 ✅ **Always:** Run `cargo clippy -- -D warnings` before pushing; CI fails on any warning
 ✅ **Always:** Add new shared dependencies to `[workspace.dependencies]` in root `Cargo.toml`
 ⚠️ **Requires Approval:** Publishing crates to crates.io (`tlog_tiles`, `static_ct_api`, `signed_note`, `signed_note`) — worker crates have `publish = false`
-🚫 **Never:** Remove or modify the `[patch.crates-io]` override for `der`; it points to a required fork
+
