@@ -145,6 +145,23 @@ fn parse_signature_algorithm(
     }
 }
 
+fn extract_lifetime_days(cert: &Certificate) -> Result<u64, SctError> {
+    let validity = &cert.tbs_certificate.validity;
+    let not_before_secs = validity.not_before.to_unix_duration().as_secs();
+    let not_after_secs = validity.not_after.to_unix_duration().as_secs();
+
+    if not_after_secs < not_before_secs {
+        return Err(SctError::Other(
+            "certificate notAfter is before notBefore".to_string(),
+        ));
+    }
+
+    let lifetime_secs = not_after_secs - not_before_secs;
+    let lifetime_days = lifetime_secs / (24 * 60 * 60);
+
+    Ok(lifetime_days)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,21 +198,4 @@ mod tests {
             "TBS DER mismatch — if intentional, re-run with UPDATE_GOLDEN=1"
         );
     }
-}
-
-fn extract_lifetime_days(cert: &Certificate) -> Result<u64, SctError> {
-    let validity = &cert.tbs_certificate.validity;
-    let not_before_secs = validity.not_before.to_unix_duration().as_secs();
-    let not_after_secs = validity.not_after.to_unix_duration().as_secs();
-
-    if not_after_secs < not_before_secs {
-        return Err(SctError::Other(
-            "certificate notAfter is before notBefore".to_string(),
-        ));
-    }
-
-    let lifetime_secs = not_after_secs - not_before_secs;
-    let lifetime_days = lifetime_secs / (24 * 60 * 60);
-
-    Ok(lifetime_days)
 }

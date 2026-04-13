@@ -24,7 +24,6 @@ anyhow.workspace = true
 base64.workspace = true
 bitcode.workspace = true
 byteorder.workspace = true
-console_error_panic_hook.workspace = true
 console_log.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true

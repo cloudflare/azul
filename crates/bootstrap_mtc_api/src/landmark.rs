@@ -559,7 +559,7 @@ mod tests {
 
         // Create a sequence with max_active_landmarks + 1 entries
         let seq = LandmarkSequence {
-            max_active_landmarks: max_active_landmarks,
+            max_active_landmarks,
             last_landmark: 200,
             landmarks: (32..=201).collect(), // 170 landmarks
         };
