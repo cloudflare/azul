@@ -53,9 +53,26 @@ pub fn extract_scts_from_cert(leaf_der: &[u8]) -> Result<(Vec<ParsedSct>, Vec<u8
 
     let mut tbs = cert.tbs_certificate;
     let extensions = tbs.extensions.as_mut().ok_or(SctError::NoSctExtension)?;
-    let (sct_ext_index, parsed_scts) = find_and_parse_scts(extensions)?;
 
-    // Remove SCT extension to get the "CT certificate" that was signed
+    // Single pass: find the SCT extension and parse it, collecting all other
+    // extensions. Per RFC 6962, all SCTs go in one extension — reject certs
+    // with multiple.
+    let mut sct_ext_index: Option<usize> = None;
+    let mut parsed_scts = Vec::new();
+    for (i, ext) in extensions.iter().enumerate() {
+        if ext.extn_id != SignedCertificateTimestampList::OID {
+            continue;
+        }
+        if sct_ext_index.is_some() {
+            return Err(SctError::Other(
+                "certificate has multiple SCT extensions, expected 1".into(),
+            ));
+        }
+        sct_ext_index = Some(i);
+        parsed_scts = parse_sct_extension(ext)?;
+    }
+    let sct_ext_index = sct_ext_index.ok_or(SctError::NoSctExtension)?;
+
     extensions.remove(sct_ext_index);
 
     let ct_cert_der = tbs
@@ -65,27 +82,7 @@ pub fn extract_scts_from_cert(leaf_der: &[u8]) -> Result<(Vec<ParsedSct>, Vec<u8
     Ok((parsed_scts, ct_cert_der, lifetime_days))
 }
 
-fn find_and_parse_scts(
-    extensions: &[x509_cert::ext::Extension],
-) -> Result<(usize, Vec<ParsedSct>), SctError> {
-    // Per RFC 6962, all SCTs go in one extension. Reject certs with multiple.
-    let sct_extensions: Vec<_> = extensions
-        .iter()
-        .enumerate()
-        .filter(|(_, ext)| ext.extn_id == SignedCertificateTimestampList::OID)
-        .collect();
-
-    let (index, sct_ext) = match sct_extensions.as_slice() {
-        [] => return Err(SctError::NoSctExtension),
-        [(idx, ext)] => (*idx, *ext),
-        _ => {
-            return Err(SctError::Other(format!(
-                "certificate has {} SCT extensions, expected 1",
-                sct_extensions.len()
-            )))
-        }
-    };
-
+fn parse_sct_extension(sct_ext: &x509_cert::ext::Extension) -> Result<Vec<ParsedSct>, SctError> {
     let sct_list = SignedCertificateTimestampList::from_der(sct_ext.extn_value.as_bytes())
         .map_err(|e| SctError::Other(format!("failed to parse SCT list DER: {e}")))?;
 
@@ -99,8 +96,7 @@ fn find_and_parse_scts(
             parsed_scts.push(convert_sct(&sct)?);
         }
     }
-
-    Ok((index, parsed_scts))
+    Ok(parsed_scts)
 }
 
 fn convert_sct(sct: &SignedCertificateTimestamp) -> Result<ParsedSct, SctError> {
