@@ -4,7 +4,7 @@ use generic_log_worker::{get_durable_object_name, BatcherConfig, GenericBatcher,
 use worker::*;
 
 #[durable_object(fetch)]
-struct Batcher(GenericBatcher);
+struct Batcher(GenericBatcher<tlog_tiles::SequenceMetadata>);
 
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
@@ -25,7 +25,7 @@ impl DurableObject for Batcher {
             enable_dedup: params.enable_dedup,
             location_hint: params.location_hint.clone(),
         };
-        Batcher(GenericBatcher::new(state, env, config))
+        Batcher(GenericBatcher::<tlog_tiles::SequenceMetadata>::new(state, env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
