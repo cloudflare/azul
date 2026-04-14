@@ -89,7 +89,7 @@ bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
 p256 = { version = "0.13", features = ["ecdsa"] }
 parking_lot = "0.12"
 prometheus = "0.14"
-rand = "0.8.5"
+rand = "0.9.3"
 rand_core = "0.6.4"
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6.5"
