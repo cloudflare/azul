@@ -20,7 +20,7 @@ pub enum StaticCTError {
     #[error(transparent)]
     Der(#[from] der::Error),
     #[error(transparent)]
-    X509(#[from] x509_verify::spki::Error),
+    X509(#[from] spki::Error),
     #[error(transparent)]
     Validation(#[from] x509_util::ValidationError),
     #[error("unexpected extension")]

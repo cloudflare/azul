@@ -5,12 +5,12 @@
 
 use der::{Decode, Encode, Error as DerError};
 use sha2::{Digest, Sha256};
+use signature::Verifier as _; // for vk.verify()
 use std::collections::{hash_map::Entry, HashMap};
 use x509_cert::{
     ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
     Certificate,
 };
-use x509_verify::VerifyingKey;
 
 /// Converts a vector of certificates into an array of DER-encoded certificates.
 ///
@@ -431,24 +431,97 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// root CA certificate, using the chain of intermediate CA certificates
 /// provided by the submitter.
 /// ```
+/// Supported algorithms: ECDSA P-256, ECDSA P-384, ECDSA P-521, RSA PKCS#1 v1.5 (SHA-1/256/384/512).
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
-    // Currently paths are built by comparing
+    // Note: chain links are discovered by comparing
     //   child.tbs_certificate.issuer.to_string()
     // to
     //   issuer.tbs_certificate.subject.to_string().
     // When these are equal, there is a plausible link between these. This is NOT the actual
     // algorithm for determining whether a link is valid. A discussion on the correct algorithm can
-    // be found here
+    // be found here:
     //   https://github.com/golang/go/issues/31440#issuecomment-537222858
     // The short version is: many clients do byte-by-byte comparison. This to_string() comparison is
     // strictly laxer than that. Which is probably fine for MTC and (static) CT use cases.
 
-    // Verify the issuer's signature on the child cert
-    if let Ok(key) = VerifyingKey::try_from(issuer) {
-        key.verify_strict(child).is_ok()
-    } else {
-        false
+    use const_oid::db::rfc5912::{
+        ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ECDSA_WITH_SHA_512, SHA_1_WITH_RSA_ENCRYPTION,
+        SHA_256_WITH_RSA_ENCRYPTION, SHA_384_WITH_RSA_ENCRYPTION, SHA_512_WITH_RSA_ENCRYPTION,
+    };
+
+    let Ok(tbs_der) = child.tbs_certificate.to_der() else {
+        return false;
+    };
+    let Some(sig_bytes) = child.signature.as_bytes() else {
+        return false;
+    };
+    let Ok(spki_der) = issuer.tbs_certificate.subject_public_key_info.to_der() else {
+        return false;
+    };
+    let Ok(spki) = spki::SubjectPublicKeyInfoRef::try_from(spki_der.as_slice()) else {
+        return false;
+    };
+
+    match child.signature_algorithm.oid {
+        // ecdsa-with-SHA256 → P-256; ecdsa-with-SHA384 → P-384; ecdsa-with-SHA512 → P-521.
+        ECDSA_WITH_SHA_256 => verify_p256(spki, &tbs_der, sig_bytes),
+        ECDSA_WITH_SHA_384 => verify_p384(spki, &tbs_der, sig_bytes),
+        ECDSA_WITH_SHA_512 => verify_p521(spki, &tbs_der, sig_bytes),
+        SHA_1_WITH_RSA_ENCRYPTION => verify_rsa::<sha1::Sha1>(spki, &tbs_der, sig_bytes),
+        SHA_256_WITH_RSA_ENCRYPTION => verify_rsa::<sha2::Sha256>(spki, &tbs_der, sig_bytes),
+        SHA_384_WITH_RSA_ENCRYPTION => verify_rsa::<sha2::Sha384>(spki, &tbs_der, sig_bytes),
+        SHA_512_WITH_RSA_ENCRYPTION => verify_rsa::<sha2::Sha512>(spki, &tbs_der, sig_bytes),
+        _ => false,
     }
+}
+
+fn verify_p256(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool {
+    let Ok(vk) = p256::ecdsa::VerifyingKey::try_from(spki) else {
+        return false;
+    };
+    p256::ecdsa::DerSignature::try_from(sig_bytes)
+        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
+        .unwrap_or(false)
+}
+
+fn verify_p384(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool {
+    let Ok(vk) = p384::ecdsa::VerifyingKey::try_from(spki) else {
+        return false;
+    };
+    p384::ecdsa::DerSignature::try_from(sig_bytes)
+        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
+        .unwrap_or(false)
+}
+
+fn verify_p521(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool {
+    // In p521 0.13.x, VerifyingKey is a wrapper struct rather than a type alias for
+    // ecdsa::VerifyingKey<NistP521>, so it does not inherit TryFrom<SubjectPublicKeyInfoRef>.
+    // Work around this by extracting the raw SEC1 bytes and using from_sec1_bytes directly.
+    // This workaround can be removed once we upgrade to p521 >=0.14 (currently in rc), where
+    // VerifyingKey becomes a type alias and inherits the TryFrom impl.
+    let Some(pub_key_bytes) = spki.subject_public_key.as_bytes() else {
+        return false;
+    };
+    let Ok(vk) = p521::ecdsa::VerifyingKey::from_sec1_bytes(pub_key_bytes) else {
+        return false;
+    };
+    // Convert the DER-encoded signature to a fixed-size P-521 signature.
+    p521::ecdsa::Signature::from_der(sig_bytes)
+        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
+        .unwrap_or(false)
+}
+
+fn verify_rsa<D>(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_bytes: &[u8]) -> bool
+where
+    D: sha2::digest::Digest + rsa::pkcs8::AssociatedOid,
+{
+    let Ok(rsa_key) = rsa::RsaPublicKey::try_from(spki) else {
+        return false;
+    };
+    let vk = rsa::pkcs1v15::VerifyingKey::<D>::new(rsa_key);
+    rsa::pkcs1v15::Signature::try_from(sig_bytes)
+        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
+        .unwrap_or(false)
 }
 
 /// Validate Basic Constraints for a CA certificate.
@@ -504,7 +577,7 @@ mod tests {
     use super::*;
     use chrono::prelude::*;
     use der::DecodePem;
-    use x509_verify::x509_cert::Certificate;
+    use x509_cert::Certificate;
 
     fn parse_datetime(s: &str) -> UnixTimestamp {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
@@ -694,6 +767,26 @@ mod tests {
 
     test_validate_chain!(intermediate_as_accepted_root; "../../static_ct_api/tests/fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 1; false);
     test_validate_chain!(leaf_as_accepted_root; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; "../../static_ct_api/tests/leaf-signed-by-fake-intermediate-cert.pem"; None; None; false; 0; false);
+
+    // SHA-1 RSA chain: root signs the intermediate with sha1WithRSAEncryption.
+    // Chain fingerprints: [intermediate, inferred-root] = 2.
+    test_validate_chain!(
+        sha1_rsa_chain_success;
+        "../../static_ct_api/tests/sha1-rsa-root-ca-cert.pem";
+        "../../static_ct_api/tests/sha1-rsa-leaf-cert.pem",
+        "../../static_ct_api/tests/sha1-rsa-intermediate-cert.pem";
+        None; None; false; 2; false
+    );
+
+    // P-521 ECDSA chain: root signs the intermediate with ecdsa-with-SHA512 over a P-521 key.
+    // Chain fingerprints: [intermediate, inferred-root] = 2.
+    test_validate_chain!(
+        p521_ecdsa_chain_success;
+        "../../static_ct_api/tests/p521-ecdsa-root-ca-cert.pem";
+        "../../static_ct_api/tests/p521-ecdsa-leaf-cert.pem",
+        "../../static_ct_api/tests/p521-ecdsa-intermediate-cert.pem";
+        None; None; false; 2; false
+    );
 
     #[test]
     fn test_find_by_subject() {

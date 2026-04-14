@@ -11,7 +11,7 @@ license.workspace = true
 
 [package.metadata.cargo-machete]
 # These deps are used in tests/ (not src/), which cargo-machete doesn't scan.
-ignored = ["bootstrap_mtc_api", "byteorder", "length_prefixed", "log", "signature", "x509_util", "x509-verify"]
+ignored = ["bootstrap_mtc_api", "byteorder", "length_prefixed", "log", "x509_util"]
 homepage.workspace = true
 repository.workspace = true
 description = "Integration tests for ct_worker (static CT API) and bootstrap_mtc_worker (MTC API)"
@@ -49,4 +49,3 @@ const-oid.workspace = true
 reqwest = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 x509_util.workspace = true
-x509-verify.workspace = true
