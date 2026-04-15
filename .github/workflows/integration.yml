@@ -106,3 +106,48 @@ jobs:
         env:
           BASE_URL: http://localhost:8787
           BOOTSTRAP_MTC_LOG_NAME: dev2
+
+integration-ietf-mtc:
+    name: IETF MTC Worker Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack@0.13.1 --locked
+
+      - name: Install worker-build
+        run: cargo install worker-build@0.7.5 --locked
+
+      - name: Build ietf_mtc_worker (dev environment)
+        working-directory: crates/ietf_mtc_worker
+        run: DEPLOY_ENV=dev worker-build --release
+
+      - name: Start wrangler dev
+        working-directory: crates/ietf_mtc_worker
+        run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
+
+      - name: Wait for wrangler dev to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8787/logs/dev2/metadata > /dev/null 2>&1; then
+              echo "wrangler dev is ready"
+              exit 0
+            fi
+            echo "Waiting for wrangler dev... attempt $i/30"
+            sleep 2
+          done
+          echo "wrangler dev failed to start in time"
+          exit 1
+
+      - name: Run IETF MTC integration tests
+        run: cargo test -p integration_tests --test ietf_mtc_api --verbose
+        env:
+          BASE_URL: http://localhost:8787
+          IETF_MTC_LOG_NAME: dev2
