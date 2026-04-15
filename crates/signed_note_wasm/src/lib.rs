@@ -196,10 +196,10 @@ impl VerifierList {
 ///
 /// Returns a JS error string if `name` is not a valid signed-note key name.
 #[wasm_bindgen(js_name = "computeKeyId")]
-pub fn compute_key_id(name: &str, key: &[u8]) -> Result<u32, JsValue> {
+pub fn compute_key_id(name: &str, signature_type: &[u8], pubkey: &[u8]) -> Result<u32, JsValue> {
     let key_name = signed_note::KeyName::new(name.to_string())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(signed_note::compute_key_id(&key_name, key))
+    Ok(signed_note::compute_key_id(&key_name, signature_type, pubkey))
 }
 
 /// Returns a vkey string: `<name>+<hex_key_id>+<base64(0x01 || pubkey)>`

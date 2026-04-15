@@ -44,14 +44,7 @@ impl NoteVerifier for Ed25519NoteVerifier {
 impl Ed25519NoteVerifier {
     #[must_use]
     pub fn new(name: KeyName, verifying_key: Ed25519VerifyingKey) -> Self {
-        let id = {
-            let pubkey = [
-                &[SignatureType::Ed25519 as u8],
-                verifying_key.to_bytes().as_slice(),
-            ]
-            .concat();
-            compute_key_id(&name, &pubkey)
-        };
+        let id = compute_key_id(&name, &[SignatureType::Ed25519 as u8], verifying_key.to_bytes().as_slice());
         Self {
             name,
             id,
@@ -79,7 +72,7 @@ impl Ed25519NoteVerifier {
             return Err(NoteError::Format);
         }
 
-        if id != compute_key_id(&name, &key) {
+        if id != compute_key_id(&name, &key[0..1], &key[1..]) {
             return Err(NoteError::Id);
         }
 
@@ -126,14 +119,7 @@ impl NoteSigner for Ed25519NoteSigner {
 impl Ed25519NoteSigner {
     #[must_use]
     pub fn new(name: KeyName, signing_key: Ed25519SigningKey) -> Self {
-        let id = {
-            let pubkey = [
-                &[SignatureType::Ed25519 as u8],
-                signing_key.verifying_key().to_bytes().as_slice(),
-            ]
-            .concat();
-            compute_key_id(&name, &pubkey)
-        };
+        let id = compute_key_id(&name, &[SignatureType::Ed25519 as u8], signing_key.verifying_key().to_bytes().as_slice());
         Self {
             name,
             id,
@@ -172,16 +158,8 @@ impl Ed25519NoteSigner {
                 let signing_key =
                     ed25519_dalek::SigningKey::try_from(key).map_err(|_| NoteError::Format)?;
 
-                let pubkey = [
-                    &[SignatureType::Ed25519 as u8],
-                    ed25519_dalek::VerifyingKey::from(&signing_key)
-                        .to_bytes()
-                        .as_slice(),
-                ]
-                .concat();
-
                 // Must verify id after deriving public key.
-                if id != compute_key_id(&name, &pubkey) {
+                if id != compute_key_id(&name, &[SignatureType::Ed25519 as u8], signing_key.verifying_key().to_bytes().as_slice()) {
                     return Err(NoteError::Id);
                 }
 
@@ -203,21 +181,17 @@ pub fn generate_encoded_ed25519_key<R: CryptoRng + ?Sized>(
     name: &KeyName,
 ) -> (String, String) {
     let signing_key = ed25519_dalek::SigningKey::generate(csprng);
+    let signature_type = &[SignatureType::Ed25519 as u8];
 
-    let pubkey = [
-        &[SignatureType::Ed25519 as u8],
-        signing_key.verifying_key().to_bytes().as_slice(),
-    ]
-    .concat();
     let privkey = [
-        &[SignatureType::Ed25519 as u8],
+        signature_type,
         signing_key.to_bytes().as_slice(),
     ]
     .concat();
     let skey = format!(
         "PRIVATE+KEY+{}+{:08x}+{}",
         name,
-        compute_key_id(name, &pubkey),
+        compute_key_id(name, signature_type, signing_key.verifying_key().to_bytes().as_slice()),
         BASE64_STANDARD.encode(privkey)
     );
     let vkey = new_encoded_ed25519_verifier_key(name, &signing_key.verifying_key());
@@ -231,11 +205,12 @@ pub fn new_encoded_ed25519_verifier_key(
     name: &KeyName,
     key: &ed25519_dalek::VerifyingKey,
 ) -> String {
-    let pubkey = [&[SignatureType::Ed25519 as u8], key.to_bytes().as_slice()].concat();
+    let signature_type = &[SignatureType::Ed25519 as u8];
+    let pubkey = key.to_bytes();
     format!(
         "{}+{:08x}+{}",
         name,
-        compute_key_id(name, &pubkey),
-        BASE64_STANDARD.encode(&pubkey)
+        compute_key_id(name, signature_type, pubkey.as_slice()),
+        BASE64_STANDARD.encode([signature_type, pubkey.as_slice()].concat())
     )
 }

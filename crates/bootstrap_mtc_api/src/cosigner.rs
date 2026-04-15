@@ -8,7 +8,6 @@ use ed25519_dalek::{
     VerifyingKey as Ed25519VerifyingKey,
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
-use sha2::{Digest, Sha256};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
 use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
 
@@ -130,15 +129,11 @@ impl MtcNoteVerifier {
         verifying_key: Ed25519VerifyingKey,
     ) -> Self {
         let name = KeyName::new(format!("oid/{ID_RDNA_TRUSTANCHOR_ID}.{log_id}")).unwrap();
-
-        let id = {
-            let mut hasher = Sha256::new();
-            hasher.update(name.as_str().as_bytes());
-            hasher.update([0x0a, 0xff]);
-            hasher.update(b"mtc-checkpoint/v1");
-            let result = hasher.finalize();
-            u32::from_be_bytes(result[0..4].try_into().unwrap())
-        };
+        // MTC cosignatures don't carry a signature-type byte or bare public key; the key ID is
+        // derived from the fixed "\xffmtc-checkpoint/v1" label (passed in the signature-type slot,
+        // with an empty public key) so that the hash input matches
+        // SHA-256(name || 0x0A || "\xffmtc-checkpoint/v1").
+        let id = signed_note::compute_key_id(&name, b"\xffmtc-checkpoint/v1", &[]);
 
         Self {
             cosigner_id,
