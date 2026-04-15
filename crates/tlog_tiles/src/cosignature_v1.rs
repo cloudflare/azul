@@ -5,7 +5,7 @@ use ed25519_dalek::{
     Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
     VerifyingKey as Ed25519VerifyingKey,
 };
-use signed_note::{compute_key_id, KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
+use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 
 use crate::{CheckpointSigner, CheckpointText, UnixTimestamp};
 
@@ -83,14 +83,7 @@ pub struct CosignatureV1NoteVerifier {
 impl CosignatureV1NoteVerifier {
     #[must_use]
     pub fn new(name: KeyName, verifying_key: Ed25519VerifyingKey) -> Self {
-        let id = {
-            let pubkey = [
-                &[SignatureType::CosignatureV1 as u8],
-                verifying_key.to_bytes().as_slice(),
-            ]
-            .concat();
-            compute_key_id(&name, &pubkey)
-        };
+        let id = signed_note::compute_key_id(&name, &[SignatureType::CosignatureV1 as u8], verifying_key.to_bytes().as_slice());
         Self {
             name,
             id,

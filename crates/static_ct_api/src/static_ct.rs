@@ -519,15 +519,7 @@ impl RFC6962NoteVerifier {
             .map_err(|_| NoteError::Format)?
             .to_vec();
         let key_id = Sha256::digest(&pkix);
-
-        let id = signed_note::compute_key_id(
-            &name,
-            &[SignatureType::RFC6962TreeHead as u8]
-                .iter()
-                .chain(key_id.iter())
-                .copied()
-                .collect::<Vec<_>>(),
-        );
+        let id = signed_note::compute_key_id(&name, &[SignatureType::RFC6962TreeHead as u8], &key_id[..]);
 
         Ok(Self {
             name,

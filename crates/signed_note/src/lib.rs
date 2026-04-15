@@ -315,14 +315,15 @@ pub trait NoteSigner {
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error>;
 }
 
-/// Computes the key ID for the given server name and encoded public key
+/// Computes the key ID for the given server name, signature type, and public key
 /// as RECOMMENDED at <https://c2sp.org/signed-note#signatures>.
 #[must_use]
-pub fn compute_key_id(name: &KeyName, key: &[u8]) -> u32 {
+pub fn compute_key_id(name: &KeyName, signature_type: &[u8], pubkey: &[u8]) -> u32 {
     let mut hasher = Sha256::new();
     hasher.update(name.0.as_bytes());
     hasher.update(b"\n");
-    hasher.update(key);
+    hasher.update(signature_type);
+    hasher.update(pubkey);
     let result = hasher.finalize();
     let mut u32_bytes = [0u8; 4];
     u32_bytes.copy_from_slice(&result[0..4]);
@@ -729,15 +730,9 @@ mod tests {
     #[test]
     fn test_from_ed25519() {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rng());
-
-        let pubkey = [
-            &[SignatureType::Ed25519 as u8],
-            signing_key.verifying_key().to_bytes().as_slice(),
-        ]
-        .concat();
-        let id = compute_key_id(&NAME, &pubkey);
-
-        let vkey = new_encoded_ed25519_verifier_key(&NAME, &signing_key.verifying_key());
+        let verifying_key = signing_key.verifying_key();
+        let id = compute_key_id(&NAME, &[SignatureType::Ed25519 as u8], verifying_key.to_bytes().as_slice());
+        let vkey = new_encoded_ed25519_verifier_key(&NAME, &verifying_key);
         let verifier = Ed25519NoteVerifier::new_from_encoded_key(&vkey).unwrap();
 
         let signer = Ed25519NoteSigner {
