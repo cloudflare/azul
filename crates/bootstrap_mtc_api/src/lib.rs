@@ -194,8 +194,8 @@ impl LogEntry for BootstrapMtcLogEntry {
         })
     }
 
-    fn new(pending: Self::Pending, metadata: Self::Metadata) -> Self {
-        Self(TlogTilesLogEntry::new(pending.entry, metadata))
+    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestamp) -> Self {
+        Self(TlogTilesLogEntry::new(pending.entry, leaf_index, timestamp))
     }
 
     fn merkle_tree_leaf(&self) -> Hash {

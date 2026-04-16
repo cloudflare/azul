@@ -882,7 +882,7 @@ async fn sequence_entries<L: LogEntry>(
             aux_tile.extend(entry.aux_entry());
         }
 
-        let sequenced_entry = L::new(entry, metadata);
+        let sequenced_entry = L::new(entry, n, timestamp);
         let tile_leaf = sequenced_entry.to_data_tile_entry();
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());

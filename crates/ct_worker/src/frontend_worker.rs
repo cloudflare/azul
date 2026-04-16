@@ -234,10 +234,12 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     if params.enable_dedup {
-        if let Some(metadata) = get_cached_metadata(&load_cache_kv(env, name)?, &lookup_key).await?
+        if let Some(metadata) =
+            get_cached_metadata::<SequenceMetadata>(&load_cache_kv(env, name)?, &lookup_key)
+                .await?
         {
             log::debug!("{name}: Entry is cached");
-            let entry = StaticCTLogEntry::new(pending_entry, metadata);
+            let entry = StaticCTLogEntry::new(pending_entry, metadata.0, metadata.1);
             let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
                 .map_err(|e| e.to_string())?;
             return Response::from_json(&sct);

@@ -94,7 +94,11 @@ pub trait LogEntry: core::fmt::Debug + Sized {
     /// useful anywhere else.
     fn initial_entry() -> Option<Self::Pending>;
 
-    fn new(pending: Self::Pending, metadata: Self::Metadata) -> Self;
+    /// Construct a sequenced log entry from a pending entry plus the two
+    /// sequencer-generated values common to every tlog application: the leaf
+    /// index and the sequencing timestamp. Application-specific sequencer
+    /// metadata (e.g. tree sizes) is handled outside this trait.
+    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestamp) -> Self;
 
     /// Returns the Merkle tree leaf hash for this entry. For tlog-tiles, this is the Merkle Tree Hash
     /// (according to <https://datatracker.ietf.org/doc/html/rfc6962#section-2.1>)
@@ -203,7 +207,7 @@ impl LogEntry for TlogTilesLogEntry {
         None
     }
 
-    fn new(pending: Self::Pending, _metadata: Self::Metadata) -> Self {
+    fn new(pending: Self::Pending, _leaf_index: LeafIndex, _timestamp: UnixTimestamp) -> Self {
         Self { inner: pending }
     }
 
@@ -237,7 +241,7 @@ mod tests {
     #[test]
     fn test_parse_tile_entry() {
         let inner = TlogTilesPendingLogEntry { data: vec![1; 100] };
-        let entry = TlogTilesLogEntry::new(inner, (123, 456));
+        let entry = TlogTilesLogEntry::new(inner, 123, 456);
         let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 
