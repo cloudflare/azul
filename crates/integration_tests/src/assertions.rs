@@ -101,8 +101,8 @@ pub fn assert_sct_signature(
     // Extract the issuer `SubjectPublicKeyInfo` DER.
     let issuer_cert = Certificate::from_der(issuer_der).context("decoding issuer certificate")?;
     let issuer_spki_der = issuer_cert
-        .tbs_certificate
-        .subject_public_key_info
+        .tbs_certificate()
+        .subject_public_key_info()
         .to_der()
         .context("encoding issuer SPKI")?;
 
@@ -149,9 +149,8 @@ pub fn assert_sct_signature(
     let ct_poison_oid = der::asn1::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.3");
     let leaf_cert = Certificate::from_der(leaf_der).context("parsing leaf cert")?;
     let is_precert = leaf_cert
-        .tbs_certificate
-        .extensions
-        .as_ref()
+        .tbs_certificate()
+        .extensions()
         .is_some_and(|exts| exts.iter().any(|e| e.extn_id == ct_poison_oid));
 
     // For precerts, the worker signs over the TBS with the CT poison extension
@@ -160,7 +159,7 @@ pub fn assert_sct_signature(
     let effective_cert_der: &[u8];
     let effective_issuer_spki: &[u8];
     if is_precert {
-        cert_to_sign = static_ct_api::build_precert_tbs(&leaf_cert.tbs_certificate)
+        cert_to_sign = static_ct_api::build_precert_tbs(leaf_cert.tbs_certificate())
             .context("building precert TBS for signature verification")?;
         effective_cert_der = &cert_to_sign;
         effective_issuer_spki = &issuer_spki_der;

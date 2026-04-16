@@ -5,9 +5,11 @@
 
 use crate::error::SctError;
 use const_oid::AssociatedOid;
-use der::{Decode, Encode};
-use x509_cert::ext::pkix::sct::{SignedCertificateTimestamp, SignedCertificateTimestampList};
-use x509_cert::Certificate;
+use der::Decode;
+use x509_cert::ext::{
+    pkix::sct::{SignedCertificateTimestamp, SignedCertificateTimestampList},
+    Extension,
+};
 
 /// A parsed SCT from a certificate.
 #[derive(Clone, Debug)]
@@ -48,14 +50,14 @@ pub enum SignatureAlgorithm {
 /// extension is missing or malformed, or if there are issues generating the
 /// `TBSCertificate` from the leaf.
 pub fn extract_scts_from_cert(leaf_der: &[u8]) -> Result<(Vec<ParsedSct>, Vec<u8>, u64), SctError> {
-    let cert = Certificate::from_der(leaf_der).map_err(|e| SctError::Other(e.to_string()))?;
-    let lifetime_days = extract_lifetime_days(&cert)?;
-
+    let cert = x509_util::OwnedCertificate::from_der(leaf_der)
+        .map_err(|e| SctError::Other(e.to_string()))?;
+    let lifetime_days = extract_lifetime_days(&cert.tbs_certificate.validity)?;
     let mut tbs = cert.tbs_certificate;
     let extensions = tbs.extensions.as_mut().ok_or(SctError::NoSctExtension)?;
     let (sct_ext_index, parsed_scts) = find_and_parse_scts(extensions)?;
 
-    // Remove SCT extension to get the "CT certificate" that was signed
+    // Remove SCT extension to get the "CT certificate" that was signed.
     extensions.remove(sct_ext_index);
 
     let ct_cert_der = tbs
@@ -86,6 +88,10 @@ fn find_and_parse_scts(
         }
     };
 
+    Ok((index, parse_sct_extension(sct_ext)?))
+}
+
+fn parse_sct_extension(sct_ext: &Extension) -> Result<Vec<ParsedSct>, SctError> {
     let sct_list = SignedCertificateTimestampList::from_der(sct_ext.extn_value.as_bytes())
         .map_err(|e| SctError::Other(format!("failed to parse SCT list DER: {e}")))?;
 
@@ -99,8 +105,7 @@ fn find_and_parse_scts(
             parsed_scts.push(convert_sct(&sct)?);
         }
     }
-
-    Ok((index, parsed_scts))
+    Ok(parsed_scts)
 }
 
 fn convert_sct(sct: &SignedCertificateTimestamp) -> Result<ParsedSct, SctError> {
@@ -145,8 +150,7 @@ fn parse_signature_algorithm(
     }
 }
 
-fn extract_lifetime_days(cert: &Certificate) -> Result<u64, SctError> {
-    let validity = &cert.tbs_certificate.validity;
+fn extract_lifetime_days(validity: &x509_cert::time::Validity) -> Result<u64, SctError> {
     let not_before_secs = validity.not_before.to_unix_duration().as_secs();
     let not_after_secs = validity.not_after.to_unix_duration().as_secs();
 
@@ -165,6 +169,8 @@ fn extract_lifetime_days(cert: &Certificate) -> Result<u64, SctError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use der::Encode as _;
+    use x509_cert::Certificate;
 
     /// Golden-file regression test for `extract_scts_from_cert`.
     ///
@@ -176,8 +182,6 @@ mod tests {
     /// ```
     #[test]
     fn test_tbs_without_sct_golden() {
-        use x509_cert::Certificate;
-
         const GOLDEN: &str = "tests/golden/cloudflare-tbs-without-sct.der";
 
         let cert = Certificate::load_pem_chain(include_bytes!("../tests/cloudflare.pem"))
