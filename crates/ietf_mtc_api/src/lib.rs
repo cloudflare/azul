@@ -11,18 +11,18 @@ pub use relative_oid::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{
     asn1::{BitString, OctetString},
-    oid::{db::rfc5280, ObjectIdentifier},
-    Any, Decode, Encode, Sequence, ValueOrd,
+    oid::{db::rfc5280::ID_CE_SUBJECT_ALT_NAME, ObjectIdentifier},
+    Any, Decode, Encode, Reader,
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use serde::{Deserialize, Serialize};
-use serde_with::{base64::Base64, serde_as};
-use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeSet, HashMap},
-    io::Read,
-    num::ParseIntError,
+use serde_with::{
+    base64::{Base64, UrlSafe},
+    formats::Unpadded,
+    serde_as,
 };
+use sha2::{Digest, Sha256};
+use std::{io::Read, num::ParseIntError};
 use thiserror::Error;
 use tlog_tiles::{
     Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, Subtree, TlogError,
@@ -30,29 +30,38 @@ use tlog_tiles::{
 };
 use x509_cert::{
     certificate::Version,
-    ext::{
-        pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages},
-        Extension, Extensions,
-    },
+    ext::{Extension, Extensions},
     name::{Name, RdnSequence},
+    request::CertReq,
     serial_number::SerialNumber,
-    spki::{AlgorithmIdentifier, SubjectPublicKeyInfo},
+    spki::{AlgorithmIdentifier, AlgorithmIdentifierOwned, SubjectPublicKeyInfo},
     time::Validity,
-    Certificate, TbsCertificate,
 };
-use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
 
-// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
-// as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
+/// OID for Trust Anchor IDs, as specified in draft-ietf-plants-merkle-tree-certs-02.
+///
+/// The experimental value `1.3.6.1.4.1.44363.47.1` (Cloudflare's private OID arc)
+/// is used until the IANA assignment from the draft is finalized.
 pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.1");
 
-// The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.6.TBD"
-// as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+/// OID for the MTC proof algorithm, used in the `signature_algorithm` field of
+/// landmark certificates, as specified in draft-ietf-plants-merkle-tree-certs-02.
+///
+/// The experimental value `1.3.6.1.4.1.44363.47.0` is used until the IANA
+/// assignment from the draft is finalized.
 pub const ID_ALG_MTCPROOF: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.0");
 
-// MTCSignature from <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+/// The draft version of the IETF MTC spec that this crate implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftVersion {
+    #[default]
+    Draft02,
+}
+
+// MTCSignature from draft-ietf-plants-merkle-tree-certs §6.1.
 struct MtcSignature {
     cosigner_id: TrustAnchorID,
     signature: Vec<u8>,
@@ -69,7 +78,7 @@ impl MtcSignature {
     }
 }
 
-// MTCProof from <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-certificate-format>.
+// MTCProof from draft-ietf-plants-merkle-tree-certs §6.1.
 struct MtcProof {
     start: u64,
     end: u64,
@@ -106,13 +115,22 @@ impl MtcProof {
     }
 }
 
-/// Add-entry request. Chain is a certificate from which to bootstrap the
-/// request in the same format as RFC6962 add-chain requests.
+/// Add-entry request for the IETF MTC submission API.
+///
+/// The payload is a PKCS#10 Certificate Signing Request (CSR) in DER format,
+/// base64url-encoded (no padding), matching the ACME `finalize` endpoint
+/// format (RFC 8555 §7.4).  The server extracts the subject, SPKI, and SANs
+/// from the CSR; the CSR signature is not verified (authentication is handled
+/// at the transport layer).
+///
+/// The validity window is set server-side: `[now, now + max_certificate_lifetime_secs]`.
+/// ACME order `notBefore`/`notAfter` fields are not currently supported.
 #[serde_as]
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct AddEntryRequest {
-    #[serde_as(as = "Vec<Base64>")]
-    pub chain: Vec<Vec<u8>>,
+    /// Base64url-encoded (no padding) DER-encoded PKCS#10 CSR.
+    #[serde_as(as = "Base64<UrlSafe, Unpadded>")]
+    pub csr: Vec<u8>,
 }
 
 /// Add-entry response.
@@ -125,40 +143,30 @@ pub struct AddEntryResponse {
     /// The time at which the entry was added to the log.
     pub timestamp: UnixTimestamp,
 
-    /// The validity period of the certificate.
+    /// The validity period of the entry as accepted by the log (may be
+    /// clipped to the log's `max_certificate_lifetime_secs`).
     pub not_before: UnixTimestamp,
     pub not_after: UnixTimestamp,
 }
 
-/// Get-roots response. This is in the same format as the RFC 6962 get-roots
-/// response, which is the base64 encoding of the DER-encoded certificate bytes.
-#[serde_as]
-#[derive(Serialize)]
-pub struct GetRootsResponse {
-    #[serde_as(as = "Vec<Base64>")]
-    pub certificates: Vec<Vec<u8>>,
-}
-
-/// A wrapper around `TlogTilesPendingLogEntry` that supports auxiliary bootstrap data.
+/// A pending IETF MTC log entry.  Unlike the bootstrap variant, there is no
+/// auxiliary tile — the entry is purely the `MerkleTreeCertEntry` data.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct IetfMtcPendingLogEntry {
-    /// The serialized bootstrap chain.
-    pub bootstrap: Vec<u8>,
-
     /// An encoded `MerkleTreeCertEntry` wrapped in a generic `TlogTilesPendingLogEntry`.
     pub entry: TlogTilesPendingLogEntry,
 }
 
 impl PendingLogEntry for IetfMtcPendingLogEntry {
-    /// MTC uses the same data tile path as tlog-tiles, 'entries'.
+    /// Uses the standard tlog-tiles data tile path.
     const DATA_TILE_PATH: PathElem = TlogTilesPendingLogEntry::DATA_TILE_PATH;
 
-    /// MTC publishes unauthenticated bootstrap data at 'bootstrap'.
-    const AUX_TILE_PATH: Option<PathElem> = Some(PathElem::Custom("bootstrap"));
+    /// No auxiliary tile.
+    const AUX_TILE_PATH: Option<PathElem> = None;
 
-    /// Returns the serialized bootstrap data.
+    /// Unused in ietf-mtc-api.
     fn aux_entry(&self) -> &[u8] {
-        &self.bootstrap
+        unimplemented!()
     }
 
     fn lookup_key(&self) -> tlog_tiles::LookupKey {
@@ -166,7 +174,7 @@ impl PendingLogEntry for IetfMtcPendingLogEntry {
     }
 }
 
-/// A wrapper around `TlogTilesLogEntry` that supports customizations for MTCs like the initial log entry.
+/// A sequenced IETF MTC log entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IetfMtcLogEntry(TlogTilesLogEntry);
 
@@ -177,7 +185,6 @@ impl LogEntry for IetfMtcLogEntry {
 
     fn initial_entry() -> Option<Self::Pending> {
         Some(Self::Pending {
-            bootstrap: vec![0, 0, 0], // u24 length prefix for empty bootstrap data
             entry: TlogTilesPendingLogEntry {
                 data: MerkleTreeCertEntry::NullEntry.encode().unwrap(),
             },
@@ -201,13 +208,96 @@ impl LogEntry for IetfMtcLogEntry {
     }
 }
 
-/// Return the serialized DER-encoded bytes of a signatureless certificate.
+/// Construct an `IetfMtcPendingLogEntry` from an `AddEntryRequest`.
+///
+/// Parses the DER-encoded PKCS#10 CSR in `req.csr`, extracting the subject,
+/// `SubjectPublicKeyInfo`, and any `subjectAltName` extension request
+/// attribute.  The CSR signature is not verified.
 ///
 /// # Errors
 ///
-/// Will return an error if the hash of `spki` does not match that in the log
-/// entry, or if there are any serialization errors.
-pub fn serialize_signatureless_cert(
+/// Returns an error if the CSR cannot be parsed, contains unsupported fields,
+/// or the resulting entry cannot be encoded.
+pub fn build_pending_entry(
+    req: &AddEntryRequest,
+    issuer: &RdnSequence,
+    validity: Validity,
+) -> Result<IetfMtcPendingLogEntry, MtcError> {
+    let csr =
+        CertReq::from_der(&req.csr).map_err(|e| MtcError::Dynamic(format!("invalid CSR: {e}")))?;
+
+    let subject = csr.info.subject;
+    let spki_der = csr.info.public_key.to_der()?;
+    let spki_hash = OctetString::new(&Sha256::digest(&spki_der)[..])?;
+
+    // Extract the AlgorithmIdentifier from the SPKI (new field in plants-02).
+    let spki_algorithm = csr.info.public_key.algorithm;
+
+    // Extract SubjectAltName from the CSR's extensionRequest attribute (RFC 2985 §5.4.2).
+    let extensions = extract_san_from_csr(&csr.info.attributes)?;
+
+    // Convert RdnSequence → Name via DER round-trip (x509-cert 0.3).
+    let issuer = Name::from_der(&issuer.to_der()?)?;
+
+    let log_entry = TbsCertificateLogEntry {
+        version: Version::V3,
+        issuer,
+        validity,
+        subject,
+        subject_public_key_info_algorithm: spki_algorithm,
+        subject_public_key_info_hash: spki_hash,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        extensions,
+    };
+
+    Ok(IetfMtcPendingLogEntry {
+        entry: TlogTilesPendingLogEntry {
+            data: MerkleTreeCertEntry::TbsCertEntry(log_entry).encode()?,
+        },
+    })
+}
+
+/// Extract a `SubjectAltName` extension from a CSR's `extensionRequest` attribute.
+///
+/// Returns `None` if no `extensionRequest` attribute is present or if it
+/// contains no `subjectAltName` extension.  Returns an error if the attribute
+/// is malformed.
+fn extract_san_from_csr(
+    attributes: &x509_cert::attr::Attributes,
+) -> Result<Option<Extensions>, MtcError> {
+    // OID for the PKCS#9 extensionRequest attribute (RFC 2985 §5.4.2 / RFC 5912).
+    const ID_EXTENSION_REQ: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.14");
+
+    for attr in attributes.iter() {
+        if attr.oid != ID_EXTENSION_REQ {
+            continue;
+        }
+        // The extensionRequest attribute value is a SET containing a single
+        // SEQUENCE OF Extension (i.e. the Extensions type).
+        for val in attr.values.iter() {
+            let exts = Extensions::from_der(&val.to_der()?)?;
+            let san_exts: Vec<Extension> = exts
+                .into_iter()
+                .filter(|e| e.extn_id == ID_CE_SUBJECT_ALT_NAME)
+                .collect();
+            if !san_exts.is_empty() {
+                return Ok(Some(Extensions::from(san_exts)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Return the serialized DER-encoded bytes of a landmark-relative
+/// certificate (draft-ietf-plants-merkle-tree-certs §6.3).
+///
+/// # Errors
+///
+/// Returns an error if the SPKI hash does not match the entry, or if there
+/// are any serialization errors.
+pub fn serialize_landmark_relative_cert(
     log_entry: &IetfMtcLogEntry,
     leaf_index: LeafIndex,
     spki_der: &[u8],
@@ -267,8 +357,6 @@ pub enum MtcError {
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
-    Validation(#[from] x509_util::ValidationError),
-    #[error(transparent)]
     Fmt(#[from] std::fmt::Error),
     #[error(transparent)]
     Utf8(#[from] std::str::Utf8Error),
@@ -296,11 +384,10 @@ impl TryFrom<u16> for MerkleTreeCertEntryType {
     }
 }
 
-/// A `MerkleTreeCertEntry` as defined in
-/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-entries>.
+/// A `MerkleTreeCertEntry` as defined in draft-ietf-plants-merkle-tree-certs §5.3.
+///
 /// The `NullEntry` type is used as the first element in the tree so that the
-/// serial number for each subsequent `TbsCertEntry` in the tree corresponds to
-/// its index in the tree.
+/// serial number for each subsequent `TbsCertEntry` corresponds to its index.
 #[allow(clippy::large_enum_variant)]
 #[derive(PartialEq, Debug)]
 pub enum MerkleTreeCertEntry {
@@ -323,7 +410,9 @@ impl MerkleTreeCertEntry {
                 (MerkleTreeCertEntryType::TbsCertEntry as u16)
                     .to_be_bytes()
                     .to_vec(),
-                tbs_cert_entry.to_der()?,
+                // plants-02: fields are written directly after the u16 type tag,
+                // without an outer ASN.1 SEQUENCE wrapper (dropped in davidben-10).
+                tbs_cert_entry.encode_fields()?,
             ]
             .concat()),
         }
@@ -346,14 +435,28 @@ impl MerkleTreeCertEntry {
                 }
             }
             MerkleTreeCertEntryType::TbsCertEntry => {
-                let tbs_cert_entry = TbsCertificateLogEntry::from_der(data)?;
+                // plants-02: the remaining bytes are raw field DER (no SEQUENCE wrapper).
+                let tbs_cert_entry = TbsCertificateLogEntry::decode_fields(data)?;
                 Ok(Self::TbsCertEntry(tbs_cert_entry))
             }
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Sequence, ValueOrd)]
+/// A `TBSCertificateLogEntry` as defined in draft-ietf-plants-merkle-tree-certs §5.3
+/// (plants-02).
+///
+/// Differs from a standard `TBSCertificate` in that `subject_public_key_info`
+/// is replaced by two separate fields:
+/// - `subject_public_key_info_algorithm`: the `AlgorithmIdentifier` from the SPKI
+///   (new in plants-02; not present in davidben-09)
+/// - `subject_public_key_info_hash`: SHA-256 of the full DER-encoded SPKI
+///
+/// Unlike in davidben-09, the entry is **not** wrapped in an ASN.1 SEQUENCE —
+/// the fields are encoded as raw concatenated DER values (the SEQUENCE wrapper
+/// was dropped in davidben-10).  For this reason we implement `Encode`/`Decode`
+/// manually rather than using `#[derive(Sequence)]`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TbsCertificateLogEntry {
     /// The certificate version
     ///
@@ -361,645 +464,485 @@ pub struct TbsCertificateLogEntry {
     /// fields such as `issuer_unique_id`, `subject_unique_id` and `extensions`
     /// require later versions. Care should be taken in order to ensure
     /// standards compliance.
-    #[asn1(context_specific = "0", default = "Default::default")]
     pub version: Version,
     pub issuer: Name,
     pub validity: Validity,
     pub subject: Name,
+    /// The `AlgorithmIdentifier` from the submitted SPKI (new in plants-02).
+    pub subject_public_key_info_algorithm: AlgorithmIdentifierOwned,
+    /// SHA-256 of the full DER-encoded `SubjectPublicKeyInfo`.
     pub subject_public_key_info_hash: OctetString,
-    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
     pub issuer_unique_id: Option<BitString>,
-    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
     pub subject_unique_id: Option<BitString>,
-    #[asn1(context_specific = "3", tag_mode = "EXPLICIT", optional = "true")]
     pub extensions: Option<Extensions>,
 }
 
-// Validate and filter extended key usage extension.
-fn filter_ext_key_usage(extension: &mut Extension) -> Result<(), MtcError> {
-    let mut eku = ExtendedKeyUsage::from_der(extension.extn_value.as_bytes())?;
-    // Require ip-kp-serverAuth, filter id-kp-clientAuth, and disallow everything else.
-    // <https://cabforum.org/working-groups/server/baseline-requirements/requirements/#712710-subscriber-certificate-extended-key-usage>
-    let mut is_err = false;
-    eku.0.retain(|usage| match *usage {
-        rfc5280::ID_KP_SERVER_AUTH => true,
-        rfc5280::ID_KP_CLIENT_AUTH => false,
-        _ => {
-            is_err = true;
-            false
+impl TbsCertificateLogEntry {
+    /// Encode all fields as raw concatenated DER (no outer SEQUENCE wrapper).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `der::Error` if any field cannot be encoded.
+    pub fn encode_fields(&self) -> der::Result<Vec<u8>> {
+        // Manually encode each field using der::Encode and collect into a Vec.
+        // This is equivalent to the content bytes of a SEQUENCE, but without
+        // the SEQUENCE tag and length prefix.
+        let mut buf = Vec::new();
+
+        // version [0] EXPLICIT INTEGER DEFAULT 0 — omit if V1 (default)
+        if self.version != Version::V1 {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<Version> {
+                tag_number: der::TagNumber(0),
+                tag_mode: TagMode::Explicit,
+                value: self.version,
+            };
+            tagged.encode_to_vec(&mut buf)?;
         }
-    });
-    if is_err {
-        return Err(MtcError::Dynamic("unexpected key usage".into()));
-    }
-    if eku.0.is_empty() {
-        return Err(MtcError::Dynamic(
-            "key usage missing id-kp-serverAuth".into(),
-        ));
-    }
-    extension.extn_value = OctetString::new(eku.to_der()?)?;
-    Ok(())
-}
 
-// Validate and filter key usage extension.
-fn filter_key_usage(extension: &mut Extension) -> Result<(), MtcError> {
-    let mut ku = KeyUsage::from_der(extension.extn_value.as_bytes())?;
-    // Require digital_signature, allow key_encipherment, and filter everything else.
-    ku.0 &= KeyUsages::DigitalSignature | KeyUsages::KeyEncipherment;
-    if !ku.0.contains(KeyUsages::DigitalSignature) {
-        return Err(MtcError::Dynamic(
-            "key usage missing DigitalSignature".into(),
-        ));
-    }
-    extension.extn_value = OctetString::new(ku.to_der()?)?;
-    Ok(())
-}
+        self.issuer.encode_to_vec(&mut buf)?;
+        self.validity.encode_to_vec(&mut buf)?;
+        self.subject.encode_to_vec(&mut buf)?;
+        self.subject_public_key_info_algorithm
+            .encode_to_vec(&mut buf)?;
+        self.subject_public_key_info_hash.encode_to_vec(&mut buf)?;
 
-// Validate and filter extensions.
-//
-// # Errors
-//
-// Will return an error if there are any duplicate extensions, or if there are
-// any critical extensions that cannot be filtered out.
-fn filter_extensions(extensions: &mut Vec<Extension>) -> Result<(), MtcError> {
-    let mut result = Ok(());
-    let mut oids = BTreeSet::new();
-    extensions.retain_mut(|extension| {
-        if oids.contains(&extension.extn_id) {
-            result = Err(MtcError::Dynamic("duplicate extension".into()));
-            return false;
+        // issuerUniqueID [1] IMPLICIT BIT STRING OPTIONAL
+        if let Some(ref v) = self.issuer_unique_id {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<BitString> {
+                tag_number: der::TagNumber(1),
+                tag_mode: TagMode::Implicit,
+                value: v.clone(),
+            };
+            tagged.encode_to_vec(&mut buf)?;
         }
-        oids.insert(extension.extn_id);
 
-        match extension.extn_id {
-            rfc5280::ID_CE_EXT_KEY_USAGE => {
-                if let Err(e) = filter_ext_key_usage(extension) {
-                    result = Err(e);
-                }
-                true
-            }
-            rfc5280::ID_CE_SUBJECT_ALT_NAME => true,
-            rfc5280::ID_CE_KEY_USAGE => {
-                if let Err(e) = filter_key_usage(extension) {
-                    result = Err(e);
-                }
-                true
-            }
-            rfc5280::ID_PE_AUTHORITY_INFO_ACCESS
-            | rfc5280::ID_CE_AUTHORITY_KEY_IDENTIFIER
-            | rfc5280::ID_CE_CRL_DISTRIBUTION_POINTS
-            | rfc5280::ID_CE_CERTIFICATE_POLICIES
-            | rfc5280::ID_CE_BASIC_CONSTRAINTS => false,
-            id => {
-                if extension.critical {
-                    result = Err(MtcError::Dynamic(format!(
-                        "unsupported critical extension {id}"
-                    )));
-                }
-                false
-            }
+        // subjectUniqueID [2] IMPLICIT BIT STRING OPTIONAL
+        if let Some(ref v) = self.subject_unique_id {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<BitString> {
+                tag_number: der::TagNumber(2),
+                tag_mode: TagMode::Implicit,
+                value: v.clone(),
+            };
+            tagged.encode_to_vec(&mut buf)?;
         }
-    });
-    result
-}
 
-/// Convert a `TbsCertificate` to a `TbsCertificateLogEntry` with the provided
-/// issuer and validity.
-///
-/// # Errors
-///
-/// Errors if the bootstrap certificate contains unsupported fields or
-/// extensions.
-pub fn tbs_cert_to_log_entry(
-    bootstrap: &TbsCertificate,
-    issuer: &RdnSequence,
-    validity: Validity,
-) -> Result<TbsCertificateLogEntry, MtcError> {
-    if bootstrap.version() != Version::V3 {
-        return Err(MtcError::Dynamic("bootstrap version must be v3".into()));
-    }
-    if validity
-        .not_before
-        .to_unix_duration()
-        .lt(&bootstrap.validity().not_before.to_unix_duration())
-    {
-        return Err(MtcError::Dynamic(
-            "entry not_before must not be less than bootstrap not_before".into(),
-        ));
-    }
-    if validity
-        .not_after
-        .to_unix_duration()
-        .gt(&bootstrap.validity().not_after.to_unix_duration())
-    {
-        return Err(MtcError::Dynamic(
-            "entry not_after must not be greater than bootstrap not_after".into(),
-        ));
+        // extensions [3] EXPLICIT Extensions OPTIONAL
+        if let Some(ref exts) = self.extensions {
+            use der::asn1::ContextSpecific;
+            use der::TagMode;
+            let tagged = ContextSpecific::<Extensions> {
+                tag_number: der::TagNumber(3),
+                tag_mode: TagMode::Explicit,
+                value: exts.clone(),
+            };
+            tagged.encode_to_vec(&mut buf)?;
+        }
+
+        Ok(buf)
     }
 
-    let extensions = if let Some(bootstrap_extensions) = bootstrap.extensions() {
-        let mut exts = bootstrap_extensions.clone();
-        filter_extensions(&mut exts)?;
-        Some(exts)
-    } else {
-        None
-    };
+    /// Decode all fields from raw concatenated DER (no outer SEQUENCE wrapper).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MtcError` if the data is malformed.
+    pub fn decode_fields(data: &[u8]) -> Result<Self, MtcError> {
+        use der::{asn1::ContextSpecific, SliceReader, TagNumber};
 
-    // Convert RdnSequence → Name via DER round-trip (Name is a newtype over RdnSequence).
-    let issuer = Name::from_der(&issuer.to_der()?)?;
+        let mut reader = SliceReader::new(data)?;
 
-    Ok(TbsCertificateLogEntry {
-        version: bootstrap.version(),
-        issuer,
-        validity,
-        subject: bootstrap.subject().clone(),
-        subject_public_key_info_hash: OctetString::new(
-            &Sha256::digest(bootstrap.subject_public_key_info().to_der()?)[..],
-        )?,
-        issuer_unique_id: bootstrap.issuer_unique_id().clone(),
-        subject_unique_id: bootstrap.subject_unique_id().clone(),
-        extensions,
-    })
-}
-
-/// Check that a bootstrap certificate covers a log entry.
-///
-/// # Errors
-///
-/// Returns an error if either certificate is invalid, or if the bootstrap
-/// certificate doesn't cover the log entry.
-#[allow(clippy::too_many_lines)]
-pub fn validate_correspondence(
-    log_entry: &TbsCertificateLogEntry,
-    raw_chain: &[Vec<u8>],
-    roots: &CertPool,
-) -> Result<(), MtcError> {
-    // We will run ordinary chain validation on the given chain. After, we will do additional
-    // validation, expressed in the below closure.
-    let validator_hook = |bootstrap: Certificate,
-                          chain_certs: Vec<&Certificate>,
-                          _chain_fingerprints: Vec<[u8; 32]>,
-                          _found_root_idx: Option<usize>|
-     -> Result<(), MtcError> {
-        if !(log_entry.version == bootstrap.tbs_certificate().version()
-            && log_entry.version == Version::V3)
-        {
-            return Err(MtcError::Dynamic(
-                "entry and bootstrap versions must be v3".into(),
-            ));
-        }
-        // Make sure the validity is contained within the validity of every cert in
-        // the chain.
-        for cert in core::iter::once(&bootstrap).chain(chain_certs) {
-            if log_entry.validity.not_before.to_unix_duration().lt(&cert
-                .tbs_certificate()
-                .validity()
-                .not_before
-                .to_unix_duration())
-            {
-                return Err(MtcError::Dynamic(
-                    "entry not_before must not be less than bootstrap chain cert not_before".into(),
-                ));
+        // version [0] EXPLICIT INTEGER DEFAULT V1
+        let version = if der::Tag::peek(&reader).ok().is_some_and(|t| {
+            t == der::Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber(0),
             }
-            if log_entry.validity.not_after.to_unix_duration().gt(&cert
-                .tbs_certificate()
-                .validity()
-                .not_after
-                .to_unix_duration())
-            {
-                return Err(MtcError::Dynamic(
-                    "entry not_after must not be greater than bootstrap chain cert not_after"
-                        .into(),
-                ));
-            }
-        }
-        if log_entry.subject != *bootstrap.tbs_certificate().subject() {
-            return Err(MtcError::Dynamic(
-                "entry subject must match bootstrap subject".into(),
-            ));
-        }
-        if log_entry.subject_public_key_info_hash
-            != OctetString::new(
-                &Sha256::digest(
-                    bootstrap
-                        .tbs_certificate()
-                        .subject_public_key_info()
-                        .to_der()?,
-                )[..],
-            )?
-        {
-            return Err(MtcError::Dynamic(
-                "entry spki hash must match hash of bootstrap spki".into(),
-            ));
-        }
-        if log_entry.issuer_unique_id != *bootstrap.tbs_certificate().issuer_unique_id() {
-            return Err(MtcError::Dynamic(
-                "entry issuer unique ID must match bootstrap issuer unique ID".into(),
-            ));
-        }
-        if log_entry.subject_unique_id != *bootstrap.tbs_certificate().subject_unique_id() {
-            return Err(MtcError::Dynamic(
-                "entry subject unique ID must match bootstrap subject unique ID".into(),
-            ));
-        }
-
-        let (log_entry_extensions, mut bootstrap_extensions) = match (
-            &log_entry.extensions,
-            bootstrap.tbs_certificate().extensions().cloned(),
-        ) {
-            // If no extensions in either entry or bootstrap, we're done.
-            (None, None) => return Ok(()),
-            // If mismatched, that's an error.
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(MtcError::Dynamic("mismatched extensions".into()))
-            }
-            // Otherwise both the log entry and bootstrap cert have
-            // extensions. Check them below.
-            (Some(log_ext), Some(boot_ext)) => (log_ext, boot_ext),
+        }) {
+            let cs = ContextSpecific::<Version>::decode(&mut reader)?;
+            cs.value
+        } else {
+            Version::V1
         };
 
-        // Check and filter bootstrap extensions.
-        filter_extensions(&mut bootstrap_extensions)?;
+        let issuer = Name::decode(&mut reader)?;
+        let validity = Validity::decode(&mut reader)?;
+        let subject = Name::decode(&mut reader)?;
+        let subject_public_key_info_algorithm = AlgorithmIdentifierOwned::decode(&mut reader)?;
+        let subject_public_key_info_hash = OctetString::decode(&mut reader)?;
 
-        // Make sure the filtered bootstrap extensions cover those of the log entry.
-        if log_entry_extensions.len() != bootstrap_extensions.len() {
-            return Err(MtcError::Dynamic(
-                "bootstrap extension lengths differ".into(),
-            ));
-        }
+        // issuerUniqueID [1] IMPLICIT BIT STRING OPTIONAL
+        let issuer_unique_id =
+            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber(1))?
+                .map(|cs| cs.value);
 
-        let bootstrap_extensions_map = bootstrap_extensions
-            .into_iter()
-            .map(|extn| (extn.extn_id, extn))
-            .collect::<HashMap<_, _>>();
-        for extension in log_entry_extensions {
-            match extension.extn_id {
-                id @ (rfc5280::ID_CE_EXT_KEY_USAGE
-                | rfc5280::ID_CE_SUBJECT_ALT_NAME
-                | rfc5280::ID_CE_KEY_USAGE) => {
-                    if let Some(bootstrap_extension) = bootstrap_extensions_map.get(&id) {
-                        // This currently checks for strict equality, but
-                        // could be relaxed somewhat, for example to allow a
-                        // bootstrap cert with the key usage
-                        // DigitalSignature+KeyEncipherment to cover a log
-                        // entry with only the DigitalSignature key usage.
-                        if extension != bootstrap_extension {
-                            return Err(MtcError::Dynamic(format!(
-                                "boostrap extension mismatch {id}"
-                            )));
-                        }
-                    } else {
-                        return Err(MtcError::Dynamic(format!(
-                            "bootstrap missing extension {id}"
-                        )));
-                    }
-                }
-                id => {
-                    return Err(MtcError::Dynamic(format!(
-                        "log entry has unsupported extension {id}"
-                    )))
-                }
+        // subjectUniqueID [2] IMPLICIT BIT STRING OPTIONAL
+        let subject_unique_id =
+            ContextSpecific::<BitString>::decode_implicit(&mut reader, TagNumber(2))?
+                .map(|cs| cs.value);
+
+        // extensions [3] EXPLICIT Extensions OPTIONAL
+        let extensions = if der::Tag::peek(&reader).ok().is_some_and(|t| {
+            t == der::Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber(3),
             }
-        }
-        Ok(())
-    };
-
-    // Run the validation logic with the above validation hook. We do
-    // not give `validate_chain_lax` a window for the `not_after` validity,
-    // since validity is checked within the validator hook.
-    validate_chain_lax(
-        raw_chain,
-        roots,
-        &ValidationOptions {
-            stop_on_first_trusted_cert: true,
-            not_after_start: None,
-            not_after_end: None,
-        },
-        validator_hook,
-    )
-    .map_err(|e| match e {
-        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
-        x509_util::HookOrValidationError::Hook(he) => he,
-    })
-}
-
-/// Parse and validate a bootstrap chain, returning a pending log entry.
-///
-/// # Arguments
-///
-/// * `raw_chain` - The 'bootstrap' chain of certificates submitted to the
-///   `add-entry` endpoint. Each entry must sign the previous entry, and the
-///   chain must start with a leaf certificate and end with a certificate that
-///   is a trusted root or is signed by a trusted root.
-/// * `roots` - A certificate pool containing the trusted roots.
-/// * `issuer` - The issuer name of the MTC CA, to replace the issuer in
-///   the bootstrap certificate.
-/// * `validity` - A bound on the maximum validity period for the returned
-///   Merkle Tree log entry, based on the MTC CA's parameters. This
-///   bound is further adjusted to ensure that it is covered by the bootstrap
-///   chain.
-///
-/// # Returns
-///
-/// Returns a pending Merkle Tree log entry derived from the bootstrap chain and
-/// other provided parameters and the inferred root, if a root had to be
-/// inferred.
-///
-/// # Errors
-///
-/// Returns an error if the chain is invalid.
-pub fn validate_chain(
-    raw_chain: &[Vec<u8>],
-    roots: &CertPool,
-    issuer: &RdnSequence,
-    validity: &mut Validity,
-) -> Result<(IetfMtcPendingLogEntry, Option<usize>), MtcError> {
-    // We will run the ordinary chain validation on our input, but we have some post-processing we
-    // need to do too. Namely we need to adjust the validity period of the provided bootstrap cert,
-    // and then construct a pending log entry. We do this in the validation hook.
-    let validator_hook = |leaf: Certificate,
-                          chain_certs: Vec<&Certificate>,
-                          chain_fingerprints: Vec<[u8; 32]>,
-                          found_root_idx: Option<usize>| {
-        // Adjust the validity bound to the overlapping part of validity periods of
-        // all certificates in the chain.
-        for cert in std::iter::once(&leaf).chain(chain_certs) {
-            if validity.not_before.to_unix_duration().lt(&cert
-                .tbs_certificate()
-                .validity()
-                .not_before
-                .to_unix_duration())
-            {
-                validity.not_before = cert.tbs_certificate().validity().not_before;
-            }
-            if validity.not_after.to_unix_duration().gt(&cert
-                .tbs_certificate()
-                .validity()
-                .not_after
-                .to_unix_duration())
-            {
-                validity.not_after = cert.tbs_certificate().validity().not_after;
-            }
-            // Check that we still have a non-empty validity period.
-            if validity
-                .not_after
-                .to_unix_duration()
-                .le(&validity.not_before.to_unix_duration())
-            {
-                // There is no remaining validity period.
-                return Err(MtcError::Dynamic(
-                    "overlap in validity with bootstrap chain must not be empty".into(),
-                ));
-            }
-        }
-
-        let mut bootstrap = Vec::new();
-        // SAFETY: `validate_chain_lax` checks that `raw_chain` is non-empty. We
-        // use `raw_chain[0]` here instead of `leaf` to avoid having to
-        // re-encode it to DER format.
-        bootstrap.write_length_prefixed(&raw_chain[0], 3)?;
-        bootstrap.write_length_prefixed(&chain_fingerprints.concat(), 2)?;
-
-        let mut bootstrap_tile_entry = Vec::new();
-        bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
-
-        let pending_entry = IetfMtcPendingLogEntry {
-            bootstrap: bootstrap_tile_entry,
-            entry: TlogTilesPendingLogEntry {
-                data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
-                    leaf.tbs_certificate(),
-                    issuer,
-                    *validity,
-                )?)
-                .encode()?,
-            },
+        }) {
+            let cs = ContextSpecific::<Extensions>::decode(&mut reader)?;
+            Some(cs.value)
+        } else {
+            None
         };
-        Ok((pending_entry, found_root_idx))
-    };
 
-    // Run the validation and return the hook-constructed pending entry. We do
-    // not give `validate_chain_lax` a window for the `not_after` validity,
-    // since validity is checked within the validator hook.
-    let pending_entry = validate_chain_lax(
-        raw_chain,
-        roots,
-        &ValidationOptions {
-            stop_on_first_trusted_cert: true,
-            not_after_start: None,
-            not_after_end: None,
-        },
-        validator_hook,
-    );
-    pending_entry.map_err(|e| match e {
-        x509_util::HookOrValidationError::Validation(ve) => ve.into(),
-        x509_util::HookOrValidationError::Hook(he) => he,
-    })
+        reader.finish().map_err(|e: der::Error| MtcError::from(e))?;
+        Ok(Self {
+            version,
+            issuer,
+            validity,
+            subject,
+            subject_public_key_info_algorithm,
+            subject_public_key_info_hash,
+            issuer_unique_id,
+            subject_unique_id,
+            extensions,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use base64::prelude::*;
     use der::asn1::UtcTime;
     use std::time::Duration;
-    use x509_cert::{time::Time, Certificate};
-    use x509_util::{build_chain, certs_to_bytes};
+    use x509_cert::{
+        ext::pkix::{name::GeneralName, SubjectAltName},
+        time::Time,
+    };
 
-    use super::*;
-
-    #[test]
-    fn test_tbs_cert_to_log_entry() {
-        let bootstrap_chain = build_chain!(
-            "../../static_ct_api/tests/leaf-cert.pem",
-            "../../static_ct_api/tests/fake-intermediate-with-name-constraints-cert.pem"
-        );
-        let raw_chain = certs_to_bytes(&bootstrap_chain).unwrap();
-
-        let roots = CertPool::new(build_chain!(
-            "../../static_ct_api/tests/fake-ca-cert.pem",
-            "../../static_ct_api/tests/fake-root-ca-cert.pem",
-            "../../static_ct_api/tests/ca-cert.pem",
-            "../../static_ct_api/tests/real-precert-intermediate.pem"
-        ))
-        .unwrap();
-
-        let validity = Validity::new(
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap()),
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap()),
-        );
-
-        let mut log_entry = {
-            let issuer = RdnSequence::default();
-            tbs_cert_to_log_entry(bootstrap_chain[0].tbs_certificate(), &issuer, validity).unwrap()
-        };
-
-        // Valid.
-        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();
-
-        // Put the extensions in a different order.
-        log_entry
-            .extensions
-            .as_mut()
-            .unwrap_or(&mut Vec::new())
-            .sort_by(|a, b| b.extn_id.cmp(&a.extn_id));
-
-        // Still valid.
-        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();
-
-        // Remove an extension.
-        let ext = log_entry
-            .extensions
-            .as_mut()
-            .unwrap_or(&mut Vec::new())
-            .pop()
-            .unwrap();
-
-        // No longer valid.
-        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap_err();
-
-        // Put it back.
-        log_entry
-            .extensions
-            .as_mut()
-            .unwrap_or(&mut Vec::new())
-            .push(ext);
-
-        // Valid again.
-        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();
-
-        // Increase the validity to outside the bootstrap's validity.
-        log_entry.validity.not_after =
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_920)).unwrap());
-
-        // No longer valid.
-        validate_correspondence(&log_entry, &raw_chain, &roots).unwrap_err();
+    fn dummy_validity() -> Validity {
+        Validity::new(
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_700_000_000)).unwrap()),
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_700_086_400)).unwrap()),
+        )
     }
 
-    #[test]
-    fn test_serialize_signatureless_cert() {
-        use der::Decode as _;
-        use tlog_tiles::{Proof, Subtree, TlogTilesLogEntry, TlogTilesPendingLogEntry};
-
-        let certs =
-            Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
-                .unwrap();
-        let cert = &certs[0];
-        let tbs = cert.tbs_certificate();
-        let issuer = RdnSequence::default();
-        let validity = Validity::new(
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap()),
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap()),
-        );
-        let log_entry = tbs_cert_to_log_entry(tbs, &issuer, validity).unwrap();
-        let spki_der = tbs.subject_public_key_info().to_der().unwrap();
-
-        // Construct a IetfMtcLogEntry wrapping the log entry.
-        let mtc_entry = MerkleTreeCertEntry::TbsCertEntry(log_entry);
-        let bootstrap_log_entry = IetfMtcLogEntry(TlogTilesLogEntry {
-            inner: TlogTilesPendingLogEntry {
-                data: mtc_entry.encode().unwrap(),
-            },
-        });
-
-        let leaf_index: LeafIndex = 42;
-        let subtree = Subtree::new(0, 64).unwrap();
-        let proof: Proof = vec![];
-
-        let cert_der = serialize_signatureless_cert(
-            &bootstrap_log_entry,
-            leaf_index,
-            &spki_der,
-            &subtree,
-            proof,
-        )
-        .unwrap();
-
-        // Parse the output as a Certificate and verify key fields.
-        let out = Certificate::from_der(&cert_der).unwrap();
-        let out_tbs = out.tbs_certificate();
-
-        // Serial number must equal leaf_index encoded as big-endian bytes.
-        // Leading zeros may differ due to DER integer sign-bit encoding.
-        let trim_leading_zeros =
-            |b: &[u8]| -> Vec<u8> { b.iter().copied().skip_while(|&x| x == 0).collect() };
-        assert_eq!(
-            trim_leading_zeros(out_tbs.serial_number().as_bytes()),
-            trim_leading_zeros(&leaf_index.to_be_bytes()),
-            "serial_number must encode leaf_index"
-        );
-
-        // Signature algorithm must be id-alg-mtcproof.
-        assert_eq!(
-            out_tbs.signature().oid,
-            ID_ALG_MTCPROOF,
-            "signature algorithm must be id-alg-mtcproof"
-        );
-
-        // Subject must match the original cert's subject.
-        assert_eq!(out_tbs.subject(), tbs.subject(), "subject must round-trip");
-
-        // SPKI in the output must match the input spki_der.
-        assert_eq!(
-            out_tbs.subject_public_key_info().to_der().unwrap(),
-            spki_der,
-            "subject_public_key_info must round-trip"
-        );
-
-        // Verify the issuer is encoded (empty RdnSequence → Name with no RDNs).
-        // This exercises the Name→issuer round-trip via DER.
-        let issuer_der = out_tbs.issuer().to_der().unwrap();
-        let expected_issuer_der = Name::from_der(&RdnSequence::default().to_der().unwrap())
+    /// Generate a CSR with no extensions.
+    fn make_csr_no_san() -> Vec<u8> {
+        use crypto_common::Generate as _;
+        use der::Encode as _;
+        use p256::ecdsa::SigningKey;
+        use std::str::FromStr;
+        use x509_cert::{
+            builder::{Builder, RequestBuilder},
+            name::Name,
+        };
+        let sk = SigningKey::generate_from_rng(&mut rand::rng());
+        let subject = Name::from_str("CN=test.example.com,O=Test,C=US").unwrap();
+        RequestBuilder::new(subject)
+            .unwrap()
+            .build::<_, p256::ecdsa::DerSignature>(&sk)
             .unwrap()
             .to_der()
-            .unwrap();
-        assert_eq!(
-            issuer_der, expected_issuer_der,
-            "issuer must encode correctly"
-        );
+            .unwrap()
+    }
 
-        // Validity must match what we passed in.
-        assert_eq!(
-            out_tbs.validity().not_before.to_unix_duration().as_secs(),
-            1_518_521_919,
-            "not_before must round-trip"
-        );
-        assert_eq!(
-            out_tbs.validity().not_after.to_unix_duration().as_secs(),
-            1_743_161_919,
-            "not_after must round-trip"
-        );
-
-        // Unique IDs: the source cert has none, so the output should have none.
-        assert!(out_tbs.issuer_unique_id().is_none());
-        assert!(out_tbs.subject_unique_id().is_none());
+    /// Generate a CSR with a subjectAltName containing two DNS names.
+    fn make_csr_with_sans() -> Vec<u8> {
+        use crypto_common::Generate as _;
+        use der::Encode as _;
+        use p256::ecdsa::SigningKey;
+        use std::str::FromStr;
+        use x509_cert::{
+            builder::{Builder, RequestBuilder},
+            ext::pkix::{name::GeneralName, SubjectAltName},
+            name::Name,
+        };
+        let sk = SigningKey::generate_from_rng(&mut rand::rng());
+        let subject = Name::from_str("CN=test.example.com,O=Test,C=US").unwrap();
+        let mut builder = RequestBuilder::new(subject).unwrap();
+        let san = SubjectAltName(vec![
+            GeneralName::DnsName(der::asn1::Ia5String::new("example.com").unwrap()),
+            GeneralName::DnsName(der::asn1::Ia5String::new("www.example.com").unwrap()),
+        ]);
+        builder.add_extension(&san).unwrap();
+        builder
+            .build::<_, p256::ecdsa::DerSignature>(&sk)
+            .unwrap()
+            .to_der()
+            .unwrap()
     }
 
     #[test]
-    fn test_encode() {
-        let certs =
-            Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))
-                .unwrap();
-        let issuer = RdnSequence::default();
-
-        let validity = Validity::new(
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_518_521_919)).unwrap()),
-            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(1_743_161_919)).unwrap()),
-        );
-
-        let log_entry =
-            tbs_cert_to_log_entry(certs[0].tbs_certificate(), &issuer, validity).unwrap();
-        let decoded = TbsCertificateLogEntry::from_der(&log_entry.to_der().unwrap()).unwrap();
-
-        assert_eq!(log_entry, decoded);
-
-        let merkle_tree_cert_entry = MerkleTreeCertEntry::TbsCertEntry(log_entry);
-        let decoded =
-            MerkleTreeCertEntry::decode(&merkle_tree_cert_entry.encode().unwrap()).unwrap();
-
-        assert_eq!(merkle_tree_cert_entry, decoded);
-
+    fn test_encode_null_entry() {
         let null_entry = MerkleTreeCertEntry::NullEntry;
         assert_eq!(
             null_entry,
             MerkleTreeCertEntry::decode(&null_entry.encode().unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn test_build_pending_entry_with_sans() {
+        let req = AddEntryRequest {
+            csr: make_csr_with_sans(),
+        };
+
+        let entry = build_pending_entry(&req, &RdnSequence::default(), dummy_validity()).unwrap();
+        let decoded = MerkleTreeCertEntry::decode(&entry.entry.data).unwrap();
+
+        let MerkleTreeCertEntry::TbsCertEntry(tbs) = decoded else {
+            panic!("expected TbsCertEntry");
+        };
+
+        let exts = tbs.extensions.unwrap();
+        assert_eq!(exts.len(), 1);
+        assert_eq!(exts[0].extn_id, ID_CE_SUBJECT_ALT_NAME);
+
+        let san = SubjectAltName::from_der(exts[0].extn_value.as_bytes()).unwrap();
+        assert_eq!(san.0.len(), 2);
+        assert!(matches!(&san.0[0], GeneralName::DnsName(n) if n.as_str() == "example.com"));
+        assert!(matches!(&san.0[1], GeneralName::DnsName(n) if n.as_str() == "www.example.com"));
+    }
+
+    #[test]
+    fn test_build_pending_entry_no_sans() {
+        let req = AddEntryRequest {
+            csr: make_csr_no_san(),
+        };
+
+        let entry = build_pending_entry(&req, &RdnSequence::default(), dummy_validity()).unwrap();
+        let decoded = MerkleTreeCertEntry::decode(&entry.entry.data).unwrap();
+        let MerkleTreeCertEntry::TbsCertEntry(tbs) = decoded else {
+            panic!("expected TbsCertEntry");
+        };
+        assert!(tbs.extensions.is_none());
+    }
+
+    #[test]
+    fn test_build_pending_entry_invalid_csr() {
+        let req = AddEntryRequest {
+            csr: b"not a valid csr".to_vec(),
+        };
+        assert!(build_pending_entry(&req, &RdnSequence::default(), dummy_validity()).is_err());
+    }
+
+    #[test]
+    fn test_add_entry_request_serde() {
+        let csr_bytes = make_csr_no_san();
+        let b64url = BASE64_URL_SAFE_NO_PAD.encode(&csr_bytes);
+
+        // Without optional fields.
+        let json = format!(r#"{{"csr": "{b64url}"}}"#);
+        let req: AddEntryRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req.csr, csr_bytes);
+        assert_eq!(req.csr, csr_bytes);
+    }
+
+    // ---- TbsCertificateLogEntry encoding regression ----
+
+    /// Reference mirror of [`TbsCertificateLogEntry`] that uses
+    /// `#[derive(Sequence)]` to produce an outer-SEQUENCE DER encoding via the
+    /// macro. Used by [`test_tbs_cert_log_entry_encoding_matches_sequence_derive`]
+    /// to verify that the hand-rolled, SEQUENCE-less
+    /// [`TbsCertificateLogEntry::encode_fields`] matches the content bytes of
+    /// the macro-derived SEQUENCE encoding.
+    ///
+    /// The field list and ASN.1 annotations are identical to the bootstrap
+    /// `TbsCertificateLogEntry` shape, plus the `subject_public_key_info_algorithm`
+    /// field that draft-ietf-plants-merkle-tree-certs-02 added.
+    #[derive(Clone, Debug, Eq, PartialEq, der::Sequence, der::ValueOrd)]
+    struct OldTbsCertificateLogEntry {
+        #[asn1(context_specific = "0", default = "Default::default")]
+        pub version: Version,
+        pub issuer: Name,
+        pub validity: Validity,
+        pub subject: Name,
+        pub subject_public_key_info_algorithm: AlgorithmIdentifierOwned,
+        pub subject_public_key_info_hash: OctetString,
+        #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
+        pub issuer_unique_id: Option<BitString>,
+        #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
+        pub subject_unique_id: Option<BitString>,
+        #[asn1(context_specific = "3", tag_mode = "EXPLICIT", optional = "true")]
+        pub extensions: Option<Extensions>,
+    }
+
+    /// Strip the outer SEQUENCE tag (`0x30`) + length from a DER-encoded value
+    /// and return the content bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `der` does not start with a SEQUENCE tag or the length can't be
+    /// parsed.
+    fn strip_sequence_wrapper(der: &[u8]) -> &[u8] {
+        assert_eq!(der[0], 0x30, "expected SEQUENCE tag");
+        // DER length: short form if top bit of first length byte is 0.
+        let first_len = der[1];
+        let (body_offset, _content_len) = if first_len & 0x80 == 0 {
+            (2usize, first_len as usize)
+        } else {
+            // Long form: low 7 bits = number of subsequent length bytes.
+            let num_len_bytes = (first_len & 0x7f) as usize;
+            let mut content_len: usize = 0;
+            for i in 0..num_len_bytes {
+                content_len = (content_len << 8) | der[2 + i] as usize;
+            }
+            (2 + num_len_bytes, content_len)
+        };
+        &der[body_offset..]
+    }
+
+    /// Build an [`OctetString`] containing a deterministic 32-byte "SPKI hash"
+    /// for tests.
+    fn dummy_spki_hash() -> OctetString {
+        OctetString::new(vec![0x42u8; 32]).unwrap()
+    }
+
+    /// Build an RSA-SHA256-style AlgorithmIdentifier for use as a placeholder
+    /// `subject_public_key_info_algorithm`.
+    fn dummy_spki_algorithm() -> AlgorithmIdentifierOwned {
+        AlgorithmIdentifierOwned {
+            oid: ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+            parameters: None,
+        }
+    }
+
+    fn dummy_issuer() -> Name {
+        use std::str::FromStr;
+        Name::from_str("CN=Test Issuer,O=Test,C=US").unwrap()
+    }
+
+    fn dummy_subject() -> Name {
+        use std::str::FromStr;
+        Name::from_str("CN=test.example.com,O=Test,C=US").unwrap()
+    }
+
+    fn dummy_extensions() -> Extensions {
+        use der::Encode as _;
+        let san = SubjectAltName(vec![GeneralName::DnsName(
+            der::asn1::Ia5String::new("example.com").unwrap(),
+        )]);
+        vec![x509_cert::ext::Extension {
+            extn_id: ObjectIdentifier::new_unwrap("2.5.29.17"),
+            critical: false,
+            extn_value: OctetString::new(san.to_der().unwrap()).unwrap(),
+        }]
+    }
+
+    /// Regression: `TbsCertificateLogEntry::encode_fields` (hand-rolled, no
+    /// outer SEQUENCE) must produce byte-for-byte the same content bytes as
+    /// `#[derive(Sequence)]` applied to a struct with the same fields, after
+    /// stripping the SEQUENCE tag + length.
+    ///
+    /// This pins the wire format against future refactors: any change to the
+    /// hand-rolled encoder would immediately diverge from the macro-derived
+    /// reference and fail this test.
+    #[test]
+    fn test_tbs_cert_log_entry_encoding_matches_sequence_derive() {
+        use der::Encode as _;
+
+        // Test matrix: mix of V1/V3, optional fields present/absent.
+        let cases: Vec<(&str, TbsCertificateLogEntry, OldTbsCertificateLogEntry)> = {
+            // Case 1: V1, no optional fields.
+            let v1 = TbsCertificateLogEntry {
+                version: Version::V1,
+                issuer: dummy_issuer(),
+                validity: dummy_validity(),
+                subject: dummy_subject(),
+                subject_public_key_info_algorithm: dummy_spki_algorithm(),
+                subject_public_key_info_hash: dummy_spki_hash(),
+                issuer_unique_id: None,
+                subject_unique_id: None,
+                extensions: None,
+            };
+            let v1_old = OldTbsCertificateLogEntry {
+                version: v1.version,
+                issuer: v1.issuer.clone(),
+                validity: v1.validity,
+                subject: v1.subject.clone(),
+                subject_public_key_info_algorithm: v1.subject_public_key_info_algorithm.clone(),
+                subject_public_key_info_hash: v1.subject_public_key_info_hash.clone(),
+                issuer_unique_id: None,
+                subject_unique_id: None,
+                extensions: None,
+            };
+
+            // Case 2: V3 with extensions only.
+            let v3_ext = TbsCertificateLogEntry {
+                version: Version::V3,
+                issuer: dummy_issuer(),
+                validity: dummy_validity(),
+                subject: dummy_subject(),
+                subject_public_key_info_algorithm: dummy_spki_algorithm(),
+                subject_public_key_info_hash: dummy_spki_hash(),
+                issuer_unique_id: None,
+                subject_unique_id: None,
+                extensions: Some(dummy_extensions()),
+            };
+            let v3_ext_old = OldTbsCertificateLogEntry {
+                version: v3_ext.version,
+                issuer: v3_ext.issuer.clone(),
+                validity: v3_ext.validity,
+                subject: v3_ext.subject.clone(),
+                subject_public_key_info_algorithm: v3_ext.subject_public_key_info_algorithm.clone(),
+                subject_public_key_info_hash: v3_ext.subject_public_key_info_hash.clone(),
+                issuer_unique_id: None,
+                subject_unique_id: None,
+                extensions: v3_ext.extensions.clone(),
+            };
+
+            // Case 3: V3 with every optional field populated.
+            let iuid = BitString::from_bytes(&[0xaa, 0xbb, 0xcc]).unwrap();
+            let suid = BitString::from_bytes(&[0xdd, 0xee]).unwrap();
+            let v3_all = TbsCertificateLogEntry {
+                version: Version::V3,
+                issuer: dummy_issuer(),
+                validity: dummy_validity(),
+                subject: dummy_subject(),
+                subject_public_key_info_algorithm: dummy_spki_algorithm(),
+                subject_public_key_info_hash: dummy_spki_hash(),
+                issuer_unique_id: Some(iuid.clone()),
+                subject_unique_id: Some(suid.clone()),
+                extensions: Some(dummy_extensions()),
+            };
+            let v3_all_old = OldTbsCertificateLogEntry {
+                version: v3_all.version,
+                issuer: v3_all.issuer.clone(),
+                validity: v3_all.validity,
+                subject: v3_all.subject.clone(),
+                subject_public_key_info_algorithm: v3_all.subject_public_key_info_algorithm.clone(),
+                subject_public_key_info_hash: v3_all.subject_public_key_info_hash.clone(),
+                issuer_unique_id: Some(iuid),
+                subject_unique_id: Some(suid),
+                extensions: v3_all.extensions.clone(),
+            };
+
+            vec![
+                ("V1 no optionals", v1, v1_old),
+                ("V3 extensions only", v3_ext, v3_ext_old),
+                ("V3 all optionals", v3_all, v3_all_old),
+            ]
+        };
+
+        for (name, new, old) in cases {
+            let new_encoded = new.encode_fields().expect("encode_fields");
+            let old_der = old.to_der().expect("to_der on reference struct");
+            let old_content = strip_sequence_wrapper(&old_der);
+            assert_eq!(
+                new_encoded, old_content,
+                "{name}: encode_fields must match derive(Sequence) content bytes"
+            );
+
+            // Round-trip through decode_fields for good measure.
+            let decoded =
+                TbsCertificateLogEntry::decode_fields(&new_encoded).expect("decode_fields");
+            assert_eq!(decoded, new, "{name}: decode_fields must round-trip");
+        }
     }
 }

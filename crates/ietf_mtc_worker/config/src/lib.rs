@@ -37,9 +37,9 @@ pub struct LogParams {
     pub max_batch_entries: usize,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,
-    /// Enable SCT validation for bootstrap certificates
+    /// The version of draft-ietf-plants-merkle-tree-certs that this log implements.
     #[serde(default)]
-    pub enable_sct_validation: bool,
+    pub version: ietf_mtc_api::DraftVersion,
 }
 
 impl LogParams {

@@ -10,16 +10,23 @@ repository.workspace = true
 description.workspace = true
 
 [dependencies]
+base64.workspace = true
 byteorder.workspace = true
+rand.workspace = true
 der.workspace = true
 ed25519-dalek.workspace = true
+signature.workspace = true
 length_prefixed.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_with.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
 thiserror.workspace = true
 tlog_tiles.workspace = true
-x509-cert.workspace = true
+x509-cert = { workspace = true, features = ["builder"] }
 x509_util.workspace = true
+
+[dev-dependencies]
+crypto-common.workspace = true
+p256.workspace = true
+serde_json.workspace = true
