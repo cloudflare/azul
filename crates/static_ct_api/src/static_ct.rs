@@ -64,6 +64,7 @@
 //! let (_checkpoint, _timestamp) = tlog_tiles::open_checkpoint(
 //!   "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b",
 //!   &verifiers,
+//!   tlog_tiles::ValidationMode::All,
 //!   now,
 //!   checkpoint.as_bytes(),
 //! ).unwrap();

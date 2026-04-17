@@ -234,7 +234,7 @@ fn serialize_mtc_subtree_signature_input(
 #[cfg(test)]
 mod tests {
 
-    use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp};
+    use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp, ValidationMode};
 
     use super::*;
     use signed_note::VerifierList;
@@ -264,6 +264,7 @@ mod tests {
         open_checkpoint(
             origin,
             &VerifierList::new(vec![verifier]),
+            ValidationMode::All,
             timestamp,
             &checkpoint,
         )

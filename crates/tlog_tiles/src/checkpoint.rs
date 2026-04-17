@@ -369,8 +369,33 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
     }
 }
 
+/// How [`open_checkpoint`] decides whether a checkpoint's signatures are
+/// sufficient.
+///
+/// A single checkpoint note can carry multiple signatures. The caller
+/// supplies a [`VerifierList`] of trusted keys; which signatures "count"
+/// depends on the caller's role:
+///
+/// - A **monitor** or **issuer** wants every key in its list to have
+///   signed — this is the `All` mode (historically the only mode).
+/// - A **witness** (per c2sp.org/tlog-witness) accepts a checkpoint as soon
+///   as any one of the trusted log keys has signed, and ignores signatures
+///   from unknown keys — this is the `Any` mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ValidationMode {
+    /// Require valid signatures from every verifier in the list.
+    All,
+    /// Accept the checkpoint if at least one verifier in the list has
+    /// produced a valid signature. Signatures from unknown keys are
+    /// silently ignored.
+    Any,
+}
+
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
 /// [`CheckpointText`] and the latest timestamp of any of its cosignatures (if defined).
+///
+/// `mode` selects how signature coverage is interpreted; see
+/// [`ValidationMode`].
 ///
 /// # Errors
 ///
@@ -378,12 +403,23 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 pub fn open_checkpoint(
     origin: &str,
     verifiers: &VerifierList,
+    mode: ValidationMode,
     current_time: UnixTimestamp,
     checkpoint_bytes: &[u8],
 ) -> Result<(CheckpointText, Option<UnixTimestamp>), TlogError> {
     // A checkpoint is a signed note whose text is a CheckpointText
     let n = Note::from_bytes(checkpoint_bytes)?;
-    let (verified_sigs, _) = n.verify(verifiers)?;
+    // `Note::verify` returns `UnverifiedNote` when no signature was produced
+    // by a verifier in `verifiers`. For `ValidationMode::Any` this is the
+    // normal "403 Forbidden" path per c2sp.org/tlog-witness; map it to
+    // `MissingVerifierSignature` so both modes return the same error type
+    // in that case. For `ValidationMode::All` the later key-coverage check
+    // would have returned the same error too.
+    let verified_sigs = match n.verify(verifiers) {
+        Ok((v, _)) => v,
+        Err(NoteError::UnverifiedNote) => return Err(TlogError::MissingVerifierSignature),
+        Err(e) => return Err(e.into()),
+    };
 
     // Go through the signatures and make sure we find all the key IDs in our verifiers list
     let mut key_ids_to_observe = verifiers.key_ids();
@@ -407,10 +443,21 @@ pub fn open_checkpoint(
         }
     }
 
-    // If we didn't see all the verifiers we wanted to see, error
-    if !key_ids_to_observe.is_empty() {
-        return Err(TlogError::MissingVerifierSignature);
+    match mode {
+        ValidationMode::All => {
+            // Every verifier in the list must have produced a valid signature.
+            if !key_ids_to_observe.is_empty() {
+                return Err(TlogError::MissingVerifierSignature);
+            }
+        }
+        ValidationMode::Any => {
+            // At least one verifier must have produced a valid signature.
+            if verified_sigs.is_empty() {
+                return Err(TlogError::MissingVerifierSignature);
+            }
+        }
     }
+
     let checkpoint_text = CheckpointText::from_bytes(n.text())?;
     if current_time < latest_timestamp.unwrap_or(0) {
         return Err(TlogError::InvalidTimestamp);
@@ -660,6 +707,7 @@ mod tests {
         open_checkpoint(
             origin,
             &VerifierList::new(vec![verifier]),
+            ValidationMode::All,
             timestamp,
             &checkpoint,
         )

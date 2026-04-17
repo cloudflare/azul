@@ -18,6 +18,9 @@ members = [
     "crates/static_ct_api",
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
+    "crates/tlog_witness",
+    "crates/witness_worker",
+    "crates/witness_worker/config",
     "crates/x509_util",
     "fuzz",
 ]
@@ -25,17 +28,20 @@ members = [
 # wrangler dev instance and will hang if run without one.
 # Run explicitly with: cargo test -p integration_tests --test static_ct_api
 default-members = [
+    "crates/bootstrap_mtc_api",
+    "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
     "crates/length_prefixed",
-    "crates/bootstrap_mtc_api",
-    "crates/bootstrap_mtc_worker",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
     "crates/static_ct_api",
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
+    "crates/tlog_witness",
+    "crates/witness_worker",
+    "crates/witness_worker/config",
     "crates/x509_util",
     "fuzz",
 ]
@@ -113,6 +119,7 @@ signed_note = { path = "crates/signed_note", version = "0.2.0" }
 static_ct_api = { path = "crates/static_ct_api", version = "0.2.0" }
 thiserror = "2.0"
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
+tlog_witness = { path = "crates/tlog_witness", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }
 reqwest = { version = "0.12", features = ["json"] }
 url = "2.2"

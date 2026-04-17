@@ -254,9 +254,14 @@ pub fn verify_checkpoint_bytes(
         };
 
     let verifier_list = VerifierList::new(verifiers);
-    let (text, _timestamp) =
-        open_checkpoint(origin, &verifier_list, now_millis, checkpoint_bytes)
-            .context("opening checkpoint")?;
+    let (text, _timestamp) = open_checkpoint(
+        origin,
+        &verifier_list,
+        tlog_tiles::ValidationMode::All,
+        now_millis,
+        checkpoint_bytes,
+    )
+    .context("opening checkpoint")?;
 
     Ok(VerifiedCheckpoint { text })
 }
