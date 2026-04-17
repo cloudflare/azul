@@ -146,7 +146,13 @@ jobs:
           echo "wrangler dev failed to start in time"
           exit 1
 
-      - name: Run IETF MTC integration tests
+      - name: Run IETF MTC integration tests (dev1, ML-DSA-44)
+        run: cargo test -p integration_tests --test ietf_mtc_api --verbose
+        env:
+          BASE_URL: http://localhost:8787
+          IETF_MTC_LOG_NAME: dev1
+
+      - name: Run IETF MTC integration tests (dev2, Ed25519)
         run: cargo test -p integration_tests --test ietf_mtc_api --verbose
         env:
           BASE_URL: http://localhost:8787

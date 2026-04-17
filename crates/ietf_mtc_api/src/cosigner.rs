@@ -39,19 +39,27 @@
 //!
 //! # Algorithm support
 //!
-//! Currently only Ed25519 is implemented. [`MtcSigningKey::MlDsa44`] and
-//! [`MtcVerifyingKey::MlDsa44`] are stub variants that will be filled in once
-//! draft-03 aligns with the `subtree/v1` unified signature format from
-//! <https://github.com/C2SP/C2SP/pull/237>.
+//! Both Ed25519 and ML-DSA-44 are supported.
+//!
+//! ML-DSA-44 uses the RustCrypto `ml-dsa` crate. When draft-03 aligns with the
+//! `subtree/v1` unified signature format from <https://github.com/C2SP/C2SP/pull/237>,
+//! the binary signing format (and the key ID algorithm bytes) will need to be
+//! updated here.
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use ed25519_dalek::pkcs8::EncodePublicKey;
+use ed25519_dalek::pkcs8::EncodePublicKey as Ed25519EncodePublicKey;
 use ed25519_dalek::{
-    ed25519::signature::{self, Signer},
+    ed25519::signature::{self, Signer as Ed25519SignerTrait},
     SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
     VerifyingKey as Ed25519VerifyingKey,
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
+use ml_dsa::{
+    signature::Verifier as MlDsaVerifier, EncodedSignature as MlDsaEncodedSignature,
+    ExpandedSigningKey as MlDsaExpandedSigningKey, MlDsa44, Signature as MlDsaSignature,
+    VerifyingKey as MlDsaVerifyingKey,
+};
+use pkcs8::EncodePublicKey as PkcsEncodePublicKey;
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
 use std::collections::HashMap;
 use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
@@ -65,23 +73,23 @@ pub type TrustAnchorID = RelativeOid;
 // ---------------------------------------------------------------------------
 
 /// A signing key for MTC checkpoint and subtree cosignatures.
-// The MlDsa44 variant will carry key data once implemented; suppress the size lint for now.
+// ML-DSA signing key is ~2.5× the size of Ed25519's; the enum is always used
+// behind indirection (via `MtcCosigner`) so the size difference is not a
+// hot-path concern.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum MtcSigningKey {
     Ed25519(Ed25519SigningKey),
-    /// ML-DSA-44 signing key. Not yet implemented.
-    MlDsa44,
+    MlDsa44(MlDsaExpandedSigningKey<MlDsa44>),
 }
 
 /// A verifying key for MTC checkpoint and subtree cosignatures.
-// The MlDsa44 variant will carry key data once implemented; suppress the size lint for now.
+// ML-DSA verifying key is much larger than Ed25519's; see note on MtcSigningKey.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum MtcVerifyingKey {
     Ed25519(Ed25519VerifyingKey),
-    /// ML-DSA-44 verifying key. Not yet implemented.
-    MlDsa44,
+    MlDsa44(MlDsaVerifyingKey<MlDsa44>),
 }
 
 impl MtcSigningKey {
@@ -93,10 +101,10 @@ impl MtcSigningKey {
     /// but future algorithms (e.g. randomized schemes requiring entropy) may
     /// be fallible.
     pub fn try_sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
-        match self {
-            Self::Ed25519(sk) => Ok(sk.sign(msg).to_bytes().to_vec()),
-            Self::MlDsa44 => unimplemented!("ML-DSA-44 signing is not yet implemented"),
-        }
+        Ok(match self {
+            Self::Ed25519(sk) => sk.sign(msg).to_bytes().to_vec(),
+            Self::MlDsa44(sk) => sk.sign(msg).encode().as_slice().to_vec(),
+        })
     }
 }
 
@@ -110,7 +118,10 @@ impl MtcVerifyingKey {
                 let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
                 Ed25519Verifier::verify(vk, msg, &sig).is_ok()
             }
-            Self::MlDsa44 => unimplemented!("ML-DSA-44 verification is not yet implemented"),
+            Self::MlDsa44(vk) => MlDsaEncodedSignature::<MlDsa44>::try_from(sig_bytes)
+                .ok()
+                .and_then(|enc| MlDsaSignature::<MlDsa44>::decode(&enc))
+                .is_some_and(|sig| MlDsaVerifier::verify(vk, msg, &sig).is_ok()),
         }
     }
 
@@ -123,11 +134,12 @@ impl MtcVerifyingKey {
     #[must_use]
     pub fn to_public_key_der(&self) -> Vec<u8> {
         match self {
-            Self::Ed25519(vk) => vk
-                .to_public_key_der()
+            Self::Ed25519(vk) => Ed25519EncodePublicKey::to_public_key_der(vk)
                 .expect("Ed25519 SPKI encoding failed")
                 .to_vec(),
-            Self::MlDsa44 => unimplemented!("ML-DSA-44 DER encoding is not yet implemented"),
+            Self::MlDsa44(vk) => PkcsEncodePublicKey::to_public_key_der(vk)
+                .expect("ML-DSA-44 SPKI encoding failed")
+                .to_vec(),
         }
     }
 }

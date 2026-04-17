@@ -7,8 +7,9 @@
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
 //! Set `IETF_MTC_LOG_NAME` to choose which log shard; defaults to `dev2`.
 //!
-//! `dev2` is preferred because its `landmark_interval_secs: 10` makes the
-//! landmark-dependent `get_certificate` test feasible without a long wait.
+//! `dev1` is configured with an ML-DSA-44 signing key, and `dev2` with an
+//! Ed25519 key. Both have `landmark_interval_secs: 10` so all tests are
+//! feasible under either algorithm.
 //!
 //! # Running
 //!
@@ -177,16 +178,45 @@ async fn ensure_initialized() {
 }
 
 /// Fetch metadata and build an `MtcVerifyingKey` for the log's cosigner.
+///
+/// Dispatches on the SPKI `AlgorithmIdentifier` OID so the same integration test
+/// can run against a log configured with Ed25519 or ML-DSA-44 signing keys.
 async fn fetch_verifying_key(client: &IetfMtcClient) -> (MtcVerifyingKey, TrustAnchorID, TrustAnchorID) {
     use std::str::FromStr;
     let meta = client.get_metadata().await.expect("metadata");
-    // cosigner_public_key is SPKI DER — decode as Ed25519 verifying key.
-    let vk = {
-        use pkcs8::DecodePublicKey;
-        let ed_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
-            .expect("cosigner_public_key must be a valid Ed25519 SPKI");
-        MtcVerifyingKey::Ed25519(ed_vk)
+
+    // `cosigner_public_key` is DER SPKI. Parse the algorithm OID to pick the
+    // correct decoder.
+    let spki: spki::SubjectPublicKeyInfoOwned =
+        spki::SubjectPublicKeyInfoOwned::try_from(meta.cosigner_public_key.as_slice())
+            .expect("cosigner_public_key must be a valid SPKI");
+
+    // RFC 8410 Ed25519.
+    const OID_ED25519: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
+    // FIPS 204 ML-DSA-44.
+    const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
+
+    let vk = match spki.algorithm.oid {
+        OID_ED25519 => {
+            use pkcs8::DecodePublicKey;
+            let ed_vk =
+                ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
+                    .expect("valid Ed25519 SPKI");
+            MtcVerifyingKey::Ed25519(ed_vk)
+        }
+        OID_ML_DSA_44 => {
+            use pkcs8::DecodePublicKey;
+            let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(
+                &meta.cosigner_public_key,
+            )
+            .expect("valid ML-DSA-44 SPKI");
+            MtcVerifyingKey::MlDsa44(vk)
+        }
+        oid => panic!("unsupported cosigner SPKI algorithm OID: {oid}"),
     };
+
     let cosigner_id = TrustAnchorID::from_str(&meta.cosigner_id).expect("cosigner_id");
     let log_id = TrustAnchorID::from_str(&meta.log_id).expect("log_id");
     (vk, cosigner_id, log_id)
@@ -462,16 +492,12 @@ async fn add_entry_appears_in_checkpoint() {
 /// After `add-entry`, `get-certificate` returns a parseable landmark-relative DER
 /// certificate once a landmark has been produced.
 ///
-/// This test uses `dev2` (10s landmark interval) and retries for up to 30s.
-/// It is skipped if `IETF_MTC_LOG_NAME` is set to a log with a longer interval.
+/// Assumes the configured log has a short `landmark_interval_secs` (≤10s);
+/// both `dev1` and `dev2` in `config.dev.json` satisfy this. Retries for up to 30s.
 #[tokio::test]
 async fn get_certificate_returns_valid_cert() {
     ensure_initialized().await;
     let log_name = ietf_mtc_log_name();
-    if log_name != "dev2" {
-        eprintln!("Skipping get_certificate test: IETF_MTC_LOG_NAME={log_name} (not dev2)");
-        return;
-    }
 
     let client = IetfMtcClient::new(&log_name);
     let csr = make_ietf_mtc_csr(&log_name).expect("generating CSR");

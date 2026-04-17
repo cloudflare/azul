@@ -14,7 +14,6 @@ Once a landmark interval elapses, the sequencer produces a landmark subtree and 
 
 ## Known limitations
 
-- ML-DSA signing is not yet implemented.
 - The subtree signing oracle (for external cosigners) is not yet implemented.
 - The ACME interface is not yet complete.
 - ACME order `notBefore`/`notAfter` fields are not currently supported.
