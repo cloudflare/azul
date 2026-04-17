@@ -18,7 +18,10 @@
 //!   MTC certificates (§6.2). The signed-note key ID is derived from the `mtc-subtree/v1`
 //!   context string. For certificate verification, [`ParsedMtcProof::verify_cosignature`]
 //!   verifies the raw signature bytes directly, bypassing the note layer. For the
-//!   `sign-subtree` HTTP endpoint (Appendix C.2), use [`MtcSubtreeNoteVerifier`].
+//!   `sign-subtree` HTTP endpoint (Appendix C.2), use
+//!   [`MtcSubtreeNoteVerifier`][crate::MtcSubtreeNoteVerifier], which lives in the
+//!   [`sign_subtree`][crate::sign_subtree] module alongside the request/response
+//!   parsers.
 //!
 //! # Types
 //!
@@ -29,10 +32,6 @@
 //! - [`MtcCheckpointNoteVerifier`]: [`NoteVerifier`] for checkpoint-scoped signatures.
 //!   Used with [`open_checkpoint`][tlog_tiles::open_checkpoint] to verify the `/checkpoint`
 //!   endpoint.
-//!
-//! - [`MtcSubtreeNoteVerifier`]: [`NoteVerifier`] for arbitrary subtree signatures in the
-//!   Appendix C.1 text note format. Used when verifying responses from the `sign-subtree`
-//!   endpoint (Appendix C.2).
 //!
 //! - [`ParsedMtcProof`]: parses and verifies the `MTCProof` from a certificate's
 //!   `signatureValue`.
@@ -109,7 +108,7 @@ impl MtcSigningKey {
 }
 
 impl MtcVerifyingKey {
-    fn verify(&self, msg: &[u8], sig_bytes: &[u8]) -> bool {
+    pub(crate) fn verify(&self, msg: &[u8], sig_bytes: &[u8]) -> bool {
         match self {
             Self::Ed25519(vk) => {
                 let Ok(sig_arr) = sig_bytes.try_into() else {
@@ -314,113 +313,6 @@ impl NoteVerifier for MtcCheckpointNoteVerifier {
 }
 
 // ---------------------------------------------------------------------------
-// MtcSubtreeNoteVerifier
-// ---------------------------------------------------------------------------
-
-/// Verifier for MTC subtree cosignatures in signed-note format (Appendix C.1/C.2).
-///
-/// Used when verifying subtree notes obtained from the `sign-subtree` endpoint
-/// (Appendix C.2). The key ID is derived from the `mtc-subtree/v1` context string,
-/// distinct from checkpoint cosignatures.
-///
-/// Note: certificates embed the raw signature bytes directly — use
-/// [`ParsedMtcProof::verify_cosignature`] for those, which does not go through
-/// the note machinery.
-///
-/// See <https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-02.html#appendix-C.1>.
-#[derive(Clone)]
-pub struct MtcSubtreeNoteVerifier {
-    cosigner_id: TrustAnchorID,
-    log_id: TrustAnchorID,
-    name: KeyName,
-    id: u32,
-    verifying_key: MtcVerifyingKey,
-}
-
-impl MtcSubtreeNoteVerifier {
-    /// Construct a new subtree note verifier.
-    ///
-    /// # Panics
-    ///
-    /// Will panic if the trust anchor ID cannot be parsed as a valid key name
-    /// according to <https://c2sp.org/signed-note#format>.
-    #[must_use]
-    pub fn new(
-        cosigner_id: TrustAnchorID,
-        log_id: TrustAnchorID,
-        verifying_key: MtcVerifyingKey,
-    ) -> Self {
-        let name = KeyName::new(format!("oid/{ID_RDNA_TRUSTANCHOR_ID}.{log_id}")).unwrap();
-        let id = signed_note::compute_key_id(&name, b"\xffmtc-subtree/v1", &[]);
-        Self {
-            cosigner_id,
-            log_id,
-            name,
-            id,
-            verifying_key,
-        }
-    }
-}
-
-impl NoteVerifier for MtcSubtreeNoteVerifier {
-    fn name(&self) -> &KeyName {
-        &self.name
-    }
-
-    fn key_id(&self) -> u32 {
-        self.id
-    }
-
-    /// Verify a subtree cosignature. The `msg` is the raw subtree note body in the
-    /// Appendix C.1 text format (`<origin>\n<start> <end>\n<base64-hash>\n`); it is
-    /// parsed to extract the subtree parameters, which are then used to reconstruct
-    /// the `MTCSubtreeSignatureInput`.
-    fn verify(&self, msg: &[u8], sig_bytes: &[u8]) -> bool {
-        let Some((start, end, hash)) = parse_subtree_note_body(msg) else {
-            return false;
-        };
-        let msg = serialize_mtc_subtree_signature_input(
-            &self.cosigner_id,
-            &self.log_id,
-            start,
-            end,
-            &hash,
-        );
-        self.verifying_key.verify(&msg, sig_bytes)
-    }
-
-    fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, NoteError> {
-        Ok(None)
-    }
-}
-
-/// Parse a subtree note body in the Appendix C.1 text format:
-/// ```text
-/// <origin>\n<start> <end>\n<base64-hash>\n
-/// ```
-/// Returns `(start, end, hash)` on success, or `None` if the format is invalid.
-fn parse_subtree_note_body(msg: &[u8]) -> Option<(LeafIndex, LeafIndex, Hash)> {
-    let text = std::str::from_utf8(msg).ok()?;
-    let mut lines = text.splitn(4, '\n');
-    let _origin = lines.next()?; // origin line — not validated here
-    let range_line = lines.next()?;
-    let hash_line = lines.next()?;
-
-    let mut parts = range_line.splitn(2, ' ');
-    let start: LeafIndex = parts.next()?.parse().ok()?;
-    let end: LeafIndex = parts.next()?.parse().ok()?;
-
-    let hash_bytes = base64_decode_standard(hash_line)?;
-    let hash_arr: [u8; 32] = hash_bytes.try_into().ok()?;
-    Some((start, end, Hash(hash_arr)))
-}
-
-fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.decode(s).ok()
-}
-
-// ---------------------------------------------------------------------------
 // MTCSubtreeSignatureInput serialization
 // ---------------------------------------------------------------------------
 
@@ -450,7 +342,7 @@ fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
 /// # Panics
 ///
 /// Panics if writing to an internal buffer fails, which should never happen.
-fn serialize_mtc_subtree_signature_input(
+pub(crate) fn serialize_mtc_subtree_signature_input(
     cosigner_id: &TrustAnchorID,
     log_id: &TrustAnchorID,
     start: LeafIndex,

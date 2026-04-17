@@ -4,9 +4,11 @@
 mod cosigner;
 mod landmark;
 mod relative_oid;
+pub mod sign_subtree;
 pub use cosigner::*;
 pub use landmark::*;
 pub use relative_oid::*;
+pub use sign_subtree::MtcSubtreeNoteVerifier;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{
