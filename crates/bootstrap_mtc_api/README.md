@@ -22,6 +22,9 @@ This crate implements the bootstrap-specific protocol layer on top of the shared
 - **Cosigner** — Ed25519-based subtree cosigning over the `mtc-subtree/v1` note
   format.
 
+For the current IETF draft implementation, see
+[`ietf_mtc_api`](../ietf_mtc_api/).
+
 ## License
 
 The project is licensed under the [BSD-3-Clause License](./LICENSE).
