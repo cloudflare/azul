@@ -1,10 +1,6 @@
-# bootstrap_mtc_api
+# ietf_mtc_api
 
-This directory contains archived source from the Bootstrap MTC experiment. The
-crate is excluded from the workspace and is no longer maintained or buildable
-from this repository.
-
-Core types and logic for the [Bootstrap MTC CA](../bootstrap_mtc_worker/README.md).
+Core types and logic for the [IETF MTC CA](../ietf_mtc_worker/README.md).
 
 This crate implements the bootstrap-specific protocol layer on top of the shared
 [`tlog_tiles`](../tlog_tiles/) infrastructure:
@@ -16,14 +12,14 @@ This crate implements the bootstrap-specific protocol layer on top of the shared
   (approximately draft-davidben-tls-merkle-tree-certs-09).
 - **`serialize_signatureless_cert`** — constructs the signatureless MTC
   certificate from a sequenced log entry, an inclusion proof, and the subscriber's
-  SPKI.
+  SPKI. (The IETF draft renamed these to "landmark-relative" certificates.)
 - **Landmark sequence** — tracks the active landmark subtrees and their Merkle
   roots for inclusion proof generation.
 - **Cosigner** — Ed25519-based subtree cosigning over the `mtc-subtree/v1` note
   format.
 
-For the current IETF draft implementation, see
-[`ietf_mtc_api`](../ietf_mtc_api/).
+This crate is intentionally frozen at the bootstrap protocol version and will not
+be updated to track the IETF draft.
 
 ## License
 

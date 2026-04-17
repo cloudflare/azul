@@ -1,0 +1,74 @@
+[package]
+name = "ietf_mtc_worker"
+publish = false
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of a Merkle Tree Certificates CA on Cloudflare Workers"
+categories = ["cryptography"]
+keywords = ["certificate", "transparency", "crypto", "pki"]
+
+[features]
+dev-bootstrap-roots = []
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1351
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+chrono.workspace = true
+config = { path = "./config", package = "ietf_mtc_worker_config" }
+generic_log_worker.workspace = true
+jsonschema.workspace = true
+ietf_mtc_api.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+url.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+itertools.workspace = true
+parking_lot.workspace = true
+futures-executor.workspace = true
+
+[dependencies]
+base64.workspace = true
+base64ct.workspace = true
+chrono.workspace = true
+config = { path = "./config", package = "ietf_mtc_worker_config" }
+csv.workspace = true
+der.workspace = true
+generic_log_worker.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+log.workspace = true
+p256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+signed_note.workspace = true
+tlog_tiles.workspace = true
+worker.workspace = true
+x509-cert.workspace = true
+x509_util.workspace = true
+ietf_mtc_api.workspace = true
+sct_validator.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(wasm_bindgen_unstable_test_coverage)',
+] }
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]
