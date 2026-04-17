@@ -4,9 +4,11 @@
 mod cosigner;
 mod landmark;
 mod relative_oid;
+pub mod sign_subtree;
 pub use cosigner::*;
 pub use landmark::*;
 pub use relative_oid::*;
+pub use sign_subtree::MtcSubtreeNoteVerifier;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{
@@ -866,7 +868,7 @@ mod tests {
         OctetString::new(vec![0x42u8; 32]).unwrap()
     }
 
-    /// Build an RSA-SHA256-style AlgorithmIdentifier for use as a placeholder
+    /// Build an RSA-SHA256-style `AlgorithmIdentifier` for use as a placeholder
     /// `subject_public_key_info_algorithm`.
     fn dummy_spki_algorithm() -> AlgorithmIdentifierOwned {
         AlgorithmIdentifierOwned {

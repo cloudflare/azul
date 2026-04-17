@@ -24,6 +24,7 @@ serde_with.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
 thiserror.workspace = true
+tlog_subtree_signature.workspace = true
 tlog_tiles.workspace = true
 x509-cert = { workspace = true, features = ["builder"] }
 x509_util.workspace = true

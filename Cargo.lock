@@ -1450,6 +1450,7 @@ dependencies = [
  "signature",
  "signed_note",
  "thiserror 2.0.17",
+ "tlog_subtree_signature",
  "tlog_tiles",
  "x509-cert",
  "x509_util",
