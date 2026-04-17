@@ -11,7 +11,7 @@ use signed_note::KeyName;
 use static_ct_api::StaticCTCheckpointSigner;
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, SequenceMetadata};
+use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
 use worker::{Env, Result};
 use x509_util::CertPool;
 
@@ -19,7 +19,10 @@ mod batcher_do;
 mod ccadb_roots_cron;
 mod cleaner_do;
 mod frontend_worker;
+mod sequence_metadata;
 mod sequencer_do;
+
+pub(crate) use sequence_metadata::StaticCTSequenceMetadata;
 
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {

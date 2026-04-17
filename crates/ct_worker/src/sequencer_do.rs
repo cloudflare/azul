@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::{load_checkpoint_signers, load_origin, CONFIG};
+use crate::{load_checkpoint_signers, load_origin, StaticCTSequenceMetadata, CONFIG};
 use generic_log_worker::{
     empty_checkpoint_callback, get_durable_object_name, GenericSequencer, SequencerConfig,
     SEQUENCER_BINDING,
@@ -15,7 +15,7 @@ use static_ct_api::StaticCTLogEntry;
 use worker::*;
 
 #[durable_object(alarm)]
-struct Sequencer(GenericSequencer<StaticCTLogEntry>);
+struct Sequencer(GenericSequencer<StaticCTLogEntry, StaticCTSequenceMetadata>);
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {

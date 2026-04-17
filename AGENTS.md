@@ -87,5 +87,6 @@ If any step fails, fix the issue in the commit it belongs to (use `git commit --
 
 ✅ **Always:** Add new shared dependencies to `[workspace.dependencies]` in root `Cargo.toml`. Do not add a dependency to a crate's `Cargo.toml` before you actually use it — `cargo machete` will flag speculative additions.
 
+✅ **Always:** Keep Workers-specific concerns (Durable Object storage formats, KV dedup cache, Worker runtime dependencies) out of the specification-level crates (`tlog_tiles`, `static_ct_api`, `bootstrap_mtc_api`, `signed_note`). Those crates implement public specs and are published to crates.io; they should not gain types, traits, or dependencies whose only consumers are Cloudflare Workers. Wire-format types used only by the sequencer and frontend belong in `generic_log_worker` or the concrete worker crate.
 ⚠️ **Requires Approval:** Publishing crates to crates.io (`tlog_tiles`, `static_ct_api`, `signed_note`, `signed_note`) — worker crates have `publish = false`
 

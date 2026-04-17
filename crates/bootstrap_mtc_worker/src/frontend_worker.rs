@@ -3,7 +3,7 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{load_checkpoint_cosigner, load_origin, load_roots, SequenceMetadata, CONFIG};
+use crate::{load_checkpoint_cosigner, load_origin, load_roots, BootstrapMtcSequenceMetadata, CONFIG};
 use der::{
     asn1::{UtcTime, Utf8StringRef},
     Any, Encode, Tag,
@@ -447,10 +447,10 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         // Return the response from the sequencing directly to the client.
         return Ok(response);
     }
-    let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
+    let metadata = deserialize::<BootstrapMtcSequenceMetadata>(&response.bytes().await?)?;
     Response::from_json(&AddEntryResponse {
-        leaf_index: metadata.0,
-        timestamp: metadata.1,
+        leaf_index: metadata.leaf_index(),
+        timestamp: metadata.timestamp(),
         not_before: validity.not_before.to_unix_duration().as_secs(),
         not_after: validity.not_after.to_unix_duration().as_secs(),
     })

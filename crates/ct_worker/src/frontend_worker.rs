@@ -3,7 +3,7 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{load_roots, load_signing_key, SequenceMetadata, CONFIG};
+use crate::{load_roots, load_signing_key, StaticCTSequenceMetadata, CONFIG};
 use config::TemporalInterval;
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
@@ -234,12 +234,18 @@ async fn add_chain_or_pre_chain(
 
     // Check if entry is cached and return right away if so.
     if params.enable_dedup {
-        if let Some(metadata) =
-            get_cached_metadata::<SequenceMetadata>(&load_cache_kv(env, name)?, &lookup_key)
-                .await?
+        if let Some(metadata) = get_cached_metadata::<StaticCTSequenceMetadata>(
+            &load_cache_kv(env, name)?,
+            &lookup_key,
+        )
+        .await?
         {
             log::debug!("{name}: Entry is cached");
-            let entry = StaticCTLogEntry::new(pending_entry, metadata.0, metadata.1);
+            let entry = StaticCTLogEntry::new(
+                pending_entry,
+                metadata.leaf_index(),
+                metadata.timestamp(),
+            );
             let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
                 .map_err(|e| e.to_string())?;
             return Response::from_json(&sct);
@@ -302,7 +308,7 @@ async fn add_chain_or_pre_chain(
         // Return the response from the sequencing directly to the client.
         return Ok(response);
     }
-    let metadata = deserialize::<SequenceMetadata>(&response.bytes().await?)?;
+    let metadata = deserialize::<StaticCTSequenceMetadata>(&response.bytes().await?)?;
     if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
@@ -315,8 +321,8 @@ async fn add_chain_or_pre_chain(
     }
     let entry = StaticCTLogEntry {
         inner: pending_entry,
-        leaf_index: metadata.0,
-        timestamp: metadata.1,
+        leaf_index: metadata.leaf_index(),
+        timestamp: metadata.timestamp(),
     };
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
