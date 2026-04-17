@@ -257,6 +257,64 @@ pub fn make_bootstrap_mtc_chain(log_name: &str) -> Result<BootstrapMtcChain> {
 }
 
 // ---------------------------------------------------------------------------
+// IETF MTC fixtures
+// ---------------------------------------------------------------------------
+
+// NOTE: compile-time dependency on ietf_mtc_worker/config.dev.json. If that file is
+// moved or renamed, the error will surface here rather than in ietf_mtc_worker.
+const IETF_MTC_DEV_CONFIG_JSON: &str = include_str!("../../ietf_mtc_worker/config.dev.json");
+
+/// A PKCS#10 CSR generated for a specific IETF MTC log shard.
+pub struct IetfMtcCsr {
+    /// DER-encoded PKCS#10 CSR.
+    pub csr_der: Vec<u8>,
+    /// DER-encoded `SubjectPublicKeyInfo` of the key in the CSR, for use with
+    /// `POST /get-certificate`.
+    pub spki_der: Vec<u8>,
+}
+
+/// Generate a PKCS#10 CSR suitable for `POST /logs/:log/add-entry` on the
+/// IETF MTC worker.
+///
+/// The CSR key is a fresh P-256 key pair.  The subject is a simple test DN.
+/// A `subjectAltName` extension with one DNS name is included.
+pub fn make_ietf_mtc_csr(log_name: &str) -> Result<IetfMtcCsr> {
+    use x509_cert::builder::{Builder, RequestBuilder};
+
+    // Validate the log name exists in the dev config (catches misconfiguration early).
+    let config: MtcDevConfig = serde_json::from_str(IETF_MTC_DEV_CONFIG_JSON)
+        .context("parsing ietf_mtc_worker config.dev.json")?;
+    config.logs.get(log_name).with_context(|| {
+        format!("log '{log_name}' not found in ietf_mtc_worker config.dev.json")
+    })?;
+
+    let leaf_key = SigningKey::generate_from_rng(&mut rand::rng());
+    let leaf_spki = SubjectPublicKeyInfoOwned::from_key(leaf_key.verifying_key())
+        .context("encoding leaf SPKI")?;
+    let spki_der = leaf_spki.to_der().context("encoding leaf SPKI to DER")?;
+
+    let subject = Name::from_str("CN=integration-test.example.com,O=Test,C=US")
+        .context("building subject name")?;
+
+    let mut builder = RequestBuilder::new(subject).context("creating RequestBuilder")?;
+
+    // Add a subjectAltName extension.
+    let san = x509_cert::ext::pkix::SubjectAltName(vec![
+        x509_cert::ext::pkix::name::GeneralName::DnsName(
+            der::asn1::Ia5String::new("integration-test.example.com").context("building SAN")?,
+        ),
+    ]);
+    builder.add_extension(&san).context("adding SAN")?;
+
+    let csr = builder
+        .build::<_, p256::ecdsa::DerSignature>(&leaf_key)
+        .context("building CSR")?;
+    let csr_der = csr.to_der().context("encoding CSR to DER")?;
+
+    Ok(IetfMtcCsr { csr_der, spki_der })
+}
+
+// ---------------------------------------------------------------------------
 // Certificate construction
 // ---------------------------------------------------------------------------
 

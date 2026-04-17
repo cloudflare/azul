@@ -1,10 +1,9 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! Integration tests for the MTC API (`ietf_mtc_worker`).
+//! Integration tests for the IETF MTC API (`ietf_mtc_worker`).
 //!
-//! These tests require a running `wrangler dev` instance built with the
-//! `dev-bootstrap-roots` feature (already configured in `wrangler.jsonc`).
+//! These tests require a running `wrangler dev` instance.
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
 //! Set `IETF_MTC_LOG_NAME` to choose which log shard; defaults to `dev2`.
 //!
@@ -24,8 +23,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use integration_tests::{
-    client::BootstrapMtcClient,
-    fixtures::{garbage_chain, make_bootstrap_mtc_chain},
+    client::{IetfMtcClient, ietf_mtc_log_name},
+    fixtures::make_ietf_mtc_csr,
 };
 use tokio::sync::OnceCell;
 use x509_cert::{der::Decode, Certificate};
@@ -47,8 +46,8 @@ fn now_millis() -> u64 {
 // Initialization guard
 // ---------------------------------------------------------------------------
 
-/// Ensures the MTC worker is fully live and has sequenced at least one entry
-/// before any test that depends on sequencer state runs.
+/// Ensures the IETF MTC worker is fully live and has sequenced at least one
+/// entry before any test that depends on sequencer state runs.
 static INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
 async fn ensure_initialized() {
@@ -57,29 +56,12 @@ async fn ensure_initialized() {
             const MAX_ATTEMPTS: u32 = 30;
             const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-            let log_name = integration_tests::client::bootstrap_mtc_log_name();
-            let client = BootstrapMtcClient::new(&log_name);
-            let mtc_chain = make_bootstrap_mtc_chain(&log_name).expect("make_bootstrap_mtc_chain for warmup");
-
-            // Wait until get-roots succeeds before attempting add-entry.
-            // get-roots triggers the CCADB fetch that populates the ROOTS
-            // OnceCell.  If add-entry races with that fetch in-flight from
-            // another request, the Workers runtime cancels it with a 500.
-            let mut roots_ready = false;
-            for _ in 0..MAX_ATTEMPTS {
-                match client.get_roots().await {
-                    Ok(_) => { roots_ready = true; break; }
-                    Err(_) => tokio::time::sleep(RETRY_DELAY).await,
-                }
-            }
-            if !roots_ready {
-                panic!("ietf_mtc_worker get-roots never succeeded after {MAX_ATTEMPTS}s");
-            }
+            let log_name = ietf_mtc_log_name();
+            let client = IetfMtcClient::new(&log_name);
+            let csr = make_ietf_mtc_csr(&log_name).expect("make_ietf_mtc_csr for warmup");
 
             for attempt in 0..MAX_ATTEMPTS {
-                // Submit an entry to trigger full initialization (DO startup,
-                // sequencer first run).  Treat any non-200 as "not yet ready".
-                match client.add_entry(mtc_chain.chain.clone()).await {
+                match client.add_entry(csr.csr_der.clone()).await {
                     Ok((200, _)) => return,
                     Ok((status, _)) => {
                         eprintln!(
@@ -96,7 +78,6 @@ async fn ensure_initialized() {
                         );
                     }
                 }
-
                 tokio::time::sleep(RETRY_DELAY).await;
             }
 
@@ -109,28 +90,10 @@ async fn ensure_initialized() {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// `GET /logs/:log/get-roots` returns 200 with a non-empty list of valid
-/// DER-encoded X.509 certificates.
-#[tokio::test]
-async fn get_roots_returns_valid_certs() {
-    let client = BootstrapMtcClient::default_log();
-    let roots = client.get_roots().await.expect("get-roots failed");
-
-    assert!(
-        !roots.certificates.is_empty(),
-        "expected at least one root certificate"
-    );
-
-    for (i, cert_der) in roots.certificates.iter().enumerate() {
-        Certificate::from_der(cert_der)
-            .unwrap_or_else(|e| panic!("certificate[{i}] is not valid DER: {e}"));
-    }
-}
-
 /// `GET /logs/:log/metadata` returns 200 with all required fields.
 #[tokio::test]
 async fn metadata_returns_valid_fields() {
-    let client = BootstrapMtcClient::default_log();
+    let client = IetfMtcClient::default_log();
     let meta = client.get_metadata().await.expect("metadata failed");
 
     // log_id and cosigner_id are dotted-decimal relative OIDs.
@@ -161,23 +124,22 @@ async fn metadata_returns_valid_fields() {
             .expect("already checked 32 bytes"),
     )
     .expect("cosigner_public_key must be a valid Ed25519 public key");
-
     assert!(
         !meta.submission_url.is_empty(),
         "submission_url must be non-empty"
     );
 }
 
-/// `POST /logs/:log/add-entry` with a valid bootstrap chain returns 200 with
-/// a structurally valid `IetfMtcAddEntryResponse`.
+/// `POST /logs/:log/add-entry` with a valid CSR returns 200 with a
+/// structurally valid response.
 #[tokio::test]
 async fn add_entry_returns_valid_response() {
     ensure_initialized().await;
-    let client = BootstrapMtcClient::default_log();
-    let mtc_chain = make_bootstrap_mtc_chain(&client.log).expect("generating MTC chain");
+    let client = IetfMtcClient::default_log();
+    let csr = make_ietf_mtc_csr(&client.log).expect("generating CSR");
 
     let (status, resp) = client
-        .add_entry(mtc_chain.chain)
+        .add_entry(csr.csr_der)
         .await
         .expect("add-entry request");
     assert_eq!(status, 200, "expected 200 from add-entry");
@@ -199,24 +161,24 @@ async fn add_entry_returns_valid_response() {
     );
 }
 
-/// `POST` with a garbage chain returns 400.
+/// `POST` with garbage bytes (not a valid CSR) returns 400.
 #[tokio::test]
-async fn add_entry_with_garbage_chain_returns_400() {
+async fn add_entry_with_invalid_csr_returns_400() {
     ensure_initialized().await;
-    let client = BootstrapMtcClient::default_log();
+    let client = IetfMtcClient::default_log();
     let (status, _) = client
-        .add_entry(garbage_chain())
+        .add_entry(b"this is not a valid CSR".to_vec())
         .await
         .expect("add-entry request");
-    assert_eq!(status, 400, "expected 400 for garbage chain");
+    assert_eq!(status, 400, "expected 400 for invalid CSR");
 }
 
 /// Requesting an unknown log name returns 400.
 #[tokio::test]
 async fn unknown_log_returns_400() {
-    let client = BootstrapMtcClient::new("this-log-does-not-exist");
+    let client = IetfMtcClient::new("this-log-does-not-exist");
     let status = client
-        .get_status("get-roots")
+        .get_status("metadata")
         .await
         .expect("GET request");
     assert_eq!(status, 400, "expected 400 for unknown log");
@@ -226,11 +188,11 @@ async fn unknown_log_returns_400() {
 #[tokio::test]
 async fn add_entry_appears_in_checkpoint() {
     ensure_initialized().await;
-    let client = BootstrapMtcClient::default_log();
-    let mtc_chain = make_bootstrap_mtc_chain(&client.log).expect("generating MTC chain");
+    let client = IetfMtcClient::default_log();
+    let csr = make_ietf_mtc_csr(&client.log).expect("generating CSR");
 
     let (status, resp) = client
-        .add_entry(mtc_chain.chain)
+        .add_entry(csr.csr_der)
         .await
         .expect("add-entry request");
     assert_eq!(status, 200, "expected 200 from add-entry");
@@ -268,7 +230,7 @@ async fn add_entry_appears_in_checkpoint() {
     );
 }
 
-/// After `add-entry`, `get-certificate` returns a parseable signatureless DER
+/// After `add-entry`, `get-certificate` returns a parseable landmark-relative DER
 /// certificate once a landmark has been produced.
 ///
 /// This test uses `dev2` (10s landmark interval) and retries for up to 30s.
@@ -276,20 +238,18 @@ async fn add_entry_appears_in_checkpoint() {
 #[tokio::test]
 async fn get_certificate_returns_valid_cert() {
     ensure_initialized().await;
-    // This test only makes sense against a fast-landmark shard (dev2).
-    // If someone overrides to a slow shard, skip rather than timeout.
-    let log_name = integration_tests::client::bootstrap_mtc_log_name();
+    let log_name = ietf_mtc_log_name();
     if log_name != "dev2" {
         eprintln!("Skipping get_certificate test: IETF_MTC_LOG_NAME={log_name} (not dev2)");
         return;
     }
 
-    let client = BootstrapMtcClient::new(&log_name);
-    let mtc_chain = make_bootstrap_mtc_chain(&log_name).expect("generating MTC chain");
-    let leaf_spki_der = mtc_chain.leaf_spki_der.clone();
+    let client = IetfMtcClient::new(&log_name);
+    let csr = make_ietf_mtc_csr(&log_name).expect("generating CSR");
+    let spki_der = csr.spki_der.clone();
 
     let (status, resp) = client
-        .add_entry(mtc_chain.chain)
+        .add_entry(csr.csr_der)
         .await
         .expect("add-entry request");
     assert_eq!(status, 200, "expected 200 from add-entry");
@@ -305,14 +265,14 @@ async fn get_certificate_returns_valid_cert() {
     let mut last_status = 0u16;
     for attempt in 0..MAX_RETRIES {
         let (s, cert_resp) = client
-            .get_certificate(leaf_index, leaf_spki_der.clone())
+            .get_certificate(leaf_index, spki_der.clone())
             .await
             .expect("get-certificate request");
         last_status = s;
         if s == 200 {
             let cert_resp = cert_resp.unwrap();
 
-            // The returned data must be parseable DER (signatureless X.509).
+            // The returned data must be parseable DER (landmark-relative X.509).
             Certificate::from_der(&cert_resp.data)
                 .expect("get-certificate returned invalid DER");
 
