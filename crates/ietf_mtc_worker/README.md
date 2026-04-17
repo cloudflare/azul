@@ -14,7 +14,6 @@ Once a landmark interval elapses, the sequencer produces a landmark subtree and 
 
 ## Known limitations
 
-- Standalone certificates (with cosignatures in the `signatures` field) are not yet implemented.
 - ML-DSA signing is not yet implemented.
 - The subtree signing oracle (for external cosigners) is not yet implemented.
 - The ACME interface is not yet complete.
