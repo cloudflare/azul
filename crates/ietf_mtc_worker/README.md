@@ -1,8 +1,8 @@
-# Bootstrap MTC CA Worker
+# IETF MTC CA Worker
 
-A Rust implementation of a [Bootstrap MTC CA](https://blog.cloudflare.com/bootstrap-mtc) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
+A Rust implementation of a [IETF MTC CA](https://blog.cloudflare.com/ietf-mtc) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
 
-This worker implements an experimental Merkle Tree Certificates CA based on the bootstrap experiment described in the Cloudflare blog post above. It implements an older version of the MTC specification (approximately draft-davidben-tls-merkle-tree-certs-09). For the current IETF draft implementation, see [`ietf_mtc_api`](../ietf_mtc_api/).
+This worker implements an experimental Merkle Tree Certificates CA based on the bootstrap experiment described in the Cloudflare blog post above. It implements an older version of the MTC specification (approximately draft-davidben-tls-merkle-tree-certs-09).
 
 The internal log architecture (Sequencer, Batcher, Cleaner Durable Objects, tiled R2 storage) is shared with the [Static CT Log](../ct_worker/README.md).
 
@@ -46,7 +46,7 @@ To test with your own root certificates:
 ### Integration tests
 
 ```bash
-BASE_URL=http://localhost:8787 BOOTSTRAP_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test bootstrap_mtc_api
+BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
 ```
 
 ## Deployment

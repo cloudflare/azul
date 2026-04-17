@@ -1,6 +1,6 @@
-# bootstrap_mtc_api
+# ietf_mtc_api
 
-Core types and logic for the [Bootstrap MTC CA](../bootstrap_mtc_worker/README.md).
+Core types and logic for the [IETF MTC CA](../ietf_mtc_worker/README.md).
 
 This crate implements the bootstrap-specific protocol layer on top of the shared
 [`tlog_tiles`](../tlog_tiles/) infrastructure:
@@ -19,8 +19,7 @@ This crate implements the bootstrap-specific protocol layer on top of the shared
   format.
 
 This crate is intentionally frozen at the bootstrap protocol version and will not
-be updated to track the IETF draft. For the current IETF draft implementation,
-see [`ietf_mtc_api`](../ietf_mtc_api/).
+be updated to track the IETF draft.
 
 ## License
 
