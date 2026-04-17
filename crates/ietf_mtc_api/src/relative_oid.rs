@@ -4,7 +4,7 @@ use std::str::FromStr;
 /// ASN.1 `RELATIVE OID`.
 ///
 /// TODO upstream this to the `der` crate.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RelativeOid {
     ber: Vec<u8>,
     arcs: Vec<u32>,
@@ -34,6 +34,37 @@ impl RelativeOid {
         Ok(Self {
             ber,
             arcs: arcs.to_vec(),
+        })
+    }
+
+    /// Decode a `RelativeOid` from its BER-encoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes are not valid BER for a relative OID.
+    pub fn from_ber_bytes(ber: &[u8]) -> Result<Self, MtcError> {
+        let mut arcs = Vec::new();
+        let mut i = 0;
+        while i < ber.len() {
+            let mut arc: u32 = 0;
+            loop {
+                let b = *ber
+                    .get(i)
+                    .ok_or_else(|| MtcError::Dynamic("truncated OID arc".into()))?;
+                i += 1;
+                arc = arc
+                    .checked_shl(7)
+                    .ok_or_else(|| MtcError::Dynamic("OID arc overflow".into()))?
+                    | u32::from(b & 0x7f);
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            arcs.push(arc);
+        }
+        Ok(Self {
+            ber: ber.to_vec(),
+            arcs,
         })
     }
 
