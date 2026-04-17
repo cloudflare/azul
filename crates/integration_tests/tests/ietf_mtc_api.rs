@@ -7,8 +7,9 @@
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
 //! Set `IETF_MTC_LOG_NAME` to choose which log shard; defaults to `dev2`.
 //!
-//! `dev2` is preferred because its `landmark_interval_secs: 10` makes the
-//! landmark-dependent `get_certificate` test feasible without a long wait.
+//! `dev1` is configured with an ML-DSA-44 signing key, and `dev2` with an
+//! Ed25519 key. Both have `landmark_interval_secs: 10` so all tests are
+//! feasible under either algorithm.
 //!
 //! # Running
 //!
@@ -24,11 +25,11 @@ use std::time::Duration;
 
 use ietf_mtc_api::{MtcVerifyingKey, ParsedMtcProof, TrustAnchorID};
 use integration_tests::{
-    client::{IetfMtcClient, ietf_mtc_log_name},
+    client::{ietf_mtc_log_name, IetfMtcClient},
     fixtures::make_ietf_mtc_csr,
 };
-use tokio::sync::OnceCell;
 use tlog_tiles::{evaluate_subtree_inclusion_proof, record_hash, Hash, Subtree};
+use tokio::sync::OnceCell;
 use x509_cert::{der::Decode, Certificate};
 
 /// OID for the MTC proof algorithm (id-alg-mtcproof).
@@ -177,16 +178,46 @@ async fn ensure_initialized() {
 }
 
 /// Fetch metadata and build an `MtcVerifyingKey` for the log's cosigner.
-async fn fetch_verifying_key(client: &IetfMtcClient) -> (MtcVerifyingKey, TrustAnchorID, TrustAnchorID) {
+///
+/// Dispatches on the SPKI `AlgorithmIdentifier` OID so the same integration test
+/// can run against a log configured with Ed25519 or ML-DSA-44 signing keys.
+async fn fetch_verifying_key(
+    client: &IetfMtcClient,
+) -> (MtcVerifyingKey, TrustAnchorID, TrustAnchorID) {
     use std::str::FromStr;
+    // RFC 8410 Ed25519.
+    const OID_ED25519: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
+    // FIPS 204 ML-DSA-44.
+    const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
+
     let meta = client.get_metadata().await.expect("metadata");
-    // cosigner_public_key is SPKI DER — decode as Ed25519 verifying key.
-    let vk = {
-        use pkcs8::DecodePublicKey;
-        let ed_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
-            .expect("cosigner_public_key must be a valid Ed25519 SPKI");
-        MtcVerifyingKey::Ed25519(ed_vk)
+
+    // `cosigner_public_key` is DER SPKI. Parse the algorithm OID to pick the
+    // correct decoder.
+    let spki: spki::SubjectPublicKeyInfoOwned =
+        spki::SubjectPublicKeyInfoOwned::try_from(meta.cosigner_public_key.as_slice())
+            .expect("cosigner_public_key must be a valid SPKI");
+
+    let vk = match spki.algorithm.oid {
+        OID_ED25519 => {
+            use pkcs8::DecodePublicKey;
+            let ed_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
+                .expect("valid Ed25519 SPKI");
+            MtcVerifyingKey::Ed25519(ed_vk)
+        }
+        OID_ML_DSA_44 => {
+            use pkcs8::DecodePublicKey;
+            let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(
+                &meta.cosigner_public_key,
+            )
+            .expect("valid ML-DSA-44 SPKI");
+            MtcVerifyingKey::MlDsa44(vk)
+        }
+        oid => panic!("unsupported cosigner SPKI algorithm OID: {oid}"),
     };
+
     let cosigner_id = TrustAnchorID::from_str(&meta.cosigner_id).expect("cosigner_id");
     let log_id = TrustAnchorID::from_str(&meta.log_id).expect("log_id");
     (vk, cosigner_id, log_id)
@@ -202,7 +233,7 @@ async fn fetch_verifying_key(client: &IetfMtcClient) -> (MtcVerifyingKey, TrustA
 /// 6. Evaluate the inclusion proof to get `expected_subtree_hash` (§4.3.2).
 /// 7. No trusted subtree predistributed in test — proceed to step 8.
 /// 8. Verify cosignatures satisfy relying party requirements (≥1 valid cosignature).
-async fn verify_standalone_cert(
+fn verify_standalone_cert(
     _client: &IetfMtcClient,
     cert: &Certificate,
     leaf_index: u64,
@@ -212,8 +243,8 @@ async fn verify_standalone_cert(
 ) {
     // §7.2 step 2: decode signatureValue as MTCProof.
     let proof_bytes = extract_mtc_proof_bytes(cert);
-    let proof = ParsedMtcProof::from_bytes(&proof_bytes)
-        .expect("MTCProof must parse from signatureValue");
+    let proof =
+        ParsedMtcProof::from_bytes(&proof_bytes).expect("MTCProof must parse from signatureValue");
 
     // §7.2 step 8: standalone certs must carry cosignatures.
     assert!(
@@ -221,8 +252,8 @@ async fn verify_standalone_cert(
         "standalone cert must have at least one cosignature (§7.2 step 8)"
     );
 
-    let subtree = Subtree::new(proof.start, proof.end)
-        .expect("MTCProof subtree interval must be valid");
+    let subtree =
+        Subtree::new(proof.start, proof.end).expect("MTCProof subtree interval must be valid");
     assert!(
         subtree.lo() <= leaf_index && leaf_index < subtree.hi(),
         "leaf_index {leaf_index} must be within subtree [{}, {})",
@@ -234,13 +265,9 @@ async fn verify_standalone_cert(
     let entry_hash = compute_entry_hash(cert, leaf_index);
 
     // §7.2 step 6: evaluate the inclusion proof to get expected_subtree_hash (§4.3.2).
-    let expected_subtree_hash = evaluate_subtree_inclusion_proof(
-        &proof.inclusion_proof,
-        &subtree,
-        leaf_index,
-        entry_hash,
-    )
-    .expect("inclusion proof evaluation must succeed");
+    let expected_subtree_hash =
+        evaluate_subtree_inclusion_proof(&proof.inclusion_proof, &subtree, leaf_index, entry_hash)
+            .expect("inclusion proof evaluation must succeed");
 
     // §7.2 step 8: verify cosignatures against expected_subtree_hash.
     proof
@@ -271,8 +298,8 @@ async fn verify_landmark_relative_cert(
 ) {
     // §7.2 step 2: decode signatureValue as MTCProof.
     let proof_bytes = extract_mtc_proof_bytes(cert);
-    let proof = ParsedMtcProof::from_bytes(&proof_bytes)
-        .expect("MTCProof must parse from signatureValue");
+    let proof =
+        ParsedMtcProof::from_bytes(&proof_bytes).expect("MTCProof must parse from signatureValue");
 
     // §6.3 / §7.2 step 7: landmark-relative certs carry no inline cosignatures.
     assert!(
@@ -280,20 +307,16 @@ async fn verify_landmark_relative_cert(
         "landmark-relative cert must have no inline cosignatures (§6.3)"
     );
 
-    let subtree = Subtree::new(proof.start, proof.end)
-        .expect("MTCProof subtree interval must be valid");
+    let subtree =
+        Subtree::new(proof.start, proof.end).expect("MTCProof subtree interval must be valid");
 
     // §7.2 steps 4-5: compute entry_hash.
     let entry_hash = compute_entry_hash(cert, leaf_index);
 
     // §7.2 step 6: evaluate the inclusion proof (§4.3.2).
-    let expected_subtree_hash = evaluate_subtree_inclusion_proof(
-        &proof.inclusion_proof,
-        &subtree,
-        leaf_index,
-        entry_hash,
-    )
-    .expect("inclusion proof evaluation must succeed");
+    let expected_subtree_hash =
+        evaluate_subtree_inclusion_proof(&proof.inclusion_proof, &subtree, leaf_index, entry_hash)
+            .expect("inclusion proof evaluation must succeed");
 
     // §7.2 step 7: compare against the trusted subtree hash.
     // In production, this hash is predistributed.  In the test, we fetch it
@@ -303,7 +326,10 @@ async fn verify_landmark_relative_cert(
         .await
         .expect("get_signed_subtree request")
         .unwrap_or_else(|| {
-            panic!("SignedSubtree not found for [{}, {})", proof.start, proof.end)
+            panic!(
+                "SignedSubtree not found for [{}, {})",
+                proof.start, proof.end
+            )
         });
     let trusted_subtree_hash = Hash(signed.hash);
     assert_eq!(
@@ -313,9 +339,8 @@ async fn verify_landmark_relative_cert(
 
     // Additionally verify the CA's cosignature over the trusted hash,
     // confirming the predistributed value is authentic.
-    use std::str::FromStr;
-    let signed_cosigner_id =
-        TrustAnchorID::from_str(&signed.cosigner_id).expect("valid cosigner_id in SignedSubtree");
+    let signed_cosigner_id = <TrustAnchorID as std::str::FromStr>::from_str(&signed.cosigner_id)
+        .expect("valid cosigner_id in SignedSubtree");
     let r2_proof = ParsedMtcProof {
         start: signed.lo,
         end: signed.hi,
@@ -346,24 +371,27 @@ async fn metadata_returns_valid_fields() {
         "log_id must be a dotted-decimal OID, got: {}",
         meta.log_id
     );
-    assert!(!meta.cosigner_id.is_empty(), "cosigner_id must be non-empty");
+    assert!(
+        !meta.cosigner_id.is_empty(),
+        "cosigner_id must be non-empty"
+    );
     // cosigner_public_key is a DER-encoded SubjectPublicKeyInfo. The algorithm
     // identifier is included so clients can determine the signing algorithm.
     assert!(
         !meta.cosigner_public_key.is_empty(),
         "cosigner_public_key must be non-empty"
     );
-    assert!(!meta.submission_url.is_empty(), "submission_url must be set");
+    assert!(
+        !meta.submission_url.is_empty(),
+        "submission_url must be set"
+    );
 }
 
 /// Requesting an unknown log name returns 400.
 #[tokio::test]
 async fn unknown_log_returns_400() {
     let client = IetfMtcClient::new("this-log-does-not-exist");
-    let status = client
-        .get_status("metadata")
-        .await
-        .expect("GET request");
+    let status = client.get_status("metadata").await.expect("GET request");
     assert_eq!(status, 400, "expected 400 for unknown log");
 }
 
@@ -392,7 +420,7 @@ async fn add_entry_returns_valid_response() {
 
     // Full signature and inclusion proof verification.
     let (vk, cosigner_id, log_id) = fetch_verifying_key(&client).await;
-    verify_standalone_cert(&client, &cert, leaf_index, &vk, &cosigner_id, &log_id).await;
+    verify_standalone_cert(&client, &cert, leaf_index, &vk, &cosigner_id, &log_id);
 }
 
 /// `POST` with garbage bytes (not a valid CSR) returns 400.
@@ -407,10 +435,13 @@ async fn add_entry_with_invalid_csr_returns_400() {
     assert_eq!(status, 400, "expected 400 for invalid CSR");
 }
 
-/// After `add-entry`, the certificate's serial number (= leaf_index) is covered
+/// After `add-entry`, the certificate's serial number (= `leaf_index`) is covered
 /// by the checkpoint.
 #[tokio::test]
 async fn add_entry_appears_in_checkpoint() {
+    const MAX_RETRIES: u32 = 12;
+    const RETRY_DELAY_MS: u64 = 500;
+
     ensure_initialized().await;
     let client = IetfMtcClient::default_log();
     let csr = make_ietf_mtc_csr(&client.log).expect("generating CSR");
@@ -431,15 +462,10 @@ async fn add_entry_appears_in_checkpoint() {
     let leaf_index = u64::from_be_bytes(padded);
     let min_size = leaf_index + 1;
 
-    const MAX_RETRIES: u32 = 12;
-    const RETRY_DELAY_MS: u64 = 500;
     let mut last_size = 0u64;
 
     for attempt in 0..MAX_RETRIES {
-        let checkpoint_bytes = client
-            .get_checkpoint()
-            .await
-            .expect("fetching checkpoint");
+        let checkpoint_bytes = client.get_checkpoint().await.expect("fetching checkpoint");
         let text = String::from_utf8_lossy(&checkpoint_bytes);
         if let Some(size_str) = text.lines().nth(1) {
             if let Ok(size) = size_str.trim().parse::<u64>() {
@@ -454,24 +480,21 @@ async fn add_entry_appears_in_checkpoint() {
         }
     }
 
-    panic!(
-        "checkpoint size {last_size} never reached {min_size} after {MAX_RETRIES} retries"
-    );
+    panic!("checkpoint size {last_size} never reached {min_size} after {MAX_RETRIES} retries");
 }
 
 /// After `add-entry`, `get-certificate` returns a parseable landmark-relative DER
 /// certificate once a landmark has been produced.
 ///
-/// This test uses `dev2` (10s landmark interval) and retries for up to 30s.
-/// It is skipped if `IETF_MTC_LOG_NAME` is set to a log with a longer interval.
+/// Assumes the configured log has a short `landmark_interval_secs` (≤10s);
+/// both `dev1` and `dev2` in `config.dev.json` satisfy this. Retries for up to 30s.
 #[tokio::test]
 async fn get_certificate_returns_valid_cert() {
+    const MAX_RETRIES: u32 = 30;
+    const RETRY_DELAY_MS: u64 = 1_000;
+
     ensure_initialized().await;
     let log_name = ietf_mtc_log_name();
-    if log_name != "dev2" {
-        eprintln!("Skipping get_certificate test: IETF_MTC_LOG_NAME={log_name} (not dev2)");
-        return;
-    }
 
     let client = IetfMtcClient::new(&log_name);
     let csr = make_ietf_mtc_csr(&log_name).expect("generating CSR");
@@ -491,8 +514,6 @@ async fn get_certificate_returns_valid_cert() {
     padded[8 - len..].copy_from_slice(&serial_bytes[serial_bytes.len() - len..]);
     let leaf_index = u64::from_be_bytes(padded);
 
-    const MAX_RETRIES: u32 = 30;
-    const RETRY_DELAY_MS: u64 = 1_000;
     let mut last_status = 0u16;
 
     for attempt in 0..MAX_RETRIES {
@@ -504,10 +525,8 @@ async fn get_certificate_returns_valid_cert() {
         if s == 200 {
             let cert_resp = cert_resp.unwrap();
 
-            let lm_cert = assert_valid_mtc_cert(
-                &cert_resp.data,
-                "get-certificate landmark-relative cert",
-            );
+            let lm_cert =
+                assert_valid_mtc_cert(&cert_resp.data, "get-certificate landmark-relative cert");
 
             assert!(
                 cert_resp.landmark_id > 0,
@@ -517,7 +536,12 @@ async fn get_certificate_returns_valid_cert() {
             // Full signature and inclusion proof verification for landmark-relative cert.
             let (vk, cosigner_id, log_id) = fetch_verifying_key(&client).await;
             verify_landmark_relative_cert(
-                &client, &lm_cert, leaf_index, &vk, &cosigner_id, &log_id,
+                &client,
+                &lm_cert,
+                leaf_index,
+                &vk,
+                &cosigner_id,
+                &log_id,
             )
             .await;
 
