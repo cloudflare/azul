@@ -36,6 +36,49 @@ npx wrangler -e=dev dev
 BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
 ```
 
+## Deployment
+
+### workers.dev
+
+The `dev` environment in `wrangler.jsonc` has `workers_dev: true`, so it can be
+deployed to a `*.workers.dev` subdomain without a custom domain. From this
+directory:
+
+```bash
+# 1. Provision the R2 bucket and upload the signing key secret for each shard.
+#    ALGORITHM must be `ed25519` or `ml-dsa-44`; LOCATION is an R2 location
+#    hint (e.g. `wnam`, `enam`).
+ENV=dev LOG_NAME=dev1 ALGORITHM=ml-dsa-44 LOCATION=enam \
+    CLOUDFLARE_ACCOUNT_ID=<account> ./scripts/create-log.sh
+ENV=dev LOG_NAME=dev2 ALGORITHM=ed25519 LOCATION=enam \
+    CLOUDFLARE_ACCOUNT_ID=<account> ./scripts/create-log.sh
+
+# 2. Deploy the worker.
+npx wrangler -e=dev deploy
+
+# 3. Smoke-test. The worker's workers.dev URL is printed by `wrangler deploy`;
+#    it will look like https://ietf-mtc.<your-subdomain>.workers.dev
+#
+#    `scripts/test-deployment.sh` submits a CSR, fetches the returned
+#    standalone MTC certificate, then polls for a landmark-relative
+#    certificate for the same entry. It prints a summary of each response
+#    but does not verify cosignatures or inclusion proofs — for that, run the
+#    Rust integration tests against the same BASE_URL:
+./scripts/test-deployment.sh \
+    --base-url https://ietf-mtc.<your-subdomain>.workers.dev \
+    --log dev1 --algorithm ML-DSA-44
+./scripts/test-deployment.sh \
+    --base-url https://ietf-mtc.<your-subdomain>.workers.dev \
+    --log dev2 --algorithm ed25519
+
+BASE_URL=https://ietf-mtc.<your-subdomain>.workers.dev IETF_MTC_LOG_NAME=dev1 \
+    cargo test -p integration_tests --test ietf_mtc_api
+```
+
+### Custom domain
+
+See the [`ct_worker` documentation](../ct_worker/README.md#deployment-to-a-custom-domain).
+
 ## License
 
 The project is licensed under the [BSD-3-Clause License](./LICENSE).
