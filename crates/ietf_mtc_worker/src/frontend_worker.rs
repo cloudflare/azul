@@ -1,12 +1,12 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! Entrypoint for the static CT submission APIs.
+//! Entrypoint for the IETF MTC CA submission APIs.
 
-use crate::{load_checkpoint_cosigner, load_origin, load_roots, BootstrapMtcSequenceMetadata, CONFIG};
+use crate::{load_checkpoint_cosigner, load_origin, IetfMtcSequenceMetadata, CONFIG};
 use der::{
     asn1::{UtcTime, Utf8StringRef},
-    Any, Encode, Tag,
+    Any, Decode, Tag,
 };
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_durable_object_stub, init_logging,
@@ -17,17 +17,19 @@ use generic_log_worker::{
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
 };
-use bootstrap_mtc_api::{
-    serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
-    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
+use ietf_mtc_api::{
+    build_pending_entry, serialize_mtc_cert, subtree_sig_key, AddEntryRequest, AddEntryResponse,
+    IetfMtcLogEntry, LandmarkSequence, SignedSubtree, TrustAnchorID, ID_RDNA_TRUSTANCHOR_ID,
+    LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
 };
+use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
 use std::time::Duration;
 use tlog_tiles::{
     open_checkpoint, CheckpointSigner, CheckpointText, LeafIndex, PendingLogEntry,
-    PendingLogEntryBlob,
+    PendingLogEntryBlob, Subtree,
 };
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -46,13 +48,16 @@ struct MetadataResponse<'a> {
     description: &'a Option<String>,
     log_id: String,
     cosigner_id: String,
+    /// DER-encoded `SubjectPublicKeyInfo` of the cosigner's verifying key,
+    /// base64-encoded. Includes the algorithm identifier so clients can
+    /// determine the signing algorithm without out-of-band information.
     #[serde_as(as = "Base64")]
-    cosigner_public_key: &'a [u8],
+    cosigner_public_key: Vec<u8>,
     submission_url: &'a str,
     monitoring_url: &'a str,
 }
 
-// POST body structure for the `/get-certificate` endpoint
+/// POST body structure for the `/get-certificate` endpoint
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct GetCertificateRequest {
@@ -105,14 +110,6 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
             // Now that we've validated the log name, use an inner router to
             // handle the request.
             Router::with_data(name)
-                .get_async("/logs/:log/get-roots", |_req, ctx| async move {
-                    Response::from_json(&GetRootsResponse {
-                        certificates: x509_util::certs_to_bytes(
-                            &load_roots(&ctx.env, ctx.data).await?.certs,
-                        )
-                        .unwrap(),
-                    })
-                })
                 .post_async("/logs/:log/add-entry", |req, ctx| async move {
                     add_entry(req, &ctx.env, ctx.data).await
                 })
@@ -154,7 +151,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                     };
 
                     // Fetch the log entry for the leaf index.
-                    let log_entry = read_leaf::<BootstrapMtcLogEntry>(
+                    let log_entry = read_leaf::<IetfMtcLogEntry>(
                         &object_backend,
                         leaf_index,
                         checkpoint.size(),
@@ -179,18 +176,19 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                         Err(ProofError::Other(e)) => return Err(e.to_string().into()),
                     };
 
-                    // Construct the signatureless certificate.
-                    let data = match serialize_signatureless_cert(
+                    // Construct the landmark-relative certificate.
+                    let data = match serialize_mtc_cert(
                         &log_entry,
                         leaf_index,
                         &spki_der,
                         &landmark_subtree,
                         proof,
+                        &[], // landmark-relative: no cosignatures
                     ) {
                         Ok(data) => data,
                         Err(e) => {
                             return Response::error(
-                                format!("Failed to serialize signatureless cert: {e}"),
+                                format!("Failed to serialize landmark-relative cert: {e}"),
                                 422,
                             )
                         }
@@ -293,6 +291,13 @@ fn build_issuer_rdn(log_id: &str) -> std::result::Result<RdnSequence, String> {
     Ok(RdnSequence::from(vec![rdn]))
 }
 
+/// Compute the validity window for a new entry.
+///
+/// `not_before` is the current time; `not_after` is `not_before +
+/// max_lifetime_secs`.
+///
+/// ACME order `notBefore`/`notAfter` fields are not currently supported;
+/// the validity window is always determined by the server's policy.
 fn build_validity(
     now_millis: u64,
     max_lifetime_secs: u64,
@@ -305,113 +310,30 @@ fn build_validity(
     Ok(Validity::new(Time::UtcTime(not_before), Time::UtcTime(not_after)))
 }
 
-/// Returns the issuer cert for SCT validation. For multi-cert chains, that's
-/// chain[1]. For single-cert chains, we look it up from the roots pool.
-fn resolve_issuer_for_sct(
-    chain: &[Vec<u8>],
-    roots: &x509_util::CertPool,
-) -> std::result::Result<Vec<u8>, String> {
-    use der::{Decode, Encode};
-    use x509_cert::Certificate;
-
-    if chain.is_empty() {
-        return Err("chain is empty".into());
-    }
-
-    if chain.len() > 1 {
-        return Ok(chain[1].clone());
-    }
-
-    // Single-cert chain: look up issuer from roots pool
-    let leaf =
-        Certificate::from_der(&chain[0]).map_err(|e| format!("failed to parse leaf: {e}"))?;
-    let issuer_dn = leaf.tbs_certificate().issuer();
-
-    roots
-        .find_by_subject(issuer_dn)
-        .ok_or_else(|| format!("issuer not found in roots pool: {issuer_dn}"))?
-        .to_der()
-        .map_err(|e| format!("failed to encode issuer: {e}"))
-}
-
-#[allow(clippy::too_many_lines)]
 async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> {
     let params = &CONFIG.logs[name];
-    let req: AddEntryRequest = req.json().await?;
+    let req: AddEntryRequest = match req.json().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("{name}: Bad request: {e}");
+            return Response::error("Bad request", 400);
+        }
+    };
 
     let issuer = build_issuer_rdn(&params.log_id)?;
-    let mut validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)?;
+    let validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)?;
 
-    let roots = load_roots(env, name).await?;
-    let (pending_entry, found_root_idx) =
-        match bootstrap_mtc_api::validate_chain(&req.chain, roots, &issuer, &mut validity) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("{name}: Bad request: {e}");
-                return Response::error("Bad request", 400);
-            }
-        };
-
-    // SCT validation (if enabled for this log shard)
-    if params.enable_sct_validation {
-        use crate::ct_logs_cron::load_ct_logs;
-        use sct_validator::{SctValidationResult, SctValidator};
-
-        // Load the CT log list from KV
-        let ct_logs = load_ct_logs(env).await?;
-        let validator = SctValidator::new(ct_logs);
-
-        // Get leaf and issuer DER for SCT validation
-        let leaf_der = req.chain.first().ok_or("Chain is empty")?;
-        let issuer_der = resolve_issuer_for_sct(&req.chain, roots)?;
-
-        let validation_time_secs = now_millis() / 1000;
-
-        match validator.validate_embedded_scts(leaf_der, &issuer_der, validation_time_secs) {
-            Ok(SctValidationResult::Valid) => {
-                log::info!("{name}: SCT validation passed");
-            }
-            Ok(SctValidationResult::ValidWithWarnings(warnings)) => {
-                log::info!(
-                    "{name}: SCT validation passed with {} warnings",
-                    warnings.len()
-                );
-                for warning in &warnings {
-                    log::debug!("{name}: SCT warning: {warning:?}");
-                }
-            }
-            Ok(SctValidationResult::StaleLogList) => {
-                log::warn!("{name}: SCT validation skipped (stale log list)");
-            }
-            Err(e) => {
-                log::warn!("{name}: SCT validation failed: {e}");
-                return Response::error(format!("SCT validation failed: {e}"), 400);
-            }
+    let pending_entry = match build_pending_entry(&req, &issuer, validity) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("{name}: Bad request: {e}");
+            return Response::error("Bad request", 400);
         }
-    }
+    };
 
     // Retrieve the sequenced entry for this pending log entry by sending a request to the DO to
     // sequence the entry.
     let lookup_key = pending_entry.lookup_key();
-
-    // First persist issuers. Use a block so memory is deallocated sooner.
-    {
-        let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-        let mut issuers = req.chain[1..]
-            .iter()
-            .map(Vec::as_slice)
-            .collect::<Vec<&[u8]>>();
-
-        // Make sure the found root is persisted as well, if the add-chain
-        // request did not include the root.
-        let root_bytes;
-        if let Some(idx) = found_root_idx {
-            root_bytes = roots.certs[idx].to_der().map_err(|e| e.to_string())?;
-            issuers.push(&root_bytes);
-        }
-
-        generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
-    }
 
     // Submit entry to be sequenced, either via a batcher or directly to the
     // sequencer.
@@ -447,13 +369,114 @@ async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> 
         // Return the response from the sequencing directly to the client.
         return Ok(response);
     }
-    let metadata = deserialize::<BootstrapMtcSequenceMetadata>(&response.bytes().await?)?;
-    Response::from_json(&AddEntryResponse {
-        leaf_index: metadata.leaf_index(),
-        timestamp: metadata.timestamp(),
-        not_before: validity.not_before.to_unix_duration().as_secs(),
-        not_after: validity.not_after.to_unix_duration().as_secs(),
-    })
+    let metadata = deserialize::<IetfMtcSequenceMetadata>(&response.bytes().await?)?;
+
+    // Build the standalone certificate from the subtree signature cached by
+    // the sequencer.  The checkpoint_callback runs before the sequencer
+    // returns, so the signature should always be present at this point.
+    let Some(certificate) = build_standalone_cert(env, name, &metadata, &req).await else {
+        log::warn!(
+            "{name}: subtree sig not found for leaf {} after sequencing",
+            metadata.leaf_index
+        );
+        return Response::error("Service unavailable: subtree signature not yet available", 503);
+    };
+
+    Response::from_json(&AddEntryResponse { certificate })
+}
+
+/// Maximum number of retries waiting for a subtree signature to appear in R2.
+const MAX_SIG_RETRIES: u32 = 6;
+/// Delay between retries in milliseconds.
+const SIG_RETRY_DELAY_MS: u64 = 250;
+
+/// Return the single subtree key that covers `leaf_index`, given the sequencer-reported
+/// tree sizes immediately before and after the batch that sequenced the entry.
+///
+/// Per §4.5, a batch is covered by at most two subtrees from
+/// [`Subtree::split_interval(old, new)`](Subtree::split_interval). The leaf
+/// falls in exactly one of them — the one whose interval contains `leaf_index`.
+fn subtree_key_for_leaf(metadata: &IetfMtcSequenceMetadata) -> Option<String> {
+    let (left, right) =
+        Subtree::split_interval(metadata.old_tree_size, metadata.new_tree_size).ok()?;
+    for subtree in [Some(left), right].into_iter().flatten() {
+        if subtree.lo() <= metadata.leaf_index && metadata.leaf_index < subtree.hi() {
+            return Some(subtree_sig_key(subtree.lo(), subtree.hi()));
+        }
+    }
+    None
+}
+
+async fn build_standalone_cert(
+    env: &Env,
+    name: &str,
+    metadata: &IetfMtcSequenceMetadata,
+    req: &AddEntryRequest,
+) -> Option<Vec<u8>> {
+    let object_bucket = ObjectBucket::new(load_public_bucket(env, name).ok()?);
+    let leaf_index = metadata.leaf_index;
+    let key = subtree_key_for_leaf(metadata)?;
+
+    // The checkpoint_callback signs and caches the covering subtree asynchronously
+    // after the sequencer responds. The key is known exactly from the sequencer
+    // metadata, so retry fetching that single key until it appears.
+    let mut signed: Option<SignedSubtree> = None;
+    for _ in 0..MAX_SIG_RETRIES {
+        if let Some(raw) = object_bucket.fetch(&key).await.ok().flatten() {
+            if let Ok(s) = serde_json::from_slice::<SignedSubtree>(&raw) {
+                signed = Some(s);
+                break;
+            }
+        }
+        worker::Delay::from(std::time::Duration::from_millis(SIG_RETRY_DELAY_MS)).await;
+    }
+    let signed = signed?;
+
+    let subtree = signed.as_subtree().ok()?;
+    let cosigner_id = TrustAnchorID::from_str(&signed.cosigner_id).ok()?;
+    let checkpoint_hash = tlog_tiles::Hash(signed.checkpoint_hash);
+
+    // Parse the CSR to extract the SPKI.
+    let csr = x509_cert::request::CertReq::from_der(&req.csr).ok()?;
+    let spki_der = der::Encode::to_der(&csr.info.public_key).ok()?;
+
+    // Read the sequenced log entry from the data tile.
+    let log_entry = generic_log_worker::log_ops::read_leaf::<IetfMtcLogEntry>(
+        &object_bucket,
+        leaf_index,
+        signed.checkpoint_size,
+        &checkpoint_hash,
+    )
+    .await
+    .ok()?;
+
+    // Compute an inclusion proof of leaf_index into the subtree.
+    let proof = match generic_log_worker::log_ops::prove_subtree_inclusion(
+        signed.checkpoint_size,
+        checkpoint_hash,
+        subtree.lo(),
+        subtree.hi(),
+        leaf_index,
+        &object_bucket,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("{name}: subtree inclusion proof failed for leaf {leaf_index}: {e:?}");
+            return None;
+        }
+    };
+
+    serialize_mtc_cert(
+        &log_entry,
+        leaf_index,
+        &spki_der,
+        &subtree,
+        proof,
+        &[(cosigner_id, signed.signature)],
+    )
+    .ok()
 }
 
 async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
@@ -550,29 +573,5 @@ mod tests {
             validity.not_after.to_unix_duration().as_secs(),
             now_ms / 1000 + lifetime_secs
         );
-    }
-
-    #[test]
-    fn test_resolve_issuer_empty_chain() {
-        let chain: Vec<Vec<u8>> = vec![];
-        let roots = x509_util::CertPool::new(vec![]).unwrap();
-        assert!(resolve_issuer_for_sct(&chain, &roots).is_err());
-    }
-
-    #[test]
-    fn test_resolve_issuer_multi_cert_chain() {
-        let leaf = vec![1, 2, 3];
-        let issuer = vec![4, 5, 6];
-        let chain = vec![leaf, issuer.clone()];
-        let roots = x509_util::CertPool::new(vec![]).unwrap();
-
-        assert_eq!(resolve_issuer_for_sct(&chain, &roots).unwrap(), issuer);
-    }
-
-    #[test]
-    fn test_resolve_issuer_invalid_der() {
-        let chain = vec![vec![0xFF, 0xFF, 0xFF]];
-        let roots = x509_util::CertPool::new(vec![]).unwrap();
-        assert!(resolve_issuer_for_sct(&chain, &roots).is_err());
     }
 }

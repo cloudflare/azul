@@ -15,7 +15,7 @@ use crate::{
     },
     serialize,
     util::now_millis,
-    CacheSerialize, DedupCache, LookupKey, MemoryCache, ObjectBucket, BATCH_ENDPOINT,
+    DedupCache, LookupKey, MemoryCache, ObjectBucket, SequencerMetadata, BATCH_ENDPOINT,
     CLEANER_BINDING, ENTRY_ENDPOINT,
 };
 use futures_util::future::join_all;
@@ -31,14 +31,14 @@ use worker::{Env, Error as WorkerError, Request, Response, State};
 // It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
-pub struct GenericSequencer<L: LogEntry> {
+pub struct GenericSequencer<L: LogEntry, M: SequencerMetadata> {
     env: Env,
-    do_state: State,                                  // implements LockBackend
-    public_bucket: RwLock<ObjectBucket>,              // implements ObjectBackend
-    cache: DedupCache<L::Metadata>,                   // implements CacheRead, CacheWrite
+    do_state: State,                     // implements LockBackend
+    public_bucket: RwLock<ObjectBucket>, // implements ObjectBackend
+    cache: DedupCache<M>,                // implements CacheRead, CacheWrite
     config: SequencerConfig,
     sequence_state: RefCell<SequenceState>,
-    pool_state: RefCell<PoolState<L::Pending, L::Metadata>>,
+    pool_state: RefCell<PoolState<L::Pending, M>>,
     initialized: RefCell<bool>,
     init_mux: Mutex<()>,
     wshim: Option<Wshim>,
@@ -62,7 +62,7 @@ pub struct SequencerConfig {
     pub env_label: String,
 }
 
-impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
+impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
     /// Return a new sequencer with the given config.
     ///
     /// # Panics
@@ -175,7 +175,7 @@ impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
             .set_alarm(self.config.sequence_interval)
             .await?;
 
-        if log_ops::sequence::<L>(
+        if log_ops::sequence::<L, M>(
             &self.pool_state,
             &self.sequence_state,
             &self.config,
@@ -219,7 +219,7 @@ impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
     }
 }
 
-impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
+impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&self, metrics: &SequencerMetrics) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.
@@ -313,7 +313,7 @@ impl<L: LogEntry<Metadata: CacheSerialize>> GenericSequencer<L> {
         &self,
         pending_entries: Vec<PendingLogEntryBlob>,
         metrics: &SequencerMetrics,
-    ) -> Result<Vec<(LookupKey, L::Metadata)>, WorkerError> {
+    ) -> Result<Vec<(LookupKey, M)>, WorkerError> {
         // Safe to unwrap config here as the log must be initialized.
         let mut futures = Vec::with_capacity(pending_entries.len());
         let mut lookup_keys = Vec::with_capacity(pending_entries.len());

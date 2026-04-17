@@ -26,11 +26,9 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::de::DeserializeOwned;
-use std::io::Write;
 pub use tlog_tiles::LookupKey;
-use tlog_tiles::{PendingLogEntry, SequenceMetadata};
+use tlog_tiles::{LeafIndex, PendingLogEntry, UnixTimestamp};
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
@@ -227,7 +225,7 @@ struct DedupCache<M> {
     storage: Storage,
 }
 
-impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default + 'static> CacheWrite<M> for DedupCache<M> {
+impl<M: SequencerMetadata> CacheWrite<M> for DedupCache<M> {
     /// Write entries to both the short-term deduplication cache and its backup in DO Storage.
     async fn put_entries(&self, entries: &[(LookupKey, M)]) -> Result<()> {
         if entries.is_empty() {
@@ -238,7 +236,7 @@ impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default +
     }
 }
 
-impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default + 'static> CacheRead<M> for DedupCache<M> {
+impl<M: SequencerMetadata> CacheRead<M> for DedupCache<M> {
     /// Check the short-term deduplication cache only. The long-term deduplication
     /// cache gets checked by the Worker frontend when handling add-chain requests.
     fn get_entry(&self, key: &LookupKey) -> Option<M> {
@@ -309,7 +307,7 @@ fn dedup_cache_fifo_key(idx: u32) -> String {
     format!("fifo:{idx}")
 }
 
-impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default + 'static> DedupCache<M> {
+impl<M: SequencerMetadata> DedupCache<M> {
     // Batches are written at most once per second, and we only need them to
     // deduplicate entries long enough for KV's eventual consistency guarantees
     // (~60s). Cap at 128 so we can use a single get_multiple call to get all
@@ -358,7 +356,7 @@ impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default +
         for value in map.values() {
             let batch = serde_wasm_bindgen::from_value::<ByteBuf>(value?)?;
             self.memory
-                .put_entries(&deserialize_entries(&batch.into_vec())?);
+                .put_entries(&M::deserialize_cache_entries(&batch.into_vec())?);
         }
 
         info!(
@@ -406,7 +404,7 @@ impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default +
         self.storage
             .put::<&ByteBuf>(
                 &Self::fifo_key(insert_idx),
-                &ByteBuf::from(serialize_entries(entries)),
+                &ByteBuf::from(M::serialize_cache_entries(entries)),
             )
             .await?;
 
@@ -415,88 +413,129 @@ impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Copy + Default +
     }
 }
 
-/// Serialization format for the `DedupCache` DO storage ring buffer.
+/// Metadata produced by the sequencer for each log entry.
 ///
-/// Each metadata type defines its own binary format so that the format can be
-/// kept stable across upgrades.  `SequenceMetadata` uses the original
-/// 32-bytes-per-entry binary format (16-byte key, 8-byte `leaf_index`,
-/// 8-byte `timestamp`, all big-endian); other types use `serde_json`.
+/// This type is:
+/// - constructed by the sequencer via [`make`](SequencerMetadata::make), which
+///   supplies the leaf index, sequencing timestamp, and pre/post-batch tree sizes
+/// - stored in the sequencer's deduplication cache (serialized via
+///   [`serialize_cache_entries`](SequencerMetadata::serialize_cache_entries))
+/// - returned to the Worker frontend over the DO→Worker wire as the response to
+///   an `add-entry` request
 ///
-/// **NOTE**: Changing this format for a deployed log will result in a `DedupCache::load`
-/// error during sequencer initialization. The sequencer's
-/// [current behavior](https://github.com/cloudflare/azul/blob/ddc4ec7c5432efed4cd5e4308f6026ffa91bc6f6/crates/generic_log_worker/src/sequencer_do.rs#L234)
-/// is to log the error and continue without the short-term deduplication cache.
-pub trait CacheSerialize: Sized {
-    /// Serialize a batch of `(LookupKey, Self)` pairs to bytes.
-    fn serialize_entries(entries: &[(LookupKey, Self)]) -> Vec<u8>;
-    /// Deserialize a batch of `(LookupKey, Self)` pairs from bytes.
+/// The default implementations of the cache-serialization methods use
+/// `serde_json`. Applications that need a different wire format (e.g. a
+/// fixed-width binary layout for backward compatibility with existing
+/// Durable Object storage) should override them.
+pub trait SequencerMetadata:
+    Serialize
+    + DeserializeOwned
+    + Send
+    + Sync
+    + Clone
+    + Copy
+    + std::fmt::Debug
+    + Default
+    + PartialEq
+    + Eq
+    + 'static
+{
+    /// Construct a value from the raw sequencer output. Called once per entry
+    /// at sequencing time.
+    ///
+    /// Every log entry has a `leaf_index` and sequencing `timestamp`; these two
+    /// are always populated. `old_tree_size` and `new_tree_size` are the tree
+    /// sizes immediately before and after the sequencing batch that included
+    /// this entry. They are unused by the default `SequenceMetadata` shape but
+    /// are exposed here so log-specific metadata types can carry them (for
+    /// example, an IETF MTC worker uses them to identify the covering subtree
+    /// for an inclusion proof without enumerating candidates).
+    fn make(
+        leaf_index: LeafIndex,
+        timestamp: UnixTimestamp,
+        old_tree_size: u64,
+        new_tree_size: u64,
+    ) -> Self;
+
+    /// Serialize a batch of `(LookupKey, Self)` pairs for the dedup cache ring
+    /// buffer stored in Durable Object storage.
+    ///
+    /// **NOTE**: Changing this format for a deployed log will result in a
+    /// `DedupCache::load` error during sequencer initialization. The current
+    /// behavior is to log the error and continue without the short-term
+    /// deduplication cache.
+    fn serialize_cache_entries(entries: &[(LookupKey, Self)]) -> Vec<u8> {
+        serde_json::to_vec(entries).expect("serializing cache entries to JSON")
+    }
+
+    /// Deserialize a batch of `(LookupKey, Self)` pairs from the dedup cache
+    /// ring buffer in Durable Object storage.
     ///
     /// # Errors
     ///
     /// Returns a `String` describing the error if the bytes are malformed.
-    /// The `String` can be converted to a `worker::Error` via `From<String>`.
-    fn deserialize_entries(buf: &[u8]) -> std::result::Result<Vec<(LookupKey, Self)>, String>;
-}
-
-/// `SequenceMetadata` uses the original 32-byte binary format for backward
-/// compatibility with existing Durable Object storage.
-impl CacheSerialize for SequenceMetadata {
-    fn serialize_entries(entries: &[(LookupKey, Self)]) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(32 * entries.len());
-        for (k, (idx, ts)) in entries {
-            buf.write_all(k).unwrap();
-            buf.write_u64::<BigEndian>(*idx).unwrap();
-            buf.write_u64::<BigEndian>(*ts).unwrap();
-        }
-        buf
-    }
-
-    fn deserialize_entries(buf: &[u8]) -> std::result::Result<Vec<(LookupKey, Self)>, String> {
-        if !buf.len().is_multiple_of(32) {
-            return Err("invalid buffer length".into());
-        }
-        let mut entries = Vec::with_capacity(buf.len() / 32);
-        let mut cursor = std::io::Cursor::new(buf);
-        while usize::try_from(cursor.position()).unwrap_or(usize::MAX) < buf.len() {
-            let mut key = LookupKey::default();
-            std::io::Read::read_exact(&mut cursor, &mut key)
-                .map_err(|e| format!("reading key: {e}"))?;
-            let idx = cursor
-                .read_u64::<BigEndian>()
-                .map_err(|e| format!("reading `leaf_index`: {e}"))?;
-            let ts = cursor
-                .read_u64::<BigEndian>()
-                .map_err(|e| format!("reading `timestamp`: {e}"))?;
-            entries.push((key, (idx, ts)));
-        }
-        Ok(entries)
+    fn deserialize_cache_entries(
+        buf: &[u8],
+    ) -> std::result::Result<Vec<(LookupKey, Self)>, String> {
+        serde_json::from_slice(buf).map_err(|e| format!("deserializing cache entries: {e}"))
     }
 }
 
-/// Implement `CacheSerialize` via `serde_json` for a given type.
-#[macro_export]
-macro_rules! impl_json_cache_serialize {
-    ($t:ty) => {
-        impl $crate::CacheSerialize for $t {
-            fn serialize_entries(entries: &[($crate::LookupKey, Self)]) -> Vec<u8> {
-                serde_json::to_vec(entries).expect("serializing cache entries to JSON")
-            }
-            fn deserialize_entries(
-                buf: &[u8],
-            ) -> ::std::result::Result<Vec<($crate::LookupKey, Self)>, String> {
-                serde_json::from_slice(buf)
-                    .map_err(|e| format!("deserializing cache entries: {e}"))
-            }
-        }
-    };
+/// A `(LookupKey, (leaf_index, timestamp))` pair as consumed by
+/// [`serialize_sequence_metadata_entries`] / [`deserialize_sequence_metadata_entries`].
+pub type SequenceMetadataEntry = (LookupKey, (LeafIndex, UnixTimestamp));
+
+/// Serialize a batch of [`SequenceMetadataEntry`] values using the fixed
+/// 32-byte binary format:
+///
+/// `[16-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`
+///
+/// Used by [`SequencerMetadata`] impls that need to preserve backward
+/// compatibility with existing Durable Object dedup cache storage. Any change
+/// to this format will result in a [`DedupCache::load`] error for deployed
+/// logs.
+#[must_use]
+pub fn serialize_sequence_metadata_entries(entries: &[SequenceMetadataEntry]) -> Vec<u8> {
+    use byteorder::{BigEndian, WriteBytesExt};
+    use std::io::Write as _;
+    let mut buf = Vec::with_capacity(32 * entries.len());
+    for (k, (idx, ts)) in entries {
+        buf.write_all(k).unwrap();
+        buf.write_u64::<BigEndian>(*idx).unwrap();
+        buf.write_u64::<BigEndian>(*ts).unwrap();
+    }
+    buf
 }
 
-fn serialize_entries<M: CacheSerialize>(entries: &[(LookupKey, M)]) -> Vec<u8> {
-    M::serialize_entries(entries)
-}
-
-fn deserialize_entries<M: CacheSerialize>(buf: &[u8]) -> Result<Vec<(LookupKey, M)>> {
-    M::deserialize_entries(buf).map_err(Into::into)
+/// Deserialize a batch of [`SequenceMetadataEntry`] values from the 32-byte
+/// binary format produced by [`serialize_sequence_metadata_entries`].
+///
+/// # Errors
+///
+/// Returns an error string if `buf.len()` is not a multiple of 32 or if the
+/// underlying byteorder reads fail.
+pub fn deserialize_sequence_metadata_entries(
+    buf: &[u8],
+) -> std::result::Result<Vec<SequenceMetadataEntry>, String> {
+    use byteorder::{BigEndian, ReadBytesExt};
+    if !buf.len().is_multiple_of(32) {
+        return Err("invalid buffer length".into());
+    }
+    let mut entries = Vec::with_capacity(buf.len() / 32);
+    let mut cursor = std::io::Cursor::new(buf);
+    while usize::try_from(cursor.position()).unwrap_or(usize::MAX) < buf.len() {
+        let mut key = LookupKey::default();
+        std::io::Read::read_exact(&mut cursor, &mut key)
+            .map_err(|e| format!("reading key: {e}"))?;
+        let idx = cursor
+            .read_u64::<BigEndian>()
+            .map_err(|e| format!("reading `leaf_index`: {e}"))?;
+        let ts = cursor
+            .read_u64::<BigEndian>()
+            .map_err(|e| format!("reading `timestamp`: {e}"))?;
+        entries.push((key, (idx, ts)));
+    }
+    Ok(entries)
 }
 
 // A fixed-size in-memory FIFO cache. `M` is the sequence metadata type stored
@@ -809,13 +848,24 @@ impl ObjectBackend for CachedRoObjectBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tlog_tiles::SequenceMetadata;
 
-    /// A minimal metadata type that uses the JSON cache format, for testing
-    /// `serialize_entries`/`deserialize_entries` with non-binary serialization.
-    #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+    /// A minimal [`SequencerMetadata`] that uses the default JSON cache format,
+    /// for testing non-binary serialization paths.
+    #[derive(
+        Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    )]
     struct TestMetadata(u64);
-    impl_json_cache_serialize!(TestMetadata);
+
+    impl SequencerMetadata for TestMetadata {
+        fn make(
+            leaf_index: LeafIndex,
+            _timestamp: UnixTimestamp,
+            _old_tree_size: u64,
+            _new_tree_size: u64,
+        ) -> Self {
+            Self(leaf_index)
+        }
+    }
 
     // ==================== HeadTailValidation Tests ====================
 
@@ -945,51 +995,17 @@ mod tests {
         assert!(keys.is_empty());
     }
 
-    // ==================== serialize/deserialize_entries Tests ====================
-
-    #[test]
-    fn test_serialize_deserialize_entries_roundtrip() {
-        let entries = vec![
-            ([1u8; 16], (100u64, 200u64)),
-            ([2u8; 16], (300u64, 400u64)),
-            ([0xffu8; 16], (u64::MAX, u64::MAX)),
-        ];
-        let serialized = serialize_entries(&entries);
-        let deserialized = deserialize_entries(&serialized).unwrap();
-        assert_eq!(entries, deserialized);
-    }
-
-    #[test]
-    fn test_serialize_deserialize_empty() {
-        let entries: Vec<(LookupKey, SequenceMetadata)> = vec![];
-        let serialized = serialize_entries(&entries);
-        let deserialized = deserialize_entries::<SequenceMetadata>(&serialized).unwrap();
-        assert!(deserialized.is_empty());
-    }
-
-    #[test]
-    fn test_deserialize_invalid_length() {
-        // SequenceMetadata uses the binary format (32 bytes per entry:
-        // 16-byte LookupKey + 8-byte leaf_index + 8-byte timestamp).
-        // A buffer that is not a multiple of 32 bytes should fail.
-        let buf = vec![0u8; 31]; // Not a multiple of 32
-        assert!(deserialize_entries::<SequenceMetadata>(&buf).is_err());
-    }
-
-    #[test]
-    fn test_deserialize_invalid_length_one_extra() {
-        let buf = vec![0u8; 33]; // 32 + 1
-        assert!(deserialize_entries::<SequenceMetadata>(&buf).is_err());
-    }
+    // ==================== serialize/deserialize_cache_entries Tests ====================
 
     #[test]
     fn test_serialize_deserialize_json_roundtrip() {
-        // TestMetadata uses the JSON format; verify entries survive a serialize/deserialize cycle.
+        // TestMetadata uses the default JSON format; verify entries survive
+        // a serialize/deserialize cycle.
         let key1 = LookupKey::from([1u8; 16]);
         let key2 = LookupKey::from([2u8; 16]);
         let entries = vec![(key1, TestMetadata(42)), (key2, TestMetadata(99))];
-        let serialized = serialize_entries(&entries);
-        let deserialized = deserialize_entries::<TestMetadata>(&serialized).unwrap();
+        let serialized = TestMetadata::serialize_cache_entries(&entries);
+        let deserialized = TestMetadata::deserialize_cache_entries(&serialized).unwrap();
         assert_eq!(deserialized.len(), 2);
         assert_eq!(deserialized[0].0, key1);
         assert_eq!(deserialized[0].1 .0, 42);
@@ -999,9 +1015,9 @@ mod tests {
 
     #[test]
     fn test_deserialize_invalid_json() {
-        // TestMetadata uses the JSON format; invalid JSON should fail deserialization.
+        // TestMetadata uses the default JSON format; invalid JSON should fail.
         let buf = b"not valid json";
-        assert!(deserialize_entries::<TestMetadata>(buf).is_err());
+        assert!(TestMetadata::deserialize_cache_entries(buf).is_err());
     }
 
     // ==================== MemoryCache Tests ====================
@@ -1020,7 +1036,7 @@ mod tests {
     #[test]
     fn test_memory_cache_multiple_entries() {
         let cache = MemoryCache::new(10);
-        let entries: Vec<(LookupKey, SequenceMetadata)> = (0..5u8)
+        let entries: Vec<(LookupKey, (u64, u64))> = (0..5u8)
             .map(|i| ([i; 16], (u64::from(i), u64::from(i) * 100)))
             .collect();
 
@@ -1065,7 +1081,7 @@ mod tests {
     #[test]
     fn test_memory_cache_batch_put() {
         let cache = MemoryCache::new(5);
-        let entries: Vec<(LookupKey, SequenceMetadata)> =
+        let entries: Vec<(LookupKey, (u64, u64))> =
             (0..3u8).map(|i| ([i; 16], (u64::from(i), 0))).collect();
 
         cache.put_entries(&entries);
@@ -1078,41 +1094,58 @@ mod tests {
 
     #[test]
     fn test_fifo_key_generation() {
-        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(0), "fifo:0");
-        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(127), "fifo:127");
-        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(128), "fifo:128");
-        assert_eq!(DedupCache::<SequenceMetadata>::fifo_key(u32::MAX), format!("fifo:{}", u32::MAX));
+        assert_eq!(DedupCache::<TestMetadata>::fifo_key(0), "fifo:0");
+        assert_eq!(DedupCache::<TestMetadata>::fifo_key(127), "fifo:127");
+        assert_eq!(DedupCache::<TestMetadata>::fifo_key(128), "fifo:128");
+        assert_eq!(
+            DedupCache::<TestMetadata>::fifo_key(u32::MAX),
+            format!("fifo:{}", u32::MAX)
+        );
     }
 
-    /// Regression test: confirm the `SequenceMetadata` binary wire format has
-    /// not changed.  Any change here would corrupt the dedup ring buffer in
-    /// Durable Object storage for deployed CT and bootstrap MTC workers.
-    ///
-    /// Format: `[16-byte key | 8-byte leaf_index BE | 8-byte timestamp BE]`
+    // ==================== sequence_metadata binary format Tests ====================
+
+    /// Confirm the shared 32-byte binary cache format is exactly
+    /// `[16-byte key | 8-byte leaf_index BE | 8-byte timestamp BE]`.
+    /// Any change would corrupt deployed workers' DO dedup ring buffer.
     #[test]
-    fn test_sequence_metadata_cache_format_unchanged() {
+    fn test_sequence_metadata_binary_format_unchanged() {
         let key: LookupKey = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
         ];
-        let leaf_index: u64 = 0x0102030405060708;
-        let timestamp: u64  = 0x0a0b0c0d0e0f1011;
+        let leaf_index: u64 = 0x0102_0304_0506_0708;
+        let timestamp: u64 = 0x0a0b_0c0d_0e0f_1011;
 
-        let entries: Vec<(LookupKey, SequenceMetadata)> = vec![(key, (leaf_index, timestamp))];
-        let serialized = serialize_entries(&entries);
+        let entries = vec![(key, (leaf_index, timestamp))];
+        let serialized = serialize_sequence_metadata_entries(&entries);
 
-        // Manually construct the expected 32-byte buffer.
         let mut expected = Vec::with_capacity(32);
         expected.extend_from_slice(&key);
         expected.extend_from_slice(&leaf_index.to_be_bytes());
         expected.extend_from_slice(&timestamp.to_be_bytes());
 
-        assert_eq!(serialized, expected,
-            "SequenceMetadata binary format has changed — this will corrupt \
-             existing Durable Object dedup cache storage");
+        assert_eq!(
+            serialized, expected,
+            "sequence_metadata binary format has changed — this will corrupt \
+             existing Durable Object dedup cache storage"
+        );
 
-        // Round-trip.
-        let deserialized = deserialize_entries::<SequenceMetadata>(&serialized).unwrap();
+        let deserialized = deserialize_sequence_metadata_entries(&serialized).unwrap();
         assert_eq!(deserialized, entries);
+    }
+
+    #[test]
+    fn test_sequence_metadata_binary_empty() {
+        let entries: Vec<(LookupKey, (u64, u64))> = vec![];
+        let serialized = serialize_sequence_metadata_entries(&entries);
+        let deserialized = deserialize_sequence_metadata_entries(&serialized).unwrap();
+        assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn test_sequence_metadata_binary_invalid_length() {
+        assert!(deserialize_sequence_metadata_entries(&[0u8; 31]).is_err());
+        assert!(deserialize_sequence_metadata_entries(&[0u8; 33]).is_err());
     }
 }

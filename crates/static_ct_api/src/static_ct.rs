@@ -121,7 +121,7 @@ use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType
 use std::io::Read;
 use tlog_tiles::{
     CheckpointSigner, CheckpointText, Hash, LeafIndex, LogEntry, LookupKey, PathElem,
-    PendingLogEntry, SequenceMetadata, UnixTimestamp,
+    PendingLogEntry, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -280,26 +280,20 @@ impl LogEntry for StaticCTLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = true;
     type Pending = StaticCTPendingLogEntry;
     type ParseError = StaticCTError;
-    type Metadata = SequenceMetadata;
-
-    fn make_metadata(
-        leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
-        _old_tree_size: u64,
-        _new_tree_size: u64,
-    ) -> Self::Metadata {
-        (leaf_index, timestamp)
-    }
 
     fn initial_entry() -> Option<Self::Pending> {
         None
     }
 
-    fn new(pending: StaticCTPendingLogEntry, metadata: Self::Metadata) -> Self {
+    fn new(
+        pending: StaticCTPendingLogEntry,
+        leaf_index: LeafIndex,
+        timestamp: UnixTimestamp,
+    ) -> Self {
         StaticCTLogEntry {
             inner: pending,
-            leaf_index: metadata.0,
-            timestamp: metadata.1,
+            leaf_index,
+            timestamp,
         }
     }
 
@@ -519,7 +513,11 @@ impl RFC6962NoteVerifier {
             .map_err(|_| NoteError::Format)?
             .to_vec();
         let key_id = Sha256::digest(&pkix);
-        let id = signed_note::compute_key_id(&name, &[SignatureType::RFC6962TreeHead as u8], &key_id[..]);
+        let id = signed_note::compute_key_id(
+            &name,
+            &[SignatureType::RFC6962TreeHead as u8],
+            &key_id[..],
+        );
 
         Ok(Self {
             name,
@@ -774,7 +772,7 @@ mod tests {
             precert_opt: None,
             chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
         };
-        let entry = StaticCTLogEntry::new(inner, (123, 456));
+        let entry = StaticCTLogEntry::new(inner, 123, 456);
         let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 

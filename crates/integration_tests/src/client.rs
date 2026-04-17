@@ -407,6 +407,193 @@ impl BootstrapMtcClient {
     }
 }
 
+// ===========================================================================
+// IETF MTC client
+// ===========================================================================
+
+/// Log shard name to use for IETF MTC tests.  Defaults to `dev2` (fast landmark interval).
+#[must_use]
+pub fn ietf_mtc_log_name() -> String {
+    std::env::var("IETF_MTC_LOG_NAME").unwrap_or_else(|_| "dev2".to_string())
+}
+
+// ===========================================================================
+// IETF MTC client
+
+/// Add-entry response from the IETF MTC worker.
+#[serde_as]
+#[derive(Deserialize, Debug, Clone)]
+pub struct IetfMtcAddEntryResponse {
+    /// DER-encoded standalone MTC certificate, base64-encoded.
+    #[serde_as(as = "Base64")]
+    pub certificate: Vec<u8>,
+}
+
+/// Get-certificate response from the IETF MTC worker.
+#[serde_as]
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcGetCertificateResponse {
+    #[serde_as(as = "Base64")]
+    pub data: Vec<u8>,
+    pub landmark_id: usize,
+}
+
+/// HTTP client bound to a particular IETF MTC log shard.
+pub struct IetfMtcClient {
+    client: reqwest::Client,
+    pub log: String,
+}
+
+impl IetfMtcClient {
+    /// Creates a new client targeting the given IETF MTC log shard.
+    #[must_use]
+    pub fn new(log: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            log: log.into(),
+        }
+    }
+
+    /// Creates a client for the default IETF MTC log (from `IETF_MTC_LOG_NAME` env / `dev2`).
+    #[must_use]
+    pub fn default_log() -> Self {
+        Self::new(ietf_mtc_log_name())
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/{}", log_url(&self.log), path)
+    }
+
+    /// `GET /logs/:log/metadata`
+    pub async fn get_metadata(&self) -> Result<BootstrapMtcMetadataResponse> {
+        let resp = self
+            .client
+            .get(self.url("metadata"))
+            .send()
+            .await
+            .context("GET metadata")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("GET metadata returned {status}");
+        }
+        resp.json().await.context("parsing metadata response")
+    }
+
+    /// `POST /logs/:log/add-entry` — sends a base64url-encoded DER CSR.
+    pub async fn add_entry(
+        &self,
+        csr_der: Vec<u8>,
+    ) -> Result<(u16, Option<IetfMtcAddEntryResponse>)> {
+        use base64::prelude::*;
+        #[derive(serde::Serialize)]
+        struct Req {
+            csr: String,
+        }
+        let resp = self
+            .client
+            .post(self.url("add-entry"))
+            .json(&Req {
+                csr: BASE64_URL_SAFE_NO_PAD.encode(&csr_der),
+            })
+            .send()
+            .await
+            .context("POST add-entry")?;
+        let status = resp.status().as_u16();
+        if status == 200 {
+            let body: IetfMtcAddEntryResponse = resp
+                .json()
+                .await
+                .context("parsing add-entry response")?;
+            Ok((status, Some(body)))
+        } else {
+            Ok((status, None))
+        }
+    }
+
+    /// `POST /logs/:log/get-certificate`
+    pub async fn get_certificate(
+        &self,
+        leaf_index: u64,
+        spki_der: Vec<u8>,
+    ) -> Result<(u16, Option<IetfMtcGetCertificateResponse>)> {
+        #[serde_as]
+        #[derive(serde::Serialize)]
+        struct Req {
+            leaf_index: u64,
+            #[serde_as(as = "Base64")]
+            spki_der: Vec<u8>,
+        }
+        let resp = self
+            .client
+            .post(self.url("get-certificate"))
+            .json(&Req { leaf_index, spki_der })
+            .send()
+            .await
+            .context("POST get-certificate")?;
+        let status = resp.status().as_u16();
+        if status == 200 {
+            let body: IetfMtcGetCertificateResponse = resp
+                .json()
+                .await
+                .context("parsing get-certificate response")?;
+            Ok((status, Some(body)))
+        } else {
+            Ok((status, None))
+        }
+    }
+
+    /// `GET /logs/:log/checkpoint` — raw bytes.
+    pub async fn get_checkpoint(&self) -> Result<Vec<u8>> {
+        self.get_raw("checkpoint").await
+    }
+
+    /// Fetch a `SignedSubtree` from R2 for the subtree covering `[lo, hi)`.
+    pub async fn get_signed_subtree(
+        &self,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Option<ietf_mtc_api::SignedSubtree>> {
+        let key = ietf_mtc_api::subtree_sig_key(lo, hi);
+        match self.get_raw(&key).await {
+            Ok(bytes) => {
+                let s: ietf_mtc_api::SignedSubtree =
+                    serde_json::from_slice(&bytes).context("parsing SignedSubtree")?;
+                Ok(Some(s))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// `GET /logs/:log/{path}` — raw bytes.
+    pub async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(self.url(path))
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("GET {path} returned {status}");
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .with_context(|| format!("reading body for {path}"))
+    }
+
+    /// `GET /logs/:log/{path}` — returns the HTTP status code without failing on 4xx/5xx.
+    pub async fn get_status(&self, path: &str) -> Result<u16> {
+        let resp = self
+            .client
+            .get(self.url(path))
+            .send()
+            .await
+            .with_context(|| format!("GET {path} (status probe)"))?;
+        Ok(resp.status().as_u16())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

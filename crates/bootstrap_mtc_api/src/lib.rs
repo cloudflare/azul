@@ -25,8 +25,8 @@ use std::{
 };
 use thiserror::Error;
 use tlog_tiles::{
-    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, SequenceMetadata, Subtree,
-    TlogError, TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
+    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, Subtree, TlogError,
+    TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
 };
 use x509_cert::{
     certificate::Version,
@@ -174,16 +174,6 @@ impl LogEntry for BootstrapMtcLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
     type Pending = BootstrapMtcPendingLogEntry;
     type ParseError = MtcError;
-    type Metadata = SequenceMetadata;
-
-    fn make_metadata(
-        leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
-        _old_tree_size: u64,
-        _new_tree_size: u64,
-    ) -> Self::Metadata {
-        (leaf_index, timestamp)
-    }
 
     fn initial_entry() -> Option<Self::Pending> {
         Some(Self::Pending {
@@ -194,8 +184,8 @@ impl LogEntry for BootstrapMtcLogEntry {
         })
     }
 
-    fn new(pending: Self::Pending, metadata: Self::Metadata) -> Self {
-        Self(TlogTilesLogEntry::new(pending.entry, metadata))
+    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestamp) -> Self {
+        Self(TlogTilesLogEntry::new(pending.entry, leaf_index, timestamp))
     }
 
     fn merkle_tree_leaf(&self) -> Hash {

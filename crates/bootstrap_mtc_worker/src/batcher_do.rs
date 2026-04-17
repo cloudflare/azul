@@ -1,10 +1,12 @@
-use crate::CONFIG;
-use generic_log_worker::{get_durable_object_name, BatcherConfig, GenericBatcher, BATCHER_BINDING};
+use crate::{BootstrapMtcSequenceMetadata, CONFIG};
+use generic_log_worker::{
+    get_durable_object_name, BatcherConfig, GenericBatcher, BATCHER_BINDING,
+};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object(fetch)]
-struct Batcher(GenericBatcher<tlog_tiles::SequenceMetadata>);
+struct Batcher(GenericBatcher<BootstrapMtcSequenceMetadata>);
 
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {

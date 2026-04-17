@@ -10,6 +10,8 @@ members = [
     "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
+    "crates/ietf_mtc_worker",
     "crates/integration_tests",
     "crates/length_prefixed",
     "crates/sct_validator",
@@ -25,11 +27,13 @@ members = [
 # wrangler dev instance and will hang if run without one.
 # Run explicitly with: cargo test -p integration_tests --test static_ct_api
 default-members = [
-    "crates/ct_worker",
-    "crates/generic_log_worker",
-    "crates/length_prefixed",
     "crates/bootstrap_mtc_api",
     "crates/bootstrap_mtc_worker",
+    "crates/ct_worker",
+    "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
+    "crates/ietf_mtc_worker",
+    "crates/length_prefixed",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
@@ -93,7 +97,9 @@ jsonschema = "0.30"
 length_prefixed = { path = "crates/length_prefixed" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
+ml-dsa = { version = "0.1.0-rc.8", features = ["pkcs8"] }
 bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
+ietf_mtc_api = { version = "0.2.0", path = "crates/ietf_mtc_api" }
 p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p384 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p521 = { version = "0.14.0-rc.8", features = ["ecdsa"] }

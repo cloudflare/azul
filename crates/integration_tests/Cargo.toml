@@ -8,10 +8,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[package.metadata.cargo-machete]
-# These deps are used in tests/ (not src/), which cargo-machete doesn't scan.
-ignored = ["bootstrap_mtc_api", "byteorder", "length_prefixed", "log", "x509_util"]
 homepage.workspace = true
 repository.workspace = true
 description = "Integration tests for ct_worker (static CT API) and bootstrap_mtc_worker (MTC API)"
@@ -25,22 +21,22 @@ name = "integration_tests"
 base64.workspace = true
 p256.workspace = true
 ed25519-dalek.workspace = true
+ml-dsa.workspace = true
+pkcs8.workspace = true
+spki.workspace = true
 sha2.workspace = true
 signed_note.workspace = true
 static_ct_api.workspace = true
-bootstrap_mtc_api.workspace = true
+ietf_mtc_api.workspace = true
 tlog_tiles.workspace = true
 sct_validator.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with = { workspace = true, features = ["base64"] }
 anyhow = { workspace = true }
-length_prefixed.workspace = true
-byteorder = { workspace = true }
 chrono.workspace = true
 crypto-common.workspace = true
 hex.workspace = true
-log.workspace = true
 rand.workspace = true
 x509-cert = { workspace = true, features = ["builder"] }
 der.workspace = true
@@ -49,4 +45,3 @@ const-oid.workspace = true
 # Async HTTP client (native, not wasm)
 reqwest = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-x509_util.workspace = true
