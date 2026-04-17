@@ -5,7 +5,7 @@
 
 use std::{collections::VecDeque, time::Duration};
 
-use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
+use crate::{load_checkpoint_cosigner, load_origin, BootstrapMtcSequenceMetadata, CONFIG};
 use generic_log_worker::{
     get_durable_object_name, load_public_bucket,
     log_ops::{prove_subtree_consistency, ProofError},
@@ -24,7 +24,7 @@ use tlog_tiles::{CheckpointText, Hash, UnixTimestamp};
 use worker::*;
 
 #[durable_object(alarm)]
-struct Sequencer(GenericSequencer<BootstrapMtcLogEntry>);
+struct Sequencer(GenericSequencer<BootstrapMtcLogEntry, BootstrapMtcSequenceMetadata>);
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {

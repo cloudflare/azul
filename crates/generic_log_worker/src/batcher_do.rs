@@ -7,10 +7,9 @@
 //! Entries are assigned to Batcher shards with consistent hashing on the cache key.
 
 use crate::{
-    deserialize, get_durable_object_stub, load_cache_kv, obs, serialize, CacheSerialize,
-    LookupKey, BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
+    deserialize, get_durable_object_stub, load_cache_kv, obs, serialize, LookupKey,
+    SequencerMetadata, BATCH_ENDPOINT, ENTRY_ENDPOINT, SEQUENCER_BINDING,
 };
-use serde::{de::DeserializeOwned, Serialize};
 use base64::prelude::*;
 use futures_util::future::{join_all, select, Either};
 use std::{
@@ -27,9 +26,12 @@ use worker::*;
 /// A Durable Object that buffers incoming log entries and submits them to the
 /// Sequencer in batches.
 ///
-/// `M` is the sequence metadata type produced for each entry after sequencing
-/// (i.e., [`LogEntry::Metadata`](tlog_tiles::LogEntry::Metadata)).
-pub struct GenericBatcher<M> {
+/// `M` is the [`SequencerMetadata`] produced for each entry after sequencing.
+/// The batcher does not inspect the entry contents, so it only needs to know
+/// the metadata type (not the full [`LogEntry`]).
+///
+/// [`LogEntry`]: tlog_tiles::LogEntry
+pub struct GenericBatcher<M: SequencerMetadata> {
     env: Env,
     config: BatcherConfig,
     state: State,
@@ -67,7 +69,7 @@ impl<M: Clone + Default> Default for Batch<M> {
     }
 }
 
-impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Default + Copy + 'static> GenericBatcher<M> {
+impl<M: SequencerMetadata> GenericBatcher<M> {
     /// Returns a new batcher with the given config.
     ///
     /// # Panics
@@ -196,7 +198,7 @@ impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Default + Copy +
     }
 }
 
-impl<M: CacheSerialize + Serialize + DeserializeOwned + Clone + Default + Copy + 'static> GenericBatcher<M> {
+impl<M: SequencerMetadata> GenericBatcher<M> {
     /// Submit the current pending batch to be sequenced.
     ///
     /// # Errors
