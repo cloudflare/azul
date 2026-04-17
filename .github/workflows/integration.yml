@@ -106,3 +106,50 @@ jobs:
         env:
           BASE_URL: http://localhost:8787
           BOOTSTRAP_MTC_LOG_NAME: dev2
+
+  integration-tlog-witness:
+    name: TLog Witness Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # wasm-pack is intentionally NOT installed here: witness_worker only
+      # uses worker-build for its wasm build, unlike the CT and MTC jobs
+      # which also compile *_wasm sibling crates that need wasm-pack.
+      - name: Install worker-build
+        run: cargo install worker-build@0.7.5 --locked
+
+      - name: Build witness_worker (dev environment)
+        working-directory: crates/witness_worker
+        run: DEPLOY_ENV=dev worker-build --release
+
+      # .dev.vars contains the WITNESS_SIGNING_KEY used by wrangler dev. This
+      # is a dev-only key (not a production secret) and is committed to the
+      # repository.
+      - name: Start wrangler dev
+        working-directory: crates/witness_worker
+        run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
+
+      - name: Wait for wrangler dev to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8787/metadata > /dev/null 2>&1; then
+              echo "wrangler dev is ready"
+              exit 0
+            fi
+            echo "Waiting for wrangler dev... attempt $i/30"
+            sleep 2
+          done
+          echo "wrangler dev failed to start in time"
+          exit 1
+
+      - name: Run TLog Witness integration tests
+        run: cargo test -p integration_tests --test tlog_witness --verbose
+        env:
+          BASE_URL: http://localhost:8787
