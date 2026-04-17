@@ -20,8 +20,12 @@ jobs:
       - name: Clippy (pedantic, advisory)
         run: cargo clippy --tests -- -W clippy::pedantic
         continue-on-error: true
-      - name: Unused dependencies
+      - name: Unused dependencies (advisory)
         run: cargo install cargo-machete --quiet && cargo machete
+        continue-on-error: true
+      - name: Formatting (advisory)
+        run: cargo fmt --all --check
+        continue-on-error: true
 
   build:
     name: Build

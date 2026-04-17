@@ -74,7 +74,18 @@ npx wrangler -e=${ENV} tail
 
 ## Boundaries
 
-✅ **Always:** Run `cargo clippy -- -D warnings` before pushing; CI fails on any warning
-✅ **Always:** Add new shared dependencies to `[workspace.dependencies]` in root `Cargo.toml`
+✅ **Always:** Before pushing any commit, run the pre-push checks locally and confirm they pass:
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings   # lint; CI fails on any warning
+cargo test --workspace --lib --bins                     # unit tests (integration_tests requires wrangler dev; skip or run separately)
+cargo fmt --all --check                                 # formatting; advisory in CI, but easy to fix
+cargo machete                                           # unused-dependency check; advisory in CI, but easy to fix
+```
+
+If any step fails, fix the issue in the commit it belongs to (use `git commit --fixup=<sha>` + `git rebase --autosquash`) rather than layering a separate "fix lint" commit on top.
+
+✅ **Always:** Add new shared dependencies to `[workspace.dependencies]` in root `Cargo.toml`. Do not add a dependency to a crate's `Cargo.toml` before you actually use it — `cargo machete` will flag speculative additions.
+
 ⚠️ **Requires Approval:** Publishing crates to crates.io (`tlog_tiles`, `static_ct_api`, `signed_note`, `signed_note`) — worker crates have `publish = false`
 
