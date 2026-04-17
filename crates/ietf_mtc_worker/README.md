@@ -1,16 +1,24 @@
-# IETF MTC CA Worker
+# IETF Merkle Tree CA Worker
 
-A Rust implementation of a [IETF MTC CA](https://blog.cloudflare.com/ietf-mtc) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
+A Rust implementation of an [IETF Merkle Tree Certificate CA](https://github.com/ietf-plants-wg/merkle-tree-certs/) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
 
-This worker implements an experimental Merkle Tree Certificates CA based on the bootstrap experiment described in the Cloudflare blog post above. It implements an older version of the MTC specification (approximately draft-davidben-tls-merkle-tree-certs-09).
+This worker implements [draft-ietf-plants-merkle-tree-certs-02](https://datatracker.ietf.org/doc/draft-ietf-plants-merkle-tree-certs/). For the older bootstrap experiment, see [`bootstrap_mtc_worker`](../bootstrap_mtc_worker/README.md).
 
 The internal log architecture (Sequencer, Batcher, Cleaner Durable Objects, tiled R2 storage) is shared with the [Static CT Log](../ct_worker/README.md).
 
 ## How it works
 
-For every MTC issued, the requester must provide a **bootstrap certificate chain** — a standard X.509 certificate chain with a path to a root trusted by the CA. By default the root store is the intersection of Chrome's and Mozilla's trust stores (sourced from the CCADB). The CA validates the chain, extracts the subject, SPKI, SANs, key usage, and EKU, and logs them as a `TBSCertificateLogEntry`.
+Subscribers submit a PKCS#10 CSR (base64url-encoded, no padding) to the `add-entry` endpoint, matching the ACME `finalize` format (RFC 8555 §7.4). The CA extracts the subject, SPKI, and SANs from the CSR and logs them as a `TBSCertificateLogEntry`. The validity window is set server-side to `[now, now + max_certificate_lifetime_secs]`.
 
-Once a landmark interval elapses, the sequencer produces a landmark subtree and the CA can issue **signatureless MTC certificates** — DER-encoded X.509 structures whose `signatureValue` encodes a Merkle inclusion proof into the landmark subtree rather than a traditional signature. (The IETF draft renamed these to "landmark-relative" certificates.)
+Once a landmark interval elapses, the sequencer produces a landmark subtree and the CA can issue **landmark-relative MTC certificates** — DER-encoded X.509 structures whose `signatureValue` encodes a Merkle inclusion proof into the landmark subtree rather than a traditional signature.
+
+## Known limitations
+
+- Standalone certificates (with cosignatures in the `signatures` field) are not yet implemented.
+- ML-DSA signing is not yet implemented.
+- The subtree signing oracle (for external cosigners) is not yet implemented.
+- The ACME interface is not yet complete.
+- ACME order `notBefore`/`notAfter` fields are not currently supported.
 
 ## Development
 
@@ -24,34 +32,11 @@ npx wrangler -e=dev dev
 ./reset-dev.sh
 ```
 
-To test the basic functionality, run the following script from this directory:
-
-```bash
-./test-dev.sh
-```
-
-This script:
-1. Fetches a bootstrap certificate chain.
-2. Submits it to the MTC CA running locally.
-3. Waits for the next landmark (interval defined in [`config.dev.json`](./config.dev.json)).
-4. Requests the signatureless MTC.
-
-### Overriding the trust store
-
-To test with your own root certificates:
-
-1. Add `dev-bootstrap-roots` to the default features in `Cargo.toml`.
-2. Append your root certificates (PEM format) to [`dev-bootstrap-roots.pem`](./dev-bootstrap-roots.pem).
-
 ### Integration tests
 
 ```bash
 BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
 ```
-
-## Deployment
-
-See the [`ct_worker` documentation](../ct_worker/README.md#deployment-to-a-custom-domain) for deployment to a custom domain.
 
 ## License
 

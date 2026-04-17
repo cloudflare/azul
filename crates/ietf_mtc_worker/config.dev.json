@@ -3,6 +3,7 @@
     "logs": {
         "dev1": {
             "description": "MTC CA Dev1",
+            "version": "draft02",
             "log_id": "44363.48.1",
             "cosigner_id": "44363.48.2",
             "submission_url": "http://localhost:8787/logs/dev1/",
@@ -10,6 +11,7 @@
         },
         "dev2": {
             "description": "MTC CA Dev2",
+            "version": "draft02",
             "log_id": "44363.48.3",
             "cosigner_id": "44363.48.4",
             "submission_url": "http://localhost:8787/logs/dev2/",
