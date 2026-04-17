@@ -372,6 +372,16 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 /// Open and verify a serialized checkpoint encoded as a [note](c2sp.org/signed-note), returning a
 /// [`CheckpointText`] and the latest timestamp of any of its cosignatures (if defined).
 ///
+/// Every verifier in `verifiers` must have produced a valid signature on
+/// the note — the checkpoint is rejected if any configured key is missing,
+/// or if any known-key signature fails to verify (the latter is the
+/// SHOULD-reject behavior from c2sp.org/signed-note, enforced by
+/// [`Note::verify`]). Callers that accept a checkpoint as soon as *any
+/// one* of a set of trusted keys has signed — for example, a
+/// c2sp.org/tlog-witness witness accepting a rotated log key — should call
+/// [`Note::verify`] directly and implement the origin and timestamp
+/// checks themselves; see `witness_worker` for an example.
+///
 /// # Errors
 ///
 /// Returns an error if the checkpoint cannot be successfully opened and verified.
@@ -411,6 +421,7 @@ pub fn open_checkpoint(
     if !key_ids_to_observe.is_empty() {
         return Err(TlogError::MissingVerifierSignature);
     }
+
     let checkpoint_text = CheckpointText::from_bytes(n.text())?;
     if current_time < latest_timestamp.unwrap_or(0) {
         return Err(TlogError::InvalidTimestamp);

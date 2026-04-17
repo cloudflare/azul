@@ -87,6 +87,8 @@ cargo machete                                                           # unused
 
 If any step fails, fix the issue in the commit it belongs to (use `git commit --fixup=<sha>` + `git rebase --autosquash`) rather than layering a separate "fix lint" commit on top.
 
+✅ **Always:** Before pushing, re-read the commit message and verify it reflects the current state of the code — counts, type names, and described behaviors can drift as code evolves.
+
 ✅ **Always:** Add new shared dependencies to `[workspace.dependencies]` in root `Cargo.toml`. Do not add a dependency to a crate's `Cargo.toml` before you actually use it — `cargo machete` will flag speculative additions.
 
 ✅ **Always:** Keep Workers-specific concerns (Durable Object storage formats, KV dedup cache, Worker runtime dependencies) out of the specification-level crates (`tlog_tiles`, `static_ct_api`, `bootstrap_mtc_api`, `signed_note`). Those crates implement public specs and are published to crates.io; they should not gain types, traits, or dependencies whose only consumers are Cloudflare Workers. Wire-format types used only by the sequencer and frontend belong in `generic_log_worker` or the concrete worker crate.
