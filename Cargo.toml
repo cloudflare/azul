@@ -102,6 +102,7 @@ jsonschema = "0.30"
 length_prefixed = { path = "crates/length_prefixed" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
+ml-dsa = { version = "0.1.0-rc.8", features = ["pkcs8"] }
 bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
 ietf_mtc_api = { version = "0.2.0", path = "crates/ietf_mtc_api" }
 p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }

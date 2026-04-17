@@ -1439,7 +1439,9 @@ dependencies = [
  "der",
  "ed25519-dalek",
  "length_prefixed",
+ "ml-dsa",
  "p256",
+ "pkcs8",
  "rand",
  "serde",
  "serde_json",
@@ -1468,6 +1470,7 @@ dependencies = [
  "itertools 0.14.0",
  "jsonschema",
  "log",
+ "ml-dsa",
  "parking_lot",
  "pkcs8",
  "rand",
@@ -1525,6 +1528,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "ietf_mtc_api",
+ "ml-dsa",
  "p256",
  "pkcs8",
  "rand",
@@ -1535,6 +1539,7 @@ dependencies = [
  "serde_with",
  "sha2",
  "signed_note",
+ "spki",
  "static_ct_api",
  "tlog_tiles",
  "tokio",
@@ -1640,6 +1645,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keccak"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e24a010dd405bd7ed803e5253182815b41bf2e6a80cc3bfc066658e03a198aa"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,6 +1749,32 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ml-dsa"
+version = "0.1.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5b2bb0ad6fa2b40396775bd56f51345171490fef993f46f91a876ecdbdaea55"
+dependencies = [
+ "const-oid",
+ "ctutils",
+ "hybrid-array",
+ "module-lattice",
+ "pkcs8",
+ "rand_core",
+ "sha3",
+ "signature",
+]
+
+[[package]]
+name = "module-lattice"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "164eb3faeaecbd14b0b2a917c1b4d0c035097a9c559b0bed85c2cdd032bc8faa"
+dependencies = [
+ "hybrid-array",
+ "num-traits",
 ]
 
 [[package]]
@@ -2710,6 +2751,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest",
+]
+
+[[package]]
+name = "sha3"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be176f1a57ce4e3d31c1a166222d9768de5954f811601fb7ca06fc8203905ce1"
+dependencies = [
+ "digest",
+ "keccak",
 ]
 
 [[package]]
