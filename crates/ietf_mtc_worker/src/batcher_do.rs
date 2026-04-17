@@ -1,7 +1,5 @@
 use crate::{IetfMtcSequenceMetadata, CONFIG};
-use generic_log_worker::{
-    get_durable_object_name, BatcherConfig, GenericBatcher, BATCHER_BINDING,
-};
+use generic_log_worker::{get_durable_object_name, BatcherConfig, GenericBatcher, BATCHER_BINDING};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

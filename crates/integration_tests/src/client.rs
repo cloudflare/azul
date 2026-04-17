@@ -423,13 +423,16 @@ pub fn ietf_mtc_log_name() -> String {
     std::env::var("IETF_MTC_LOG_NAME").unwrap_or_else(|_| "dev2".to_string())
 }
 
+// ===========================================================================
+// IETF MTC client
+
 /// Add-entry response from the IETF MTC worker.
+#[serde_as]
 #[derive(Deserialize, Debug, Clone)]
 pub struct IetfMtcAddEntryResponse {
-    pub leaf_index: u64,
-    pub timestamp: u64,
-    pub not_before: u64,
-    pub not_after: u64,
+    /// DER-encoded standalone MTC certificate, base64-encoded.
+    #[serde_as(as = "Base64")]
+    pub certificate: Vec<u8>,
 }
 
 /// Get-certificate response from the IETF MTC worker.
@@ -503,10 +506,8 @@ impl IetfMtcClient {
             .context("POST add-entry")?;
         let status = resp.status().as_u16();
         if status == 200 {
-            let body: IetfMtcAddEntryResponse = resp
-                .json()
-                .await
-                .context("parsing add-entry response")?;
+            let body: IetfMtcAddEntryResponse =
+                resp.json().await.context("parsing add-entry response")?;
             Ok((status, Some(body)))
         } else {
             Ok((status, None))
@@ -529,7 +530,10 @@ impl IetfMtcClient {
         let resp = self
             .client
             .post(self.url("get-certificate"))
-            .json(&Req { leaf_index, spki_der })
+            .json(&Req {
+                leaf_index,
+                spki_der,
+            })
             .send()
             .await
             .context("POST get-certificate")?;
@@ -548,6 +552,23 @@ impl IetfMtcClient {
     /// `GET /logs/:log/checkpoint` — raw bytes.
     pub async fn get_checkpoint(&self) -> Result<Vec<u8>> {
         self.get_raw("checkpoint").await
+    }
+
+    /// Fetch a `SignedSubtree` from R2 for the subtree covering `[lo, hi)`.
+    pub async fn get_signed_subtree(
+        &self,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Option<ietf_mtc_api::SignedSubtree>> {
+        let key = ietf_mtc_api::subtree_sig_key(lo, hi);
+        match self.get_raw(&key).await {
+            Ok(bytes) => {
+                let s: ietf_mtc_api::SignedSubtree =
+                    serde_json::from_slice(&bytes).context("parsing SignedSubtree")?;
+                Ok(Some(s))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     /// `GET /logs/:log/{path}` — raw bytes.

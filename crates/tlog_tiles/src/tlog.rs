@@ -544,6 +544,60 @@ pub fn verify_subtree_inclusion_proof(
     verify_inclusion_proof(proof, n.hi - n.lo, n_hash, leaf_index - n.lo, leaf_hash)
 }
 
+/// Evaluate a subtree inclusion proof, returning the expected subtree hash.
+///
+/// Implements the "Evaluating a Subtree Inclusion Proof" procedure from
+/// draft-ietf-plants-merkle-tree-certs §4.3.2.  Given the proof hashes and
+/// the leaf hash, it derives the subtree root without requiring it as input.
+/// The caller can then verify the result against an external commitment such
+/// as a cosignature.
+///
+/// This is the complement of [`verify_subtree_inclusion_proof`], which takes
+/// the expected root as input and checks equality.
+///
+/// # Errors
+///
+/// Returns an error if `leaf_index` is outside the subtree `n` or the proof
+/// is malformed.
+pub fn evaluate_subtree_inclusion_proof(
+    proof: &Proof,
+    n: &Subtree,
+    leaf_index: u64,
+    leaf_hash: Hash,
+) -> Result<Hash, TlogError> {
+    let tree_size = n.hi - n.lo;
+    let index = leaf_index
+        .checked_sub(n.lo)
+        .ok_or(TlogError::InvalidProof)?;
+    if index >= tree_size {
+        return Err(TlogError::InvalidProof);
+    }
+    let mut f_n = index;
+    let mut s_n = tree_size - 1;
+    let mut r = leaf_hash;
+    for p in proof {
+        if s_n == 0 {
+            return Err(TlogError::InvalidProof);
+        }
+        if lsb_set(f_n) || f_n == s_n {
+            r = node_hash(*p, r);
+            while !lsb_set(f_n) {
+                f_n >>= 1;
+                s_n >>= 1;
+            }
+        } else {
+            r = node_hash(r, *p);
+        }
+        f_n >>= 1;
+        s_n >>= 1;
+    }
+    if s_n == 0 {
+        Ok(r)
+    } else {
+        Err(TlogError::InvalidProof)
+    }
+}
+
 /// Returns the proof that the tree of size `n` contains as a prefix all the
 /// records from the tree of smaller size `m`.
 ///

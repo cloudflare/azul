@@ -134,19 +134,17 @@ pub struct AddEntryRequest {
 }
 
 /// Add-entry response.
+///
+/// The DER-encoded standalone MTC certificate (§6.2) encodes all relevant
+/// fields: the entry index is the certificate serial number, validity is in
+/// the `TBSCertificate`, and the inclusion proof and cosignature are in the
+/// `signatureValue`.
 #[serde_as]
 #[derive(Serialize)]
 pub struct AddEntryResponse {
-    /// The index of the entry in the log.
-    pub leaf_index: LeafIndex,
-
-    /// The time at which the entry was added to the log.
-    pub timestamp: UnixTimestamp,
-
-    /// The validity period of the entry as accepted by the log (may be
-    /// clipped to the log's `max_certificate_lifetime_secs`).
-    pub not_before: UnixTimestamp,
-    pub not_after: UnixTimestamp,
+    /// DER-encoded standalone MTC certificate (§6.2), base64-encoded.
+    #[serde_as(as = "Base64")]
+    pub certificate: Vec<u8>,
 }
 
 /// A pending IETF MTC log entry.  Unlike the bootstrap variant, there is no
@@ -290,19 +288,76 @@ fn extract_san_from_csr(
     Ok(None)
 }
 
-/// Return the serialized DER-encoded bytes of a landmark-relative
-/// certificate (draft-ietf-plants-merkle-tree-certs §6.3).
+/// R2 key prefix for cached subtree signatures.
+///
+/// Each key has the form `{SUBTREE_SIG_KEY_PREFIX}/{lo}-{hi}` where `lo` and
+/// `hi` are the zero-padded decimal endpoints of the signed subtree interval.
+/// Zero-padding ensures lexicographic ordering matches numeric ordering.
+pub const SUBTREE_SIG_KEY_PREFIX: &str = "subtree-sig";
+
+/// Format a subtree signature R2 key for the interval `[lo, hi)`.
+#[must_use]
+pub fn subtree_sig_key(lo: u64, hi: u64) -> String {
+    format!("{SUBTREE_SIG_KEY_PREFIX}/{lo:020}-{hi:020}")
+}
+
+/// A subtree cosignature cached in R2 by the sequencer.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignedSubtree {
+    /// The start (inclusive) of the subtree interval.
+    pub lo: u64,
+    /// The end (exclusive) of the subtree interval.
+    pub hi: u64,
+    /// SHA-256 Merkle hash of the subtree root.
+    #[serde_as(as = "Base64")]
+    pub hash: [u8; 32],
+    /// SHA-256 hash of the full checkpoint tree at the time of signing.
+    /// Required to fetch the correct hash tiles when computing inclusion proofs.
+    #[serde_as(as = "Base64")]
+    pub checkpoint_hash: [u8; 32],
+    /// Tree size of the full checkpoint at the time of signing.
+    pub checkpoint_size: u64,
+    /// Raw cosignature bytes from `MtcCosigner::sign_subtree`.
+    #[serde_as(as = "Base64")]
+    pub signature: Vec<u8>,
+    /// `TrustAnchorID` of the cosigner that produced `signature`.
+    pub cosigner_id: String,
+}
+
+impl SignedSubtree {
+    /// Return the subtree interval as a `Subtree`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `(lo, hi)` is not a valid subtree interval.
+    pub fn as_subtree(&self) -> Result<Subtree, MtcError> {
+        Subtree::new(self.lo, self.hi).map_err(|e| MtcError::Dynamic(e.to_string()))
+    }
+
+    /// Return true if `leaf_index` falls within `[lo, hi)`.
+    #[must_use]
+    pub fn contains(&self, leaf_index: LeafIndex) -> bool {
+        self.lo <= leaf_index && leaf_index < self.hi
+    }
+}
+
+/// Serialize a DER-encoded MTC certificate (draft-ietf-plants-merkle-tree-certs §6.1).
+///
+/// Pass an empty `cosignatures` slice for a landmark-relative certificate (§6.3)
+/// or a non-empty slice for a standalone certificate (§6.2).
 ///
 /// # Errors
 ///
 /// Returns an error if the SPKI hash does not match the entry, or if there
 /// are any serialization errors.
-pub fn serialize_landmark_relative_cert(
+pub fn serialize_mtc_cert(
     log_entry: &IetfMtcLogEntry,
     leaf_index: LeafIndex,
     spki_der: &[u8],
     subtree: &Subtree,
     inclusion_proof: Proof,
+    cosignatures: &[(TrustAnchorID, Vec<u8>)],
 ) -> Result<Vec<u8>, MtcError> {
     let entry = match MerkleTreeCertEntry::decode(&log_entry.0.inner.data)? {
         MerkleTreeCertEntry::TbsCertEntry(entry) => entry,
@@ -332,6 +387,13 @@ pub fn serialize_landmark_relative_cert(
         subject_unique_id: entry.subject_unique_id,
         extensions: entry.extensions,
     };
+    let signatures = cosignatures
+        .iter()
+        .map(|(cosigner_id, sig)| MtcSignature {
+            cosigner_id: cosigner_id.clone(),
+            signature: sig.clone(),
+        })
+        .collect();
     let certificate = x509_util::OwnedCertificate {
         tbs_certificate,
         signature_algorithm,
@@ -340,7 +402,7 @@ pub fn serialize_landmark_relative_cert(
                 start: subtree.lo(),
                 end: subtree.hi(),
                 inclusion_proof,
-                signatures: Vec::new(),
+                signatures,
             }
             .to_bytes(),
         )?,
