@@ -4,66 +4,49 @@
 //! [`IetfMtcSequenceMetadata`] — the per-entry metadata produced by the
 //! IETF MTC sequencer.
 
-use generic_log_worker::{
-    deserialize_sequence_metadata_entries, serialize_sequence_metadata_entries, SequencerMetadata,
-};
+use generic_log_worker::SequencerMetadata;
 use serde::{Deserialize, Serialize};
-use tlog_tiles::{LeafIndex, LookupKey, UnixTimestamp};
+use tlog_tiles::{LeafIndex, UnixTimestamp};
 
-/// Sequencer metadata for a IETF MTC log entry.
+/// Sequencer metadata for an IETF MTC log entry.
 ///
-/// Carries the leaf index and sequencing timestamp.
+/// Carries only the fields the IETF MTC worker actually consumes downstream:
+/// the `leaf_index` of the sequenced entry and the tree sizes before and after
+/// the sequencing batch. The frontend uses `old_tree_size` and `new_tree_size`
+/// together with `leaf_index` to identify the single covering subtree in
+/// `Subtree::split_interval(old, new)` that contains this entry — and
+/// therefore the exact R2 key of its cached subtree signature — without
+/// having to enumerate candidate subtree keys.
 ///
-/// Wire-format constraints (do not change without migration):
+/// Unlike bootstrap/static-ct metadata, there is no `timestamp` field: the
+/// IETF MTC `add-entry` response is a DER-encoded §6.2 standalone certificate,
+/// whose validity is carried inside the TBS entry rather than returned
+/// separately.
 ///
-/// 1. **Durable Object dedup ring buffer**: 32-byte binary layout
-///    `[16-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`.
-///    This format matches the one previously used when the type was
-///    `(LeafIndex, UnixTimestamp)`; preserving it avoids a one-time deserialize
-///    warning on deploy as the sequencer loads any entries already in DO
-///    storage.
-/// 2. **DO→Worker RPC**: `bitcode` sequence of the two u64 fields (preserved by
-///    the tuple-struct layout).
-///
-/// IETF MTC does not currently use the long-term KV dedup cache.
+/// IETF MTC does not currently use the long-term KV dedup cache or have any
+/// deployed short-term dedup storage, so no wire-format compatibility
+/// constraints apply; the default JSON cache serialization is fine.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IetfMtcSequenceMetadata(pub LeafIndex, pub UnixTimestamp);
-
-impl IetfMtcSequenceMetadata {
-    /// Return the leaf index.
-    #[must_use]
-    pub fn leaf_index(&self) -> LeafIndex {
-        self.0
-    }
-
-    /// Return the sequencing timestamp (milliseconds since the Unix epoch).
-    #[must_use]
-    pub fn timestamp(&self) -> UnixTimestamp {
-        self.1
-    }
+pub struct IetfMtcSequenceMetadata {
+    /// Zero-based index of the sequenced entry.
+    pub leaf_index: LeafIndex,
+    /// Tree size immediately before the batch that sequenced this entry.
+    pub old_tree_size: u64,
+    /// Tree size immediately after the batch that sequenced this entry.
+    pub new_tree_size: u64,
 }
 
 impl SequencerMetadata for IetfMtcSequenceMetadata {
-    fn make(
+    fn new(
         leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
-        _old_tree_size: u64,
-        _new_tree_size: u64,
+        _timestamp: UnixTimestamp,
+        old_tree_size: u64,
+        new_tree_size: u64,
     ) -> Self {
-        Self(leaf_index, timestamp)
-    }
-
-    fn serialize_cache_entries(entries: &[(LookupKey, Self)]) -> Vec<u8> {
-        let pairs: Vec<(LookupKey, (u64, u64))> =
-            entries.iter().map(|(k, m)| (*k, (m.0, m.1))).collect();
-        serialize_sequence_metadata_entries(&pairs)
-    }
-
-    fn deserialize_cache_entries(buf: &[u8]) -> Result<Vec<(LookupKey, Self)>, String> {
-        let pairs = deserialize_sequence_metadata_entries(buf)?;
-        Ok(pairs
-            .into_iter()
-            .map(|(k, (idx, ts))| (k, Self(idx, ts)))
-            .collect())
+        Self {
+            leaf_index,
+            old_tree_size,
+            new_tree_size,
+        }
     }
 }

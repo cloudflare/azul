@@ -1693,6 +1693,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "ietf_mtc_api",
  "ml-dsa",
  "p256",
  "pkcs8",
