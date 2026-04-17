@@ -23,7 +23,6 @@ use crate::{
     util::now_millis,
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequencerConfig,
 };
-use serde::de::DeserializeOwned;
 use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
@@ -39,6 +38,7 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
+use crate::SequencerMetadata;
 use tlog_tiles::{
     Hash, HashReader, LogEntry, PendingLogEntry, PreloadedTlogTileReader, Proof, Subtree,
     TileHashReader, TileIterator, TlogError, TlogTile, TlogTileRecorder, TreeWithTimestamp,
@@ -109,7 +109,7 @@ impl<P: PendingLogEntry, M: Copy + Debug + Default + 'static> Default for PoolSt
     }
 }
 
-impl<E: PendingLogEntry, M: Serialize + DeserializeOwned + Copy + Debug + Default + 'static> PoolState<E, M> {
+impl<E: PendingLogEntry, M: SequencerMetadata> PoolState<E, M> {
     // Check if the key is already in the pool. If so, return a Receiver from
     // which to read the entry metadata when it is sequenced.
     fn check(&self, key: &LookupKey) -> Option<AddLeafResult<M>> {
@@ -718,7 +718,7 @@ pub(crate) fn add_leaf_to_pool<E, M>(
 ) -> AddLeafResult<M>
 where
     E: PendingLogEntry,
-    M: Serialize + DeserializeOwned + Copy + Debug + Default + 'static,
+    M: SequencerMetadata,
 {
     let hash = entry.lookup_key();
     let mut state = state.borrow_mut();
@@ -744,13 +744,13 @@ where
 ///
 /// Will return an error if sequencing fails with an error that requires the
 /// sequencer to be re-initialized to get into a good state.
-pub(crate) async fn sequence<L: LogEntry>(
-    pool_state: &RefCell<PoolState<L::Pending, L::Metadata>>,
+pub(crate) async fn sequence<L: LogEntry, M: SequencerMetadata>(
+    pool_state: &RefCell<PoolState<L::Pending, M>>,
     sequence_state: &RefCell<SequenceState>,
     config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &impl CacheWrite<L::Metadata>,
+    cache: &impl CacheWrite<M>,
     metrics: &SequencerMetrics,
 ) -> Result<(), anyhow::Error> {
     let Some(entries) = pool_state.borrow_mut().take(
@@ -765,7 +765,7 @@ pub(crate) async fn sequence<L: LogEntry>(
 
     metrics.seq_pool_size.observe(entries.len().as_f64());
 
-    let result = match sequence_entries::<L>(
+    let result = match sequence_entries::<L, M>(
         sequence_state,
         config,
         object,
@@ -816,13 +816,13 @@ enum SequenceError {
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
 /// If a fatal sequencing error occurs, the ephemeral log state must be reloaded before the next sequencing.
 #[allow(clippy::too_many_lines)]
-async fn sequence_entries<L: LogEntry>(
+async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     sequence_state: &RefCell<SequenceState>,
     config: &SequencerConfig,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
-    cache: &impl CacheWrite<L::Metadata>,
-    entries: Vec<(L::Pending, Sender<L::Metadata>)>,
+    cache: &impl CacheWrite<M>,
+    entries: Vec<(L::Pending, Sender<M>)>,
     metrics: &SequencerMetrics,
 ) -> Result<(), SequenceError> {
     let name = &config.name;
@@ -870,10 +870,10 @@ async fn sequence_entries<L: LogEntry>(
         }
 
         // Add the entry and metadata to our lists of things sequenced.
-        // L::make_metadata provides the application-specific metadata type,
-        // which may include leaf_index, timestamp, and the old and new sizes
-        // of the tree (for subtree inclusion proofs).
-        let metadata = L::make_metadata(n, timestamp, old_size, new_size);
+        // `M::make` constructs the application-specific metadata, which may
+        // include leaf_index, timestamp, and the old and new tree sizes (e.g.
+        // for subtree inclusion proofs).
+        let metadata = M::make(n, timestamp, old_size, new_size);
         cache_metadata.push((entry.lookup_key(), metadata));
         sequenced_metadata.push((sender, metadata));
 
@@ -1378,8 +1378,25 @@ pub async fn upload_issuers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tlog_tiles::SequenceMetadata;
     use crate::{empty_checkpoint_callback, util};
+    use tlog_tiles::LeafIndex;
+
+    /// Local metadata type used to exercise the sequencer and batcher logic
+    /// end-to-end. Kept as a `(LeafIndex, UnixTimestamp)` tuple so existing
+    /// tests can destructure with `let (leaf_index, timestamp) = ...`. The
+    /// JSON cache serialization defaults are fine for tests.
+    type SequenceMetadata = (LeafIndex, UnixTimestamp);
+
+    impl SequencerMetadata for SequenceMetadata {
+        fn make(
+            leaf_index: LeafIndex,
+            timestamp: UnixTimestamp,
+            _old_tree_size: u64,
+            _new_tree_size: u64,
+        ) -> Self {
+            (leaf_index, timestamp)
+        }
+    }
 
     use anyhow::ensure;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
@@ -2471,7 +2488,7 @@ mod tests {
             }
         }
         fn sequence(&mut self) -> Result<(), anyhow::Error> {
-            block_on(sequence::<StaticCTLogEntry>(
+            block_on(sequence::<StaticCTLogEntry, SequenceMetadata>(
                 &self.pool_state,
                 &self.sequence_state,
                 &self.config,
@@ -2495,7 +2512,7 @@ mod tests {
             &mut self,
             entries: Vec<(StaticCTPendingLogEntry, Sender<SequenceMetadata>)>,
         ) {
-            block_on(sequence_entries::<StaticCTLogEntry>(
+            block_on(sequence_entries::<StaticCTLogEntry, SequenceMetadata>(
                 &self.sequence_state,
                 &self.config,
                 &self.object,

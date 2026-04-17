@@ -121,7 +121,7 @@ use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType
 use std::io::Read;
 use tlog_tiles::{
     CheckpointSigner, CheckpointText, Hash, LeafIndex, LogEntry, LookupKey, PathElem,
-    PendingLogEntry, SequenceMetadata, UnixTimestamp,
+    PendingLogEntry, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -280,16 +280,6 @@ impl LogEntry for StaticCTLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = true;
     type Pending = StaticCTPendingLogEntry;
     type ParseError = StaticCTError;
-    type Metadata = SequenceMetadata;
-
-    fn make_metadata(
-        leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
-        _old_tree_size: u64,
-        _new_tree_size: u64,
-    ) -> Self::Metadata {
-        (leaf_index, timestamp)
-    }
 
     fn initial_entry() -> Option<Self::Pending> {
         None

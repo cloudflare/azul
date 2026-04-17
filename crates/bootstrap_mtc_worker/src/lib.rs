@@ -12,7 +12,6 @@ use signed_note::KeyName;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::SequenceMetadata;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_util::CertPool;
@@ -22,7 +21,10 @@ mod ccadb_roots_cron;
 mod cleaner_do;
 mod ct_logs_cron;
 mod frontend_worker;
+mod sequence_metadata;
 mod sequencer_do;
+
+pub(crate) use sequence_metadata::BootstrapMtcSequenceMetadata;
 
 // Application configuration.
 static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
