@@ -2970,6 +2970,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlog_witness"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "signed_note",
+ "thiserror 2.0.17",
+ "tlog_tiles",
+]
+
+[[package]]
 name = "tls_codec"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3712,6 +3722,37 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "witness_worker"
+version = "0.2.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "ed25519-dalek",
+ "generic_log_worker",
+ "getrandom 0.4.2",
+ "jsonschema",
+ "log",
+ "pkcs8",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "signed_note",
+ "tlog_tiles",
+ "tlog_witness",
+ "witness_worker_config",
+ "worker",
+]
+
+[[package]]
+name = "witness_worker_config"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_with",
 ]
 
 [[package]]

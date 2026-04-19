@@ -481,9 +481,14 @@ async fn get_current_checkpoint(
 
     let origin = &load_origin(name);
     let verifiers = &VerifierList::new(vec![load_checkpoint_cosigner(env, name).verifier()]);
-    let (checkpoint, _timestamp) =
-        open_checkpoint(origin.as_str(), verifiers, now_millis(), &checkpoint_bytes)
-            .map_err(|e| e.to_string())?;
+    let (checkpoint, _timestamp) = open_checkpoint(
+        origin.as_str(),
+        verifiers,
+        tlog_tiles::ValidationMode::All,
+        now_millis(),
+        &checkpoint_bytes,
+    )
+    .map_err(|e| e.to_string())?;
     Ok((checkpoint, checkpoint_bytes))
 }
 

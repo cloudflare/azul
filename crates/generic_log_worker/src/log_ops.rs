@@ -340,6 +340,7 @@ impl SequenceState {
         let (c, timestamp) = tlog_tiles::open_checkpoint(
             config.origin.as_str(),
             &verifiers,
+            tlog_tiles::ValidationMode::All,
             now_millis(),
             &stored_checkpoint,
         )?;
@@ -362,8 +363,13 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) =
-            tlog_tiles::open_checkpoint(config.origin.as_str(), &verifiers, now_millis(), &sth)?;
+        let (c1, _) = tlog_tiles::open_checkpoint(
+            config.origin.as_str(),
+            &verifiers,
+            tlog_tiles::ValidationMode::All,
+            now_millis(),
+            &sth,
+        )?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {

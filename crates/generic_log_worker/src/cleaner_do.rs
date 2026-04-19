@@ -284,6 +284,7 @@ impl GenericCleaner {
         let checkpoint = tlog_tiles::open_checkpoint(
             self.config.origin.as_str(),
             &self.config.verifiers,
+            tlog_tiles::ValidationMode::All,
             now_millis(),
             &checkpoint_bytes,
         )

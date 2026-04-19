@@ -1,0 +1,52 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["witness_name", "submission_prefix", "logs"],
+    "additionalProperties": false,
+    "properties": {
+        "logging_level": {
+            "type": "string",
+            "enum": ["trace", "debug", "info", "warn", "error"]
+        },
+        "witness_name": {
+            "type": "string",
+            "description": "The witness's identity, as it appears in cosignature lines. Per c2sp.org/signed-note, this MUST NOT contain the '+', whitespace, or control characters.",
+            "pattern": "^[^+\\s]+$"
+        },
+        "description": {
+            "type": "string"
+        },
+        "submission_prefix": {
+            "type": "string",
+            "description": "URL prefix for write APIs (e.g. https://witness.example/)."
+        },
+        "monitoring_prefix": {
+            "type": "string",
+            "description": "URL prefix for read APIs. Currently unused by the tlog-witness spec but reserved for future monitor-facing endpoints."
+        },
+        "logs": {
+            "type": "object",
+            "description": "Logs this witness will accept checkpoints for, keyed by a short identifier used only internally. The identifier does not appear on the wire.",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["origin", "log_public_keys"],
+                "additionalProperties": false,
+                "properties": {
+                    "description": {"type": "string"},
+                    "origin": {
+                        "type": "string",
+                        "description": "The log's origin line, as it appears in checkpoint notes."
+                    },
+                    "log_public_keys": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "string",
+                            "description": "A DER-encoded SubjectPublicKeyInfo, base64-encoded. The witness accepts checkpoint signatures from any of these keys and ignores signatures from others."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
