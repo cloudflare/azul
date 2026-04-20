@@ -11,7 +11,7 @@ license.workspace = true
 
 [package.metadata.cargo-machete]
 # These deps are used in tests/ (not src/), which cargo-machete doesn't scan.
-ignored = ["bootstrap_mtc_api", "byteorder", "length_prefixed", "log", "x509_util"]
+ignored = ["bootstrap_mtc_api", "byteorder", "length_prefixed", "log", "tlog_witness", "x509_util"]
 homepage.workspace = true
 repository.workspace = true
 description = "Integration tests for ct_worker (static CT API) and bootstrap_mtc_worker (MTC API)"
@@ -30,6 +30,7 @@ signed_note.workspace = true
 static_ct_api.workspace = true
 bootstrap_mtc_api.workspace = true
 tlog_tiles.workspace = true
+tlog_witness.workspace = true
 sct_validator.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "tlog_witness"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of the c2sp.org/tlog-witness protocol"
+categories = ["cryptography"]
+keywords = ["transparency", "witness", "checkpoint"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+base64.workspace = true
+signed_note.workspace = true
+thiserror.workspace = true
+tlog_tiles.workspace = true
