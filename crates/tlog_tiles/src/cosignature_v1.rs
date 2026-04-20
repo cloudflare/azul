@@ -83,7 +83,11 @@ pub struct CosignatureV1NoteVerifier {
 impl CosignatureV1NoteVerifier {
     #[must_use]
     pub fn new(name: KeyName, verifying_key: Ed25519VerifyingKey) -> Self {
-        let id = signed_note::compute_key_id(&name, &[SignatureType::CosignatureV1 as u8], verifying_key.to_bytes().as_slice());
+        let id = signed_note::compute_key_id(
+            &name,
+            &[SignatureType::CosignatureV1 as u8],
+            verifying_key.to_bytes().as_slice(),
+        );
         Self {
             name,
             id,

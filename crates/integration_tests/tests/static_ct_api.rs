@@ -155,25 +155,25 @@ async fn get_roots_returns_valid_certs() {
 /// `GET /logs/:log/log.v3.json` returns 200 with all required fields.
 #[tokio::test]
 async fn log_v3_json_returns_valid_metadata() {
+    use p256::pkcs8::{DecodePublicKey, EncodePublicKey};
+    use sha2::{Digest, Sha256};
+
     let client = CtClient::default_log();
-    let meta = client
-        .get_log_v3_json()
-        .await
-        .expect("log.v3.json failed");
+    let meta = client.get_log_v3_json().await.expect("log.v3.json failed");
 
     assert_eq!(meta.log_id.len(), 32, "log_id must be 32 bytes");
     assert!(!meta.key.is_empty(), "key must be non-empty");
     assert!(meta.mmd > 0, "mmd must be positive");
-    assert!(!meta.submission_url.is_empty(), "submission_url must be set");
+    assert!(
+        !meta.submission_url.is_empty(),
+        "submission_url must be set"
+    );
 
     // Key must be a valid P-256 SPKI.
-    use p256::pkcs8::DecodePublicKey;
     p256::ecdsa::VerifyingKey::from_public_key_der(&meta.key)
         .expect("key must be a valid P-256 SPKI");
 
     // log_id must equal SHA-256(SPKI).
-    use p256::pkcs8::EncodePublicKey;
-    use sha2::{Digest, Sha256};
     let vkey = p256::ecdsa::VerifyingKey::from_public_key_der(&meta.key).unwrap();
     let pkix = vkey.to_public_key_der().unwrap();
     let expected_id: [u8; 32] = Sha256::digest(pkix.as_bytes()).into();

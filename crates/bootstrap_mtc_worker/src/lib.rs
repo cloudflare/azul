@@ -4,9 +4,9 @@
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 use crate::ccadb_roots_cron::{update_ccadb_roots, CCADB_ROOTS_FILENAME, CCADB_ROOTS_NAMESPACE};
+use bootstrap_mtc_api::{MtcCosigner, TrustAnchorID};
 use config::AppConfig;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
-use bootstrap_mtc_api::{MtcCosigner, TrustAnchorID};
 use p256::pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;

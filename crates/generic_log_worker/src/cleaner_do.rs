@@ -127,7 +127,7 @@ impl GenericCleaner {
 
         let name = &self.config.name;
         if !*self.initialized.borrow() {
-            log::info!("{name}: Initializing cleaner from alarm handler",);
+            log::info!("{name}: Initializing cleaner from alarm handler");
             self.initialize().await?;
         }
         // Schedule the next cleaning.

@@ -44,7 +44,11 @@ impl NoteVerifier for Ed25519NoteVerifier {
 impl Ed25519NoteVerifier {
     #[must_use]
     pub fn new(name: KeyName, verifying_key: Ed25519VerifyingKey) -> Self {
-        let id = compute_key_id(&name, &[SignatureType::Ed25519 as u8], verifying_key.to_bytes().as_slice());
+        let id = compute_key_id(
+            &name,
+            &[SignatureType::Ed25519 as u8],
+            verifying_key.to_bytes().as_slice(),
+        );
         Self {
             name,
             id,
@@ -119,7 +123,11 @@ impl NoteSigner for Ed25519NoteSigner {
 impl Ed25519NoteSigner {
     #[must_use]
     pub fn new(name: KeyName, signing_key: Ed25519SigningKey) -> Self {
-        let id = compute_key_id(&name, &[SignatureType::Ed25519 as u8], signing_key.verifying_key().to_bytes().as_slice());
+        let id = compute_key_id(
+            &name,
+            &[SignatureType::Ed25519 as u8],
+            signing_key.verifying_key().to_bytes().as_slice(),
+        );
         Self {
             name,
             id,
@@ -159,7 +167,13 @@ impl Ed25519NoteSigner {
                     ed25519_dalek::SigningKey::try_from(key).map_err(|_| NoteError::Format)?;
 
                 // Must verify id after deriving public key.
-                if id != compute_key_id(&name, &[SignatureType::Ed25519 as u8], signing_key.verifying_key().to_bytes().as_slice()) {
+                if id
+                    != compute_key_id(
+                        &name,
+                        &[SignatureType::Ed25519 as u8],
+                        signing_key.verifying_key().to_bytes().as_slice(),
+                    )
+                {
                     return Err(NoteError::Id);
                 }
 
@@ -183,15 +197,15 @@ pub fn generate_encoded_ed25519_key<R: CryptoRng + ?Sized>(
     let signing_key = ed25519_dalek::SigningKey::generate(csprng);
     let signature_type = &[SignatureType::Ed25519 as u8];
 
-    let privkey = [
-        signature_type,
-        signing_key.to_bytes().as_slice(),
-    ]
-    .concat();
+    let privkey = [signature_type, signing_key.to_bytes().as_slice()].concat();
     let skey = format!(
         "PRIVATE+KEY+{}+{:08x}+{}",
         name,
-        compute_key_id(name, signature_type, signing_key.verifying_key().to_bytes().as_slice()),
+        compute_key_id(
+            name,
+            signature_type,
+            signing_key.verifying_key().to_bytes().as_slice()
+        ),
         BASE64_STANDARD.encode(privkey)
     );
     let vkey = new_encoded_ed25519_verifier_key(name, &signing_key.verifying_key());

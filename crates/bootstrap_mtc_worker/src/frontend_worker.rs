@@ -3,7 +3,13 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{load_checkpoint_cosigner, load_origin, load_roots, BootstrapMtcSequenceMetadata, CONFIG};
+use crate::{
+    load_checkpoint_cosigner, load_origin, load_roots, BootstrapMtcSequenceMetadata, CONFIG,
+};
+use bootstrap_mtc_api::{
+    serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
+    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
+};
 use der::{
     asn1::{UtcTime, Utf8StringRef},
     Any, Encode, Tag,
@@ -16,10 +22,6 @@ use generic_log_worker::{
     serialize,
     util::now_millis,
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
-};
-use bootstrap_mtc_api::{
-    serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
-    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
@@ -302,7 +304,10 @@ fn build_validity(
     let not_after = UtcTime::from_unix_duration(now + Duration::from_secs(max_lifetime_secs))
         .map_err(|e| e.to_string())?;
 
-    Ok(Validity::new(Time::UtcTime(not_before), Time::UtcTime(not_after)))
+    Ok(Validity::new(
+        Time::UtcTime(not_before),
+        Time::UtcTime(not_after),
+    ))
 }
 
 /// Returns the issuer cert for SCT validation. For multi-cert chains, that's

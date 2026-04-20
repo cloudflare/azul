@@ -167,10 +167,7 @@ pub fn load_cache_kv(env: &Env, name: &str) -> Result<kv::KvStore> {
 /// # Errors
 ///
 /// Returns an error if there are issues retrieving the metadata.
-pub async fn get_cached_metadata<M>(
-    kv: &KvStore,
-    lookup_key: &LookupKey,
-) -> Result<Option<M>>
+pub async fn get_cached_metadata<M>(kv: &KvStore, lookup_key: &LookupKey) -> Result<Option<M>>
 where
     M: Serialize + DeserializeOwned,
 {
@@ -190,11 +187,7 @@ where
 ///
 /// Returns an error if either the KV namespace doesn't exist, or if there is an
 /// exception when writing the value.
-pub async fn put_cache_entry_metadata<L, M>(
-    kv: &KvStore,
-    pending: &L,
-    metadata: M,
-) -> Result<()>
+pub async fn put_cache_entry_metadata<L, M>(kv: &KvStore, pending: &L, metadata: M) -> Result<()>
 where
     L: PendingLogEntry,
     M: Serialize,
@@ -494,6 +487,10 @@ pub type SequenceMetadataEntry = (LookupKey, (LeafIndex, UnixTimestamp));
 /// compatibility with existing Durable Object dedup cache storage. Any change
 /// to this format will result in a [`DedupCache::load`] error for deployed
 /// logs.
+///
+/// # Panics
+///
+/// Panics if writting to a pre-allocated buffer fails, which should never happen.
 #[must_use]
 pub fn serialize_sequence_metadata_entries(entries: &[SequenceMetadataEntry]) -> Vec<u8> {
     use byteorder::{BigEndian, WriteBytesExt};
@@ -851,9 +848,7 @@ mod tests {
 
     /// A minimal [`SequencerMetadata`] that uses the default JSON cache format,
     /// for testing non-binary serialization paths.
-    #[derive(
-        Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-    )]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct TestMetadata(u64);
 
     impl SequencerMetadata for TestMetadata {

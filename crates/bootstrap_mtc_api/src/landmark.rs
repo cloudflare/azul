@@ -448,8 +448,7 @@ mod tests {
 
         assert_eq!(
             num_active, max_active_landmarks,
-            "Serialized file should have num_active_landmarks = {}",
-            max_active_landmarks
+            "Serialized file should have num_active_landmarks = {max_active_landmarks}"
         );
 
         // File should contain num_active + 1 lines of tree sizes

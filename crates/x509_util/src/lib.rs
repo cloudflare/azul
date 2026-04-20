@@ -599,9 +599,7 @@ fn verify_p256(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_byte
     let Ok(vk) = p256::ecdsa::VerifyingKey::try_from(spki) else {
         return false;
     };
-    p256::ecdsa::DerSignature::try_from(sig_bytes)
-        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
-        .unwrap_or(false)
+    p256::ecdsa::DerSignature::try_from(sig_bytes).is_ok_and(|sig| vk.verify(tbs_der, &sig).is_ok())
 }
 
 /// Verify a P-384 ECDSA signature over `tbs_der` using the key in `spki`.
@@ -609,9 +607,7 @@ fn verify_p384(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_byte
     let Ok(vk) = p384::ecdsa::VerifyingKey::try_from(spki) else {
         return false;
     };
-    p384::ecdsa::DerSignature::try_from(sig_bytes)
-        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
-        .unwrap_or(false)
+    p384::ecdsa::DerSignature::try_from(sig_bytes).is_ok_and(|sig| vk.verify(tbs_der, &sig).is_ok())
 }
 
 /// Verify a P-521 ECDSA signature over `tbs_der` using the key in `spki`.
@@ -619,9 +615,7 @@ fn verify_p521(spki: spki::SubjectPublicKeyInfoRef<'_>, tbs_der: &[u8], sig_byte
     let Ok(vk) = p521::ecdsa::VerifyingKey::try_from(spki) else {
         return false;
     };
-    p521::ecdsa::DerSignature::try_from(sig_bytes)
-        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
-        .unwrap_or(false)
+    p521::ecdsa::DerSignature::try_from(sig_bytes).is_ok_and(|sig| vk.verify(tbs_der, &sig).is_ok())
 }
 
 /// Verify an RSA PKCS#1 v1.5 signature over `tbs_der` using the key in `spki`.
@@ -633,9 +627,7 @@ where
         return false;
     };
     let vk = rsa::pkcs1v15::VerifyingKey::<D>::new(rsa_key);
-    rsa::pkcs1v15::Signature::try_from(sig_bytes)
-        .map(|sig| vk.verify(tbs_der, &sig).is_ok())
-        .unwrap_or(false)
+    rsa::pkcs1v15::Signature::try_from(sig_bytes).is_ok_and(|sig| vk.verify(tbs_der, &sig).is_ok())
 }
 
 /// Validate Basic Constraints for a CA certificate.
