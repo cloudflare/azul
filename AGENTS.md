@@ -77,11 +77,13 @@ npx wrangler -e=${ENV} tail
 ✅ **Always:** Before pushing any commit, run the pre-push checks locally and confirm they pass:
 
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings   # lint; CI fails on any warning
-cargo test --workspace --lib --bins                     # unit tests (integration_tests requires wrangler dev; skip or run separately)
-cargo fmt --all --check                                 # formatting; advisory in CI, but easy to fix
-cargo machete                                           # unused-dependency check; advisory in CI, but easy to fix
+cargo clippy --workspace --all-targets -- -Dwarnings -Dclippy::pedantic # lint everything (including fuzz)
+cargo test                                                              # unit tests; uses default-members, so integration_tests and fuzz are skipped
+cargo fmt --all --check                                                 # advisory in CI, easy to fix
+cargo machete                                                           # unused-dependency check; advisory in CI, easy to fix
 ```
+
+`integration_tests` is excluded from the default test run because it requires a live `wrangler dev` instance (invoke it explicitly once wrangler is running; see the integration test workflow below). `fuzz` is excluded because it is the cargo-fuzz harness crate, run via `cargo fuzz run <target>` on a nightly toolchain. Both are still linted.
 
 If any step fails, fix the issue in the commit it belongs to (use `git commit --fixup=<sha>` + `git rebase --autosquash`) rather than layering a separate "fix lint" commit on top.
 

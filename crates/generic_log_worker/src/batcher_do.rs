@@ -226,22 +226,21 @@ impl<M: SequencerMetadata> GenericBatcher<M> {
                 ..Default::default()
             },
         )?;
-        let sequenced_entries: HashMap<LookupKey, M> =
-            deserialize::<Vec<(LookupKey, M)>>(
-                &get_durable_object_stub(
-                    &self.env,
-                    &self.config.name,
-                    None,
-                    SEQUENCER_BINDING,
-                    self.config.location_hint.as_deref(),
-                )?
-                .fetch_with_request(req)
-                .await?
-                .bytes()
-                .await?,
+        let sequenced_entries: HashMap<LookupKey, M> = deserialize::<Vec<(LookupKey, M)>>(
+            &get_durable_object_stub(
+                &self.env,
+                &self.config.name,
+                None,
+                SEQUENCER_BINDING,
+                self.config.location_hint.as_deref(),
             )?
-            .into_iter()
-            .collect();
+            .fetch_with_request(req)
+            .await?
+            .bytes()
+            .await?,
+        )?
+        .into_iter()
+        .collect();
 
         // Send the sequenced entries to channel subscribers.
         batch.done.send_modify(|v| v.clone_from(&sequenced_entries));

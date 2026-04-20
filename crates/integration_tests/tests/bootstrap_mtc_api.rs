@@ -59,7 +59,8 @@ async fn ensure_initialized() {
 
             let log_name = integration_tests::client::bootstrap_mtc_log_name();
             let client = BootstrapMtcClient::new(&log_name);
-            let mtc_chain = make_bootstrap_mtc_chain(&log_name).expect("make_bootstrap_mtc_chain for warmup");
+            let mtc_chain =
+                make_bootstrap_mtc_chain(&log_name).expect("make_bootstrap_mtc_chain for warmup");
 
             // Wait until get-roots succeeds before attempting add-entry.
             // get-roots triggers the CCADB fetch that populates the ROOTS
@@ -68,13 +69,17 @@ async fn ensure_initialized() {
             let mut roots_ready = false;
             for _ in 0..MAX_ATTEMPTS {
                 match client.get_roots().await {
-                    Ok(_) => { roots_ready = true; break; }
+                    Ok(_) => {
+                        roots_ready = true;
+                        break;
+                    }
                     Err(_) => tokio::time::sleep(RETRY_DELAY).await,
                 }
             }
-            if !roots_ready {
-                panic!("bootstrap_mtc_worker get-roots never succeeded after {MAX_ATTEMPTS}s");
-            }
+            assert!(
+                roots_ready,
+                "bootstrap_mtc_worker get-roots never succeeded after {MAX_ATTEMPTS}s"
+            );
 
             for attempt in 0..MAX_ATTEMPTS {
                 // Submit an entry to trigger full initialization (DO startup,
@@ -134,10 +139,7 @@ async fn metadata_returns_valid_fields() {
     let meta = client.get_metadata().await.expect("metadata failed");
 
     // log_id and cosigner_id are dotted-decimal relative OIDs.
-    assert!(
-        !meta.log_id.is_empty(),
-        "log_id must be non-empty"
-    );
+    assert!(!meta.log_id.is_empty(), "log_id must be non-empty");
     assert!(
         meta.log_id.contains('.'),
         "log_id must be a dotted-decimal OID, got: {}",
@@ -215,16 +217,16 @@ async fn add_entry_with_garbage_chain_returns_400() {
 #[tokio::test]
 async fn unknown_log_returns_400() {
     let client = BootstrapMtcClient::new("this-log-does-not-exist");
-    let status = client
-        .get_status("get-roots")
-        .await
-        .expect("GET request");
+    let status = client.get_status("get-roots").await.expect("GET request");
     assert_eq!(status, 400, "expected 400 for unknown log");
 }
 
 /// After `add-entry`, the checkpoint tree size covers the returned `leaf_index`.
 #[tokio::test]
 async fn add_entry_appears_in_checkpoint() {
+    const MAX_RETRIES: u32 = 12;
+    const RETRY_DELAY_MS: u64 = 500;
+
     ensure_initialized().await;
     let client = BootstrapMtcClient::default_log();
     let mtc_chain = make_bootstrap_mtc_chain(&client.log).expect("generating MTC chain");
@@ -239,15 +241,10 @@ async fn add_entry_appears_in_checkpoint() {
     let min_size = resp.leaf_index + 1;
 
     // Retry until checkpoint covers the leaf or we time out.
-    const MAX_RETRIES: u32 = 12;
-    const RETRY_DELAY_MS: u64 = 500;
     let mut last_size = 0u64;
 
     for attempt in 0..MAX_RETRIES {
-        let checkpoint_bytes = client
-            .get_checkpoint()
-            .await
-            .expect("fetching checkpoint");
+        let checkpoint_bytes = client.get_checkpoint().await.expect("fetching checkpoint");
         // Parse tree size from the checkpoint text (second line).
         let text = String::from_utf8_lossy(&checkpoint_bytes);
         if let Some(size_str) = text.lines().nth(1) {
@@ -263,9 +260,7 @@ async fn add_entry_appears_in_checkpoint() {
         }
     }
 
-    panic!(
-        "checkpoint size {last_size} never reached {min_size} after {MAX_RETRIES} retries"
-    );
+    panic!("checkpoint size {last_size} never reached {min_size} after {MAX_RETRIES} retries");
 }
 
 /// After `add-entry`, `get-certificate` returns a parseable signatureless DER
@@ -275,6 +270,9 @@ async fn add_entry_appears_in_checkpoint() {
 /// It is skipped if `BOOTSTRAP_MTC_LOG_NAME` is set to a log with a longer interval.
 #[tokio::test]
 async fn get_certificate_returns_valid_cert() {
+    const MAX_RETRIES: u32 = 30;
+    const RETRY_DELAY_MS: u64 = 1_000;
+
     ensure_initialized().await;
     // This test only makes sense against a fast-landmark shard (dev2).
     // If someone overrides to a slow shard, skip rather than timeout.
@@ -299,9 +297,6 @@ async fn get_certificate_returns_valid_cert() {
 
     // Wait for a landmark to be produced (dev2 landmark_interval_secs = 10).
     // Retry get-certificate until it returns 200 (not 503 Retry-After).
-    const MAX_RETRIES: u32 = 30;
-    const RETRY_DELAY_MS: u64 = 1_000;
-
     let mut last_status = 0u16;
     for attempt in 0..MAX_RETRIES {
         let (s, cert_resp) = client
@@ -313,8 +308,7 @@ async fn get_certificate_returns_valid_cert() {
             let cert_resp = cert_resp.unwrap();
 
             // The returned data must be parseable DER (signatureless X.509).
-            Certificate::from_der(&cert_resp.data)
-                .expect("get-certificate returned invalid DER");
+            Certificate::from_der(&cert_resp.data).expect("get-certificate returned invalid DER");
 
             assert!(
                 cert_resp.landmark_id > 0,

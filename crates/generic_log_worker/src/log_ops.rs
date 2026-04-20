@@ -18,6 +18,7 @@
 //! - [ctlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/ctlog_test.go)
 //! - [testlog_test.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/internal/ctlog/testlog_test.go)
 
+use crate::SequencerMetadata;
 use crate::{
     obs::metrics::{millis_diff_as_secs, AsF64, SequencerMetrics},
     util::now_millis,
@@ -38,7 +39,6 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
-use crate::SequencerMetadata;
 use tlog_tiles::{
     Hash, HashReader, LogEntry, PendingLogEntry, PreloadedTlogTileReader, Proof, Subtree,
     TileHashReader, TileIterator, TlogError, TlogTile, TlogTileRecorder, TreeWithTimestamp,
@@ -927,7 +927,10 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         }
     }
 
-    assert_eq!(n, new_size, "loop must have processed exactly entries.len() entries");
+    assert_eq!(
+        n, new_size,
+        "loop must have processed exactly entries.len() entries"
+    );
 
     // Stage leftover partial data tile, if any.
     if new_size != old_size && !new_size.is_multiple_of(u64::from(TlogTile::FULL_WIDTH)) {
@@ -1072,7 +1075,10 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
 
     // Call the checkpoint callback. This is a no-op for CT, but is used to
     // update landmark checkpoints for MTC.
-    if let Err(e) = (config.checkpoint_callback)(old_time, timestamp, old_size, new_size, new.checkpoint()).await {
+    if let Err(e) =
+        (config.checkpoint_callback)(old_time, timestamp, old_size, new_size, new.checkpoint())
+            .await
+    {
         warn!("{name}: Checkpoint callback failed: {e}");
     }
 
@@ -1399,16 +1405,13 @@ mod tests {
     }
 
     use anyhow::ensure;
+    use crypto_common::Generate as _;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use futures_executor::block_on;
     use itertools::Itertools;
-    use crypto_common::Generate as _;
     use p256::ecdsa::SigningKey as EcdsaSigningKey;
     use prometheus::Registry;
-    use rand::{
-        rngs::SmallRng,
-        Rng, RngExt, SeedableRng,
-    };
+    use rand::{rngs::SmallRng, Rng, RngExt, SeedableRng};
     use signed_note::{KeyName, Note};
     use static_ct_api::{
         PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
@@ -2533,7 +2536,11 @@ mod tests {
         fn add(&mut self, is_precert: bool) -> AddLeafResult<SequenceMetadata> {
             self.add_with_seed(is_precert, rand::rng().next_u64())
         }
-        fn add_with_seed(&mut self, is_precert: bool, seed: u64) -> AddLeafResult<SequenceMetadata> {
+        fn add_with_seed(
+            &mut self,
+            is_precert: bool,
+            seed: u64,
+        ) -> AddLeafResult<SequenceMetadata> {
             let mut rng = SmallRng::seed_from_u64(seed);
             let mut certificate = vec![0; rng.random_range(8..12)];
             rng.fill(&mut certificate[..]);

@@ -21,15 +21,19 @@ members = [
     "crates/x509_util",
     "fuzz",
 ]
-# Exclude integration_tests from the default test run — it requires a live
-# wrangler dev instance and will hang if run without one.
-# Run explicitly with: cargo test -p integration_tests --test static_ct_api
+# Exclude two kinds of crates from the default `cargo <cmd>` run:
+#   * `integration_tests`: requires a live wrangler dev instance and will
+#     hang if run without one. Invoke explicitly with, e.g.
+#     `cargo test -p integration_tests --test static_ct_api`.
+#   * `fuzz`: cargo-fuzz targets that depend on `libfuzzer-sys` and a
+#     nightly toolchain / sanitizer runtime. Invoke explicitly with
+#     `cargo fuzz run <target>`.
 default-members = [
+    "crates/bootstrap_mtc_api",
+    "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
     "crates/length_prefixed",
-    "crates/bootstrap_mtc_api",
-    "crates/bootstrap_mtc_worker",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
@@ -37,7 +41,6 @@ default-members = [
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
     "crates/x509_util",
-    "fuzz",
 ]
 
 [workspace.package]

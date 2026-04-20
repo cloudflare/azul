@@ -321,7 +321,10 @@ impl BootstrapMtcClient {
     }
 
     /// `POST /logs/:log/add-entry`
-    pub async fn add_entry(&self, chain: Vec<Vec<u8>>) -> Result<(u16, Option<BootstrapMtcAddEntryResponse>)> {
+    pub async fn add_entry(
+        &self,
+        chain: Vec<Vec<u8>>,
+    ) -> Result<(u16, Option<BootstrapMtcAddEntryResponse>)> {
         let body = AddChainRequest { chain };
         let resp = self
             .client
@@ -356,7 +359,10 @@ impl BootstrapMtcClient {
         let resp = self
             .client
             .post(self.url("get-certificate"))
-            .json(&Req { leaf_index, spki_der })
+            .json(&Req {
+                leaf_index,
+                spki_der,
+            })
             .send()
             .await
             .context("POST get-certificate")?;

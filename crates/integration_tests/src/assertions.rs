@@ -33,10 +33,7 @@ use crate::client::{AddChainResponse, CtClient, LogV3JsonResponse};
 /// Returns an error if any invariant is violated.
 pub fn assert_sct_structure(sct: &AddChainResponse) -> Result<()> {
     if sct.sct_version != 0 {
-        bail!(
-            "expected sct_version == 0 (v1), got {}",
-            sct.sct_version
-        );
+        bail!("expected sct_version == 0 (v1), got {}", sct.sct_version);
     }
     if sct.id.len() != 32 {
         bail!("expected log id to be 32 bytes, got {}", sct.id.len());
@@ -88,7 +85,9 @@ pub fn assert_sct_signature(
         .context("decoding log verifying key")?;
 
     // Verify that the SCT log id matches the expected SHA-256(SPKI).
-    let pkix = vkey.to_public_key_der().context("re-encoding verifying key")?;
+    let pkix = vkey
+        .to_public_key_der()
+        .context("re-encoding verifying key")?;
     let expected_log_id: [u8; 32] = Sha256::digest(pkix.as_bytes()).into();
     if sct.id.as_slice() != expected_log_id {
         bail!(
@@ -123,7 +122,11 @@ pub fn assert_sct_signature(
     let der_signature = sig_bytes[4..].to_vec();
 
     let parsed_sct = ParsedSct {
-        log_id: sct.id.as_slice().try_into().context("SCT id not 32 bytes")?,
+        log_id: sct
+            .id
+            .as_slice()
+            .try_into()
+            .context("SCT id not 32 bytes")?,
         timestamp: sct.timestamp,
         extensions: sct.extensions.clone(),
         signature: SctSignature {
@@ -168,8 +171,13 @@ pub fn assert_sct_signature(
         effective_issuer_spki = &[];
     }
 
-    verify_sct_signature(&parsed_sct, &ct_log, effective_cert_der, effective_issuer_spki)
-        .context("SCT signature verification failed")?;
+    verify_sct_signature(
+        &parsed_sct,
+        &ct_log,
+        effective_cert_der,
+        effective_issuer_spki,
+    )
+    .context("SCT signature verification failed")?;
 
     Ok(())
 }
@@ -241,22 +249,21 @@ pub fn verify_checkpoint_bytes(
     let rfc6962_verifier = RFC6962NoteVerifier::new(key_name.clone(), &vkey)
         .context("constructing RFC6962NoteVerifier")?;
 
-    let verifiers: Vec<Box<dyn signed_note::NoteVerifier>> =
-        if let Some(wkey_der) = witness_key_der {
-            let ed25519_vkey = ed25519_dalek::VerifyingKey::from_public_key_der(wkey_der)
-                .context("decoding witness verifying key")?;
-            let encoded = signed_note::new_encoded_ed25519_verifier_key(&key_name, &ed25519_vkey);
-            let witness_verifier = Ed25519NoteVerifier::new_from_encoded_key(&encoded)
-                .context("constructing Ed25519NoteVerifier")?;
-            vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]
-        } else {
-            vec![Box::new(rfc6962_verifier)]
-        };
+    let verifiers: Vec<Box<dyn signed_note::NoteVerifier>> = if let Some(wkey_der) = witness_key_der
+    {
+        let ed25519_vkey = ed25519_dalek::VerifyingKey::from_public_key_der(wkey_der)
+            .context("decoding witness verifying key")?;
+        let encoded = signed_note::new_encoded_ed25519_verifier_key(&key_name, &ed25519_vkey);
+        let witness_verifier = Ed25519NoteVerifier::new_from_encoded_key(&encoded)
+            .context("constructing Ed25519NoteVerifier")?;
+        vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]
+    } else {
+        vec![Box::new(rfc6962_verifier)]
+    };
 
     let verifier_list = VerifierList::new(verifiers);
-    let (text, _timestamp) =
-        open_checkpoint(origin, &verifier_list, now_millis, checkpoint_bytes)
-            .context("opening checkpoint")?;
+    let (text, _timestamp) = open_checkpoint(origin, &verifier_list, now_millis, checkpoint_bytes)
+        .context("opening checkpoint")?;
 
     Ok(VerifiedCheckpoint { text })
 }
@@ -288,9 +295,7 @@ pub async fn assert_leaf_in_checkpoint(
     let tree_size = checkpoint.text.size();
 
     if leaf_index >= tree_size {
-        bail!(
-            "leaf_index {leaf_index} >= tree_size {tree_size}: entry not yet in checkpoint"
-        );
+        bail!("leaf_index {leaf_index} >= tree_size {tree_size}: entry not yet in checkpoint");
     }
 
     // Compute the hash storage index for this leaf.
@@ -334,10 +339,9 @@ pub async fn assert_leaf_in_checkpoint(
     // Compute the correct width from the verified tree_size.
     // The worker only stores the current (widest) partial tile — not narrower
     // historical versions — so we must request the tile at its current width.
-    let tile_width_from_tree =
-        u32::try_from(tree_size - tile_n * u64::from(TlogTile::FULL_WIDTH))
-            .unwrap_or(TlogTile::FULL_WIDTH)
-            .min(TlogTile::FULL_WIDTH);
+    let tile_width_from_tree = u32::try_from(tree_size - tile_n * u64::from(TlogTile::FULL_WIDTH))
+        .unwrap_or(TlogTile::FULL_WIDTH)
+        .min(TlogTile::FULL_WIDTH);
     let data_tile = TlogTile::new(0, tile_n, tile_width_from_tree, Some(PathElem::Data));
     let data_tile_path = data_tile.path();
     let tile_bytes = fetch_tile_with_retry(client, &data_tile_path)

@@ -6,15 +6,15 @@
 use std::{collections::VecDeque, time::Duration};
 
 use crate::{load_checkpoint_cosigner, load_origin, BootstrapMtcSequenceMetadata, CONFIG};
+use bootstrap_mtc_api::{
+    BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
+    LANDMARK_KEY,
+};
 use generic_log_worker::{
     get_durable_object_name, load_public_bucket,
     log_ops::{prove_subtree_consistency, ProofError},
     CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
     SEQUENCER_BINDING,
-};
-use bootstrap_mtc_api::{
-    BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
-    LANDMARK_KEY,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
@@ -86,7 +86,11 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
     let params = &CONFIG.logs[name];
     let bucket = load_public_bucket(env, name).unwrap();
     Box::new(
-        move |old_time: UnixTimestamp, new_time: UnixTimestamp, _old_tree_size: u64, _new_tree_size: u64, new_checkpoint_bytes: &[u8]| {
+        move |old_time: UnixTimestamp,
+              new_time: UnixTimestamp,
+              _old_tree_size: u64,
+              _new_tree_size: u64,
+              new_checkpoint_bytes: &[u8]| {
             let new_checkpoint = {
                 // TODO: Make more efficient. There are two unnecessary allocations here.
 

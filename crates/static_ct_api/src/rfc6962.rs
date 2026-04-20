@@ -438,7 +438,7 @@ mod tests {
         new_exts: Option<&[Extension]>,
     ) -> Certificate {
         let mut owned = x509_util::OwnedCertificate::from(cert);
-        owned.tbs_certificate.extensions = new_exts.map(|exts| exts.to_vec());
+        owned.tbs_certificate.extensions = new_exts.map(<[x509_cert::ext::Extension]>::to_vec);
         Certificate::from_der(&owned.to_der().unwrap()).unwrap()
     }
 }

@@ -15,10 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
       - name: Clippy (required)
         run: cargo clippy -- -D warnings
       - name: Clippy (pedantic, advisory)
-        run: cargo clippy --tests -- -W clippy::pedantic
+        run: cargo clippy --workspace --all-targets -- -Dwarnings -Dclippy::pedantic
         continue-on-error: true
       - name: Unused dependencies (advisory)
         run: cargo install cargo-machete --quiet && cargo machete
@@ -32,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
       - name: Build
         run: cargo build --tests --workspace --verbose
 
@@ -40,5 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
       - name: Run tests
         run: cargo test --verbose

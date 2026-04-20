@@ -839,7 +839,7 @@ mod tests {
             .extensions
             .as_mut()
             .unwrap_or(&mut Vec::new())
-            .sort_by(|a, b| b.extn_id.cmp(&a.extn_id));
+            .sort_by_key(|b| std::cmp::Reverse(b.extn_id));
 
         // Still valid.
         validate_correspondence(&log_entry, &raw_chain, &roots).unwrap();

@@ -731,7 +731,11 @@ mod tests {
     fn test_from_ed25519() {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
-        let id = compute_key_id(&NAME, &[SignatureType::Ed25519 as u8], verifying_key.to_bytes().as_slice());
+        let id = compute_key_id(
+            &NAME,
+            &[SignatureType::Ed25519 as u8],
+            verifying_key.to_bytes().as_slice(),
+        );
         let vkey = new_encoded_ed25519_verifier_key(&NAME, &verifying_key);
         let verifier = Ed25519NoteVerifier::new_from_encoded_key(&vkey).unwrap();
 
