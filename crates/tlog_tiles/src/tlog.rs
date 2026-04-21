@@ -483,44 +483,16 @@ pub fn verify_inclusion_proof(
     leaf_index: u64,
     leaf_hash: Hash,
 ) -> Result<(), TlogError> {
-    // 1. Compare leaf_index from the inclusion_proof_v2 structure against tree_size. If leaf_index is greater than or equal to tree_size, then fail the proof verification.
-    if leaf_index >= tree_size {
-        return Err(TlogError::InvalidProof);
-    }
-    // 2. Set fn to leaf_index and sn to tree_size - 1.
-    let mut f_n = leaf_index;
-    let mut s_n = tree_size - 1;
-    // 3. Set r to hash.
-    let mut r = leaf_hash;
-    // 4. For each value p in the inclusion_path array:
-    for p in proof {
-        // a. If sn is 0, then stop the iteration and fail the proof verification.
-        if s_n == 0 {
-            return Err(TlogError::InvalidProof);
-        }
-        // b. If LSB(fn) is set, or if fn is equal to sn, then:
-        if lsb_set(f_n) || f_n == s_n {
-            // i. Set r to HASH(0x01 || p || r).
-            r = node_hash(*p, r);
-            // ii. If LSB(fn) is not set, then right-shift both fn and sn equally until either LSB(fn) is set or fn is 0.
-            //
-            // NOTE: It must be the case that fn is non-zero, so we can simplify.
-            while !lsb_set(f_n) {
-                f_n >>= 1;
-                s_n >>= 1;
-            }
-        } else {
-            // i. Set r to HASH(0x01 || r || p).
-            r = node_hash(r, *p);
-        }
-        // c. Finally, right-shift both fn and sn one time.
-        f_n >>= 1;
-        s_n >>= 1;
-    }
-    // 5. Compare sn to 0. Compare r against the root_hash. If sn is equal to 0
-    //    and r and the root_hash are equal, then the log has proven the
-    //    inclusion of hash. Otherwise, fail the proof verification.
-    if s_n == 0 && r == root_hash {
+    // Delegate to the evaluator with a synthetic `[0, tree_size)` subtree,
+    // matching how the MTC spec layers §4.3.3 on top of §4.3.2. A
+    // `tree_size` of 0 fails `Subtree::new` here (with `ConditionNotMet`
+    // rather than `InvalidProof`); this is a strict-subset behavioral
+    // change — nothing in the workspace matches on the specific error
+    // variant — and is the correct outcome, since an empty tree has no
+    // leaves to prove inclusion for.
+    let subtree = Subtree::new(0, tree_size)?;
+    let evaluated = evaluate_subtree_inclusion_proof(proof, &subtree, leaf_index, leaf_hash)?;
+    if evaluated == root_hash {
         Ok(())
     } else {
         Err(TlogError::InvalidProof)
@@ -529,7 +501,7 @@ pub fn verify_inclusion_proof(
 
 /// Verify the proof that a leaf at index `leaf_index` and hash `leaf_hash` is
 /// included in the subtree `[n_lo, n_hi)` with hash `n_hash`, following
-/// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.2>.
+/// <https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-03.html#section-4.3.3>.
 ///
 /// # Errors
 ///
@@ -541,7 +513,86 @@ pub fn verify_subtree_inclusion_proof(
     leaf_index: u64,
     leaf_hash: Hash,
 ) -> Result<(), TlogError> {
-    verify_inclusion_proof(proof, n.hi - n.lo, n_hash, leaf_index - n.lo, leaf_hash)
+    let evaluated = evaluate_subtree_inclusion_proof(proof, n, leaf_index, leaf_hash)?;
+    if evaluated == n_hash {
+        Ok(())
+    } else {
+        Err(TlogError::InvalidProof)
+    }
+}
+
+/// Evaluate a subtree inclusion proof, returning the derived subtree hash.
+///
+/// Implements the "Evaluating a Subtree Inclusion Proof" procedure from
+/// <https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-03.html#section-4.3.2>.
+/// Given the proof hashes and the leaf hash, derives the subtree root
+/// without requiring it as input. The caller can then verify the result
+/// against an external commitment such as a cosignature.
+///
+/// This is the primitive; both [`verify_inclusion_proof`] and
+/// [`verify_subtree_inclusion_proof`] delegate here and compare the
+/// result against a caller-supplied root, matching how §4.3.3 of the
+/// MTC draft is defined on top of §4.3.2.
+///
+/// # Errors
+///
+/// Returns [`TlogError::InvalidProof`] if `leaf_index` is outside the
+/// subtree `n` or the proof is malformed.
+pub fn evaluate_subtree_inclusion_proof(
+    proof: &Proof,
+    n: &Subtree,
+    leaf_index: u64,
+    leaf_hash: Hash,
+) -> Result<Hash, TlogError> {
+    // 1. Check that [start, end) is a valid subtree and that
+    //    start <= index < end. If either do not hold, fail proof evaluation.
+    //
+    // Validity of [start, end) is already discharged by the `Subtree` type
+    // invariant (Subtree::new rejects anything else), so only the index
+    // bound needs to be checked here. `checked_sub` handles the
+    // `leaf_index < start` case without underflowing.
+    let index = leaf_index
+        .checked_sub(n.lo)
+        .ok_or(TlogError::InvalidProof)?;
+    let tree_size = n.hi - n.lo;
+    if index >= tree_size {
+        return Err(TlogError::InvalidProof);
+    }
+    // 2. Set fn to index - start and sn to end - start - 1.
+    let mut f_n = index;
+    let mut s_n = tree_size - 1;
+    // 3. Set r to entry_hash.
+    let mut r = leaf_hash;
+    // 4. For each value p in the inclusion_proof array:
+    for p in proof {
+        //    1. If sn is 0, then stop the iteration and fail proof evaluation.
+        if s_n == 0 {
+            return Err(TlogError::InvalidProof);
+        }
+        //    2. If LSB(fn) is set, or if fn is equal to sn, then:
+        if lsb_set(f_n) || f_n == s_n {
+            //       1. Set r to HASH(0x01 || p || r).
+            r = node_hash(*p, r);
+            //       2. Until LSB(fn) is set, right-shift fn and sn equally.
+            while !lsb_set(f_n) {
+                f_n >>= 1;
+                s_n >>= 1;
+            }
+        } else {
+            //       Otherwise:
+            //       1. Set r to HASH(0x01 || r || p).
+            r = node_hash(r, *p);
+        }
+        //    3. Finally, right-shift both fn and sn one time.
+        f_n >>= 1;
+        s_n >>= 1;
+    }
+    // 5. If sn is not zero, fail proof evaluation.
+    if s_n != 0 {
+        return Err(TlogError::InvalidProof);
+    }
+    // 6. Return r as the expected subtree hash.
+    Ok(r)
 }
 
 /// Returns the proof that the tree of size `n` contains as a prefix all the
@@ -1275,15 +1326,20 @@ mod tests {
                     )
                     .unwrap();
                     for leaf_index in lo..hi {
+                        let proof = subtree_inclusion_proof(&m, leaf_index, &storage).unwrap();
+                        let leaf_hash = leafhashes[usize::try_from(leaf_index).unwrap()];
                         // Prove that each leaf in the subtree is included in the subtree.
-                        verify_subtree_inclusion_proof(
-                            &subtree_inclusion_proof(&m, leaf_index, &storage).unwrap(),
-                            &m,
-                            m_hash,
-                            leaf_index,
-                            leafhashes[usize::try_from(leaf_index).unwrap()],
-                        )
-                        .unwrap();
+                        verify_subtree_inclusion_proof(&proof, &m, m_hash, leaf_index, leaf_hash)
+                            .unwrap();
+                        // The evaluator returns the subtree hash, which must
+                        // match the committed `m_hash`. This is the
+                        // counterpart used by cosignature verifiers that
+                        // reconstruct the subtree hash from an inclusion
+                        // proof instead of being handed it directly.
+                        let evaluated =
+                            evaluate_subtree_inclusion_proof(&proof, &m, leaf_index, leaf_hash)
+                                .unwrap();
+                        assert_eq!(evaluated, m_hash);
                     }
                 }
             }
@@ -1312,6 +1368,53 @@ mod tests {
         assert!(Subtree::new(39, 36).is_err());
         assert!(Subtree::new(123, 456).is_err());
         assert!(Subtree::new(0, 0).is_err());
+    }
+
+    #[test]
+    fn test_evaluate_subtree_inclusion_proof_rejects_out_of_range() {
+        // Build a small tree of size 4 so we have a non-trivial subtree.
+        let mut leaves = Vec::new();
+        let mut storage = TestHashStorage::new();
+        for i in 0..4u64 {
+            let data = format!("leaf {i}");
+            leaves.push(record_hash(data.as_bytes()));
+            let hashes = stored_hashes(i, data.as_bytes(), &storage).unwrap();
+            storage.extend(hashes);
+        }
+        let subtree = Subtree::new(0, 4).unwrap();
+        let proof = subtree_inclusion_proof(&subtree, 2, &storage).unwrap();
+
+        // leaf_index below subtree.lo underflows.
+        assert!(evaluate_subtree_inclusion_proof(
+            &proof,
+            &Subtree::new(2, 4).unwrap(),
+            1,
+            leaves[1]
+        )
+        .is_err());
+        // leaf_index at or above subtree.hi is rejected.
+        assert!(evaluate_subtree_inclusion_proof(&proof, &subtree, 4, leaves[0]).is_err());
+        // Empty proof when the leaf needs one is rejected by step 5 of
+        // draft-ietf-plants-merkle-tree-certs §4.3.2 ("If sn is not zero,
+        // fail proof evaluation"): with a 4-leaf subtree the inclusion loop
+        // never executes, so the algorithm reaches step 5 with sn still
+        // equal to its initial value of `end - start - 1`.
+        let empty_proof: Proof = Vec::new();
+        assert!(evaluate_subtree_inclusion_proof(&empty_proof, &subtree, 2, leaves[2]).is_err());
+    }
+
+    /// `verify_inclusion_proof(proof, 0, …)` delegates through
+    /// `Subtree::new(0, 0)`, which fails with `ConditionNotMet`. Pin the
+    /// variant so a future "`tree_size == 0` shortcut" cannot silently flip
+    /// it back to `InvalidProof`. The outcome ("this proof is bogus") is
+    /// the same; only the variant should differ.
+    #[test]
+    fn test_verify_inclusion_proof_rejects_zero_tree_size() {
+        let err = verify_inclusion_proof(&Vec::new(), 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap_err();
+        assert!(
+            matches!(err, TlogError::ConditionNotMet(_)),
+            "expected ConditionNotMet, got {err:?}",
+        );
     }
 
     #[test]
