@@ -10,12 +10,15 @@ members = [
     "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
+    "crates/ietf_mtc_worker",
     "crates/integration_tests",
     "crates/length_prefixed",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
     "crates/static_ct_api",
+    "crates/tlog_subtree_signature",
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
     "crates/x509_util",
@@ -33,11 +36,14 @@ default-members = [
     "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
+    "crates/ietf_mtc_worker",
     "crates/length_prefixed",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
     "crates/static_ct_api",
+    "crates/tlog_subtree_signature",
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
     "crates/x509_util",
@@ -96,7 +102,9 @@ jsonschema = "0.30"
 length_prefixed = { path = "crates/length_prefixed" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
+ml-dsa = { version = "0.1.0-rc.8", features = ["pkcs8"] }
 bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
+ietf_mtc_api = { version = "0.2.0", path = "crates/ietf_mtc_api" }
 p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p384 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p521 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
@@ -115,6 +123,7 @@ signature = "3.0.0-rc.10"
 signed_note = { path = "crates/signed_note", version = "0.2.0" }
 static_ct_api = { path = "crates/static_ct_api", version = "0.2.0" }
 thiserror = "2.0"
+tlog_subtree_signature = { path = "crates/tlog_subtree_signature", version = "0.2.0" }
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }
 reqwest = { version = "0.12", features = ["json"] }
