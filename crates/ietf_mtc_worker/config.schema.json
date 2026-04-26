@@ -1,0 +1,121 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "logging_level": {
+            "type": "string",
+            "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+            ],
+            "description": "Log verbosity."
+        },
+        "logs": {
+            "type": "object",
+            "description": "Dictionary MTC log shard names to configurations.",
+            "additionalProperties": false,
+            "patternProperties": {
+                "^[a-zA-Z0-9_]+$": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the log."
+                        },
+                        "log_id": {
+                            "type": "string",
+                            "description": "The log ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
+                        },
+                        "cosigner_id": {
+                            "type": "string",
+                            "description": "The cosigner's ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
+                        },
+                        "max_certificate_lifetime_secs": {
+                            "type": "integer",
+                            "default": 604800,
+                            "description": "The maximum lifetime for issued certificates. The actual lifetime could be less, for example, to fit within the bootstrap certificate's validity window."
+                        },
+                        "landmark_interval_secs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 3600,
+                            "description": "The time between publishing landmarks. This is used to calculate `max_active_landmarks` as `ceil(max_certificate_timetime_secs / landmark_interval_secs) + 1`."
+                        },
+                        "submission_url": {
+                            "type": "string",
+                            "description": "URL for log submissions."
+                        },
+                        "monitoring_url": {
+                            "type": "string",
+                            "default": "<submission_url>",
+                            "description": "URL for log monitoring. If unspecified, use the submission URL and the Worker will proxy requests to the R2 bucket."
+                        },
+                        "location_hint": {
+                            "type": "string",
+                            "description": "Provide a hint to place the log in a specific geographic location. See https://developers.cloudflare.com/durable-objects/reference/data-location/ for supported locations. If unspecified, the Durable Object will be created in proximity to the first request."
+                        },
+                        "sequence_interval_millis": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "default": 1000,
+                            "description": "The duration in between sequencing operations, in milliseconds."
+                        },
+                        "max_sequence_skips": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "The maximum number of times sequencing can be skipped to avoid creating partial tiles. If non-zero, pending entries may be delayed by either a multiple of the sequence interval or sequence_skip_threshold_millis if set."
+                        },
+                        "sequence_skip_threshold_millis": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "If provided, entries will only be skipped by sequencing (when max_sequenced_skips is non-zero) if they have been in the pool for less than this timeout."
+                        },
+                        "num_batchers": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 8,
+                            "maximum": 255,
+                            "description": "The number of batchers to use to proxy requests to the sequencer. If zero, requests from the frontend worker go directly to the sequencer."
+                        },
+                        "batch_timeout_millis": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "default": 100,
+                            "description": "The maximum duration to wait before submitting a batch to the sequencer, in milliseconds."
+                        },
+                        "max_batch_entries": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 256,
+                            "description": "The maximum number of entries per batch."
+                        },
+                        "clean_interval_secs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 60,
+                            "description": "How long to wait in between runs of the partial tile cleaner."
+                        },
+                        "version": {
+                            "type": "string",
+                            "enum": ["draft02"],
+                            "default": "draft02",
+                            "description": "The version of draft-ietf-plants-merkle-tree-certs that this log implements."
+                        }
+                    },
+                    "required": [
+                        "log_id",
+                        "submission_url"
+                    ]
+                }
+            }
+        }
+    },
+    "required": [
+        "logs"
+    ]
+}
