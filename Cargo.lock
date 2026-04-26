@@ -2943,6 +2943,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlog_subtree_signature"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "byteorder",
+ "length_prefixed",
+ "signature",
+ "signed_note",
+ "thiserror 2.0.17",
+ "tlog_tiles",
+]
+
+[[package]]
 name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
