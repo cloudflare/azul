@@ -99,10 +99,10 @@ fn metadata(env: &Env) -> Result<Response> {
     let witness_public_key = load_witness_public_key_der(env)?;
     let logs: Vec<LogMetadata> = CONFIG
         .logs
-        .values()
-        .map(|p| LogMetadata {
+        .iter()
+        .map(|(origin, p)| LogMetadata {
             description: p.description.as_deref(),
-            origin: &p.origin,
+            origin,
             log_public_keys: p.log_public_keys.iter().map(Vec::as_slice).collect(),
         })
         .collect();

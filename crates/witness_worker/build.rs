@@ -27,8 +27,21 @@ fn main() {
 
     // Deserialize to the strongly-typed config; this catches type/shape errors
     // that the JSON Schema may not.
-    let _: AppConfig = serde_json::from_str(config_contents).unwrap_or_else(|e| {
+    //
+    // Note: there is no need for a separate "duplicate origin" check here.
+    // Origins are the keys of `AppConfig.logs`, so duplicates are duplicate
+    // JSON object keys, which `serde_json` rejects at deserialization time.
+    let app_config: AppConfig = serde_json::from_str(config_contents).unwrap_or_else(|e| {
         panic!("failed to parse '{config_file}' as AppConfig: {e}");
+    });
+
+    // Run the canonical validation defined in the config crate. This
+    // covers signed-note key-name constraints on `witness_name` and
+    // every log origin, plus Ed25519 SPKI parsing and `(name, key_id)`
+    // collision detection on `log_public_keys`. Failures surface as
+    // build errors with operator-readable messages.
+    app_config.validate().unwrap_or_else(|e| {
+        panic!("config '{config_file}' failed validation: {e}");
     });
 
     // Copy to OUT_DIR for include_str! at compile time.
