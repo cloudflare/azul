@@ -5,9 +5,8 @@
     "submission_prefix": "http://localhost:8787/",
     "monitoring_prefix": "http://localhost:8787/",
     "logs": {
-        "example1": {
+        "example.com/log1": {
             "description": "Dev-only log. SPKI matches the keypair embedded in tests/tlog_witness.rs.",
-            "origin": "example.com/log1",
             "log_public_keys": [
                 "MCowBQYDK2VwAyEAzdnT3CQc3ag2fmKnO1ntodIm0wfsymDkK89IOrHKLWc="
             ]

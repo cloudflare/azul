@@ -3753,8 +3753,10 @@ dependencies = [
 name = "witness_worker_config"
 version = "0.2.0"
 dependencies = [
+ "ed25519-dalek",
  "serde",
  "serde_with",
+ "signed_note",
 ]
 
 [[package]]

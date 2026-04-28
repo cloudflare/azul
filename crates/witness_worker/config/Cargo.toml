@@ -11,5 +11,7 @@ repository.workspace = true
 description = "Configuration for witness_worker"
 
 [dependencies]
+ed25519-dalek.workspace = true
 serde.workspace = true
 serde_with.workspace = true
+signed_note.workspace = true

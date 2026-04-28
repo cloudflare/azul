@@ -26,17 +26,16 @@
         },
         "logs": {
             "type": "object",
-            "description": "Logs this witness will accept checkpoints for, keyed by a short identifier used only internally. The identifier does not appear on the wire.",
+            "description": "Logs this witness will accept checkpoints for, keyed by the log's origin line (the first line of a checkpoint note). The origin is used as a signed-note key name at runtime, so per c2sp.org/signed-note it MUST NOT contain '+', whitespace, or control characters.",
+            "propertyNames": {
+                "pattern": "^[^+\\s]+$"
+            },
             "additionalProperties": {
                 "type": "object",
-                "required": ["origin", "log_public_keys"],
+                "required": ["log_public_keys"],
                 "additionalProperties": false,
                 "properties": {
                     "description": {"type": "string"},
-                    "origin": {
-                        "type": "string",
-                        "description": "The log's origin line, as it appears in checkpoint notes."
-                    },
                     "log_public_keys": {
                         "type": "array",
                         "minItems": 1,

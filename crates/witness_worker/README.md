@@ -17,8 +17,9 @@ key.
 
 ## Known limitations
 
-- Only Ed25519 logs are supported (the only algorithm for `cosignature/v1`
+- Cosignatures are Ed25519 only (the only algorithm for `cosignature/v1`
   per c2sp.org/tlog-cosignature v1).
+- Only logs that sign checkpoints with Ed25519 are accepted.
 
 ## Configuration
 

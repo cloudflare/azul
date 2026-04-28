@@ -23,7 +23,7 @@ use ed25519_dalek::{
     SigningKey as Ed25519SigningKey,
 };
 use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier, VerifierList};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
 use tlog_tiles::CosignatureV1CheckpointSigner;
 #[allow(clippy::wildcard_imports)]
@@ -45,31 +45,23 @@ pub(crate) static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 
 /// Per-origin cache of the parsed trusted log keys.
 ///
-/// Populated eagerly on first access, so any configuration error —
-/// non-Ed25519 SPKI, invalid DER, or an origin whose `(name, key_id)`
-/// space is ambiguous across two configured keys — causes the worker to
-/// abort at startup rather than failing at request-handling time with an
-/// HTTP 400/500.
+/// `build.rs` calls [`AppConfig::validate`] and refuses to compile a
+/// witness with a malformed config, so by the time this static is built
+/// every origin and SPKI is known to parse cleanly. The `expect` calls
+/// below treat parse failures as `unreachable!` rather than as recoverable
+/// errors.
 ///
-/// A `(name, key_id)` collision is cosmically unlikely in normal operation
-/// (32-bit `key_id` is derived from the SPKI so it would require two
-/// distinct keys to hash to the same prefix) but detecting it here gives
-/// the operator a loud, single point of failure instead of silently
-/// locking the log out: `Note::verify` surfaces `NoteError::AmbiguousKey`
-/// for every affected checkpoint signature.
-///
-/// Values are plain `(VerifyingKey, key_id)` pairs rather than a
+/// Values are plain `(KeyName, VerifyingKey)` pairs rather than a
 /// pre-built `VerifierList`, because `Box<dyn NoteVerifier>` is not
 /// `Sync` and so cannot live inside a `LazyLock`. Building the
 /// `VerifierList` per request from these cached keys is cheap
-/// (`Ed25519NoteVerifier::new` is just field assignment) and keeps the
-/// startup-time validation entirely in this module.
+/// (`Ed25519NoteVerifier::new` is just field assignment).
 pub(crate) static LOG_KEYS: LazyLock<HashMap<String, Vec<LogKey>>> = LazyLock::new(|| {
-    let mut out = HashMap::with_capacity(CONFIG.logs.len());
-    for (id, log) in &CONFIG.logs {
-        out.insert(log.origin.clone(), parse_log_keys(id, log));
-    }
-    out
+    CONFIG
+        .logs
+        .iter()
+        .map(|(origin, log)| (origin.clone(), parse_log_keys(origin, log)))
+        .collect()
 });
 
 /// A parsed trusted log key.
@@ -79,35 +71,28 @@ pub(crate) struct LogKey {
     pub verifying_key: ed25519_dalek::VerifyingKey,
 }
 
-/// Build a list of parsed keys for a single configured log, panicking on
-/// any configuration error.
-fn parse_log_keys(log_id: &str, log: &config::LogParams) -> Vec<LogKey> {
-    let origin_name = KeyName::new(log.origin.clone()).unwrap_or_else(|e| {
-        panic!(
-            "log {log_id:?}: origin {:?} is not a valid signed-note key name: {e:?}",
-            log.origin,
-        )
-    });
-    let mut out: Vec<LogKey> = Vec::with_capacity(log.log_public_keys.len());
-    let mut seen_ids: BTreeSet<u32> = BTreeSet::new();
-    for (i, spki) in log.log_public_keys.iter().enumerate() {
-        let vk = ed25519_dalek::VerifyingKey::from_public_key_der(spki).unwrap_or_else(|e| {
-            panic!("log {log_id:?}: log_public_keys[{i}] is not a valid Ed25519 SPKI: {e}")
-        });
-        // Computing the Ed25519 key_id costs one SHA-256 hash, but it's
-        // a one-time startup cost and it lets us catch collisions here.
-        let v = Ed25519NoteVerifier::new(origin_name.clone(), vk);
-        assert!(
-            seen_ids.insert(v.key_id()),
-            "log {log_id:?}: log_public_keys[{i}] shares a (name, key_id) pair with an earlier key; \
-             witness would be unable to disambiguate signatures from it",
-        );
-        out.push(LogKey {
-            origin: origin_name.clone(),
-            verifying_key: vk,
-        });
-    }
-    out
+/// Build a list of parsed keys for a single configured log.
+///
+/// Both fields (origin as a [`KeyName`], each SPKI as an Ed25519
+/// `VerifyingKey`) are validated up front by
+/// [`config::AppConfig::validate`] in `build.rs`, so the parse calls
+/// below are guarded by `expect` rather than recoverable error
+/// propagation. A panic here would indicate `validate` and this function
+/// have drifted out of sync.
+fn parse_log_keys(origin: &str, log: &config::LogParams) -> Vec<LogKey> {
+    let origin_name = KeyName::new(origin.to_owned())
+        .expect("origin validated as a signed-note KeyName by AppConfig::validate");
+    log.log_public_keys
+        .iter()
+        .map(|spki| {
+            let verifying_key = ed25519_dalek::VerifyingKey::from_public_key_der(spki)
+                .expect("SPKI validated as Ed25519 by AppConfig::validate");
+            LogKey {
+                origin: origin_name.clone(),
+                verifying_key,
+            }
+        })
+        .collect()
 }
 
 /// Build a [`VerifierList`] for a given origin from the cached keys, or
@@ -226,9 +211,9 @@ mod dev_config_tests {
         // config.dev.json without pulling in the full config parser —
         // this keeps the test robust to unrelated config-shape changes.
         let parsed: serde_json::Value = serde_json::from_str(DEV_CONFIG).unwrap();
-        let b64 = parsed["logs"]["example1"]["log_public_keys"][0]
+        let b64 = parsed["logs"]["example.com/log1"]["log_public_keys"][0]
             .as_str()
-            .expect("config.dev.json must have logs.example1.log_public_keys[0]");
+            .expect("config.dev.json must have logs[\"example.com/log1\"].log_public_keys[0]");
         let config_spki = BASE64_STANDARD.decode(b64).expect("SPKI is base64");
 
         // Derive the SPKI from the PEM and compare.
