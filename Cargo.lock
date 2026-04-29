@@ -1478,6 +1478,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "static_ct_api",
+ "tlog_cosignature",
  "tlog_tiles",
  "tlog_witness",
  "tokio",
@@ -2944,11 +2945,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlog_cosignature"
+version = "0.2.0"
+dependencies = [
+ "byteorder",
+ "ed25519-dalek",
+ "rand",
+ "signed_note",
+ "tlog_tiles",
+]
+
+[[package]]
 name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
- "byteorder",
  "ed25519-dalek",
  "length_prefixed",
  "rand",
@@ -3743,6 +3754,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signed_note",
+ "tlog_cosignature",
  "tlog_tiles",
  "tlog_witness",
  "witness_worker_config",
