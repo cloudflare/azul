@@ -25,7 +25,7 @@ use ed25519_dalek::{
 use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier, VerifierList};
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::CosignatureV1CheckpointSigner;
+use tlog_cosignature::CosignatureV1CheckpointSigner;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

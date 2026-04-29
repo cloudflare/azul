@@ -28,8 +28,8 @@
 //!   verifier. The parsers here return the checkpoint [`Note`] with its
 //!   signatures still attached so the caller can inspect them.
 //! - Cosignature production: producing a `cosignature/v1` signature is
-//!   handled by [`tlog_tiles::CosignatureV1CheckpointSigner`] (or any other
-//!   [`tlog_tiles::CheckpointSigner`] impl).
+//!   handled by [`tlog_cosignature::CosignatureV1CheckpointSigner`] (or any
+//!   other [`tlog_tiles::CheckpointSigner`] impl).
 //! - Consistency-proof verification: use
 //!   [`tlog_tiles::verify_consistency_proof`] directly.
 //! - Persistent state for the "latest cosigned checkpoint per origin" check
@@ -39,6 +39,7 @@
 //! [spec]: https://c2sp.org/tlog-witness
 //! [add]: https://c2sp.org/tlog-witness#add-checkpoint
 //! [`Note`]: signed_note::Note
+//! [`tlog_cosignature::CosignatureV1CheckpointSigner`]: https://docs.rs/tlog_cosignature/latest/tlog_cosignature/cosignature_v1/struct.CosignatureV1CheckpointSigner.html
 
 mod add_checkpoint;
 

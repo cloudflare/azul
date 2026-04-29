@@ -259,7 +259,7 @@ fn verify_witness_signature(checkpoint: &Note, sigs: &[NoteSignature], meta: &Me
     let witness_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.witness_public_key)
         .expect("witness SPKI");
     let name = KeyName::new(meta.witness_name.clone()).expect("KeyName for witness");
-    let v = tlog_tiles::CosignatureV1NoteVerifier::new(name, witness_vk);
+    let v = tlog_cosignature::CosignatureV1NoteVerifier::new(name, witness_vk);
     let augmented = Note::new(checkpoint.text(), sigs).expect("assemble augmented note");
     let (verified, _unverified) = augmented
         .verify(&VerifierList::new(vec![Box::new(v)]))

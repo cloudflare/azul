@@ -1,0 +1,24 @@
+[package]
+name = "tlog_cosignature"
+readme = "README.md"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of c2sp.org/tlog-cosignature"
+categories = ["cryptography"]
+keywords = ["transparency", "cosignature", "checkpoint", "crypto", "pki"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+byteorder.workspace = true
+ed25519-dalek.workspace = true
+signed_note.workspace = true
+tlog_tiles.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

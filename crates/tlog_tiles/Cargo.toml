@@ -26,7 +26,6 @@ serde_json.workspace = true
 
 [dependencies]
 base64.workspace = true
-byteorder.workspace = true
 ed25519-dalek.workspace = true
 length_prefixed.workspace = true
 rand.workspace = true
