@@ -24,6 +24,8 @@
 //! - [`MAX_SUBTREE_COSIGNATURE_LINES`] / [`MAX_CHECKPOINT_SIGNATURES`]:
 //!   spec-mandated upper bounds (8 each) on cosignature lines in the
 //!   `sign-subtree` request.
+//! - [`MAX_REQUEST_BODY_SIZE`]: parser-level cap on request-body size,
+//!   shared by both endpoints, applied before any base64 decoding.
 //! - [`CONTENT_TYPE_TLOG_SIZE`]: the `text/x.tlog.size` media type used for
 //!   `add-checkpoint`'s `409 Conflict` response bodies.
 //!
@@ -59,7 +61,9 @@ pub use add_checkpoint::{
     parse_add_checkpoint_request, parse_add_checkpoint_response, serialize_add_checkpoint_request,
     serialize_add_checkpoint_response, AddCheckpointRequest,
 };
-pub use common::{TlogWitnessError, CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES};
+pub use common::{
+    TlogWitnessError, CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE,
+};
 pub use sign_subtree::{
     parse_sign_subtree_request, parse_sign_subtree_response, serialize_sign_subtree_request,
     serialize_sign_subtree_response, SignSubtreeRequest, MAX_CHECKPOINT_SIGNATURES,
