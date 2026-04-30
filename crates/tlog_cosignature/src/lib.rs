@@ -9,10 +9,16 @@
 //! inclusion proof.
 //!
 //! This crate provides signers and verifiers for the cosignature formats
-//! specified by the C2SP document. Today only the Ed25519 `cosignature/v1`
-//! format is implemented (in the [`cosignature_v1`] module); the
-//! ML-DSA-44 `subtree/v1` format will be added in a follow-up alongside
-//! support for signing arbitrary subtrees.
+//! specified by the C2SP document:
+//!
+//! - [`cosignature_v1`]: the legacy Ed25519 timestamped checkpoint
+//!   cosignature (signed-note algorithm byte `0x04`). Locked to
+//!   start = 0; signs the checkpoint note body verbatim.
+//! - [`subtree_v1`]: an ML-DSA-44 cosignature over an arbitrary subtree
+//!   (signed-note algorithm byte `0x06`). The checkpoint case
+//!   (`start = 0`, `end = size`) is interchangeable with `cosignature/v1`
+//!   semantically; non-zero `start` cosignatures are used by tlog-witness'
+//!   `sign-subtree` API and by Merkle Tree certificates.
 //!
 //! HTTP transports for requesting cosignatures are out of scope; see
 //! [`tlog_witness`] for parsers/serializers of the
@@ -23,5 +29,7 @@
 //! [`tlog_witness`]: https://docs.rs/tlog_witness
 
 pub mod cosignature_v1;
+pub mod subtree_v1;
 
 pub use cosignature_v1::{CosignatureV1CheckpointSigner, CosignatureV1NoteVerifier};
+pub use subtree_v1::{SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier};
