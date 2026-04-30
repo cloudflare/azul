@@ -28,35 +28,10 @@
 
 use base64::prelude::*;
 use signed_note::{Note, NoteSignature};
-use tlog_tiles::{Hash, HASH_SIZE};
+use tlog_tiles::Hash;
 
-/// Maximum number of consistency-proof lines a client may send, per
-/// [c2sp.org/tlog-witness#add-checkpoint](https://c2sp.org/tlog-witness#add-checkpoint).
-///
-/// A Merkle consistency proof over a log with at most `2^64` entries has at
-/// most 63 hashes.
-pub const MAX_CONSISTENCY_PROOF_LINES: usize = 63;
-
-/// Content type used for `409 Conflict` response bodies carrying a decimal
-/// tree size, per the spec.
-pub const CONTENT_TYPE_TLOG_SIZE: &str = "text/x.tlog.size";
-
-/// Errors produced by this crate's parsers and serializers.
-#[derive(Debug, thiserror::Error)]
-pub enum TlogWitnessError {
-    /// The body failed high-level structural checks (missing blank line,
-    /// malformed `old` line, too many proof lines, etc.).
-    #[error("malformed request: {0}")]
-    MalformedRequest(String),
-
-    /// The response body was malformed.
-    #[error("malformed response: {0}")]
-    MalformedResponse(String),
-
-    /// An embedded signed-note (checkpoint or signature line) failed to parse.
-    #[error("signed note: {0:?}")]
-    Note(signed_note::NoteError),
-}
+use crate::common::{parse_proof_line, MAX_CONSISTENCY_PROOF_LINES};
+use crate::TlogWitnessError;
 
 /// A parsed `add-checkpoint` request body.
 ///
@@ -227,19 +202,6 @@ fn parse_old_line(line: &str) -> Result<u64, TlogWitnessError> {
     }
     rest.parse::<u64>()
         .map_err(|e| TlogWitnessError::MalformedRequest(format!("parsing 'old' tree size: {e}")))
-}
-
-fn parse_proof_line(line: &str) -> Result<Hash, TlogWitnessError> {
-    let decoded = BASE64_STANDARD
-        .decode(line)
-        .map_err(|e| TlogWitnessError::MalformedRequest(format!("base64 proof line: {e}")))?;
-    let arr: [u8; HASH_SIZE] = decoded.try_into().map_err(|v: Vec<u8>| {
-        TlogWitnessError::MalformedRequest(format!(
-            "consistency proof hash is {} bytes, want {HASH_SIZE}",
-            v.len()
-        ))
-    })?;
-    Ok(Hash(arr))
 }
 
 // ---------------------------------------------------------------------------
