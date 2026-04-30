@@ -42,9 +42,10 @@
 //! [`tlog_cosignature::CosignatureV1CheckpointSigner`]: https://docs.rs/tlog_cosignature/latest/tlog_cosignature/cosignature_v1/struct.CosignatureV1CheckpointSigner.html
 
 mod add_checkpoint;
+mod common;
 
 pub use add_checkpoint::{
     parse_add_checkpoint_request, parse_add_checkpoint_response, serialize_add_checkpoint_request,
-    serialize_add_checkpoint_response, AddCheckpointRequest, TlogWitnessError,
-    CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES,
+    serialize_add_checkpoint_response, AddCheckpointRequest,
 };
+pub use common::{TlogWitnessError, CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES};
