@@ -39,7 +39,9 @@ use base64::prelude::*;
 use signed_note::{Note, NoteSignature};
 use tlog_tiles::Hash;
 
-use crate::common::{parse_proof_line, MAX_CONSISTENCY_PROOF_LINES};
+use crate::common::{
+    parse_proof_line, parse_tree_size_decimal, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE,
+};
 use crate::TlogWitnessError;
 
 /// Maximum number of subtree-cosignature lines a client may send in a
@@ -102,13 +104,26 @@ pub struct SignSubtreeRequest {
 ///
 /// # Errors
 ///
-/// Returns [`TlogWitnessError::MalformedRequest`] if the request fails
-/// any structural check (missing required line, wrong line ordering,
-/// over-bound counts, malformed `subtree` line, malformed base64) or
-/// [`TlogWitnessError::Note`] if any cosignature or checkpoint-signature
-/// line fails [`NoteSignature::from_bytes`] / the embedded note fails
+/// Returns [`TlogWitnessError::MalformedRequest`] if the body exceeds
+/// [`MAX_REQUEST_BODY_SIZE`] or fails any structural check (missing
+/// required line, wrong line ordering, over-bound counts, malformed
+/// `subtree` line, malformed base64) or [`TlogWitnessError::Note`] if
+/// any cosignature or checkpoint-signature line fails
+/// [`NoteSignature::from_bytes`] / the embedded note fails
 /// [`Note::from_bytes`].
 pub fn parse_sign_subtree_request(body: &[u8]) -> Result<SignSubtreeRequest, TlogWitnessError> {
+    // Reject oversized bodies up front. The line-count caps don't
+    // bound the line *sizes* (an ML-DSA-44 cosignature line is ~3.3
+    // KiB on the wire but nothing in `NoteSignature::from_bytes`
+    // enforces that — it will base64-decode any blob) so without
+    // this cap a hostile input could feed the parser an
+    // 8-cosig × 100 MB payload.
+    if body.len() > MAX_REQUEST_BODY_SIZE {
+        return Err(TlogWitnessError::MalformedRequest(format!(
+            "request body exceeds {MAX_REQUEST_BODY_SIZE} bytes"
+        )));
+    }
+
     // Split on the first blank line. Everything before it is the
     // subtree header (range line + hash line + cosig lines + proof
     // lines); everything after it is the reference checkpoint (either
@@ -323,28 +338,10 @@ fn parse_subtree_range_line(line: &str) -> Result<(u64, u64), TlogWitnessError> 
             "trailing data after end in 'subtree' line".into(),
         ));
     }
-    let start = parse_decimal(start_text, "start")?;
-    let end = parse_decimal(end_text, "end")?;
+    let start = parse_tree_size_decimal(start_text, "subtree start")?;
+    let end = parse_tree_size_decimal(end_text, "subtree end")?;
     Ok((start, end))
 }
-
-/// Parse an ASCII decimal `u64` per the spec's tree-size encoding rules:
-/// no leading zeros except for the value zero itself.
-fn parse_decimal(text: &str, what: &str) -> Result<u64, TlogWitnessError> {
-    if text.is_empty() {
-        return Err(TlogWitnessError::MalformedRequest(format!(
-            "empty subtree {what}"
-        )));
-    }
-    if text.len() > 1 && text.starts_with('0') {
-        return Err(TlogWitnessError::MalformedRequest(format!(
-            "subtree {what} has leading zeros"
-        )));
-    }
-    text.parse::<u64>()
-        .map_err(|e| TlogWitnessError::MalformedRequest(format!("parsing subtree {what}: {e}")))
-}
-
 
 /// Parse the reference checkpoint section of a `sign-subtree` request.
 ///
@@ -628,6 +625,39 @@ mod tests {
             matches!(err, TlogWitnessError::Note(_)),
             "expected Note(_) error, got {err:?}",
         );
+    }
+
+    /// Reject a body larger than [`MAX_REQUEST_BODY_SIZE`] before
+    /// doing any base64 decoding.
+    #[test]
+    fn request_rejects_oversized_body() {
+        let body = vec![b'a'; MAX_REQUEST_BODY_SIZE + 1];
+        let err = parse_sign_subtree_request(&body).unwrap_err();
+        match err {
+            TlogWitnessError::MalformedRequest(msg) => {
+                assert!(
+                    msg.contains("request body exceeds"),
+                    "error must mention the body-size cap: {msg}",
+                );
+            }
+            other => panic!("expected MalformedRequest, got {other:?}"),
+        }
+    }
+
+    /// Reject `subtree +0 +1` even though Rust's `u64::from_str` would
+    /// otherwise accept the leading `+`.
+    #[test]
+    fn request_rejects_leading_plus_in_range() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"subtree +0 +1\n");
+        body.extend_from_slice(BASE64_STANDARD.encode([0u8; 32]).as_bytes());
+        body.push(b'\n');
+        body.push(b'\n');
+        body.extend_from_slice(b"example.com/log\n1\n");
+        body.extend_from_slice(BASE64_STANDARD.encode([0u8; 32]).as_bytes());
+        body.push(b'\n');
+        let err = parse_sign_subtree_request(&body).unwrap_err();
+        assert!(matches!(err, TlogWitnessError::MalformedRequest(_)));
     }
 
     /// Same wire shape as `add-checkpoint`, so the response helpers

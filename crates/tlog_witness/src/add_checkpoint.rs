@@ -30,7 +30,9 @@ use base64::prelude::*;
 use signed_note::{Note, NoteSignature};
 use tlog_tiles::Hash;
 
-use crate::common::{parse_proof_line, MAX_CONSISTENCY_PROOF_LINES};
+use crate::common::{
+    parse_proof_line, parse_tree_size_decimal, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE,
+};
 use crate::TlogWitnessError;
 
 /// A parsed `add-checkpoint` request body.
@@ -63,10 +65,21 @@ pub struct AddCheckpointRequest {
 ///
 /// # Errors
 ///
-/// Returns [`TlogWitnessError::MalformedRequest`] if the control block is not
-/// well formed, and [`TlogWitnessError::Note`] if the embedded checkpoint
-/// note fails to parse.
+/// Returns [`TlogWitnessError::MalformedRequest`] if the body exceeds
+/// [`MAX_REQUEST_BODY_SIZE`] or the control block is not well formed,
+/// and [`TlogWitnessError::Note`] if the embedded checkpoint note
+/// fails to parse.
 pub fn parse_add_checkpoint_request(body: &[u8]) -> Result<AddCheckpointRequest, TlogWitnessError> {
+    // Reject oversized bodies up front. Even though the line counts
+    // (proof lines) are spec-bounded, the embedded checkpoint and
+    // individual line sizes are not, and we don't want the parser
+    // base64-decoding arbitrarily large blobs on a hostile input.
+    if body.len() > MAX_REQUEST_BODY_SIZE {
+        return Err(TlogWitnessError::MalformedRequest(format!(
+            "request body exceeds {MAX_REQUEST_BODY_SIZE} bytes"
+        )));
+    }
+
     // Split the body at the first blank line (`\n\n`). The control block
     // (old + proof lines) precedes it; the checkpoint note follows.
     let pos = body.windows(2).position(|w| w == b"\n\n").ok_or_else(|| {
@@ -182,26 +195,15 @@ pub fn parse_add_checkpoint_response(body: &[u8]) -> Result<Vec<NoteSignature>, 
 // ---------------------------------------------------------------------------
 
 fn parse_old_line(line: &str) -> Result<u64, TlogWitnessError> {
-    // Per spec: literal "old", single 0x20, then decimal tree size with no
-    // leading zeros except for the value zero itself.
+    // Per spec: literal "old", single 0x20, then decimal tree size with
+    // no leading zeros (except for the value zero itself), no leading
+    // sign, and ASCII digits only — see [`parse_tree_size_decimal`].
     let rest = line.strip_prefix("old ").ok_or_else(|| {
         TlogWitnessError::MalformedRequest(
             "first line must start with \"old \" followed by a tree size".into(),
         )
     })?;
-    // Reject leading zeros (with the sole exception of "0" itself).
-    if rest.is_empty() {
-        return Err(TlogWitnessError::MalformedRequest(
-            "empty tree size in 'old' line".into(),
-        ));
-    }
-    if rest.len() > 1 && rest.starts_with('0') {
-        return Err(TlogWitnessError::MalformedRequest(
-            "tree size in 'old' line has leading zeros".into(),
-        ));
-    }
-    rest.parse::<u64>()
-        .map_err(|e| TlogWitnessError::MalformedRequest(format!("parsing 'old' tree size: {e}")))
+    parse_tree_size_decimal(rest, "tree size in 'old' line")
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +325,37 @@ mod tests {
             parse_add_checkpoint_request(&body).unwrap_err(),
             TlogWitnessError::MalformedRequest(_)
         ));
+    }
+
+    /// Reject `old +0` even though Rust's `u64::from_str` would
+    /// otherwise accept the leading `+`.
+    #[test]
+    fn request_rejects_leading_plus_in_old_size() {
+        let cp = fake_checkpoint("example.com/log", 0, 0);
+        let mut body = Vec::new();
+        body.extend_from_slice(b"old +0\n\n");
+        body.extend_from_slice(&cp.to_bytes());
+        assert!(matches!(
+            parse_add_checkpoint_request(&body).unwrap_err(),
+            TlogWitnessError::MalformedRequest(_)
+        ));
+    }
+
+    /// Reject a body larger than [`MAX_REQUEST_BODY_SIZE`] before
+    /// doing any base64 decoding.
+    #[test]
+    fn request_rejects_oversized_body() {
+        let body = vec![b'a'; MAX_REQUEST_BODY_SIZE + 1];
+        let err = parse_add_checkpoint_request(&body).unwrap_err();
+        match err {
+            TlogWitnessError::MalformedRequest(msg) => {
+                assert!(
+                    msg.contains("request body exceeds"),
+                    "error must mention the body-size cap: {msg}",
+                );
+            }
+            other => panic!("expected MalformedRequest, got {other:?}"),
+        }
     }
 
     #[test]
