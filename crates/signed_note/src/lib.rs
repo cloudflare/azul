@@ -692,6 +692,17 @@ impl Note {
     pub fn text(&self) -> &[u8] {
         &self.text
     }
+
+    /// Returns the note's signatures, in the order they appear on the wire.
+    ///
+    /// The slice is empty when the note was constructed via
+    /// [`Note::new`] with no `existing_sigs`. [`Note::from_bytes`]
+    /// always returns a note with at least one signature, since the
+    /// signed-note wire format requires a non-empty signature block.
+    #[must_use]
+    pub fn signatures(&self) -> &[NoteSignature] {
+        &self.sigs
+    }
 }
 
 #[cfg(test)]
