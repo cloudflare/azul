@@ -119,9 +119,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use std::io::Read;
+use tlog_core::{Hash, LeafIndex};
 use tlog_tiles::{
-    CheckpointSigner, CheckpointText, Hash, LeafIndex, LogEntry, LookupKey, PathElem,
-    PendingLogEntry, UnixTimestamp,
+    CheckpointSigner, CheckpointText, LogEntry, LookupKey, PathElem, PendingLogEntry, UnixTimestamp,
 };
 
 #[repr(u16)]
@@ -303,7 +303,7 @@ impl LogEntry for StaticCTLogEntry {
     ///
     /// Panics if writing to the internal buffer fails, which should never happen.
     fn merkle_tree_leaf(&self) -> Hash {
-        tlog_tiles::record_hash(
+        tlog_core::record_hash(
             &[
                 &[
                     0, // version = v1 (0)

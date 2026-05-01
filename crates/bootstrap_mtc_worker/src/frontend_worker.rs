@@ -27,9 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
 use std::time::Duration;
+use tlog_core::LeafIndex;
 use tlog_tiles::{
-    open_checkpoint, CheckpointSigner, CheckpointText, LeafIndex, PendingLogEntry,
-    PendingLogEntryBlob,
+    open_checkpoint, CheckpointSigner, CheckpointText, PendingLogEntry, PendingLogEntryBlob,
 };
 #[allow(clippy::wildcard_imports)]
 use worker::*;

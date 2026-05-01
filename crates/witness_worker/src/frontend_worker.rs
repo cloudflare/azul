@@ -203,7 +203,8 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
     // `NoteError` variants indicate a syntactically malformed signature
     // line and are surfaced as `400 Bad Request`.
     //
-    // `tlog_tiles::open_checkpoint` is deliberately not used here because
+    // `tlog_tiles::open_checkpoint` (in the c2sp.org/tlog-checkpoint slice
+    // of `tlog_tiles`) is deliberately not used here because
     // it additionally requires *every* configured verifier to sign — the
     // full-coverage semantics an issuer or monitor wants, but not a
     // witness: a log rotating keys may have multiple trusted public keys

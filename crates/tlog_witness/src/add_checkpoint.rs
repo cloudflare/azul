@@ -28,7 +28,7 @@
 
 use base64::prelude::*;
 use signed_note::{Note, NoteSignature};
-use tlog_tiles::{Hash, HASH_SIZE};
+use tlog_core::{Hash, HASH_SIZE};
 
 /// Maximum number of consistency-proof lines a client may send, per
 /// [c2sp.org/tlog-witness#add-checkpoint](https://c2sp.org/tlog-witness#add-checkpoint).

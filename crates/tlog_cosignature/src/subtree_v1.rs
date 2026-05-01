@@ -89,7 +89,8 @@ use ml_dsa::{
     MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
 };
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
-use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, Subtree, UnixTimestamp, HASH_SIZE};
+use tlog_core::{Hash, Subtree, HASH_SIZE};
+use tlog_tiles::{CheckpointSigner, CheckpointText, UnixTimestamp};
 
 /// The fixed 12-byte label prefix domain-separating `subtree/v1` from
 /// other cosignature formats.
@@ -259,7 +260,7 @@ impl SubtreeV1CheckpointSigner {
     /// Sign an arbitrary subtree, returning a `subtree/v1`
     /// [`NoteSignature`].
     ///
-    /// `subtree` carries `(start, end)` as a `tlog_tiles::Subtree`,
+    /// `subtree` carries `(start, end)` as a `tlog_core::Subtree`,
     /// which has been validated at construction time to be a valid
     /// `[start, end)` subtree per draft-ietf-plants-merkle-tree-certs
     /// §4.1 (`start < end`, alignment to the next-power-of-two width).
@@ -401,7 +402,7 @@ impl SubtreeV1NoteVerifier {
     /// `false` for any malformation, including when the spec's
     /// timestamp/start invariant is violated.
     ///
-    /// `subtree` carries `(start, end)` as a `tlog_tiles::Subtree`,
+    /// `subtree` carries `(start, end)` as a `tlog_core::Subtree`,
     /// which has been validated at construction time; the previous
     /// runtime `start < end` check is now expressed in the type.
     ///
@@ -527,7 +528,7 @@ fn decode_signature(bytes: &[u8]) -> Option<MlDsaSignature<MlDsa44>> {
 mod tests {
     use super::*;
     use ml_dsa::ExpandedSigningKey;
-    use tlog_tiles::HASH_SIZE;
+    use tlog_core::HASH_SIZE;
 
     /// Construct a deterministic ML-DSA-44 expanded signing key from a
     /// 32-byte seed; the companion verifying key is derived via

@@ -1,5 +1,5 @@
 [package]
-name = "tlog_tiles"
+name = "tlog_core"
 readme = "README.md"
 version.workspace = true
 authors.workspace = true
@@ -7,9 +7,9 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "An implementation of c2sp.org/tlog-tiles and c2sp.org/tlog-checkpoint"
+description = "RFC 6962 Merkle tree math + draft-ietf-plants-merkle-tree-certs subtree proofs"
 categories = ["cryptography"]
-keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
+keywords = ["transparency", "merkle", "rfc6962", "crypto", "pki"]
 
 [package.metadata.release]
 release = false
@@ -21,17 +21,8 @@ wasm-opt = false
 [lib]
 crate-type = ["rlib"]
 
-[dev-dependencies]
-serde_json.workspace = true
-
 [dependencies]
 base64.workspace = true
-ed25519-dalek.workspace = true
-length_prefixed.workspace = true
-rand.workspace = true
 serde.workspace = true
 sha2.workspace = true
-signed_note.workspace = true
 thiserror.workspace = true
-tlog_core.workspace = true
-url.workspace = true

@@ -19,7 +19,8 @@ use generic_log_worker::{
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::Note;
-use tlog_tiles::{CheckpointText, Hash, UnixTimestamp};
+use tlog_core::Hash;
+use tlog_tiles::{CheckpointText, UnixTimestamp};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

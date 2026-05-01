@@ -179,6 +179,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "thiserror 2.0.17",
+ "tlog_core",
  "tlog_tiles",
  "x509-cert",
  "x509_util",
@@ -210,6 +211,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signed_note",
+ "tlog_core",
  "tlog_tiles",
  "url",
  "worker",
@@ -584,6 +586,7 @@ dependencies = [
  "serde_with",
  "signed_note",
  "static_ct_api",
+ "tlog_core",
  "tlog_tiles",
  "url",
  "worker",
@@ -1030,6 +1033,7 @@ dependencies = [
  "signed_note",
  "static_ct_api",
  "thiserror 2.0.17",
+ "tlog_core",
  "tlog_tiles",
  "tokio",
  "worker",
@@ -1478,6 +1482,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "static_ct_api",
+ "tlog_core",
  "tlog_cosignature",
  "tlog_tiles",
  "tlog_witness",
@@ -2809,6 +2814,7 @@ dependencies = [
  "signed_note",
  "spki",
  "thiserror 2.0.17",
+ "tlog_core",
  "tlog_tiles",
  "x509-cert",
  "x509_util",
@@ -2991,6 +2997,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlog_core"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "serde",
+ "sha2",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "tlog_cosignature"
 version = "0.2.0"
 dependencies = [
@@ -3000,6 +3016,7 @@ dependencies = [
  "ml-dsa",
  "rand",
  "signed_note",
+ "tlog_core",
  "tlog_tiles",
 ]
 
@@ -3016,6 +3033,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "thiserror 2.0.17",
+ "tlog_core",
  "url",
 ]
 
@@ -3025,6 +3043,7 @@ version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.2",
+ "tlog_core",
  "tlog_tiles",
  "wasm-bindgen",
 ]
@@ -3036,7 +3055,7 @@ dependencies = [
  "base64",
  "signed_note",
  "thiserror 2.0.17",
- "tlog_tiles",
+ "tlog_core",
 ]
 
 [[package]]
@@ -3802,6 +3821,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signed_note",
+ "tlog_core",
  "tlog_cosignature",
  "tlog_tiles",
  "tlog_witness",
