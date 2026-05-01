@@ -89,8 +89,8 @@ use ml_dsa::{
     MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
 };
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_core::{Hash, Subtree, HASH_SIZE};
-use tlog_tiles::{CheckpointSigner, CheckpointText, UnixTimestamp};
 
 /// The fixed 12-byte label prefix domain-separating `subtree/v1` from
 /// other cosignature formats.
@@ -328,7 +328,7 @@ impl CheckpointSigner for SubtreeV1CheckpointSigner {
 
     fn sign(
         &self,
-        timestamp_unix_millis: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         // The checkpoint case fixes start = 0 and end = checkpoint_size.
@@ -342,7 +342,7 @@ impl CheckpointSigner for SubtreeV1CheckpointSigner {
         // timestamp unchanged (in seconds), trusting them not to pass
         // zero in this path.
         Ok(self.sign_subtree(
-            timestamp_unix_millis / 1000,
+            timestamp / 1000,
             checkpoint.origin(),
             &subtree,
             checkpoint.hash(),
@@ -664,7 +664,7 @@ mod tests {
 
         // Build a checkpoint note body and sign with the CheckpointSigner
         // path. Timestamp is in millis; signer divides by 1000 internally.
-        let cp_text = tlog_tiles::CheckpointText::new(
+        let cp_text = tlog_checkpoint::CheckpointText::new(
             "log.example/origin",
             42,
             Hash([0x55u8; HASH_SIZE]),

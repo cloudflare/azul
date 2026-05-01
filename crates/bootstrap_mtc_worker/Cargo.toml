@@ -59,6 +59,7 @@ serde_json.workspace = true
 serde_with.workspace = true
 signed_note.workspace = true
 tlog_core.workspace = true
+tlog_checkpoint.workspace = true
 tlog_tiles.workspace = true
 worker.workspace = true
 x509-cert.workspace = true

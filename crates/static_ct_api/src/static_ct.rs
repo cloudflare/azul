@@ -61,7 +61,7 @@
 //!
 //! // Make a list of the verifiers that MUST apear on the checkpoint, and load the checkpoint
 //! let verifiers = VerifierList::new(vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]);
-//! let (_checkpoint, _timestamp) = tlog_tiles::open_checkpoint(
+//! let (_checkpoint, _timestamp) = tlog_checkpoint::open_checkpoint(
 //!   "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b",
 //!   &verifiers,
 //!   now,
@@ -119,10 +119,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use std::io::Read;
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_core::{Hash, LeafIndex};
-use tlog_tiles::{
-    CheckpointSigner, CheckpointText, LogEntry, LookupKey, PathElem, PendingLogEntry, UnixTimestamp,
-};
+use tlog_tiles::{LogEntry, LookupKey, PathElem, PendingLogEntry};
 
 #[repr(u16)]
 enum EntryType {
@@ -240,7 +239,7 @@ pub struct StaticCTLogEntry {
     pub leaf_index: LeafIndex,
 
     /// The `TimestampedEntry.timestamp`.
-    pub timestamp: UnixTimestamp,
+    pub timestamp: UnixTimestampMillis,
 }
 
 impl StaticCTLogEntry {
@@ -288,7 +287,7 @@ impl LogEntry for StaticCTLogEntry {
     fn new(
         pending: StaticCTPendingLogEntry,
         leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
     ) -> Self {
         StaticCTLogEntry {
             inner: pending,
@@ -576,7 +575,10 @@ impl NoteVerifier for RFC6962NoteVerifier {
         self.verifying_key.verify(&sth_bytes, &signature).is_ok()
     }
 
-    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<UnixTimestamp>, NoteError> {
+    fn extract_timestamp_millis(
+        &self,
+        mut sig: &[u8],
+    ) -> Result<Option<UnixTimestampMillis>, NoteError> {
         // In a static-ct signed tree head, the timestamp is the first 8 bytes of the sig
         //   https://github.com/C2SP/C2SP/blob/efb68c16664309a68120e37528fa1c046dd1ac09/static-ct-api.md#checkpoints
         // and it's in milliseconds
@@ -718,7 +720,7 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
     /// then prepend the timestamp.
     fn sign(
         &self,
-        timestamp_unix_millis: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         // RFC 6962-type signatures do not sign extension lines. If this checkpoint has extension lines, this is an error.
@@ -727,11 +729,8 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
         }
 
         // Produce the bytestring that will be signed
-        let tree_head_bytes = serialize_sth_signature_input(
-            timestamp_unix_millis,
-            checkpoint.size(),
-            checkpoint.hash(),
-        );
+        let tree_head_bytes =
+            serialize_sth_signature_input(timestamp, checkpoint.size(), checkpoint.hash());
 
         // Sign the string
         let tree_head_sig = sign(&self.signing_key, &tree_head_bytes);
@@ -742,9 +741,7 @@ impl CheckpointSigner for StaticCTCheckpointSigner {
         //     TreeHeadSignature signature;
         // } RFC6962NoteSignature;
         let mut note_sig = Vec::new();
-        note_sig
-            .write_u64::<BigEndian>(timestamp_unix_millis)
-            .unwrap();
+        note_sig.write_u64::<BigEndian>(timestamp).unwrap();
         note_sig.extend(&tree_head_sig);
 
         // Return the note signature. We can unwrap() here because the only cause for error is if

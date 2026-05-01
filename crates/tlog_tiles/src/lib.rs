@@ -3,22 +3,23 @@
 
 //! # `tlog_tiles`
 //!
-//! Implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) and
-//! [C2SP tlog-checkpoint](https://c2sp.org/tlog-checkpoint) specifications.
+//! Implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles)
+//! HTTP wire format for tile-encoded transparency logs.
 //!
-//! The underlying RFC 6962 Merkle math (the [`Hash`] type, the proof
-//! builders/verifiers, the `Subtree` type) lives in the [`tlog_core`]
-//! crate; this crate adds the tile-encoding wire format and the
-//! checkpoint note shape on top.
+//! The Merkle math (the [`Hash`] type, the proof builders/verifiers,
+//! the `Subtree` type) lives in the [`tlog_core`] crate; the
+//! [tlog-checkpoint][tc] signed-note format lives in the
+//! [`tlog_checkpoint`] crate; this crate is the tile-encoding layer on
+//! top of both.
 //!
+//! [tc]: https://c2sp.org/tlog-checkpoint
 //! [`Hash`]: tlog_core::Hash
 //! [`tlog_core`]: https://docs.rs/tlog_core
+//! [`tlog_checkpoint`]: https://docs.rs/tlog_checkpoint
 
-pub mod checkpoint;
 pub mod entries;
 pub mod tile;
 
-pub use checkpoint::*;
 pub use entries::*;
 pub use tile::*;
 

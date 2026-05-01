@@ -15,7 +15,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tlog_tiles::checkpoint::CheckpointText;
+use tlog_checkpoint::CheckpointText;
 
 fuzz_target!(|data: &[u8]| {
     let _ = CheckpointText::from_bytes(data);
