@@ -9,7 +9,8 @@ use ed25519_dalek::{
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
-use tlog_tiles::{CheckpointSigner, CheckpointText, Hash, LeafIndex, UnixTimestamp};
+use tlog_core::{Hash, LeafIndex};
+use tlog_tiles::{CheckpointSigner, CheckpointText, UnixTimestamp};
 
 use crate::{RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
 
@@ -234,7 +235,8 @@ fn serialize_mtc_subtree_signature_input(
 #[cfg(test)]
 mod tests {
 
-    use tlog_tiles::{open_checkpoint, record_hash, TreeWithTimestamp};
+    use tlog_core::record_hash;
+    use tlog_tiles::{open_checkpoint, TreeWithTimestamp};
 
     use super::*;
     use signed_note::VerifierList;

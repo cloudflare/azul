@@ -1,39 +1,37 @@
-// Ported from "mod" (https://pkg.go.dev/golang.org/x/mod)
-// Copyright 2009 The Go Authors
-// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
-//
-// This ports code from the original Go project "mod" and adapts it to Rust idioms.
-//
-// Modifications and Rust implementation Copyright (c) 2025 Cloudflare, Inc.
+// Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! # tlog tiles
+//! # `tlog_tiles`
 //!
-//! Implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) and [C2SP checkpoint](https://c2sp.org/tlog-checkpoint) specifications.
+//! Implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) and
+//! [C2SP tlog-checkpoint](https://c2sp.org/tlog-checkpoint) specifications.
 //!
-//! This file contains code ported from the original project [tlog](https://pkg.go.dev/golang.org/x/mod/sumdb/tlog).
+//! The underlying RFC 6962 Merkle math (the [`Hash`] type, the proof
+//! builders/verifiers, the `Subtree` type) lives in the [`tlog_core`]
+//! crate; this crate adds the tile-encoding wire format and the
+//! checkpoint note shape on top.
 //!
-//! References:
-//! - [ct_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/ct_test.go)
+//! [`Hash`]: tlog_core::Hash
+//! [`tlog_core`]: https://docs.rs/tlog_core
 
 pub mod checkpoint;
 pub mod entries;
 pub mod tile;
-pub mod tlog;
 
 pub use checkpoint::*;
 pub use entries::*;
 pub use tile::*;
-pub use tlog::*;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use base64::prelude::*;
     use serde::{Deserialize, Deserializer};
     use std::fs::File;
     use std::io::Read;
     use std::path::PathBuf;
+    use tlog_core::{
+        record_hash, verify_consistency_proof, verify_inclusion_proof, Hash, TlogError,
+    };
     use url::form_urlencoded;
 
     #[derive(Deserialize)]

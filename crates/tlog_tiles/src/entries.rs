@@ -3,16 +3,14 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{io::Read, marker::PhantomData};
 
-use crate::{Hash, PathElem, TlogError};
+use crate::PathElem;
+use tlog_core::{Hash, LeafIndex};
 
 pub const LOOKUP_KEY_LEN: usize = 16;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];
 
 /// Unix timestamp.
 pub type UnixTimestamp = u64;
-
-/// Index of a leaf in the Merkle tree.
-pub type LeafIndex = u64;
 
 /// An opaque `PendingLogEntry` that can be passed around without requiring full
 /// deserialization.
@@ -153,7 +151,7 @@ impl PendingLogEntry for TlogTilesPendingLogEntry {
 impl LogEntry for TlogTilesLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
     type Pending = TlogTilesPendingLogEntry;
-    type ParseError = TlogError;
+    type ParseError = std::io::Error;
 
     fn initial_entry() -> Option<Self::Pending> {
         None
@@ -164,7 +162,7 @@ impl LogEntry for TlogTilesLogEntry {
     }
 
     fn merkle_tree_leaf(&self) -> Hash {
-        crate::tlog::record_hash(&self.inner.data)
+        tlog_core::record_hash(&self.inner.data)
     }
 
     fn to_data_tile_entry(&self) -> Vec<u8> {

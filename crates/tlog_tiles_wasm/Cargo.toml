@@ -18,6 +18,7 @@ ignored = ["getrandom"]
 crate-type = ["cdylib"]
 
 [dependencies]
+tlog_core = { workspace = true }
 tlog_tiles = { workspace = true }
 wasm-bindgen = { workspace = true }
 console_error_panic_hook = { workspace = true }

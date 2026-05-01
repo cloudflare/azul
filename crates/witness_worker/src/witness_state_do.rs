@@ -41,7 +41,7 @@
 //! [add]: https://c2sp.org/tlog-witness#add-checkpoint
 
 use serde::{Deserialize, Serialize};
-use tlog_tiles::{verify_consistency_proof, Hash};
+use tlog_core::{verify_consistency_proof, Hash};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -199,7 +199,7 @@ pub(crate) fn state_stub(env: &Env, origin: &str) -> Result<Stub> {
 // ---------------------------------------------------------------------------
 mod hash_hex {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tlog_tiles::{Hash, HASH_SIZE};
+    use tlog_core::{Hash, HASH_SIZE};
 
     pub fn serialize<S>(h: &Hash, ser: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -233,7 +233,7 @@ mod hash_hex {
 mod hash_vec_hex {
     use super::hash_hex::from_hex;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tlog_tiles::Hash;
+    use tlog_core::Hash;
 
     pub fn serialize<S>(v: &[Hash], ser: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -259,7 +259,7 @@ mod hash_vec_hex {
 #[cfg(test)]
 mod tests {
     use super::{CheckAndUpdateRequest, LatestCheckpoint};
-    use tlog_tiles::{Hash, HASH_SIZE};
+    use tlog_core::{Hash, HASH_SIZE};
 
     /// Pin the on-disk JSON layout of `LatestCheckpoint`. Changing this
     /// format would make already-deployed witnesses unable to read their

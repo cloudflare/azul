@@ -29,6 +29,7 @@ sha2.workspace = true
 signed_note.workspace = true
 static_ct_api.workspace = true
 bootstrap_mtc_api.workspace = true
+tlog_core.workspace = true
 tlog_cosignature.workspace = true
 tlog_tiles.workspace = true
 tlog_witness.workspace = true

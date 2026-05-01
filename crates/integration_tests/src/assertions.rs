@@ -14,9 +14,10 @@ use sct_validator::{
 use sha2::{Digest, Sha256};
 use signed_note::{Ed25519NoteVerifier, KeyName, VerifierList};
 use static_ct_api::{Extensions, RFC6962NoteVerifier, StaticCTLogEntry};
+use tlog_core::HashReader;
 use tlog_tiles::{
-    open_checkpoint, CheckpointText, HashReader, LogEntry, PathElem, PreloadedTlogTileReader,
-    TileHashReader, TileIterator, TlogTile,
+    open_checkpoint, CheckpointText, LogEntry, PathElem, PreloadedTlogTileReader, TileHashReader,
+    TileIterator, TlogTile,
 };
 use x509_cert::{der::Decode, der::Encode, Certificate};
 
@@ -299,7 +300,7 @@ pub async fn assert_leaf_in_checkpoint(
     }
 
     // Compute the hash storage index for this leaf.
-    let hash_index = tlog_tiles::stored_hash_index(0, leaf_index);
+    let hash_index = tlog_core::stored_hash_index(0, leaf_index);
     let indexes = vec![hash_index];
 
     // Use TlogTileRecorder to discover which hash tiles are needed for the

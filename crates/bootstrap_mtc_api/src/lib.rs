@@ -24,9 +24,9 @@ use std::{
     num::ParseIntError,
 };
 use thiserror::Error;
+use tlog_core::{Hash, LeafIndex, Proof, Subtree, TlogError};
 use tlog_tiles::{
-    Hash, LeafIndex, LogEntry, PathElem, PendingLogEntry, Proof, Subtree, TlogError,
-    TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
+    LogEntry, PathElem, PendingLogEntry, TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
 };
 use x509_cert::{
     certificate::Version,
@@ -876,7 +876,8 @@ mod tests {
     #[test]
     fn test_serialize_signatureless_cert() {
         use der::Decode as _;
-        use tlog_tiles::{Proof, Subtree, TlogTilesLogEntry, TlogTilesPendingLogEntry};
+        use tlog_core::{Proof, Subtree};
+        use tlog_tiles::{TlogTilesLogEntry, TlogTilesPendingLogEntry};
 
         let certs =
             Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))

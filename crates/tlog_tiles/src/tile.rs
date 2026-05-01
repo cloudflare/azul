@@ -15,15 +15,15 @@
 //! - [tile.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/tile.go)
 //! - [tile_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/tile_test.go)
 
-use crate::tlog::{
-    node_hash, split_stored_hash_index, stored_hash_index, tree_hash_indexes, Hash, HashReader,
-    TlogError, HASH_SIZE,
-};
 use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use tlog_core::{
+    node_hash, split_stored_hash_index, stored_hash_index, tree_hash_indexes, Hash, HashReader,
+    TlogError, HASH_SIZE,
+};
 
 // To limit the size of any particular directory listing, we encode the (possibly very large)
 // number N by encoding three digits at a time.  For example, 123456789 encodes as x123/x456/789.
@@ -791,6 +791,284 @@ impl TileReader for PreloadedTlogTileReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use tlog_core::{
+        consistency_proof, evaluate_subtree_inclusion_proof, inclusion_proof, record_hash,
+        stored_hash_count, stored_hash_index, stored_hashes, subtree_consistency_proof,
+        subtree_hash, subtree_inclusion_proof, tree_hash, verify_consistency_proof,
+        verify_inclusion_proof, verify_subtree_consistency_proof, verify_subtree_inclusion_proof,
+        Subtree,
+    };
+
+    /// In-memory `HashReader` paired with [`TestTilesStorage`] in the
+    /// `test_tree` integration test below. Newtype wrapper around
+    /// `Vec<Hash>` so the orphan rules let us implement the foreign
+    /// `HashReader` trait on it.
+    #[derive(Default)]
+    struct TestHashStorage(Vec<Hash>);
+
+    impl TestHashStorage {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn extend<I: IntoIterator<Item = Hash>>(&mut self, iter: I) {
+            self.0.extend(iter);
+        }
+        fn iter(&self) -> std::slice::Iter<'_, Hash> {
+            self.0.iter()
+        }
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    impl HashReader for TestHashStorage {
+        fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, TlogError> {
+            // It's not required by HashReader that indexes be in increasing order,
+            // but check that the functions we are testing only ever ask for
+            // indexes in increasing order.
+            let mut prev_index = 0;
+            for (i, &index) in indexes.iter().enumerate() {
+                if i != 0 && index <= prev_index {
+                    return Err(TlogError::IndexesOutOfOrder);
+                }
+                prev_index = index;
+            }
+
+            let mut out = Vec::with_capacity(indexes.len());
+            for &index in indexes {
+                out.push(self.0[usize::try_from(index).unwrap()]);
+            }
+            Ok(out)
+        }
+    }
+
+    /// `TileReader` impl backed by an in-memory `HashMap<Tile, Vec<u8>>`.
+    /// Counts how many tiles are read but not saved so the integration
+    /// test below can pin the "must save tiles" invariant.
+    #[derive(Default, Debug)]
+    struct TestTilesStorage {
+        // Make use of interior mutability here to avoid needing to make struct mutable for tests:
+        // https://ricardomartins.cc/2016/06/08/interior-mutability
+        unsaved: Cell<usize>,
+        m: HashMap<Tile, Vec<u8>>,
+    }
+
+    impl TileReader for TestTilesStorage {
+        fn height(&self) -> u8 {
+            2
+        }
+
+        fn save_tiles(&self, tiles: &[Tile], _data: &[Vec<u8>]) {
+            let new_size = self.unsaved.get() - tiles.len();
+            self.unsaved.set(new_size);
+        }
+
+        fn read_tiles(&self, tiles: &[Tile]) -> Result<Vec<Vec<u8>>, TlogError> {
+            let mut out = Vec::with_capacity(tiles.len());
+            for tile in tiles {
+                if let Some(data) = self.m.get(tile) {
+                    out.push(data.clone());
+                } else {
+                    panic!("tile {tile:?} not found in map");
+                }
+            }
+            let new_size = self.unsaved.get() + tiles.len();
+            self.unsaved.set(new_size);
+            Ok(out)
+        }
+    }
+
+    /// Cross-crate integration test: exercises the [`tlog`] math layer
+    /// (`stored_hashes`, `tree_hash`, `inclusion_proof`,
+    /// `consistency_proof`, the `subtree_*` variants) against the
+    /// tile-encoded storage layer (`Tile`, `TileReader`,
+    /// `TileHashReader`) for trees of size 0..100.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn test_tree() {
+        const TEST_H: u8 = 2;
+
+        let mut trees = Vec::new();
+        let mut leafhashes = Vec::new();
+        let mut storage = TestHashStorage::new();
+        let mut tiles = HashMap::<Tile, Vec<u8>>::new();
+
+        for i in 0..100 {
+            let data = format!("leaf {i}");
+            let hashes = stored_hashes(i, data.as_bytes(), &storage).unwrap();
+
+            leafhashes.push(record_hash(data.as_bytes()));
+            let old_storage_len = storage.len();
+            storage.extend(hashes);
+
+            assert_eq!(stored_hash_count(i + 1), storage.len() as u64);
+
+            let th = tree_hash(i + 1, &storage).unwrap();
+
+            for tile in Tile::new_tiles(TEST_H, i, i + 1) {
+                let data = tile.read_data(&storage).unwrap();
+                let default = Vec::new();
+                let old_data = if tile.width() > 1 {
+                    let old = Tile::new(
+                        tile.height(),
+                        tile.level(),
+                        tile.level_index(),
+                        tile.width() - 1,
+                        None,
+                    );
+                    tiles.get(&old).unwrap_or(&default)
+                } else {
+                    &default
+                };
+                assert!(
+                    old_data.len() == data.len() - HASH_SIZE && *old_data == data[..old_data.len()],
+                    "tile {tile:?} not extending old tile"
+                );
+                tiles.insert(tile, data);
+            }
+
+            for tile in Tile::new_tiles(TEST_H, 0, i + 1) {
+                let data = tile.read_data(&storage).unwrap();
+                assert_eq!(tiles[&tile], data, "mismatch at {tile:?}");
+            }
+
+            for tile in Tile::new_tiles(TEST_H, i / 2, i + 1) {
+                let data = tile.read_data(&storage).unwrap();
+                assert_eq!(tiles[&tile], data, "mismatch at {tile:?}");
+            }
+
+            // Check that all the new hashes are readable from their tiles.
+            for (j, stored_hash) in storage.iter().enumerate().skip(old_storage_len) {
+                let tile = Tile::from_index(TEST_H, j as u64);
+                let data = tiles.get(&tile).cloned().unwrap();
+                let h = tile.hash_at_index(&data, j as u64).unwrap();
+                assert_eq!(h, *stored_hash);
+            }
+
+            trees.push(th);
+
+            // Check that inclusion proofs work, for all trees and leaves so far.
+            for j in 0..=i {
+                let mut p = inclusion_proof(i + 1, j, &storage).unwrap();
+                verify_inclusion_proof(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()])
+                    .unwrap();
+
+                for k in 0..p.len() {
+                    p[k].0[0] ^= 1;
+                    assert!(
+                        verify_inclusion_proof(
+                            &p,
+                            i + 1,
+                            th,
+                            j,
+                            leafhashes[usize::try_from(j).unwrap()]
+                        )
+                        .is_err(),
+                        "verify_inclusion_proof({}, {j}) succeeded with corrupt proof hash #{k}!",
+                        i + 1
+                    );
+                    p[k].0[0] ^= 1;
+                }
+            }
+
+            // Check that inclusion proofs work using TileReader.
+            let tile_storage = TestTilesStorage {
+                m: tiles.clone(),
+                unsaved: Cell::new(0),
+            };
+            let thr = TileHashReader::new(i + 1, th, &tile_storage);
+            for j in 0..=i {
+                let h = thr.read_hashes(&[stored_hash_index(0, j)]).unwrap();
+                assert_eq!(h.len(), 1, "bad read_hashes implementation");
+                assert_eq!(h[0], leafhashes[usize::try_from(j).unwrap()], "wrong hash");
+
+                // Even though reading the hash suffices, check we can generate the proof too.
+                let p = inclusion_proof(i + 1, j, &thr).unwrap();
+                verify_inclusion_proof(&p, i + 1, th, j, leafhashes[usize::try_from(j).unwrap()])
+                    .unwrap();
+            }
+            assert_eq!(tile_storage.unsaved.get(), 0, "did not save tiles");
+
+            // Check that ReadHashes will give an error if the index is not in the tree.
+            assert!(
+                thr.read_hashes(&[(i + 1) * 2]).is_err(),
+                "read_hashes returned non-err for index not in tree, want err"
+            );
+
+            assert_eq!(tile_storage.unsaved.get(), 0, "did not save tiles");
+
+            // Check that consistency proofs work, for all trees so far, using TileReader.
+            for j in 0..=i {
+                let h = tree_hash(j + 1, &thr).unwrap();
+                assert_eq!(h, trees[usize::try_from(j).unwrap()]);
+
+                // Even though computing the subtree hash suffices, check that we can generate the proof too.
+                let mut p = consistency_proof(i + 1, j + 1, &thr).unwrap();
+                verify_consistency_proof(&p, i + 1, th, j + 1, trees[usize::try_from(j).unwrap()])
+                    .unwrap();
+                for k in 0..p.len() {
+                    p[k].0[0] ^= 1;
+                    assert!(
+                        verify_consistency_proof(
+                            &p,
+                            i + 1,
+                            th,
+                            j + 1,
+                            trees[usize::try_from(j).unwrap()]
+                        )
+                        .is_err(),
+                        "verify_consistency_proof({}, {j}) succeeded with corrupt proof hash #{k}!",
+                        i + 1
+                    );
+                    p[k].0[0] ^= 1;
+                }
+            }
+            assert_eq!(tile_storage.unsaved.get(), 0, "did not save tiles");
+
+            // Check that subtree consistency proofs work, for all valid subtrees up to the current tree size.
+            for lo in 0..i {
+                let max_hi = if lo == 0 {
+                    u64::MAX
+                } else {
+                    // If `lo` is non-zero, find the maximum power of 2 that divides `lo`.
+                    // This is a bitwise trick that isolates the lowest set bit.
+                    let max_size = lo & lo.wrapping_neg();
+                    lo + max_size
+                };
+                for hi in lo + 1..=i.min(max_hi) {
+                    let m = Subtree::new(lo, hi).unwrap();
+                    let m_hash = subtree_hash(&m, &storage).unwrap();
+                    // Prove that the subtree is consistent with the tree of size `n`.
+                    verify_subtree_consistency_proof(
+                        &subtree_consistency_proof(i + 1, &m, &storage).unwrap(),
+                        i + 1,
+                        th,
+                        &m,
+                        m_hash,
+                    )
+                    .unwrap();
+                    for leaf_index in lo..hi {
+                        let proof = subtree_inclusion_proof(&m, leaf_index, &storage).unwrap();
+                        let leaf_hash = leafhashes[usize::try_from(leaf_index).unwrap()];
+                        // Prove that each leaf in the subtree is included in the subtree.
+                        verify_subtree_inclusion_proof(&proof, &m, m_hash, leaf_index, leaf_hash)
+                            .unwrap();
+                        // The evaluator returns the subtree hash, which must
+                        // match the committed `m_hash`. This is the
+                        // counterpart used by cosignature verifiers that
+                        // reconstruct the subtree hash from an inclusion
+                        // proof instead of being handed it directly.
+                        let evaluated =
+                            evaluate_subtree_inclusion_proof(&proof, &m, leaf_index, leaf_hash)
+                                .unwrap();
+                        assert_eq!(evaluated, m_hash);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_new_tiles_for_size() {

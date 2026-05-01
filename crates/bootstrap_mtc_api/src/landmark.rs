@@ -34,7 +34,7 @@
 
 use crate::MtcError;
 use std::{collections::VecDeque, fmt::Write};
-use tlog_tiles::Subtree;
+use tlog_core::Subtree;
 
 /// A sequence of landmarks used for constructing landmark certificates.
 ///

@@ -34,7 +34,7 @@
 //! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/note_test.go)
 //! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
 
-use crate::{tlog::Hash, HashReader, TlogError, UnixTimestamp};
+use crate::UnixTimestamp;
 use base64::{prelude::BASE64_STANDARD, Engine};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
 use rand::{seq::SliceRandom, Rng, RngExt};
@@ -47,6 +47,44 @@ use std::{
     fmt,
     io::{BufRead, Read},
 };
+use thiserror::Error;
+use tlog_core::{Hash, HashReader, TlogError};
+
+/// Errors returned by the checkpoint-signing and -verification entry
+/// points in this module ([`open_checkpoint`], [`TreeWithTimestamp::sign`],
+/// [`TreeWithTimestamp::from_hash_reader`]).
+///
+/// Compared to the math-only [`tlog_core::TlogError`] this also covers
+/// signature-verification failure modes and parser failures specific to
+/// the [c2sp.org/tlog-checkpoint][spec] signed-note format.
+///
+/// [spec]: https://c2sp.org/tlog-checkpoint
+#[derive(Debug, Error)]
+pub enum CheckpointError {
+    /// A required verifier did not produce a valid signature on the
+    /// note. Surfaces as `403 Forbidden` in HTTP frontends.
+    #[error("missing verifier signature")]
+    MissingVerifierSignature,
+    /// One of the embedded note signature timestamps is in the future
+    /// relative to the caller-supplied `current_time`.
+    #[error("timestamp is after current time")]
+    InvalidTimestamp,
+    /// The checkpoint origin does not match the caller-supplied origin.
+    #[error("checkpoint origin does not match")]
+    OriginMismatch,
+    /// The embedded signed note is malformed or its signatures fail to
+    /// verify.
+    #[error(transparent)]
+    Note(#[from] NoteError),
+    /// The checkpoint text section is not parseable as a
+    /// [`CheckpointText`].
+    #[error(transparent)]
+    MalformedCheckpoint(#[from] MalformedCheckpointTextError),
+    /// A pure-math error from the underlying `tlog` layer (e.g. failing
+    /// to compute a tree hash from the supplied [`HashReader`]).
+    #[error(transparent)]
+    Tlog(#[from] TlogError),
+}
 
 /// This works like `BufRead::lines`, except it reports a final newline as a
 /// length-0 line
@@ -325,16 +363,14 @@ pub struct Ed25519CheckpointSigner {
 }
 
 impl Ed25519CheckpointSigner {
-    /// Returns a new `Ed25519Signer`.
-    ///
-    /// # Errors
-    ///
-    /// Errors if a verifier cannot be created from the provided signing key.
-    pub fn new(name: KeyName, k: Ed25519SigningKey) -> Result<Self, TlogError> {
-        Ok(Self {
+    /// Returns a new `Ed25519CheckpointSigner` from a key name and
+    /// signing key. Infallible.
+    #[must_use]
+    pub fn new(name: KeyName, k: Ed25519SigningKey) -> Self {
+        Self {
             v: Ed25519NoteVerifier::new(name, k.verifying_key()),
             k,
-        })
+        }
     }
 }
 
@@ -390,7 +426,7 @@ pub fn open_checkpoint(
     verifiers: &VerifierList,
     current_time: UnixTimestamp,
     checkpoint_bytes: &[u8],
-) -> Result<(CheckpointText, Option<UnixTimestamp>), TlogError> {
+) -> Result<(CheckpointText, Option<UnixTimestamp>), CheckpointError> {
     // A checkpoint is a signed note whose text is a CheckpointText
     let n = Note::from_bytes(checkpoint_bytes)?;
     let (verified_sigs, _) = n.verify(verifiers)?;
@@ -419,15 +455,15 @@ pub fn open_checkpoint(
 
     // If we didn't see all the verifiers we wanted to see, error
     if !key_ids_to_observe.is_empty() {
-        return Err(TlogError::MissingVerifierSignature);
+        return Err(CheckpointError::MissingVerifierSignature);
     }
 
     let checkpoint_text = CheckpointText::from_bytes(n.text())?;
     if current_time < latest_timestamp.unwrap_or(0) {
-        return Err(TlogError::InvalidTimestamp);
+        return Err(CheckpointError::InvalidTimestamp);
     }
     if checkpoint_text.origin() != origin {
-        return Err(TlogError::OriginMismatch);
+        return Err(CheckpointError::OriginMismatch);
     }
 
     Ok((checkpoint_text, latest_timestamp))
@@ -459,7 +495,7 @@ impl TreeWithTimestamp {
         r: &R,
         time: UnixTimestamp,
     ) -> Result<TreeWithTimestamp, TlogError> {
-        let hash = crate::tree_hash(size, r)?;
+        let hash = tlog_core::tree_hash(size, r)?;
         Ok(Self { size, hash, time })
     }
 
@@ -493,7 +529,7 @@ impl TreeWithTimestamp {
         extensions: &[&str],
         signers: &[&dyn CheckpointSigner],
         rng: &mut impl Rng,
-    ) -> Result<Vec<u8>, TlogError> {
+    ) -> Result<Vec<u8>, CheckpointError> {
         // Shuffle the signer order
         let mut signers = signers.to_vec();
         signers.shuffle(rng);
@@ -559,7 +595,7 @@ fn gen_grease_signatures(origin: &str, rng: &mut impl Rng) -> Vec<NoteSignature>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tlog::record_hash;
+    use tlog_core::record_hash;
 
     #[test]
     fn test_parse_checkpoint() {
@@ -660,7 +696,7 @@ mod tests {
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
             let sk = Ed25519SigningKey::generate(&mut rand::rng());
-            Ed25519CheckpointSigner::new(KeyName::new("my-signer".into()).unwrap(), sk).unwrap()
+            Ed25519CheckpointSigner::new(KeyName::new("my-signer".into()).unwrap(), sk)
         };
         let checkpoint = tree
             .sign(origin, &[], &[&signer], &mut rand::rng())

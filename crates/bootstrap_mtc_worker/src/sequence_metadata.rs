@@ -8,7 +8,8 @@ use generic_log_worker::{
     deserialize_sequence_metadata_entries, serialize_sequence_metadata_entries, SequencerMetadata,
 };
 use serde::{Deserialize, Serialize};
-use tlog_tiles::{LeafIndex, LookupKey, UnixTimestamp};
+use tlog_core::LeafIndex;
+use tlog_tiles::{LookupKey, UnixTimestamp};
 
 /// Sequencer metadata for a bootstrap MTC log entry.
 ///

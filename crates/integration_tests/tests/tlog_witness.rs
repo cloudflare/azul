@@ -50,10 +50,11 @@ use serde::Deserialize;
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
-use tlog_tiles::{
-    consistency_proof, record_hash, stored_hashes, tree_hash, CheckpointSigner,
-    Ed25519CheckpointSigner, Hash, HashReader, TlogError, TreeWithTimestamp, HASH_SIZE,
+use tlog_core::{
+    consistency_proof, record_hash, stored_hashes, tree_hash, Hash, HashReader, TlogError,
+    HASH_SIZE,
 };
+use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
 use tlog_witness::{
     parse_add_checkpoint_response, serialize_add_checkpoint_request, CONTENT_TYPE_TLOG_SIZE,
 };
@@ -77,7 +78,7 @@ const LOG_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
 fn log_signer() -> Ed25519CheckpointSigner {
     let sk = Ed25519SigningKey::from_pkcs8_pem(LOG_SIGNING_KEY_PEM).expect("parse dev log key");
     let name = KeyName::new(LOG_ORIGIN.to_owned()).expect("KeyName for origin");
-    Ed25519CheckpointSigner::new(name, sk).expect("build Ed25519CheckpointSigner")
+    Ed25519CheckpointSigner::new(name, sk)
 }
 
 /// Generate a fresh Ed25519 log signer that the witness does *not* trust —
@@ -85,7 +86,7 @@ fn log_signer() -> Ed25519CheckpointSigner {
 fn untrusted_log_signer() -> Ed25519CheckpointSigner {
     let sk = Ed25519SigningKey::generate(&mut rng());
     let name = KeyName::new(LOG_ORIGIN.to_owned()).unwrap();
-    Ed25519CheckpointSigner::new(name, sk).unwrap()
+    Ed25519CheckpointSigner::new(name, sk)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ impl ToyLog {
     }
 
     /// `consistency_proof(old_size → current)`. Wraps
-    /// `tlog_tiles::consistency_proof`, whose argument order is reversed from
+    /// `tlog_core::consistency_proof`, whose argument order is reversed from
     /// RFC 6962 convention (larger size first).
     fn consistency_proof(&self, old_size: u64) -> Vec<Hash> {
         let size = self.size();
@@ -364,7 +365,7 @@ async fn tlog_witness_end_to_end() {
         let sk = Ed25519SigningKey::generate(&mut rng());
         let origin = "not.configured.example/log";
         let name = KeyName::new(origin.to_owned()).unwrap();
-        let other_signer = Ed25519CheckpointSigner::new(name, sk).unwrap();
+        let other_signer = Ed25519CheckpointSigner::new(name, sk);
         let tree = TreeWithTimestamp::new(1, record_hash(b"x"), now_millis());
         let cp = tree
             .sign(origin, &[], &[&other_signer], &mut rng())

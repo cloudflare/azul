@@ -39,10 +39,10 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
+use tlog_core::{Hash, HashReader, Proof, Subtree, TlogError, HASH_SIZE};
 use tlog_tiles::{
-    Hash, HashReader, LogEntry, PendingLogEntry, PreloadedTlogTileReader, Proof, Subtree,
-    TileHashReader, TileIterator, TlogError, TlogTile, TlogTileRecorder, TreeWithTimestamp,
-    UnixTimestamp, HASH_SIZE,
+    LogEntry, PendingLogEntry, PreloadedTlogTileReader, TileHashReader, TileIterator, TlogTile,
+    TlogTileRecorder, TreeWithTimestamp, UnixTimestamp,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -276,7 +276,7 @@ pub(crate) async fn create_log(
     }
 
     let timestamp = now_millis();
-    let tree = TreeWithTimestamp::new(0, tlog_tiles::EMPTY_HASH, timestamp);
+    let tree = TreeWithTimestamp::new(0, tlog_core::EMPTY_HASH, timestamp);
 
     // Construct the checkpoint signers
     let dyn_signers = config
@@ -415,7 +415,7 @@ impl SequenceState {
                 let got = entry?.merkle_tree_leaf();
                 let exp = level0_tile.hash_at_index(
                     level0_tile_bytes,
-                    tlog_tiles::stored_hash_index(0, start + i as u64),
+                    tlog_core::stored_hash_index(0, start + i as u64),
                 )?;
                 if got != exp {
                     bail!(
@@ -488,7 +488,7 @@ impl SequenceState {
         };
         // We can unwrap because edge_tiles is guaranteed to contain the tiles
         // necessary to prove this.
-        tlog_tiles::inclusion_proof(tree_size, tree_size - 1, &reader).unwrap()
+        tlog_core::inclusion_proof(tree_size, tree_size - 1, &reader).unwrap()
     }
 
     /// Proves that this tree of size n is compatible with the subtree of size
@@ -504,14 +504,14 @@ impl SequenceState {
             edge_tiles: &self.edge_tiles,
             overlay: &HashMap::default(),
         };
-        tlog_tiles::consistency_proof(tree_size, tree_size - 1, &reader)
+        tlog_core::consistency_proof(tree_size, tree_size - 1, &reader)
     }
 }
 
 #[derive(Error, Debug)]
 pub enum ProofError {
     #[error(transparent)]
-    Tlog(#[from] tlog_tiles::TlogError),
+    Tlog(#[from] tlog_core::TlogError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -558,12 +558,12 @@ pub async fn prove_subtree_inclusion(
 ) -> Result<Proof, ProofError> {
     // Fetch the tiles needed for the proof.
     let n = &Subtree::new(start, end)?;
-    let indexes = tlog_tiles::subtree_inclusion_proof_indexes(n, leaf_index)?;
+    let indexes = tlog_core::subtree_inclusion_proof_indexes(n, leaf_index)?;
     let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
     let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
 
     // Construct the proof.
-    Ok(tlog_tiles::subtree_inclusion_proof(
+    Ok(tlog_core::subtree_inclusion_proof(
         n,
         leaf_index,
         &hash_reader,
@@ -605,15 +605,15 @@ pub async fn prove_subtree_consistency(
 ) -> Result<(Proof, Hash), ProofError> {
     let m = &Subtree::new(start, end)?;
     // Fetch the tiles needed for the proof.
-    let indexes = tlog_tiles::subtree_consistency_proof_indexes(cur_tree_size, m)?;
+    let indexes = tlog_core::subtree_consistency_proof_indexes(cur_tree_size, m)?;
     let tile_reader = tile_reader_for_indexes(cur_tree_size, &indexes, object).await?;
     let hash_reader = TileHashReader::new(cur_tree_size, cur_tree_hash, &tile_reader);
 
     // Construct the proof.
-    let proof = tlog_tiles::subtree_consistency_proof(cur_tree_size, m, &hash_reader)?;
+    let proof = tlog_core::subtree_consistency_proof(cur_tree_size, m, &hash_reader)?;
 
     // Compute the subtree hash.
-    let subtree_hash = tlog_tiles::subtree_hash(m, &hash_reader)?;
+    let subtree_hash = tlog_core::subtree_hash(m, &hash_reader)?;
     Ok((proof, subtree_hash))
 }
 
@@ -891,7 +891,7 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         // Compute the new tree hashes and add them to the hashReader overlay
         // (we will use them later to insert more leaves and finally to produce
         // the new tiles).
-        let hashes = tlog_tiles::stored_hashes_for_record_hash(
+        let hashes = tlog_core::stored_hashes_for_record_hash(
             n,
             merkle_tree_leaf,
             &HashReaderWithOverlay {
@@ -905,7 +905,7 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
             ))
         })?;
         for (i, h) in hashes.iter().enumerate() {
-            let id = tlog_tiles::stored_hash_index(0, n) + i as u64;
+            let id = tlog_core::stored_hash_index(0, n) + i as u64;
             overlay.insert(id, *h);
         }
 
@@ -1115,7 +1115,7 @@ fn stage_data_tile<L: LogEntry>(
     data_tile: Vec<u8>,
     aux_tile: Vec<u8>,
 ) {
-    let tile = TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1))
+    let tile = TlogTile::from_index(tlog_core::stored_hash_index(0, n - 1))
         .with_data_path(L::Pending::DATA_TILE_PATH);
     edge_tiles.insert(
         DATA_TILE_LEVEL_KEY,
@@ -1131,7 +1131,7 @@ fn stage_data_tile<L: LogEntry>(
     });
     if let Some(path_elem) = L::Pending::AUX_TILE_PATH {
         let tile =
-            TlogTile::from_index(tlog_tiles::stored_hash_index(0, n - 1)).with_data_path(path_elem);
+            TlogTile::from_index(tlog_core::stored_hash_index(0, n - 1)).with_data_path(path_elem);
         edge_tiles.insert(
             AUX_TILE_LEVEL_KEY,
             TileWithBytes {
@@ -1179,7 +1179,7 @@ async fn read_edge_tiles(
 ) -> Result<HashMap<u8, TileWithBytes>, anyhow::Error> {
     // Fetch the right-most edge tiles by reading the last leaf. TileHashReader
     // will fetch and verify the right tiles as a side-effect.
-    let indexes = vec![tlog_tiles::stored_hash_index(0, tree_size - 1)];
+    let indexes = vec![tlog_core::stored_hash_index(0, tree_size - 1)];
     let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object).await?;
 
     // Verify the leaf tile against the tree hash.
@@ -1210,7 +1210,7 @@ pub async fn read_leaf<L: LogEntry>(
     tree_size: u64,
     tree_hash: &Hash,
 ) -> Result<L, anyhow::Error> {
-    let leaf_stored_hash_index = tlog_tiles::stored_hash_index(0, leaf_index);
+    let leaf_stored_hash_index = tlog_core::stored_hash_index(0, leaf_index);
     let tile_reader = tile_reader_for_indexes(tree_size, &[leaf_stored_hash_index], object).await?;
 
     // Verify the leaf tile against the tree hash.
@@ -1246,7 +1246,7 @@ pub async fn read_leaf<L: LogEntry>(
         let got = entry.merkle_tree_leaf();
         let exp = level0_tile.hash_at_index(
             &level0_tile_bytes,
-            tlog_tiles::stored_hash_index(0, start + i as u64),
+            tlog_core::stored_hash_index(0, start + i as u64),
         )?;
         if got != exp {
             bail!(
@@ -1385,7 +1385,7 @@ pub async fn upload_issuers(
 mod tests {
     use super::*;
     use crate::{empty_checkpoint_callback, util};
-    use tlog_tiles::LeafIndex;
+    use tlog_core::LeafIndex;
 
     /// Local metadata type used to exercise the sequencer and batcher logic
     /// end-to-end. Kept as a `(LeafIndex, UnixTimestamp)` tuple so existing
@@ -1457,7 +1457,7 @@ mod tests {
                 let leaf_edge = &sequence_state.edge_tiles.get(&0u8).unwrap().b;
                 Hash(leaf_edge[leaf_edge.len() - HASH_SIZE..].try_into().unwrap())
             };
-            tlog_tiles::verify_inclusion_proof(
+            tlog_core::verify_inclusion_proof(
                 &inc_proof,
                 tree_size,
                 new_tree_hash,
@@ -1473,7 +1473,7 @@ mod tests {
             if i > 0 {
                 let proof = sequence_state.prove_consistency_of_single_append().unwrap();
                 // Verify the proof
-                tlog_tiles::verify_consistency_proof(
+                tlog_core::verify_consistency_proof(
                     &proof,
                     tree_size,
                     new_tree_hash,
@@ -1523,7 +1523,7 @@ mod tests {
                 )
             };
             // Verify the inclusion proof
-            tlog_tiles::verify_inclusion_proof(&proof, n, tree_hash, i, leaf_hash).unwrap();
+            tlog_core::verify_inclusion_proof(&proof, n, tree_hash, i, leaf_hash).unwrap();
         }
 
         // Check that we can make a consistency proof for random spans in the tree
@@ -1538,7 +1538,7 @@ mod tests {
                 &log.object,
             ))
             .unwrap();
-            tlog_tiles::verify_consistency_proof(
+            tlog_core::verify_consistency_proof(
                 &consistency_proof,
                 new_tree_size,
                 tree_hashes[usize::try_from(new_tree_size).unwrap()],
@@ -1849,8 +1849,7 @@ mod tests {
         let checkpoint_signer = Ed25519CheckpointSigner::new(
             log.config.origin.clone(),
             Ed25519SigningKey::generate(&mut rand::rng()),
-        )
-        .unwrap();
+        );
         log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
@@ -2451,8 +2450,7 @@ mod tests {
                 let witness = Ed25519CheckpointSigner::new(
                     origin.clone(),
                     Ed25519SigningKey::generate(&mut rng),
-                )
-                .unwrap();
+                );
                 vec![Box::new(signer), Box::new(witness)]
             };
             // Don't use checkpoint extensions
@@ -2621,7 +2619,7 @@ mod tests {
             }
 
             let indexes: Vec<u64> = (0..c.size())
-                .map(|n| tlog_tiles::stored_hash_index(0, n))
+                .map(|n| tlog_core::stored_hash_index(0, n))
                 .collect();
             // [read_tile_hashes] checks the inclusion of every hash in the provided tree,
             // so this checks the validity of the entire Merkle tree.
@@ -2632,7 +2630,7 @@ mod tests {
                 hash_reader.read_hashes(&indexes)?
             };
 
-            let last_tile = TlogTile::from_index(tlog_tiles::stored_hash_count(c.size() - 1))
+            let last_tile = TlogTile::from_index(tlog_core::stored_hash_count(c.size() - 1))
                 .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
 
             for n in 0..last_tile.level_index() {

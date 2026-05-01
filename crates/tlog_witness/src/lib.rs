@@ -31,7 +31,7 @@
 //!   handled by [`tlog_cosignature::CosignatureV1CheckpointSigner`] (or any
 //!   other [`tlog_tiles::CheckpointSigner`] impl).
 //! - Consistency-proof verification: use
-//!   [`tlog_tiles::verify_consistency_proof`] directly.
+//!   [`tlog_core::verify_consistency_proof`] directly.
 //! - Persistent state for the "latest cosigned checkpoint per origin" check
 //!   that [`add-checkpoint`][add] mandates — that is a deployment concern,
 //!   not a wire-format concern.

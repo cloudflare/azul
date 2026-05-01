@@ -27,8 +27,9 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde::de::DeserializeOwned;
+use tlog_core::LeafIndex;
 pub use tlog_tiles::LookupKey;
-use tlog_tiles::{LeafIndex, PendingLogEntry, UnixTimestamp};
+use tlog_tiles::{PendingLogEntry, UnixTimestamp};
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
