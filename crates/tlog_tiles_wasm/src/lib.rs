@@ -118,18 +118,18 @@ pub fn verify_consistency_proof(
         )));
     }
 
-    let proof: Vec<tlog_tiles::Hash> = proof_hashes
+    let proof: Vec<tlog_core::Hash> = proof_hashes
         .chunks_exact(32)
-        .map(|chunk| tlog_tiles::Hash(chunk.try_into().unwrap()))
+        .map(|chunk| tlog_core::Hash(chunk.try_into().unwrap()))
         .collect();
 
     // Underlying API: (proof, n=new_size, root_hash=new_root, m=old_size, m_hash=old_root)
-    tlog_tiles::verify_consistency_proof(
+    tlog_core::verify_consistency_proof(
         &proof,
         new_size,
-        tlog_tiles::Hash(new_root.try_into().unwrap()),
+        tlog_core::Hash(new_root.try_into().unwrap()),
         old_size,
-        tlog_tiles::Hash(old_root.try_into().unwrap()),
+        tlog_core::Hash(old_root.try_into().unwrap()),
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }

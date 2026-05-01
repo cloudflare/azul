@@ -81,9 +81,7 @@ pub(crate) fn load_checkpoint_signers(env: &Env, name: &str) -> Vec<Box<dyn Chec
     let signer = StaticCTCheckpointSigner::new(origin.clone(), signing_key)
         .map_err(|e| format!("could not create static-ct checkpoint signer: {e}"))
         .unwrap();
-    let witness = Ed25519CheckpointSigner::new(origin, witness_key)
-        .map_err(|e| format!("could not create ed25519 checkpoint signer: {e}"))
-        .unwrap();
+    let witness = Ed25519CheckpointSigner::new(origin, witness_key);
 
     vec![Box::new(signer), Box::new(witness)]
 }
