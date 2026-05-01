@@ -24,9 +24,10 @@ use std::{
     num::ParseIntError,
 };
 use thiserror::Error;
+use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::{Hash, LeafIndex, Proof, Subtree, TlogError};
 use tlog_tiles::{
-    LogEntry, PathElem, PendingLogEntry, TlogTilesLogEntry, TlogTilesPendingLogEntry, UnixTimestamp,
+    LogEntry, PathElem, PendingLogEntry, TlogTilesLogEntry, TlogTilesPendingLogEntry,
 };
 use x509_cert::{
     certificate::Version,
@@ -123,11 +124,11 @@ pub struct AddEntryResponse {
     pub leaf_index: LeafIndex,
 
     /// The time at which the entry was added to the log.
-    pub timestamp: UnixTimestamp,
+    pub timestamp: UnixTimestampMillis,
 
     /// The validity period of the certificate.
-    pub not_before: UnixTimestamp,
-    pub not_after: UnixTimestamp,
+    pub not_before: UnixTimestampMillis,
+    pub not_after: UnixTimestampMillis,
 }
 
 /// Get-roots response. This is in the same format as the RFC 6962 get-roots
@@ -184,7 +185,7 @@ impl LogEntry for BootstrapMtcLogEntry {
         })
     }
 
-    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestamp) -> Self {
+    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestampMillis) -> Self {
         Self(TlogTilesLogEntry::new(pending.entry, leaf_index, timestamp))
     }
 

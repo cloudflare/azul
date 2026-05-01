@@ -270,7 +270,7 @@ impl CertPool {
 /// Unix timestamp, measured since the epoch (January 1, 1970, 00:00),
 /// ignoring leap seconds, in milliseconds.
 /// This can be unsigned as we never deal with negative timestamps.
-pub type UnixTimestamp = u64;
+pub type UnixTimestampMillis = u64;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ValidationError {
@@ -311,8 +311,8 @@ pub struct ValidationOptions {
 
     // Bounds on allowed NotAfter values appearing in the end-entity
     // certificate. This is only used by CT.
-    pub not_after_start: Option<UnixTimestamp>,
-    pub not_after_end: Option<UnixTimestamp>,
+    pub not_after_start: Option<UnixTimestampMillis>,
+    pub not_after_end: Option<UnixTimestampMillis>,
 }
 
 /// Validates a certificate chain. This is not a super strict validation
@@ -685,7 +685,7 @@ mod tests {
     use der::DecodePem;
     use x509_cert::Certificate;
 
-    fn parse_datetime(s: &str) -> UnixTimestamp {
+    fn parse_datetime(s: &str) -> UnixTimestampMillis {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
     }
 

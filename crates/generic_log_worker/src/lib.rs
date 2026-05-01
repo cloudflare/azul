@@ -27,9 +27,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde::de::DeserializeOwned;
+use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::LeafIndex;
 pub use tlog_tiles::LookupKey;
-use tlog_tiles::{PendingLogEntry, UnixTimestamp};
+use tlog_tiles::PendingLogEntry;
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
@@ -446,7 +447,7 @@ pub trait SequencerMetadata:
     /// for an inclusion proof without enumerating candidates).
     fn new(
         leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         old_tree_size: u64,
         new_tree_size: u64,
     ) -> Self;
@@ -477,7 +478,7 @@ pub trait SequencerMetadata:
 
 /// A `(LookupKey, (leaf_index, timestamp))` pair as consumed by
 /// [`serialize_sequence_metadata_entries`] / [`deserialize_sequence_metadata_entries`].
-pub type SequenceMetadataEntry = (LookupKey, (LeafIndex, UnixTimestamp));
+pub type SequenceMetadataEntry = (LookupKey, (LeafIndex, UnixTimestampMillis));
 
 /// Serialize a batch of [`SequenceMetadataEntry`] values using the fixed
 /// 32-byte binary format:
@@ -855,7 +856,7 @@ mod tests {
     impl SequencerMetadata for TestMetadata {
         fn new(
             leaf_index: LeafIndex,
-            _timestamp: UnixTimestamp,
+            _timestamp: UnixTimestampMillis,
             _old_tree_size: u64,
             _new_tree_size: u64,
         ) -> Self {

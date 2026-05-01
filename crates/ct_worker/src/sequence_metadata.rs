@@ -8,8 +8,9 @@ use generic_log_worker::{
     deserialize_sequence_metadata_entries, serialize_sequence_metadata_entries, SequencerMetadata,
 };
 use serde::{Deserialize, Serialize};
+use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::LeafIndex;
-use tlog_tiles::{LookupKey, UnixTimestamp};
+use tlog_tiles::LookupKey;
 
 /// Sequencer metadata for a static-ct-api log entry.
 ///
@@ -25,7 +26,7 @@ use tlog_tiles::{LookupKey, UnixTimestamp};
 /// 3. **DO→Worker RPC**: `bitcode` sequence of the two u64 fields. Also
 ///    preserved by the tuple-struct layout.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct StaticCTSequenceMetadata(pub LeafIndex, pub UnixTimestamp);
+pub struct StaticCTSequenceMetadata(pub LeafIndex, pub UnixTimestampMillis);
 
 impl StaticCTSequenceMetadata {
     /// Return the leaf index.
@@ -36,7 +37,7 @@ impl StaticCTSequenceMetadata {
 
     /// Return the sequencing timestamp (milliseconds since the Unix epoch).
     #[must_use]
-    pub fn timestamp(&self) -> UnixTimestamp {
+    pub fn timestamp(&self) -> UnixTimestampMillis {
         self.1
     }
 }
@@ -44,7 +45,7 @@ impl StaticCTSequenceMetadata {
 impl SequencerMetadata for StaticCTSequenceMetadata {
     fn new(
         leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         _old_tree_size: u64,
         _new_tree_size: u64,
     ) -> Self {
@@ -71,7 +72,7 @@ mod tests {
     use super::*;
 
     /// Confirm the JSON wire format used by the KV long-term dedup cache
-    /// metadata matches the historical `(LeafIndex, UnixTimestamp)` tuple shape
+    /// metadata matches the historical `(LeafIndex, UnixTimestampMillis)` tuple shape
     /// (i.e. `[leaf_index, timestamp]`). Changing this would orphan pre-existing
     /// KV entries from deployed logs.
     #[test]

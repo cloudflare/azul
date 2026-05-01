@@ -14,10 +14,10 @@ use sct_validator::{
 use sha2::{Digest, Sha256};
 use signed_note::{Ed25519NoteVerifier, KeyName, VerifierList};
 use static_ct_api::{Extensions, RFC6962NoteVerifier, StaticCTLogEntry};
+use tlog_checkpoint::{open_checkpoint, CheckpointText};
 use tlog_core::HashReader;
 use tlog_tiles::{
-    open_checkpoint, CheckpointText, LogEntry, PathElem, PreloadedTlogTileReader, TileHashReader,
-    TileIterator, TlogTile,
+    LogEntry, PathElem, PreloadedTlogTileReader, TileHashReader, TileIterator, TlogTile,
 };
 use x509_cert::{der::Decode, der::Encode, Certificate};
 

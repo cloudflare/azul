@@ -9,8 +9,8 @@ use ed25519_dalek::{
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_core::{Hash, LeafIndex};
-use tlog_tiles::{CheckpointSigner, CheckpointText, UnixTimestamp};
 
 use crate::{RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
 
@@ -93,8 +93,8 @@ impl CheckpointSigner for MtcCosigner {
     /// Sign a checkpoint with the subtree cosigner. For checkpoints, the start index is always 0.
     fn sign(
         &self,
-        _timestamp_unix_millis: UnixTimestamp,
-        checkpoint: &tlog_tiles::CheckpointText,
+        _timestamp: UnixTimestampMillis,
+        checkpoint: &tlog_checkpoint::CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         let sig = self.sign_subtree(0, checkpoint.size(), checkpoint.hash())?;
         Ok(NoteSignature::new(self.name().clone(), self.key_id(), sig))
@@ -235,8 +235,8 @@ fn serialize_mtc_subtree_signature_input(
 #[cfg(test)]
 mod tests {
 
+    use tlog_checkpoint::{open_checkpoint, TreeWithTimestamp};
     use tlog_core::record_hash;
-    use tlog_tiles::{open_checkpoint, TreeWithTimestamp};
 
     use super::*;
     use signed_note::VerifierList;
