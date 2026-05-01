@@ -179,6 +179,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "thiserror 2.0.17",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_tiles",
  "x509-cert",
@@ -211,6 +212,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signed_note",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_tiles",
  "url",
@@ -586,6 +588,7 @@ dependencies = [
  "serde_with",
  "signed_note",
  "static_ct_api",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_tiles",
  "url",
@@ -1033,6 +1036,7 @@ dependencies = [
  "signed_note",
  "static_ct_api",
  "thiserror 2.0.17",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_tiles",
  "tokio",
@@ -1482,6 +1486,7 @@ dependencies = [
  "sha2",
  "signed_note",
  "static_ct_api",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_cosignature",
  "tlog_tiles",
@@ -2814,6 +2819,7 @@ dependencies = [
  "signed_note",
  "spki",
  "thiserror 2.0.17",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_tiles",
  "x509-cert",
@@ -2993,7 +2999,21 @@ name = "tlog-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "tlog_checkpoint",
  "tlog_tiles",
+]
+
+[[package]]
+name = "tlog_checkpoint"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "rand",
+ "sha2",
+ "signed_note",
+ "thiserror 2.0.17",
+ "tlog_core",
 ]
 
 [[package]]
@@ -3016,8 +3036,8 @@ dependencies = [
  "ml-dsa",
  "rand",
  "signed_note",
+ "tlog_checkpoint",
  "tlog_core",
- "tlog_tiles",
 ]
 
 [[package]]
@@ -3025,14 +3045,11 @@ name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
- "ed25519-dalek",
  "length_prefixed",
- "rand",
  "serde",
  "serde_json",
  "sha2",
- "signed_note",
- "thiserror 2.0.17",
+ "tlog_checkpoint",
  "tlog_core",
  "url",
 ]
@@ -3043,8 +3060,8 @@ version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.2",
+ "tlog_checkpoint",
  "tlog_core",
- "tlog_tiles",
  "wasm-bindgen",
 ]
 
@@ -3821,9 +3838,9 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signed_note",
+ "tlog_checkpoint",
  "tlog_core",
  "tlog_cosignature",
- "tlog_tiles",
  "tlog_witness",
  "witness_worker_config",
  "worker",

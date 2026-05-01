@@ -7,7 +7,7 @@ use ed25519_dalek::{
 };
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 
-use tlog_tiles::{CheckpointSigner, CheckpointText, UnixTimestamp};
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 
 /// Implementation of [`CheckpointSigner`] that produces a timestamped Ed25519 cosignature/v1 (alg 0x04 from <c2sp.org/signed-note>).
 pub struct CosignatureV1CheckpointSigner {
@@ -37,11 +37,11 @@ impl CheckpointSigner for CosignatureV1CheckpointSigner {
 
     fn sign(
         &self,
-        timestamp_unix_millis: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         // Timestamp is in seconds.
-        let timestamp_unix_secs = timestamp_unix_millis / 1000;
+        let timestamp_unix_secs = timestamp / 1000;
         let mut msg = format!("cosignature/v1\ntime {timestamp_unix_secs}\n").into_bytes();
         msg.extend(checkpoint.to_bytes());
 
@@ -140,8 +140,8 @@ impl NoteVerifier for CosignatureV1NoteVerifier {
 #[cfg(test)]
 mod tests {
 
+    use tlog_checkpoint::{open_checkpoint, TreeWithTimestamp};
     use tlog_core::record_hash;
-    use tlog_tiles::{open_checkpoint, TreeWithTimestamp};
 
     use super::*;
     use signed_note::VerifierList;

@@ -8,8 +8,9 @@ use generic_log_worker::{
     deserialize_sequence_metadata_entries, serialize_sequence_metadata_entries, SequencerMetadata,
 };
 use serde::{Deserialize, Serialize};
+use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::LeafIndex;
-use tlog_tiles::{LookupKey, UnixTimestamp};
+use tlog_tiles::LookupKey;
 
 /// Sequencer metadata for a bootstrap MTC log entry.
 ///
@@ -20,7 +21,7 @@ use tlog_tiles::{LookupKey, UnixTimestamp};
 /// 1. **Durable Object dedup ring buffer**: 32-byte binary layout
 ///    `[16-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`.
 ///    This format matches the one previously used when the type was
-///    `(LeafIndex, UnixTimestamp)`; preserving it avoids a one-time deserialize
+///    `(LeafIndex, UnixTimestampMillis)`; preserving it avoids a one-time deserialize
 ///    warning on deploy as the sequencer loads any entries already in DO
 ///    storage.
 /// 2. **DO→Worker RPC**: `bitcode` sequence of the two u64 fields (preserved by
@@ -28,7 +29,7 @@ use tlog_tiles::{LookupKey, UnixTimestamp};
 ///
 /// Bootstrap MTC does not currently use the long-term KV dedup cache.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BootstrapMtcSequenceMetadata(pub LeafIndex, pub UnixTimestamp);
+pub struct BootstrapMtcSequenceMetadata(pub LeafIndex, pub UnixTimestampMillis);
 
 impl BootstrapMtcSequenceMetadata {
     /// Return the leaf index.
@@ -39,7 +40,7 @@ impl BootstrapMtcSequenceMetadata {
 
     /// Return the sequencing timestamp (milliseconds since the Unix epoch).
     #[must_use]
-    pub fn timestamp(&self) -> UnixTimestamp {
+    pub fn timestamp(&self) -> UnixTimestampMillis {
         self.1
     }
 }
@@ -47,7 +48,7 @@ impl BootstrapMtcSequenceMetadata {
 impl SequencerMetadata for BootstrapMtcSequenceMetadata {
     fn new(
         leaf_index: LeafIndex,
-        timestamp: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         _old_tree_size: u64,
         _new_tree_size: u64,
     ) -> Self {

@@ -281,7 +281,7 @@ impl GenericCleaner {
             .ok_or("missing object body")?
             .bytes()
             .await?;
-        let checkpoint = tlog_tiles::open_checkpoint(
+        let checkpoint = tlog_checkpoint::open_checkpoint(
             self.config.origin.as_str(),
             &self.config.verifiers,
             now_millis(),

@@ -4,13 +4,11 @@ use sha2::{Digest, Sha256};
 use std::{io::Read, marker::PhantomData};
 
 use crate::PathElem;
+use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::{Hash, LeafIndex};
 
 pub const LOOKUP_KEY_LEN: usize = 16;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];
-
-/// Unix timestamp.
-pub type UnixTimestamp = u64;
 
 /// An opaque `PendingLogEntry` that can be passed around without requiring full
 /// deserialization.
@@ -58,7 +56,7 @@ pub trait LogEntry: core::fmt::Debug + Sized {
     /// sequencer-generated values common to every tlog application: the leaf
     /// index and the sequencing timestamp. Application-specific sequencer
     /// metadata (e.g. tree sizes) is handled outside this trait.
-    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestamp) -> Self;
+    fn new(pending: Self::Pending, leaf_index: LeafIndex, timestamp: UnixTimestampMillis) -> Self;
 
     /// Returns the Merkle tree leaf hash for this entry. For tlog-tiles, this is the Merkle Tree Hash
     /// (according to <https://datatracker.ietf.org/doc/html/rfc6962#section-2.1>)
@@ -157,7 +155,11 @@ impl LogEntry for TlogTilesLogEntry {
         None
     }
 
-    fn new(pending: Self::Pending, _leaf_index: LeafIndex, _timestamp: UnixTimestamp) -> Self {
+    fn new(
+        pending: Self::Pending,
+        _leaf_index: LeafIndex,
+        _timestamp: UnixTimestampMillis,
+    ) -> Self {
         Self { inner: pending }
     }
 

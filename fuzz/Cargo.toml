@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys.workspace = true
+tlog_checkpoint.workspace = true
 tlog_tiles.workspace = true
 
 [[bin]]

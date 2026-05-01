@@ -11,7 +11,9 @@
 // Modifications and Rust implementation Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! A Checkpoint is a tree head to be formatted according to the [C2SP tlog-checkpoint](https://c2sp.org/tlog-checkpoint) specification.
+//! A Checkpoint is a tree head formatted as a [signed-note][note]
+//! per the [C2SP tlog-checkpoint](https://c2sp.org/tlog-checkpoint)
+//! specification.
 //!
 //! A checkpoint looks like this:
 //! ```text
@@ -25,16 +27,33 @@
 //! — PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=
 //! — EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5n2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ=
 //! ```
-//! We call everything up to and including the last extension line (including its final newline) the **checkpoint text**.
 //!
-//! This file contains code ported from the original projects [tlog](https://pkg.go.dev/golang.org/x/mod/sumdb/tlog) and [sunlight](https://github.com/FiloSottile/sunlight).
+//! We call everything up to and including the last extension line
+//! (including its final newline) the **checkpoint text**.
 //!
-//! References:
-//! - [note.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/note.go)
-//! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/tlog/note_test.go)
-//! - [checkpoint.go](https://github.com/FiloSottile/sunlight/blob/36be227ff4599ac11afe3cec37a5febcd61da16a/checkpoint.go)
+//! This crate provides:
+//!
+//! - [`CheckpointText`] — parser/serializer for the text portion.
+//! - [`CheckpointSigner`] / [`Ed25519CheckpointSigner`] — signers that
+//!   produce checkpoint signatures.
+//! - [`TreeWithTimestamp`] — a (size, hash, timestamp) tuple ready to
+//!   be signed.
+//! - [`open_checkpoint`] — the caller-side
+//!   parse-and-fully-verify entry point.
+//!
+//! The Merkle math (the [`Hash`] type, proof builders/verifiers,
+//! `Subtree`) lives in the [`tlog_core`] crate.
+//!
+//! Ports code from the Go [`tlog`][tlog-go] package and from
+//! [sunlight][sunlight]; see per-symbol references in the source for
+//! upstream pointers.
+//!
+//! [note]: https://c2sp.org/signed-note
+//! [`Hash`]: tlog_core::Hash
+//! [`tlog_core`]: https://docs.rs/tlog_core
+//! [tlog-go]: https://pkg.go.dev/golang.org/x/mod/sumdb/tlog
+//! [sunlight]: https://github.com/FiloSottile/sunlight
 
-use crate::UnixTimestamp;
 use base64::{prelude::BASE64_STANDARD, Engine};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
 use rand::{seq::SliceRandom, Rng, RngExt};
@@ -49,6 +68,14 @@ use std::{
 };
 use thiserror::Error;
 use tlog_core::{Hash, HashReader, TlogError};
+
+/// Unix-epoch timestamp, in milliseconds.
+///
+/// Embedded in [`TreeWithTimestamp`] and signed by every
+/// [`CheckpointSigner`] that produces a timestamped cosignature
+/// (e.g. `cosignature/v1`). A type alias rather than a newtype so it
+/// composes naturally with arithmetic / comparisons at every callsite.
+pub type UnixTimestampMillis = u64;
 
 /// Errors returned by the checkpoint-signing and -verification entry
 /// points in this module ([`open_checkpoint`], [`TreeWithTimestamp::sign`],
@@ -206,7 +233,7 @@ impl CheckpointText {
     ///
     /// # Errors
     ///
-    /// Returns a [`MalformedCheckpointError`] if the arguments do not comply with
+    /// Returns a [`MalformedCheckpointTextError`] if the arguments do not comply with
     /// the [C2SP tlog-checkpoint](https://c2sp.org/tlog-checkpoint) specification.
     pub fn new(
         origin: &str,
@@ -345,7 +372,7 @@ pub trait CheckpointSigner {
     /// Errors if the signing fails.
     fn sign(
         &self,
-        timestamp_unix_millis: UnixTimestamp,
+        timestamp: UnixTimestampMillis,
         checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError>;
 
@@ -385,7 +412,7 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 
     fn sign(
         &self,
-        _: UnixTimestamp,
+        _: UnixTimestampMillis,
         checkpoint_text: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
         let msg = checkpoint_text.to_bytes();
@@ -424,9 +451,9 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 pub fn open_checkpoint(
     origin: &str,
     verifiers: &VerifierList,
-    current_time: UnixTimestamp,
+    current_time: UnixTimestampMillis,
     checkpoint_bytes: &[u8],
-) -> Result<(CheckpointText, Option<UnixTimestamp>), CheckpointError> {
+) -> Result<(CheckpointText, Option<UnixTimestampMillis>), CheckpointError> {
     // A checkpoint is a signed note whose text is a CheckpointText
     let n = Note::from_bytes(checkpoint_bytes)?;
     let (verified_sigs, _) = n.verify(verifiers)?;
@@ -434,7 +461,7 @@ pub fn open_checkpoint(
     // Go through the signatures and make sure we find all the key IDs in our verifiers list
     let mut key_ids_to_observe = verifiers.key_ids();
     // The latest timestamp of the signatures in the note. We use this to check that nothing was signed in the future
-    let mut latest_timestamp: Option<UnixTimestamp> = None;
+    let mut latest_timestamp: Option<UnixTimestampMillis> = None;
     for sig in &verified_sigs {
         // Fetch the verifier for this signature, if it's here
         let verif = match verifiers.verifier(sig.name(), sig.id()) {
@@ -474,13 +501,13 @@ pub fn open_checkpoint(
 pub struct TreeWithTimestamp {
     size: u64,
     hash: Hash,
-    time: UnixTimestamp,
+    time: UnixTimestampMillis,
 }
 
 impl TreeWithTimestamp {
     /// Returns a new tree with the given hash.
     #[must_use]
-    pub fn new(size: u64, hash: Hash, time: UnixTimestamp) -> Self {
+    pub fn new(size: u64, hash: Hash, time: UnixTimestampMillis) -> Self {
         Self { size, hash, time }
     }
 
@@ -493,7 +520,7 @@ impl TreeWithTimestamp {
     pub fn from_hash_reader<R: HashReader>(
         size: u64,
         r: &R,
-        time: UnixTimestamp,
+        time: UnixTimestampMillis,
     ) -> Result<TreeWithTimestamp, TlogError> {
         let hash = tlog_core::tree_hash(size, r)?;
         Ok(Self { size, hash, time })
@@ -513,7 +540,7 @@ impl TreeWithTimestamp {
 
     /// Returns the timestamp of the tree.
     #[must_use]
-    pub fn time(&self) -> UnixTimestamp {
+    pub fn time(&self) -> UnixTimestampMillis {
         self.time
     }
 

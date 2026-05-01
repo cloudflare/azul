@@ -39,10 +39,11 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
+use tlog_checkpoint::{TreeWithTimestamp, UnixTimestampMillis};
 use tlog_core::{Hash, HashReader, Proof, Subtree, TlogError, HASH_SIZE};
 use tlog_tiles::{
     LogEntry, PendingLogEntry, PreloadedTlogTileReader, TileHashReader, TileIterator, TlogTile,
-    TlogTileRecorder, TreeWithTimestamp, UnixTimestamp,
+    TlogTileRecorder,
 };
 use tokio::sync::watch::{channel, Receiver, Sender};
 
@@ -89,7 +90,7 @@ pub(crate) struct PoolState<P: PendingLogEntry, M: Copy + Debug + Default + 'sta
 
     // Ring buffer tracking insertion timestamps for the most recent entries
     // that are potentially skippable.
-    leftover_timestamps_millis: [UnixTimestamp; TlogTile::FULL_WIDTH as usize],
+    leftover_timestamps_millis: [UnixTimestampMillis; TlogTile::FULL_WIDTH as usize],
 
     // The next slot to insert an entry timestamp, when reduced modulo
     // `TlogTile::FULL_WIDTH`.
@@ -165,10 +166,9 @@ impl<E: PendingLogEntry, M: SequencerMetadata> PoolState<E, M> {
             new_size / u64::from(TlogTile::FULL_WIDTH) > old_size / u64::from(TlogTile::FULL_WIDTH);
         let num_leftover_entries =
             usize::try_from(new_size % u64::from(TlogTile::FULL_WIDTH)).unwrap();
-        let oldest_leftover_timestamp_millis: UnixTimestamp = self.leftover_timestamps_millis[(self
-            .leftover_timestamps_next_slot
-            - num_leftover_entries)
-            % TlogTile::FULL_WIDTH as usize];
+        let oldest_leftover_timestamp_millis: UnixTimestampMillis = self.leftover_timestamps_millis
+            [(self.leftover_timestamps_next_slot - num_leftover_entries)
+                % TlogTile::FULL_WIDTH as usize];
         let oldest_leftover_is_expired = sequence_skip_threshold_millis
             .is_some_and(|threshold| now_millis() > oldest_leftover_timestamp_millis + threshold);
 
@@ -337,7 +337,7 @@ impl SequenceState {
                 .collect(),
         );
 
-        let (c, timestamp) = tlog_tiles::open_checkpoint(
+        let (c, timestamp) = tlog_checkpoint::open_checkpoint(
             config.origin.as_str(),
             &verifiers,
             now_millis(),
@@ -362,8 +362,12 @@ impl SequenceState {
             "{name}: Loaded checkpoint from object storage; checkpoint={}",
             std::str::from_utf8(&stored_checkpoint)?
         );
-        let (c1, _) =
-            tlog_tiles::open_checkpoint(config.origin.as_str(), &verifiers, now_millis(), &sth)?;
+        let (c1, _) = tlog_checkpoint::open_checkpoint(
+            config.origin.as_str(),
+            &verifiers,
+            now_millis(),
+            &sth,
+        )?;
 
         match (Ord::cmp(&c1.size(), &c.size()), c1.hash() == c.hash()) {
             (Ordering::Equal, false) => {
@@ -1388,15 +1392,15 @@ mod tests {
     use tlog_core::LeafIndex;
 
     /// Local metadata type used to exercise the sequencer and batcher logic
-    /// end-to-end. Kept as a `(LeafIndex, UnixTimestamp)` tuple so existing
+    /// end-to-end. Kept as a `(LeafIndex, UnixTimestampMillis)` tuple so existing
     /// tests can destructure with `let (leaf_index, timestamp) = ...`. The
     /// JSON cache serialization defaults are fine for tests.
-    type SequenceMetadata = (LeafIndex, UnixTimestamp);
+    type SequenceMetadata = (LeafIndex, UnixTimestampMillis);
 
     impl SequencerMetadata for SequenceMetadata {
         fn new(
             leaf_index: LeafIndex,
-            timestamp: UnixTimestamp,
+            timestamp: UnixTimestampMillis,
             _old_tree_size: u64,
             _new_tree_size: u64,
         ) -> Self {
@@ -1417,7 +1421,8 @@ mod tests {
         PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
     };
     use std::time::Duration;
-    use tlog_tiles::{CheckpointSigner, CheckpointText, Ed25519CheckpointSigner, TlogTile};
+    use tlog_checkpoint::{CheckpointSigner, CheckpointText, Ed25519CheckpointSigner};
+    use tlog_tiles::TlogTile;
 
     #[test]
     fn test_sequence_one_leaf_short() {

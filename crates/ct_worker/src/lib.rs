@@ -11,7 +11,7 @@ use signed_note::KeyName;
 use static_ct_api::StaticCTCheckpointSigner;
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
-use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner};
+use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner};
 use worker::{Env, Result};
 use x509_util::CertPool;
 

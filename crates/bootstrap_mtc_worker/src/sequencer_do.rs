@@ -19,8 +19,8 @@ use generic_log_worker::{
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::Note;
+use tlog_checkpoint::{CheckpointText, UnixTimestampMillis};
 use tlog_core::Hash;
-use tlog_tiles::{CheckpointText, UnixTimestamp};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -87,8 +87,8 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
     let params = &CONFIG.logs[name];
     let bucket = load_public_bucket(env, name).unwrap();
     Box::new(
-        move |old_time: UnixTimestamp,
-              new_time: UnixTimestamp,
+        move |old_time: UnixTimestampMillis,
+              new_time: UnixTimestampMillis,
               _old_tree_size: u64,
               _new_tree_size: u64,
               new_checkpoint_bytes: &[u8]| {
