@@ -16,9 +16,8 @@ use signed_note::{Ed25519NoteVerifier, KeyName, VerifierList};
 use static_ct_api::{Extensions, RFC6962NoteVerifier, StaticCTLogEntry};
 use tlog_checkpoint::{open_checkpoint, CheckpointText};
 use tlog_core::HashReader;
-use tlog_tiles::{
-    LogEntry, PathElem, PreloadedTlogTileReader, TileHashReader, TileIterator, TlogTile,
-};
+use tlog_entry::{LogEntry, TileIterator};
+use tlog_tiles::{PathElem, PreloadedTlogTileReader, TileHashReader, TlogTile};
 use x509_cert::{der::Decode, der::Encode, Certificate};
 
 use crate::client::{AddChainResponse, CtClient, LogV3JsonResponse};

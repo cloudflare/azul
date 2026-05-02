@@ -10,7 +10,7 @@ use generic_log_worker::{
 use serde::{Deserialize, Serialize};
 use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::LeafIndex;
-use tlog_tiles::LookupKey;
+use tlog_entry::LookupKey;
 
 /// Sequencer metadata for a bootstrap MTC log entry.
 ///

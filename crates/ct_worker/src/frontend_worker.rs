@@ -14,7 +14,7 @@ use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
 use serde_with::{base64::Base64, serde_as};
 use static_ct_api::{AddChainRequest, GetRootsResponse, StaticCTLogEntry};
-use tlog_tiles::{LogEntry, PendingLogEntry, PendingLogEntryBlob};
+use tlog_entry::{LogEntry, PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::der::Encode;
