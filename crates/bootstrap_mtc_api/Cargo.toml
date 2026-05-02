@@ -21,6 +21,7 @@ sha2.workspace = true
 signed_note.workspace = true
 thiserror.workspace = true
 tlog_core.workspace = true
+tlog_entry.workspace = true
 tlog_checkpoint.workspace = true
 tlog_tiles.workspace = true
 x509-cert.workspace = true

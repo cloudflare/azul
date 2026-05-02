@@ -4,23 +4,25 @@
 //! # `tlog_tiles`
 //!
 //! Implementation of the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles)
-//! HTTP wire format for tile-encoded transparency logs.
+//! HTTP tile-encoding wire format for tiled transparency logs.
 //!
 //! The Merkle math (the [`Hash`] type, the proof builders/verifiers,
 //! the `Subtree` type) lives in the [`tlog_core`] crate; the
 //! [tlog-checkpoint][tc] signed-note format lives in the
-//! [`tlog_checkpoint`] crate; this crate is the tile-encoding layer on
-//! top of both.
+//! [`tlog_checkpoint`] crate; the [`PendingLogEntry`] /
+//! [`LogEntry`] traits and the c2sp.org/tlog-tiles entry-bundle
+//! types live in the (internal) [`tlog_entry`] crate.
 //!
 //! [tc]: https://c2sp.org/tlog-checkpoint
 //! [`Hash`]: tlog_core::Hash
 //! [`tlog_core`]: https://docs.rs/tlog_core
 //! [`tlog_checkpoint`]: https://docs.rs/tlog_checkpoint
+//! [`tlog_entry`]: https://docs.rs/tlog_entry
+//! [`PendingLogEntry`]: https://docs.rs/tlog_entry/latest/tlog_entry/trait.PendingLogEntry.html
+//! [`LogEntry`]: https://docs.rs/tlog_entry/latest/tlog_entry/trait.LogEntry.html
 
-pub mod entries;
 pub mod tile;
 
-pub use entries::*;
 pub use tile::*;
 
 #[cfg(test)]

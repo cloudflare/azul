@@ -1,11 +1,32 @@
+//! Worker-side log-entry abstractions for transparency logs.
+//!
+//! Defines the [`PendingLogEntry`] / [`LogEntry`] traits that
+//! [`generic_log_worker`][glw] consumes and that the various
+//! per-application data types (CT entries, MTC certificates, etc.)
+//! implement; plus a small set of helpers used by both
+//! ([`LookupKey`], [`PendingLogEntryBlob`], [`TileIterator`]).
+//!
+//! Also includes [`TlogTilesPendingLogEntry`] / [`TlogTilesLogEntry`]:
+//! the default implementation for the [c2sp.org/tlog-tiles][spec]
+//! "Log entries" wire format (big-endian uint16 length-prefixed
+//! blobs, served at `/tile/entries/<N>`).
+//!
+//! This crate sits between the spec-level data types and
+//! `generic_log_worker`. It is not published; it exists to break
+//! what would otherwise be a dependency cycle between the spec
+//! crates and the generic worker.
+//!
+//! [glw]: https://docs.rs/generic_log_worker
+//! [spec]: https://c2sp.org/tlog-tiles
+
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{io::Read, marker::PhantomData};
 
-use crate::PathElem;
 use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::{Hash, LeafIndex};
+use tlog_tiles::PathElem;
 
 pub const LOOKUP_KEY_LEN: usize = 16;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];

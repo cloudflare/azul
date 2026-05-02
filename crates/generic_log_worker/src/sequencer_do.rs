@@ -23,7 +23,7 @@ use log::{error, info};
 use prometheus::Registry;
 use signed_note::KeyName;
 use tlog_checkpoint::{CheckpointSigner, UnixTimestampMillis};
-use tlog_tiles::{LogEntry, PendingLogEntryBlob};
+use tlog_entry::{LogEntry, PendingLogEntryBlob};
 use tokio::sync::{Mutex, RwLock};
 use worker::{Env, Error as WorkerError, Request, Response, State};
 

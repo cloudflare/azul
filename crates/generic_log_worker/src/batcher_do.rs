@@ -17,7 +17,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
-use tlog_tiles::PendingLogEntryBlob;
+use tlog_entry::PendingLogEntryBlob;
 use tokio::sync::watch::{self, Sender};
 use worker::kv::KvStore;
 #[allow(clippy::wildcard_imports)]
@@ -30,7 +30,7 @@ use worker::*;
 /// The batcher does not inspect the entry contents, so it only needs to know
 /// the metadata type (not the full [`LogEntry`]).
 ///
-/// [`LogEntry`]: tlog_tiles::LogEntry
+/// [`LogEntry`]: tlog_entry::LogEntry
 pub struct GenericBatcher<M: SequencerMetadata> {
     env: Env,
     config: BatcherConfig,

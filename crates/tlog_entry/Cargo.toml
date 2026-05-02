@@ -1,15 +1,13 @@
 [package]
-name = "tlog_tiles"
-readme = "README.md"
+name = "tlog_entry"
+publish = false
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "An implementation of c2sp.org/tlog-tiles"
-categories = ["cryptography"]
-keywords = ["ct", "certificate", "transparency", "crypto", "pki"]
+description = "Worker-side log-entry abstractions for transparency logs"
 
 [package.metadata.release]
 release = false
@@ -21,11 +19,10 @@ wasm-opt = false
 [lib]
 crate-type = ["rlib"]
 
-[dev-dependencies]
-base64.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-url.workspace = true
-
 [dependencies]
+length_prefixed.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tlog_checkpoint.workspace = true
 tlog_core.workspace = true
+tlog_tiles.workspace = true
