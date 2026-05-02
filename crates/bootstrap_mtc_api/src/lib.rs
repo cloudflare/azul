@@ -26,9 +26,8 @@ use std::{
 use thiserror::Error;
 use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::{Hash, LeafIndex, Proof, Subtree, TlogError};
-use tlog_tiles::{
-    LogEntry, PathElem, PendingLogEntry, TlogTilesLogEntry, TlogTilesPendingLogEntry,
-};
+use tlog_entry::{LogEntry, PendingLogEntry, TlogTilesLogEntry, TlogTilesPendingLogEntry};
+use tlog_tiles::PathElem;
 use x509_cert::{
     certificate::Version,
     ext::{
@@ -162,7 +161,7 @@ impl PendingLogEntry for BootstrapMtcPendingLogEntry {
         &self.bootstrap
     }
 
-    fn lookup_key(&self) -> tlog_tiles::LookupKey {
+    fn lookup_key(&self) -> tlog_entry::LookupKey {
         self.entry.lookup_key()
     }
 }
@@ -878,7 +877,7 @@ mod tests {
     fn test_serialize_signatureless_cert() {
         use der::Decode as _;
         use tlog_core::{Proof, Subtree};
-        use tlog_tiles::{TlogTilesLogEntry, TlogTilesPendingLogEntry};
+        use tlog_entry::{TlogTilesLogEntry, TlogTilesPendingLogEntry};
 
         let certs =
             Certificate::load_pem_chain(include_bytes!("../../static_ct_api/tests/leaf-cert.pem"))

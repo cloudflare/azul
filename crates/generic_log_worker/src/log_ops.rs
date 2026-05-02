@@ -41,10 +41,8 @@ use std::{
 use thiserror::Error;
 use tlog_checkpoint::{TreeWithTimestamp, UnixTimestampMillis};
 use tlog_core::{Hash, HashReader, Proof, Subtree, TlogError, HASH_SIZE};
-use tlog_tiles::{
-    LogEntry, PendingLogEntry, PreloadedTlogTileReader, TileHashReader, TileIterator, TlogTile,
-    TlogTileRecorder,
-};
+use tlog_entry::{LogEntry, PendingLogEntry, TileIterator};
+use tlog_tiles::{PreloadedTlogTileReader, TileHashReader, TlogTile, TlogTileRecorder};
 use tokio::sync::watch::{channel, Receiver, Sender};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as

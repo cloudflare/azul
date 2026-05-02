@@ -4,7 +4,7 @@ use crate::{load_checkpoint_signers, load_origin, CONFIG};
 use generic_log_worker::{get_durable_object_name, CleanerConfig, GenericCleaner, CLEANER_BINDING};
 use signed_note::VerifierList;
 use static_ct_api::StaticCTPendingLogEntry;
-use tlog_tiles::PendingLogEntry;
+use tlog_entry::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

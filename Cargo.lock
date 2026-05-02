@@ -181,6 +181,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tlog_checkpoint",
  "tlog_core",
+ "tlog_entry",
  "tlog_tiles",
  "x509-cert",
  "x509_util",
@@ -214,7 +215,7 @@ dependencies = [
  "signed_note",
  "tlog_checkpoint",
  "tlog_core",
- "tlog_tiles",
+ "tlog_entry",
  "url",
  "worker",
  "x509-cert",
@@ -590,7 +591,7 @@ dependencies = [
  "static_ct_api",
  "tlog_checkpoint",
  "tlog_core",
- "tlog_tiles",
+ "tlog_entry",
  "url",
  "worker",
  "x509-cert",
@@ -1038,6 +1039,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tlog_checkpoint",
  "tlog_core",
+ "tlog_entry",
  "tlog_tiles",
  "tokio",
  "worker",
@@ -1489,6 +1491,7 @@ dependencies = [
  "tlog_checkpoint",
  "tlog_core",
  "tlog_cosignature",
+ "tlog_entry",
  "tlog_tiles",
  "tlog_witness",
  "tokio",
@@ -2821,6 +2824,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tlog_checkpoint",
  "tlog_core",
+ "tlog_entry",
  "tlog_tiles",
  "x509-cert",
  "x509_util",
@@ -3041,15 +3045,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlog_entry"
+version = "0.2.0"
+dependencies = [
+ "length_prefixed",
+ "serde",
+ "sha2",
+ "tlog_checkpoint",
+ "tlog_core",
+ "tlog_tiles",
+]
+
+[[package]]
 name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
  "base64",
- "length_prefixed",
  "serde",
  "serde_json",
- "sha2",
- "tlog_checkpoint",
  "tlog_core",
  "url",
 ]

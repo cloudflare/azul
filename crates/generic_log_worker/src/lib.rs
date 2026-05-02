@@ -29,8 +29,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use serde::de::DeserializeOwned;
 use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::LeafIndex;
-pub use tlog_tiles::LookupKey;
-use tlog_tiles::PendingLogEntry;
+pub use tlog_entry::LookupKey;
+use tlog_entry::PendingLogEntry;
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
