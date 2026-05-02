@@ -19,7 +19,7 @@ pub fn init() {
 /// Parse with `CheckpointText.fromBytes()`.
 #[wasm_bindgen]
 pub struct CheckpointText {
-    inner: tlog_tiles::CheckpointText,
+    inner: tlog_checkpoint::CheckpointText,
 }
 
 #[wasm_bindgen]
@@ -34,7 +34,7 @@ impl CheckpointText {
     /// Returns a JS error string if the input is not a valid checkpoint text.
     #[wasm_bindgen(js_name = "fromBytes")]
     pub fn from_bytes(data: &[u8]) -> Result<CheckpointText, JsValue> {
-        tlog_tiles::CheckpointText::from_bytes(data)
+        tlog_checkpoint::CheckpointText::from_bytes(data)
             .map(|c| CheckpointText { inner: c })
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }

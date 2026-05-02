@@ -22,7 +22,8 @@ use futures_util::future::join_all;
 use log::{error, info};
 use prometheus::Registry;
 use signed_note::KeyName;
-use tlog_tiles::{CheckpointSigner, LogEntry, PendingLogEntryBlob, UnixTimestamp};
+use tlog_checkpoint::{CheckpointSigner, UnixTimestampMillis};
+use tlog_tiles::{LogEntry, PendingLogEntryBlob};
 use tokio::sync::{Mutex, RwLock};
 use worker::{Env, Error as WorkerError, Request, Response, State};
 
@@ -51,7 +52,7 @@ pub struct SequencerConfig {
     pub checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
     /// A function that takes a Unix timestamp in milliseconds and returns
     /// extension lines to be included in the checkpoint
-    pub checkpoint_extension: Box<dyn Fn(UnixTimestamp) -> Vec<String>>,
+    pub checkpoint_extension: Box<dyn Fn(UnixTimestampMillis) -> Vec<String>>,
     pub sequence_interval: Duration,
     pub max_sequence_skips: usize,
     pub sequence_skip_threshold_millis: Option<u64>,
@@ -357,15 +358,15 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
 /// so that it can have side-effects.
 ///
 /// The parameters are as follows:
-/// - `old_time: UnixTimestamp`: The timestamp of the previous checkpoint.
-/// - `new_time: UnixTimestamp`: The timestamp of the latest checkpoint.
+/// - `old_time: UnixTimestampMillis`: The timestamp of the previous checkpoint.
+/// - `new_time: UnixTimestampMillis`: The timestamp of the latest checkpoint.
 /// - `old_tree_size: u64`: The tree size of the previous checkpoint.
 /// - `new_tree_size: u64`: The tree size of the latest checkpoint.
 /// - `new_checkpoint: &[u8]`: The latest checkpoint bytes. This is a signed note.
 pub type CheckpointCallbacker = Box<
     dyn Fn(
-            UnixTimestamp,
-            UnixTimestamp,
+            UnixTimestampMillis,
+            UnixTimestampMillis,
             u64,
             u64,
             &[u8],
@@ -378,8 +379,8 @@ pub type CheckpointCallbacker = Box<
 #[must_use]
 pub fn empty_checkpoint_callback() -> CheckpointCallbacker {
     Box::new(
-        move |_old_time: UnixTimestamp,
-              _new_time: UnixTimestamp,
+        move |_old_time: UnixTimestampMillis,
+              _new_time: UnixTimestampMillis,
               _old_tree_size: u64,
               _new_tree_size: u64,
               _new_checkpoint: &[u8]| { Box::pin(async move { Ok(()) }) },

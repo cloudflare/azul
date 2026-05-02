@@ -29,7 +29,7 @@
 //!   signatures still attached so the caller can inspect them.
 //! - Cosignature production: producing a `cosignature/v1` signature is
 //!   handled by [`tlog_cosignature::CosignatureV1CheckpointSigner`] (or any
-//!   other [`tlog_tiles::CheckpointSigner`] impl).
+//!   other [`tlog_checkpoint::CheckpointSigner`] impl).
 //! - Consistency-proof verification: use
 //!   [`tlog_core::verify_consistency_proof`] directly.
 //! - Persistent state for the "latest cosigned checkpoint per origin" check

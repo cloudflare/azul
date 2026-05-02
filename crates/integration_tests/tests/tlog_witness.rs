@@ -50,11 +50,11 @@ use serde::Deserialize;
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
+use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
 use tlog_core::{
     consistency_proof, record_hash, stored_hashes, tree_hash, Hash, HashReader, TlogError,
     HASH_SIZE,
 };
-use tlog_tiles::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
 use tlog_witness::{
     parse_add_checkpoint_response, serialize_add_checkpoint_request, CONTENT_TYPE_TLOG_SIZE,
 };

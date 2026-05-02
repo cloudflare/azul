@@ -32,7 +32,7 @@ use der::{
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
-use tlog_tiles::UnixTimestamp;
+use tlog_checkpoint::UnixTimestampMillis;
 use x509_cert::{
     der::Encode, ext::pkix::ExtendedKeyUsage, impl_newtype, Certificate, TbsCertificate,
 };
@@ -56,7 +56,7 @@ pub struct AddChainResponse {
     pub sct_version: u8,
     #[serde_as(as = "Base64")]
     pub id: Vec<u8>,
-    pub timestamp: UnixTimestamp,
+    pub timestamp: UnixTimestampMillis,
     #[serde_as(as = "Base64")]
     pub extensions: Vec<u8>,
     #[serde_as(as = "Base64")]
@@ -81,8 +81,8 @@ pub struct GetRootsResponse {
 pub fn partially_validate_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
-    not_after_start: Option<UnixTimestamp>,
-    not_after_end: Option<UnixTimestamp>,
+    not_after_start: Option<UnixTimestampMillis>,
+    not_after_end: Option<UnixTimestampMillis>,
     expect_precert: bool,
     require_server_auth_eku: bool,
 ) -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
@@ -247,7 +247,7 @@ mod tests {
     use x509_cert::ext::Extension;
     use x509_cert::{Certificate, TbsCertificate};
 
-    fn parse_datetime(s: &str) -> UnixTimestamp {
+    fn parse_datetime(s: &str) -> UnixTimestampMillis {
         u64::try_from(DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()).unwrap()
     }
 

@@ -21,7 +21,7 @@ length_prefixed.workspace = true
 ml-dsa.workspace = true
 signed_note.workspace = true
 tlog_core.workspace = true
-tlog_tiles.workspace = true
+tlog_checkpoint.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

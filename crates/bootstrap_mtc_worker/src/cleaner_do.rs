@@ -4,7 +4,8 @@ use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
 use bootstrap_mtc_api::BootstrapMtcPendingLogEntry;
 use generic_log_worker::{get_durable_object_name, CleanerConfig, GenericCleaner, CLEANER_BINDING};
 use signed_note::VerifierList;
-use tlog_tiles::{CheckpointSigner, PendingLogEntry};
+use tlog_checkpoint::CheckpointSigner;
+use tlog_tiles::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

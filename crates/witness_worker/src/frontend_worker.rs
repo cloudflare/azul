@@ -17,7 +17,7 @@
 
 use generic_log_worker::util::now_millis;
 use signed_note::NoteError;
-use tlog_tiles::{CheckpointSigner, CheckpointText};
+use tlog_checkpoint::{CheckpointSigner, CheckpointText};
 use tlog_witness::{
     parse_add_checkpoint_request, serialize_add_checkpoint_response, AddCheckpointRequest,
     CONTENT_TYPE_TLOG_SIZE,
@@ -203,7 +203,7 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
     // `NoteError` variants indicate a syntactically malformed signature
     // line and are surfaced as `400 Bad Request`.
     //
-    // `tlog_tiles::open_checkpoint` (in the c2sp.org/tlog-checkpoint slice
+    // `tlog_checkpoint::open_checkpoint` (in the c2sp.org/tlog-checkpoint slice
     // of `tlog_tiles`) is deliberately not used here because
     // it additionally requires *every* configured verifier to sign — the
     // full-coverage semantics an issuer or monitor wants, but not a
