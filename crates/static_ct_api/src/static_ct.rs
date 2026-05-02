@@ -121,7 +121,8 @@ use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType
 use std::io::Read;
 use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_core::{Hash, LeafIndex};
-use tlog_tiles::{LogEntry, LookupKey, PathElem, PendingLogEntry};
+use tlog_entry::{LogEntry, LookupKey, PendingLogEntry};
+use tlog_tiles::PathElem;
 
 #[repr(u16)]
 enum EntryType {

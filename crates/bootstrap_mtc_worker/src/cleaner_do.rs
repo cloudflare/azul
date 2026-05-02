@@ -5,7 +5,7 @@ use bootstrap_mtc_api::BootstrapMtcPendingLogEntry;
 use generic_log_worker::{get_durable_object_name, CleanerConfig, GenericCleaner, CLEANER_BINDING};
 use signed_note::VerifierList;
 use tlog_checkpoint::CheckpointSigner;
-use tlog_tiles::PendingLogEntry;
+use tlog_entry::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 

@@ -29,7 +29,7 @@ use signed_note::VerifierList;
 use std::time::Duration;
 use tlog_checkpoint::{open_checkpoint, CheckpointSigner, CheckpointText};
 use tlog_core::LeafIndex;
-use tlog_tiles::{PendingLogEntry, PendingLogEntryBlob};
+use tlog_entry::{PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 use x509_cert::{
