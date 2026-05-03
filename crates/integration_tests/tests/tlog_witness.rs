@@ -34,32 +34,42 @@
 //! 8. Bad consistency proof (right size, wrong hashes) → 422.
 //! 9. `old > checkpoint.size` → 400.
 //! 10. Malformed body (missing blank line) → 400.
+//! 11. `/sign-subtree` happy path: cosign a subtree of the most-
+//!     recently-cosigned checkpoint and verify the response signature.
+//! 12. `/sign-subtree` with a checkpoint NOT cosigned by the witness → 403.
+//! 13. `/sign-subtree` with `end > checkpoint.size` → 400.
 //!
 //! # Key management
 //!
-//! The SPKI committed to `crates/witness_worker/config.dev.json` MUST match
-//! the dev log key embedded below. If the config diverges the witness will
-//! 403 the tests with "No valid signatures from trusted log keys".
+//! The witness's `add-checkpoint` cosignature is `subtree/v1` (ML-DSA-44),
+//! per the dev `WITNESS_SIGNING_KEY` in `.dev.vars`. The log signing
+//! key remains Ed25519. Both PEMs are duplicated in the witness crate's
+//! unit tests so a rotation breaks closed; see
+//! `crates/witness_worker/src/lib.rs::dev_config_tests`.
 //!
 //! [`witness_worker`]: ../../../crates/witness_worker
 //! [`c2sp.org/tlog-witness`]: https://c2sp.org/tlog-witness
 
 use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey as Ed25519SigningKey};
+use ml_dsa::MlDsa44;
 use rand::rng;
 use serde::Deserialize;
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
+use tlog_cosignature::SubtreeV1NoteVerifier;
 use tlog_tiles::{
-    consistency_proof, record_hash, stored_hashes, tree_hash, CheckpointSigner,
-    Ed25519CheckpointSigner, Hash, HashReader, TlogError, TreeWithTimestamp, HASH_SIZE,
+    consistency_proof, record_hash, stored_hashes, subtree_consistency_proof, tree_hash,
+    CheckpointSigner, Ed25519CheckpointSigner, Hash, HashReader, Subtree, TlogError,
+    TreeWithTimestamp, HASH_SIZE,
 };
 use tlog_witness::{
-    parse_add_checkpoint_response, serialize_add_checkpoint_request, CONTENT_TYPE_TLOG_SIZE,
+    parse_add_checkpoint_response, parse_sign_subtree_response, serialize_add_checkpoint_request,
+    serialize_sign_subtree_request, CONTENT_TYPE_TLOG_SIZE,
 };
 
 // ---------------------------------------------------------------------------
-// Test fixtures: log origin + Ed25519 log key
+// Test fixtures: log origin + dev keypairs
 // ---------------------------------------------------------------------------
 
 /// Origin the witness is configured to accept checkpoints for (see
@@ -134,6 +144,10 @@ impl ToyLog {
 
     fn root(&self, size: u64) -> Hash {
         tree_hash(size, &self.stored).expect("tree_hash")
+    }
+
+    fn subtree_hash(&self, subtree: &Subtree) -> Hash {
+        tlog_tiles::subtree_hash(subtree, &self.stored).expect("subtree_hash")
     }
 
     fn sign_checkpoint(&self, signer: &Ed25519CheckpointSigner) -> Vec<u8> {
@@ -239,6 +253,29 @@ async fn post_add_checkpoint(body: &[u8]) -> AddCheckpointResult {
     }
 }
 
+async fn post_sign_subtree(body: &[u8]) -> AddCheckpointResult {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/sign-subtree", base_url()))
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(body.to_vec())
+        .send()
+        .await
+        .expect("sign-subtree request");
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body = resp.bytes().await.expect("response bytes").to_vec();
+    AddCheckpointResult {
+        status,
+        content_type,
+        body,
+    }
+}
+
 async fn wait_for_witness() {
     for _ in 0..30 {
         if reqwest::Client::new()
@@ -254,12 +291,21 @@ async fn wait_for_witness() {
     panic!("witness did not become ready at {}", base_url());
 }
 
-fn verify_witness_signature(checkpoint: &Note, sigs: &[NoteSignature], meta: &MetadataResponse) {
-    use ed25519_dalek::pkcs8::DecodePublicKey;
-    let witness_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.witness_public_key)
-        .expect("witness SPKI");
+/// Build a `SubtreeV1NoteVerifier` from the witness's `/metadata` SPKI
+/// and its configured name. Used to verify both `add-checkpoint` and
+/// `sign-subtree` responses.
+fn witness_verifier(meta: &MetadataResponse) -> SubtreeV1NoteVerifier {
+    use pkcs8::DecodePublicKey;
+    let witness_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&meta.witness_public_key)
+        .expect("witness SPKI must parse as ML-DSA-44");
     let name = KeyName::new(meta.witness_name.clone()).expect("KeyName for witness");
-    let v = tlog_cosignature::CosignatureV1NoteVerifier::new(name, witness_vk);
+    SubtreeV1NoteVerifier::new(name, witness_vk)
+}
+
+/// Verify that `sigs` (returned from /add-checkpoint) contains a valid
+/// `subtree/v1` cosignature from the witness on the given checkpoint.
+fn verify_witness_signature(checkpoint: &Note, sigs: &[NoteSignature], meta: &MetadataResponse) {
+    let v = witness_verifier(meta);
     let augmented = Note::new(checkpoint.text(), sigs).expect("assemble augmented note");
     let (verified, _unverified) = augmented
         .verify(&VerifierList::new(vec![Box::new(v)]))
@@ -465,6 +511,118 @@ async fn tlog_witness_end_to_end() {
             400,
             "malformed body: body={:?}",
             String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----------------------- (11) /sign-subtree happy path -----------------------
+    //
+    // Re-advance the witness state to the current log size (5) by
+    // submitting a fresh `add-checkpoint`, capture the witness's
+    // cosignature on it, then ask `/sign-subtree` to cosign a subtree
+    // of that checkpoint with a valid subtree consistency proof.
+    let cosigned_checkpoint;
+    {
+        // The witness state is currently at size 2 (from step 3); the
+        // local log is at size 5 (after pushes in steps 4 and 8). Build
+        // and submit the consistency proof from 2 → 5.
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let proof = log.consistency_proof(2);
+        let body = serialize_add_checkpoint_request(2, &proof, &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "advance witness state to size 5: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+        let witness_sigs = parse_add_checkpoint_response(&r.body).expect("parse response");
+        // Build an augmented note carrying the original log signature
+        // plus the witness's fresh cosignature, ready to feed back into
+        // /sign-subtree as the reference checkpoint.
+        let mut all_sigs = note.signatures().to_vec();
+        all_sigs.extend(witness_sigs);
+        cosigned_checkpoint = Note::new(note.text(), &all_sigs).expect("assemble cosigned note");
+    }
+    let cp_size = log.size();
+    {
+        // Subtree [0, 4) of the size-5 tree.
+        let subtree = Subtree::new(0, 4).expect("valid subtree");
+        let s_hash = log.subtree_hash(&subtree);
+        let proof = subtree_consistency_proof(cp_size, &subtree, &log.stored)
+            .expect("subtree consistency proof");
+        let body = serialize_sign_subtree_request(
+            subtree.lo(),
+            subtree.hi(),
+            &s_hash,
+            &[],
+            &proof,
+            &cosigned_checkpoint,
+        )
+        .unwrap();
+        let r = post_sign_subtree(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "sign-subtree happy path: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+        let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
+        assert_eq!(sigs.len(), 1, "exactly one cosignature line");
+        // Verify the response is a valid subtree/v1 cosignature on the
+        // requested subtree.
+        let v = witness_verifier(&meta);
+        assert!(
+            v.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, sigs[0].signature()),
+            "witness signature must verify against the requested subtree",
+        );
+    }
+
+    // ----------------------- (12) /sign-subtree with checkpoint NOT cosigned by us → 403 -----------------------
+    //
+    // Build a fresh checkpoint (signed by the trusted log key, but the
+    // witness has never seen this size). Stateless verification rejects
+    // it because no witness self-cosignature is attached.
+    {
+        let mut other_log = ToyLog::new();
+        other_log.push(b"a");
+        other_log.push(b"b");
+        let cp = other_log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let subtree = Subtree::new(0, 1).expect("valid subtree");
+        let s_hash = other_log.subtree_hash(&subtree);
+        let proof = subtree_consistency_proof(other_log.size(), &subtree, &other_log.stored)
+            .expect("subtree consistency proof");
+        let body = serialize_sign_subtree_request(0, 1, &s_hash, &[], &proof, &note).unwrap();
+        let r = post_sign_subtree(&body).await;
+        assert_eq!(
+            r.status,
+            403,
+            "no witness cosignature on reference checkpoint: body={:?}",
+            String::from_utf8_lossy(&r.body),
+        );
+    }
+
+    // ----------------------- (13) /sign-subtree with end > checkpoint.size → 400 -----------------------
+    {
+        // Reuse the cosigned checkpoint from step 11; ask for a subtree
+        // ending past its size.
+        let bogus_end = cp_size + 1; // checkpoint size is 5
+        let body = serialize_sign_subtree_request(
+            0,
+            bogus_end,
+            &Hash([0u8; HASH_SIZE]),
+            &[],
+            &[],
+            &cosigned_checkpoint,
+        )
+        .unwrap();
+        let r = post_sign_subtree(&body).await;
+        assert_eq!(
+            r.status,
+            400,
+            "end > checkpoint.size: body={:?}",
+            String::from_utf8_lossy(&r.body),
         );
     }
 }

@@ -17,6 +17,8 @@ crate-type = ["rlib"]
 [dependencies]
 byteorder.workspace = true
 ed25519-dalek.workspace = true
+length_prefixed.workspace = true
+ml-dsa.workspace = true
 signed_note.workspace = true
 tlog_tiles.workspace = true
 

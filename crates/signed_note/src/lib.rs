@@ -232,6 +232,7 @@ pub enum SignatureType {
     Ed25519 = 0x01,
     CosignatureV1 = 0x04,
     RFC6962TreeHead = 0x05,
+    MlDsa44 = 0x06,
     Undefined = 0xff,
 }
 
@@ -243,6 +244,7 @@ impl TryFrom<u8> for SignatureType {
             0x01 => Ok(SignatureType::Ed25519),
             0x04 => Ok(SignatureType::CosignatureV1),
             0x05 => Ok(SignatureType::RFC6962TreeHead),
+            0x06 => Ok(SignatureType::MlDsa44),
             0xff => Ok(SignatureType::Undefined),
             _ => Err(NoteError::UnknownSignatureType),
         }
@@ -253,13 +255,36 @@ impl TryFrom<u8> for SignatureType {
 pub struct KeyName(String);
 
 impl KeyName {
-    /// Return a valid key name according to <https://c2sp.org/signed-note#format>.
-    /// It must be non-empty and not have any Unicode spaces or pluses.
+    /// Maximum length, in bytes, of a key name's UTF-8 encoding.
+    ///
+    /// The signed-note spec does not itself impose a length cap, but every
+    /// C2SP-defined consumer that embeds a key name in a length-prefixed
+    /// wire format does so as a TLS-presentation `opaque<1..2^8-1>` —
+    /// notably the `cosigner_name` and `log_origin` fields of
+    /// [`tlog-cosignature`][cosig]'s ML-DSA-44 `cosigned_message` struct.
+    /// Capping `KeyName` at the same 255-byte limit means consumers can
+    /// rely on `as_str().as_bytes().len() <= MAX_LEN` without a redundant
+    /// runtime check at every encoding site, and an over-long key name
+    /// fails closed at construction rather than at first use.
+    ///
+    /// [cosig]: https://c2sp.org/tlog-cosignature
+    pub const MAX_LEN: usize = 255;
+
+    /// Return a valid key name according to <https://c2sp.org/signed-note#format>:
+    /// non-empty, with no Unicode spaces or `+` characters. Additionally
+    /// capped at [`Self::MAX_LEN`] bytes for compatibility with C2SP
+    /// consumers (see the constant for rationale).
     ///
     /// # Errors
-    /// Will return `Err` if the key name is empty or has Unicode spaces or pluses.
+    /// Returns [`NoteError::InvalidKeyName`] if the key name is empty,
+    /// contains Unicode whitespace or `+`, or exceeds
+    /// [`Self::MAX_LEN`] bytes when UTF-8-encoded.
     pub fn new(name: String) -> Result<Self, NoteError> {
-        if name.is_empty() || name.chars().any(char::is_whitespace) || name.contains('+') {
+        if name.is_empty()
+            || name.len() > Self::MAX_LEN
+            || name.chars().any(char::is_whitespace)
+            || name.contains('+')
+        {
             Err(NoteError::InvalidKeyName)
         } else {
             Ok(Self(name))
@@ -960,5 +985,35 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, NoteError::MismatchedVerifier));
+    }
+
+    /// `KeyName::new` enforces the signed-note key-name rules plus the
+    /// 255-byte cap (see `KeyName::MAX_LEN` for rationale).
+    #[test]
+    fn test_key_name_validation() {
+        // Spec rules: empty, whitespace, '+' all rejected.
+        assert!(KeyName::new(String::new()).is_err());
+        assert!(KeyName::new("a b".into()).is_err());
+        assert!(KeyName::new("a+b".into()).is_err());
+        // Unicode whitespace, not just ASCII.
+        assert!(KeyName::new("a\u{00a0}b".into()).is_err());
+
+        // Length cap: 255 bytes ok, 256+ rejected.
+        let max = "a".repeat(KeyName::MAX_LEN);
+        assert_eq!(max.len(), KeyName::MAX_LEN);
+        KeyName::new(max).expect("max-length name accepted");
+
+        let over = "a".repeat(KeyName::MAX_LEN + 1);
+        let err = KeyName::new(over).unwrap_err();
+        assert!(matches!(err, NoteError::InvalidKeyName));
+
+        // The cap is in bytes, not characters: a multi-byte-char string
+        // whose char count is ≤ MAX_LEN but byte length exceeds it is
+        // rejected. "é" is 2 bytes in UTF-8.
+        let two_byte_chars = "é".repeat(KeyName::MAX_LEN / 2 + 1);
+        assert!(two_byte_chars.chars().count() <= KeyName::MAX_LEN);
+        assert!(two_byte_chars.len() > KeyName::MAX_LEN);
+        let err = KeyName::new(two_byte_chars).unwrap_err();
+        assert!(matches!(err, NoteError::InvalidKeyName));
     }
 }
