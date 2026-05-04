@@ -71,10 +71,16 @@ npx wrangler -e=${ENV} tail
 1. Create `crates/<name>/Cargo.toml` with `workspace = true` fields
 2. Add the path to `[workspace.members]` in root `Cargo.toml`
 3. Add shared dependencies to `[workspace.dependencies]` rather than duplicating versions
+4. Symlink the workspace root LICENSE into the crate so the published
+   tarball ships a copy: `ln -s ../../LICENSE crates/<name>/LICENSE`
+   (or `../../../LICENSE` for sub-crates one level deeper, e.g. the
+   `*_worker/config/` sub-crates). `cargo package` follows the
+   symlink and embeds the resolved bytes. This applies even to
+   `publish = false` crates for workspace-wide consistency.
 
 ## Boundaries
 
-✅ **Always:** Before pushing any commit, run the pre-push checks locally and confirm they pass:
+✅ **Always (for code changes):** Before pushing any commit that touches Rust sources, `Cargo.toml` files, or anything else that affects the build, run the pre-push checks locally and confirm they pass:
 
 ```bash
 cargo clippy --workspace --all-targets -- -Dwarnings -Dclippy::pedantic # lint everything (including fuzz)
@@ -84,6 +90,8 @@ cargo machete                                                           # unused
 ```
 
 `integration_tests` is excluded from the default test run because it requires a live `wrangler dev` instance (invoke it explicitly once wrangler is running; see the integration test workflow below). `fuzz` is excluded because it is the cargo-fuzz harness crate, run via `cargo fuzz run <target>` on a nightly toolchain. Both are still linted.
+
+The pre-push checks may be skipped for changes that obviously cannot affect the build — pure documentation edits (`README.md`, `AGENTS.md`, `*.md`), license / license-symlink edits, comment-only edits, and similar. When in doubt, run them.
 
 If any step fails, fix the issue in the commit it belongs to (use `git commit --fixup=<sha>` + `git rebase --autosquash`) rather than layering a separate "fix lint" commit on top.
 
