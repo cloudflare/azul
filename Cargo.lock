@@ -2903,7 +2903,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3056,6 +3056,18 @@ dependencies = [
  "tlog_checkpoint",
  "tlog_core",
  "tlog_tiles",
+]
+
+[[package]]
+name = "tlog_mirror"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "byteorder",
+ "hmac",
+ "sha2",
+ "thiserror 2.0.17",
+ "tlog_core",
 ]
 
 [[package]]
