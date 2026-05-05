@@ -27,10 +27,8 @@ config = { path = "./config", package = "mirror_worker_config" }
 jsonschema.workspace = true
 serde_json.workspace = true
 
-[dev-dependencies]
-base64.workspace = true
-
 [dependencies]
+base64.workspace = true
 config = { path = "./config", package = "mirror_worker_config" }
 console_error_panic_hook.workspace = true
 console_log.workspace = true
@@ -38,12 +36,16 @@ ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 log.workspace = true
+ml-dsa.workspace = true
+pkcs8.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 signed_note.workspace = true
 tlog_checkpoint.workspace = true
 tlog_core.workspace = true
+tlog_cosignature.workspace = true
+tlog_mirror.workspace = true
 tlog_witness.workspace = true
 worker.workspace = true
 

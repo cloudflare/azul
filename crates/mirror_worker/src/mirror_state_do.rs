@@ -15,13 +15,14 @@
 //!   the latest pending here as the canonical source of truth for the
 //!   `add-checkpoint` consistency proof check).
 //!
-//! - `mirror`: the latest checkpoint for which the mirror has cosigned
-//!   and committed all entries. Always at-or-behind `pending`. Not yet
-//!   used in this slice — `add-entries` (a future slice) is what
-//!   advances `mirror`.
+//! - `committed`: the latest *mirror checkpoint* — the state for which
+//!   the mirror has fully ingested entries and emitted a cosignature.
+//!   Always at-or-behind `pending`. Advanced by `add-entries` once a
+//!   round of entry packages catches up to a pending checkpoint;
+//!   advancement is monotone (the DO refuses to roll back).
 //!
-//! For now, only `pending` is updated. The DO exposes a single internal
-//! RPC consumed by the frontend handler in the same worker:
+//! The DO exposes three internal RPCs consumed by the frontend handler
+//! in the same worker:
 //!
 //! - `POST /update-pending` — body is a JSON
 //!   [`UpdatePendingRequest`] carrying the client-claimed `old_size`,
@@ -37,9 +38,24 @@
 //!   `text/x.tlog.size` response. On proof verification failure it
 //!   returns 422.
 //!
-//! Atomicity of the read-verify-compare-write sequence is provided by
+//! - `POST /get-state` — read-only snapshot of both `pending` and
+//!   `committed`. Used by the `add-entries` handler (future slice) to
+//!   early-reject 409 / 404 cases before reading the streaming
+//!   request body.
+//!
+//! - `POST /commit` — body is a JSON [`CommitRequest`] carrying a new
+//!   `(size, hash, signed_note_bytes)` tuple. The DO atomically
+//!   advances `committed` to that tuple iff the proposed `size` is
+//!   `>= committed.size` and `<= pending.size`. If `size <
+//!   committed.size`, a concurrent `add-entries` already advanced past
+//!   us; the DO returns 200 with the *current* committed state and
+//!   does not write (the caller treats this as a no-op success). If
+//!   `size > pending.size`, the request is malformed (cannot commit
+//!   beyond pending); 400.
+//!
+//! Atomicity of the read-verify-compare-write sequences is provided by
 //! Cloudflare Durable Objects' input/output gates (see the inline
-//! commentary in the handler).
+//! commentary in the handlers).
 //!
 //! [spec]: https://c2sp.org/tlog-mirror
 //! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
@@ -53,6 +69,7 @@ use worker::*;
 use crate::MIRROR_STATE_BINDING;
 
 const PENDING_KEY: &str = "pending";
+const COMMITTED_KEY: &str = "committed";
 
 /// The persisted *pending checkpoint* for a single log origin.
 ///
@@ -76,6 +93,67 @@ pub struct PendingCheckpoint {
     /// notes are ASCII text but the JSON-with-arbitrary-bytes
     /// alternative is fragile, and base64 keeps the storage layer
     /// uniform with the wire format used by the ticket scheme).
+    #[serde_as(as = "Base64As")]
+    pub signed_note_bytes: Vec<u8>,
+}
+
+/// The persisted *committed checkpoint* (a.k.a. the *mirror
+/// checkpoint*) for a single log origin.
+///
+/// This is the state for which the mirror has fully ingested entries
+/// and is willing to emit a cosignature on. Always at-or-behind
+/// [`PendingCheckpoint`]. Advanced monotonically by `/commit`.
+///
+/// We store the full signed-note bytes here too so the mirror can
+/// serve a cosigned checkpoint at `<monitoring>/<encoded-origin>/checkpoint`
+/// without needing to look up historic pending state. The bytes match
+/// what the log signed for this `(size, hash)` — i.e. they are a
+/// historic value of [`PendingCheckpoint::signed_note_bytes`] (or the
+/// current one, when committed has caught up to pending).
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CommittedCheckpoint {
+    /// Tree size of the latest committed (mirror) checkpoint. Zero if
+    /// the mirror has not yet committed any entries for this origin.
+    pub size: u64,
+    /// Root hash of the latest committed checkpoint. All-zero if
+    /// `size` is 0.
+    #[serde(with = "hash_hex")]
+    pub hash: Hash,
+    /// The full signed-note bytes for the committed `(size, hash)`,
+    /// as the log originally signed them. Empty if `size` is 0. The
+    /// mirror's `<monitoring>/<encoded-origin>/checkpoint` serves
+    /// these bytes plus the mirror's own cosignature lines.
+    #[serde_as(as = "Base64As")]
+    pub signed_note_bytes: Vec<u8>,
+}
+
+/// Snapshot of both the pending and committed state, returned by
+/// `/get-state`. Used by the `add-entries` handler (future slice) to
+/// early-reject 409/404 cases before reading the streaming request
+/// body.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MirrorStateSnapshot {
+    pub pending: PendingCheckpoint,
+    pub committed: CommittedCheckpoint,
+}
+
+/// Body of the internal `/commit` RPC. The DO atomically advances
+/// `committed` to `(size, hash, signed_note_bytes)` iff `size` is at
+/// least the current committed size and at most the current pending
+/// size. See the module-level comment for the full state-machine.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CommitRequest {
+    /// Proposed new committed tree size.
+    pub size: u64,
+    /// Proposed new committed root hash.
+    #[serde(with = "hash_hex")]
+    pub hash: Hash,
+    /// Full signed-note bytes for `(size, hash)`. Persisted alongside
+    /// size+hash so the mirror can serve them at
+    /// `<monitoring>/<encoded-origin>/checkpoint` along with its
+    /// cosignature.
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
 }
@@ -119,6 +197,66 @@ impl DurableObject for MirrorState {
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
+            (Method::Post, "/get-state") => {
+                // Read-only snapshot of both pending and committed.
+                // Atomicity comes for free from the DO input gate: no
+                // other handler is running concurrently for this DO,
+                // so the pair is consistent.
+                let snapshot = self.read_snapshot().await;
+                Response::from_json(&snapshot)
+            }
+            (Method::Post, "/commit") => {
+                // Atomic mirror-checkpoint advance. Compare-and-swap
+                // semantics:
+                //
+                //   * If `body.size < current_committed.size`, a
+                //     concurrent `add-entries` for the same origin
+                //     already advanced past us. The spec is explicit
+                //     that the mirror MUST NOT roll back the mirror
+                //     checkpoint in this case; we treat the call as a
+                //     no-op success and return the *current* committed
+                //     state so the caller knows the mirror is already
+                //     ahead.
+                //
+                //   * If `body.size > current_pending.size`, the
+                //     caller is trying to commit beyond what the
+                //     mirror has accepted as a pending checkpoint
+                //     (programmer error in the frontend or stale
+                //     pending state); 400.
+                //
+                //   * Otherwise (committed.size <= body.size <=
+                //     pending.size), advance committed to the
+                //     proposed `(size, hash, signed_note_bytes)`.
+                //
+                // The DO input gate serializes commits for this
+                // origin, so two concurrent `add-entries` calls each
+                // see a consistent view and the higher one wins.
+                let body: CommitRequest = req.json().await?;
+                let snapshot = self.read_snapshot().await;
+                if body.size > snapshot.pending.size {
+                    return Response::error(
+                        format!(
+                            "commit beyond pending: requested size {} > pending size {}",
+                            body.size, snapshot.pending.size
+                        ),
+                        400,
+                    );
+                }
+                if body.size < snapshot.committed.size {
+                    // Already ahead; no-op success.
+                    return Response::from_json(&snapshot.committed);
+                }
+                let new_committed = CommittedCheckpoint {
+                    size: body.size,
+                    hash: body.hash,
+                    signed_note_bytes: body.signed_note_bytes,
+                };
+                self.state
+                    .storage()
+                    .put(COMMITTED_KEY, &new_committed)
+                    .await?;
+                Response::from_json(&new_committed)
+            }
             (Method::Post, "/update-pending") => {
                 // Atomicity of the read-verify-compare-write sequence
                 // below relies on Cloudflare Durable Objects' input/output
@@ -204,6 +342,30 @@ impl DurableObject for MirrorState {
     }
 }
 
+impl MirrorState {
+    /// Read both `pending` and `committed` from DO storage. Missing
+    /// keys are treated as `Default::default()` (size 0, all-zero
+    /// hash, empty bytes), representing "this origin has no state
+    /// yet".
+    async fn read_snapshot(&self) -> MirrorStateSnapshot {
+        let pending: PendingCheckpoint = self
+            .state
+            .storage()
+            .get(PENDING_KEY)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let committed: CommittedCheckpoint = self
+            .state
+            .storage()
+            .get(COMMITTED_KEY)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+        MirrorStateSnapshot { pending, committed }
+    }
+}
+
 /// Lookup helper used by the frontend: get a stub for the DO serving a
 /// particular log origin.
 pub(crate) fn state_stub(env: &Env, origin: &str) -> Result<Stub> {
@@ -278,7 +440,10 @@ mod hash_vec_hex {
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingCheckpoint, UpdatePendingRequest};
+    use super::{
+        CommitRequest, CommittedCheckpoint, MirrorStateSnapshot, PendingCheckpoint,
+        UpdatePendingRequest,
+    };
     use tlog_core::{Hash, HASH_SIZE};
 
     /// Pin the on-disk JSON layout of `PendingCheckpoint`. Changing
@@ -366,5 +531,84 @@ mod tests {
         assert_eq!(pc.size, 0);
         assert_eq!(pc.hash.0, [0u8; HASH_SIZE]);
         assert!(pc.signed_note_bytes.is_empty());
+    }
+
+    /// Pin the on-disk JSON layout of `CommittedCheckpoint`. Same
+    /// migration considerations as `PendingCheckpoint`: deployed
+    /// mirrors must keep parsing this after a worker upgrade.
+    #[test]
+    fn committed_checkpoint_json_format_unchanged() {
+        let mut bytes = [0u8; HASH_SIZE];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::try_from(i).unwrap();
+        }
+        let cc = CommittedCheckpoint {
+            size: 42,
+            hash: Hash(bytes),
+            signed_note_bytes: b"signed-note-bytes".to_vec(),
+        };
+        let json = serde_json::to_string(&cc).unwrap();
+        assert_eq!(
+            json,
+            r#"{"size":42,"hash":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","signed_note_bytes":"c2lnbmVkLW5vdGUtYnl0ZXM="}"#
+        );
+        let decoded: CommittedCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.size, 42);
+        assert_eq!(decoded.hash.0, bytes);
+        assert_eq!(decoded.signed_note_bytes, b"signed-note-bytes");
+    }
+
+    /// The default `CommittedCheckpoint` represents "never committed
+    /// any entries for this origin".
+    #[test]
+    fn committed_checkpoint_default_is_zero() {
+        let cc = CommittedCheckpoint::default();
+        assert_eq!(cc.size, 0);
+        assert_eq!(cc.hash.0, [0u8; HASH_SIZE]);
+        assert!(cc.signed_note_bytes.is_empty());
+    }
+
+    /// Pin the wire shape of the `/get-state` response.
+    #[test]
+    fn mirror_state_snapshot_json_format() {
+        let snap = MirrorStateSnapshot {
+            pending: PendingCheckpoint {
+                size: 5,
+                hash: Hash([0xaa; HASH_SIZE]),
+                signed_note_bytes: b"p".to_vec(),
+            },
+            committed: CommittedCheckpoint {
+                size: 3,
+                hash: Hash([0xbb; HASH_SIZE]),
+                signed_note_bytes: b"c".to_vec(),
+            },
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(
+            json.contains(r#""pending":{"#) && json.contains(r#""committed":{"#),
+            "snapshot must include both pending and committed: {json}"
+        );
+        let decoded: MirrorStateSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.pending.size, 5);
+        assert_eq!(decoded.committed.size, 3);
+    }
+
+    /// Pin the wire shape of the `/commit` request body.
+    #[test]
+    fn commit_request_json_format_unchanged() {
+        let req = CommitRequest {
+            size: 7,
+            hash: Hash([0xcc; HASH_SIZE]),
+            signed_note_bytes: b"cm".to_vec(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json,
+            r#"{"size":7,"hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signed_note_bytes":"Y20="}"#
+        );
+        let decoded: CommitRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.size, 7);
+        assert_eq!(decoded.hash.0, [0xcc; HASH_SIZE]);
+        assert_eq!(decoded.signed_note_bytes, b"cm");
     }
 }

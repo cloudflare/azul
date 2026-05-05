@@ -29,6 +29,8 @@
 //! [`MirrorState`]: crate::mirror_state_do
 //! [tiles]: https://c2sp.org/tlog-tiles
 
+use serde::Serialize;
+use serde_with::{base64::Base64 as Base64As, serde_as};
 use signed_note::NoteError;
 use tlog_checkpoint::CheckpointText;
 use tlog_witness::{parse_add_checkpoint_request, AddCheckpointRequest, CONTENT_TYPE_TLOG_SIZE};
@@ -36,7 +38,7 @@ use tlog_witness::{parse_add_checkpoint_request, AddCheckpointRequest, CONTENT_T
 use worker::*;
 
 use crate::{
-    log_verifiers,
+    load_mirror_public_key_der, load_mirror_signer, log_verifiers,
     mirror_state_do::{state_stub, PendingCheckpoint, UpdatePendingRequest},
     CONFIG,
 };
@@ -62,6 +64,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/add-checkpoint", |req, ctx| async move {
             add_checkpoint(req, ctx.env).await
         })
+        .get("/metadata", |_req, ctx| metadata(&ctx.env))
         .get("/", |_req, _ctx| {
             Response::ok(format!(
                 "{} — c2sp.org/tlog-mirror mirror\n",
@@ -70,6 +73,86 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .run(req, env)
         .await
+}
+
+/// Response body for the `/metadata` endpoint.
+///
+/// Publishes the mirror's identity and the per-log configuration so
+/// clients can learn what logs this mirror mirrors and what URL
+/// prefixes to use. Symmetric with the witness's `/metadata` shape,
+/// with a `mirror_algorithm` field added so clients know whether to
+/// expect `cosignature/v1` or `subtree/v1` cosignatures.
+#[serde_as]
+#[derive(Serialize)]
+struct MetadataResponse<'a> {
+    mirror_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    /// DER-encoded `SubjectPublicKeyInfo` for the mirror's verifying
+    /// key. Algorithm is identified by `mirror_algorithm`.
+    #[serde_as(as = "Base64As")]
+    mirror_public_key: &'a [u8],
+    /// `"cosignature/v1"` (Ed25519) or `"subtree/v1"` (ML-DSA-44).
+    /// See [c2sp.org/tlog-cosignature](https://c2sp.org/tlog-cosignature).
+    mirror_algorithm: &'a str,
+    submission_prefix: &'a str,
+    monitoring_prefix: &'a str,
+    logs: Vec<LogMetadata<'a>>,
+}
+
+#[serde_as]
+#[derive(Serialize)]
+struct LogMetadata<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    origin: &'a str,
+    /// DER-encoded `SubjectPublicKeyInfo` blobs for the log's trusted
+    /// keys.
+    #[serde_as(as = "Vec<Base64As>")]
+    log_public_keys: Vec<&'a [u8]>,
+}
+
+/// Build the per-log metadata entries from the worker's `CONFIG`
+/// `logs` map, sorted by origin so the result has a deterministic
+/// order regardless of `HashMap` iteration order. The deterministic
+/// order matters for diff-based monitoring of `/metadata` and for any
+/// client that hashes the response (cache keys, etc.).
+///
+/// Split out from [`metadata`] so the sort can be unit-tested without
+/// a `worker::Env`.
+fn metadata_logs(
+    logs: &std::collections::HashMap<String, config::LogParams>,
+) -> Vec<LogMetadata<'_>> {
+    let mut out: Vec<LogMetadata> = logs
+        .iter()
+        .map(|(origin, p)| LogMetadata {
+            description: p.description.as_deref(),
+            origin,
+            log_public_keys: p.log_public_keys.iter().map(Vec::as_slice).collect(),
+        })
+        .collect();
+    out.sort_by_key(|l| l.origin);
+    out
+}
+
+/// `GET /metadata` handler.
+fn metadata(env: &Env) -> Result<Response> {
+    let mirror_public_key = load_mirror_public_key_der(env)?;
+    let mirror_algorithm = load_mirror_signer(env)?.algorithm();
+    let logs = metadata_logs(&CONFIG.logs);
+    let body = MetadataResponse {
+        mirror_name: &CONFIG.mirror_name,
+        description: CONFIG.description.as_deref(),
+        mirror_public_key,
+        mirror_algorithm,
+        submission_prefix: &CONFIG.submission_prefix,
+        monitoring_prefix: CONFIG
+            .monitoring_prefix
+            .as_deref()
+            .unwrap_or(&CONFIG.submission_prefix),
+        logs,
+    };
+    Response::from_json(&body)
 }
 
 /// Handle `POST /add-checkpoint`.
@@ -295,4 +378,113 @@ fn tlog_size_conflict(current: &PendingCheckpoint) -> Result<Response> {
     Ok(Response::from_body(ResponseBody::Body(body.into_bytes()))?
         .with_status(409)
         .with_headers(headers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogMetadata, MetadataResponse};
+
+    /// `description` is optional in the `/metadata` response. When
+    /// absent it MUST be omitted from the JSON body (not serialized as
+    /// `null`) so the wire shape matches what clients expect.
+    #[test]
+    fn metadata_description_omitted_when_none() {
+        let log = LogMetadata {
+            description: None,
+            origin: "example.com/log",
+            log_public_keys: vec![b"spki".as_slice()],
+        };
+        let body = MetadataResponse {
+            mirror_name: "example.com/mirror",
+            description: None,
+            mirror_public_key: b"mirror-spki",
+            mirror_algorithm: "subtree/v1",
+            submission_prefix: "https://mirror.example.com/",
+            monitoring_prefix: "https://mirror.example.com/",
+            logs: vec![log],
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            !json.contains("\"description\""),
+            "description should be omitted when None, got: {json}"
+        );
+    }
+
+    #[test]
+    fn metadata_description_present_when_some() {
+        let log = LogMetadata {
+            description: Some("a log"),
+            origin: "example.com/log",
+            log_public_keys: vec![b"spki".as_slice()],
+        };
+        let body = MetadataResponse {
+            mirror_name: "example.com/mirror",
+            description: Some("a mirror"),
+            mirror_public_key: b"mirror-spki",
+            mirror_algorithm: "subtree/v1",
+            submission_prefix: "https://mirror.example.com/",
+            monitoring_prefix: "https://mirror.example.com/",
+            logs: vec![log],
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"description\":\"a mirror\""), "{json}");
+        assert!(json.contains("\"description\":\"a log\""), "{json}");
+    }
+
+    /// Pin the `mirror_algorithm` field shape — it's a stable string
+    /// that clients use to pick a verifier. Must be exactly
+    /// `cosignature/v1` or `subtree/v1`.
+    #[test]
+    fn metadata_includes_mirror_algorithm() {
+        let body = MetadataResponse {
+            mirror_name: "example.com/mirror",
+            description: None,
+            mirror_public_key: b"k",
+            mirror_algorithm: "subtree/v1",
+            submission_prefix: "https://m.example/",
+            monitoring_prefix: "https://m.example/",
+            logs: vec![],
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            json.contains("\"mirror_algorithm\":\"subtree/v1\""),
+            "missing or misnamed mirror_algorithm: {json}"
+        );
+    }
+
+    /// `metadata_logs` returns entries sorted by origin so the
+    /// `/metadata` response body is deterministic across worker
+    /// isolates (regardless of `HashMap` iteration order).
+    #[test]
+    fn metadata_logs_sorted_by_origin() {
+        use std::collections::HashMap;
+        let mut logs = HashMap::new();
+        logs.insert(
+            "z.example/log".to_owned(),
+            config::LogParams {
+                description: None,
+                log_public_keys: vec![b"z-spki".to_vec()],
+            },
+        );
+        logs.insert(
+            "a.example/log".to_owned(),
+            config::LogParams {
+                description: None,
+                log_public_keys: vec![b"a-spki".to_vec()],
+            },
+        );
+        logs.insert(
+            "m.example/log".to_owned(),
+            config::LogParams {
+                description: None,
+                log_public_keys: vec![b"m-spki".to_vec()],
+            },
+        );
+        let out = super::metadata_logs(&logs);
+        let origins: Vec<&str> = out.iter().map(|l| l.origin).collect();
+        assert_eq!(
+            origins,
+            vec!["a.example/log", "m.example/log", "z.example/log"]
+        );
+    }
 }
