@@ -1707,6 +1707,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror_worker"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "console_error_panic_hook",
+ "console_log",
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "hex",
+ "jsonschema",
+ "log",
+ "mirror_worker_config",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "signed_note",
+ "tlog_checkpoint",
+ "tlog_core",
+ "tlog_witness",
+ "worker",
+]
+
+[[package]]
+name = "mirror_worker_config"
+version = "0.2.0"
+dependencies = [
+ "ed25519-dalek",
+ "serde",
+ "serde_with",
+ "signed_note",
+]
+
+[[package]]
 name = "ml-dsa"
 version = "0.1.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

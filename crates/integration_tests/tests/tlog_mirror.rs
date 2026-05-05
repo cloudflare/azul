@@ -1,0 +1,447 @@
+// Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
+
+//! End-to-end integration tests for the `mirror_worker` implementation of
+//! [c2sp.org/tlog-mirror][spec].
+//!
+//! These tests require a running `wrangler dev` instance of `mirror_worker`
+//! on `localhost:8787` (or `BASE_URL`), backed by **fresh** persistent state.
+//! Delete `crates/mirror_worker/.wrangler/state/` between runs to reset the
+//! per-origin pending checkpoint the mirror has accepted. CI does this
+//! automatically.
+//!
+//! # Test layout
+//!
+//! The mirror's `add-checkpoint` API is deeply stateful: each successful
+//! submission advances a per-origin pending `(size, hash, signed_note_bytes)`
+//! that every subsequent submission must be consistent with. Giving each
+//! case its own `#[tokio::test]` would cross-pollute that state
+//! unpredictably (tests run in a non-deterministic order by default), so
+//! we collapse the scenarios into a single `#[tokio::test]` that threads
+//! one in-memory [`ToyLog`] through every step in order. Each step
+//! asserts the expected HTTP status and then (if the call was a
+//! successful advance) updates the local log to match what the mirror
+//! just recorded.
+//!
+//! Steps covered (happy-path + basic error codes per the spec):
+//!
+//! 1. `GET /` returns the configured mirror identity.
+//! 2. First `add-checkpoint` (`old=0`, no proof) → 200 with empty body.
+//! 3. Second `add-checkpoint` with consistency proof → 200, advancing
+//!    pending state.
+//! 4. Stale `old_size` → 409 with `text/x.tlog.size` body.
+//! 5. Unknown origin → 404.
+//! 6. Signature from untrusted key → 403.
+//! 7. Trusted `(name, id)` but garbage signature bytes → 403.
+//! 8. Bad consistency proof (right size, wrong hashes) → 422.
+//! 9. `old > checkpoint.size` → 400.
+//! 10. Malformed body (missing blank line) → 400.
+//!
+//! Per spec, the mirror MUST NOT cosign on `add-checkpoint`; the response
+//! body for a successful submission is empty. Cosignature emission
+//! happens only on `add-entries` once entries catch up to the pending
+//! tree size — that's a future slice and a future test.
+//!
+//! # Key management
+//!
+//! The SPKI committed to `crates/mirror_worker/config.dev.json` MUST
+//! match the dev log key embedded below. (The mirror reuses the same
+//! Ed25519 dev keypair as the witness — see
+//! `crates/mirror_worker/src/lib.rs::dev_config_tests`.) If the configs
+//! diverge the mirror will 403 the tests with "No valid signatures from
+//! trusted log keys".
+//!
+//! [spec]: https://c2sp.org/tlog-mirror
+
+use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey as Ed25519SigningKey};
+use rand::rng;
+use signed_note::{KeyName, Note, NoteSignature};
+use std::time::Duration;
+use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
+use tlog_core::{
+    consistency_proof, record_hash, stored_hashes, tree_hash, Hash, HashReader, TlogError,
+    HASH_SIZE,
+};
+use tlog_witness::{serialize_add_checkpoint_request, CONTENT_TYPE_TLOG_SIZE};
+
+// ---------------------------------------------------------------------------
+// Test fixtures: log origin + Ed25519 log key
+// ---------------------------------------------------------------------------
+
+/// Origin the mirror is configured to accept checkpoints for (see
+/// `crates/mirror_worker/config.dev.json`).
+const LOG_ORIGIN: &str = "example.com/log1";
+
+/// PKCS#8 PEM for the Ed25519 log key. The corresponding SPKI is
+/// committed in `crates/mirror_worker/config.dev.json` (and identically
+/// in `crates/witness_worker/config.dev.json`) as the only entry of
+/// `log_public_keys`. DEV-ONLY — this keypair is published in the repo
+/// and MUST NOT be used for anything other than these integration tests.
+const LOG_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+    MC4CAQAwBQYDK2VwBCIEIA2VCmSeCNVJTboEACcXvVahZHSHEJDxSl94aej1Q8hQ\n\
+    -----END PRIVATE KEY-----\n";
+
+fn log_signer() -> Ed25519CheckpointSigner {
+    let sk = Ed25519SigningKey::from_pkcs8_pem(LOG_SIGNING_KEY_PEM).expect("parse dev log key");
+    let name = KeyName::new(LOG_ORIGIN.to_owned()).expect("KeyName for origin");
+    Ed25519CheckpointSigner::new(name, sk)
+}
+
+/// Generate a fresh Ed25519 log signer that the mirror does *not* trust
+/// — used by the 403 step.
+fn untrusted_log_signer() -> Ed25519CheckpointSigner {
+    let sk = Ed25519SigningKey::generate(&mut rng());
+    let name = KeyName::new(LOG_ORIGIN.to_owned()).unwrap();
+    Ed25519CheckpointSigner::new(name, sk)
+}
+
+// ---------------------------------------------------------------------------
+// Toy log: maintains enough state to produce valid checkpoints and
+// consistency proofs for whatever sequence of leaves the test has
+// pushed. Identical shape to the witness integration test.
+// ---------------------------------------------------------------------------
+
+struct StoredHashes(Vec<Hash>);
+
+impl HashReader for StoredHashes {
+    fn read_hashes(&self, indexes: &[u64]) -> std::result::Result<Vec<Hash>, TlogError> {
+        indexes
+            .iter()
+            .map(|&i| {
+                self.0
+                    .get(usize::try_from(i).unwrap())
+                    .copied()
+                    .ok_or(TlogError::IndexesNotInTree)
+            })
+            .collect()
+    }
+}
+
+struct ToyLog {
+    n: u64,
+    stored: StoredHashes,
+}
+
+impl ToyLog {
+    fn new() -> Self {
+        Self {
+            n: 0,
+            stored: StoredHashes(Vec::new()),
+        }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        let new = stored_hashes(self.n, data, &self.stored).expect("stored_hashes");
+        self.stored.0.extend(new);
+        self.n += 1;
+    }
+
+    fn size(&self) -> u64 {
+        self.n
+    }
+
+    fn root(&self, size: u64) -> Hash {
+        tree_hash(size, &self.stored).expect("tree_hash")
+    }
+
+    fn sign_checkpoint(&self, signer: &Ed25519CheckpointSigner) -> Vec<u8> {
+        let size = self.size();
+        let hash = self.root(size);
+        let tree = TreeWithTimestamp::new(size, hash, now_millis());
+        tree.sign(LOG_ORIGIN, &[], &[signer], &mut rng())
+            .expect("sign checkpoint")
+    }
+
+    /// `consistency_proof(old_size → current)`. Wraps
+    /// `tlog_core::consistency_proof`, whose argument order is reversed
+    /// from RFC 6962 convention (larger size first).
+    fn consistency_proof(&self, old_size: u64) -> Vec<Hash> {
+        let size = self.size();
+        if old_size == 0 || old_size == size {
+            return Vec::new();
+        }
+        consistency_proof(size, old_size, &self.stored).expect("consistency_proof")
+    }
+}
+
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP plumbing
+// ---------------------------------------------------------------------------
+
+fn base_url() -> String {
+    std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8787".to_string())
+}
+
+struct AddCheckpointResult {
+    status: u16,
+    content_type: Option<String>,
+    body: Vec<u8>,
+}
+
+async fn post_add_checkpoint(body: &[u8]) -> AddCheckpointResult {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/add-checkpoint", base_url()))
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(body.to_vec())
+        .send()
+        .await
+        .expect("add-checkpoint request");
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body = resp.bytes().await.expect("response bytes").to_vec();
+    AddCheckpointResult {
+        status,
+        content_type,
+        body,
+    }
+}
+
+async fn fetch_root() -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/", base_url()))
+        .send()
+        .await
+        .expect("root request");
+    assert_eq!(resp.status().as_u16(), 200, "root status");
+    resp.text().await.expect("root text")
+}
+
+async fn wait_for_mirror() {
+    for _ in 0..30 {
+        if reqwest::Client::new()
+            .get(format!("{}/", base_url()))
+            .send()
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    panic!("mirror did not become ready at {}", base_url());
+}
+
+// ---------------------------------------------------------------------------
+// The whole test suite, as one ordered sequence.
+// ---------------------------------------------------------------------------
+
+// Scenarios are intentionally collapsed into one `#[tokio::test]` so
+// they thread through a single `ToyLog` — see the module-level comment
+// above. That makes this function long by design.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn tlog_mirror_end_to_end() {
+    wait_for_mirror().await;
+
+    // ----------------------- (1) GET / -----------------------
+    //
+    // The mirror does not yet expose a `/metadata` endpoint; this slice
+    // ships only `add-checkpoint` and a status root. Pin that the root
+    // identifies the configured mirror.
+    let root = fetch_root().await;
+    assert!(
+        root.contains("dev.mirror.example") && root.contains("c2sp.org/tlog-mirror"),
+        "root does not look like a mirror status page: {root:?}",
+    );
+
+    let signer = log_signer();
+    let mut log = ToyLog::new();
+
+    // ----------------------- (2) First submission: old=0 -----------------------
+    log.push(b"leaf 0");
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "first submission: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+        // Mirror MUST NOT cosign on add-checkpoint; the response body is
+        // empty. (Spec: "responding with an empty response body".)
+        assert!(
+            r.body.is_empty(),
+            "mirror response body must be empty, got: {:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----------------------- (3) Second submission with consistency proof -----------------------
+    let old_size = log.size();
+    log.push(b"leaf 1");
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let proof = log.consistency_proof(old_size);
+        let body = serialize_add_checkpoint_request(old_size, &proof, &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "second submission: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+        assert!(r.body.is_empty(), "200 response body must be empty");
+    }
+
+    // ----------------------- (4) Stale old_size → 409 -----------------------
+    // At this point the mirror has recorded pending size = 2. Advance our
+    // local log to size = 4 and submit with old=1 (stale).
+    log.push(b"leaf 2");
+    log.push(b"leaf 3");
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let proof = log.consistency_proof(1);
+        let body = serialize_add_checkpoint_request(1, &proof, &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            409,
+            "stale old_size: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+        assert_eq!(
+            r.content_type.as_deref().map(str::trim),
+            Some(CONTENT_TYPE_TLOG_SIZE),
+            "409 must be Content-Type {CONTENT_TYPE_TLOG_SIZE}"
+        );
+        let size_str = std::str::from_utf8(&r.body).unwrap().trim_end_matches('\n');
+        let recorded: u64 = size_str.parse().expect("409 body is a decimal size");
+        assert_eq!(
+            recorded, 2,
+            "409 body must carry the mirror's latest pending size"
+        );
+    }
+
+    // ----------------------- (5) Unknown origin → 404 -----------------------
+    {
+        let sk = Ed25519SigningKey::generate(&mut rng());
+        let origin = "not.configured.example/log";
+        let name = KeyName::new(origin.to_owned()).unwrap();
+        let other_signer = Ed25519CheckpointSigner::new(name, sk);
+        let tree = TreeWithTimestamp::new(1, record_hash(b"x"), now_millis());
+        let cp = tree
+            .sign(origin, &[], &[&other_signer], &mut rng())
+            .unwrap();
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            404,
+            "unknown origin: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----------------------- (6) Untrusted key → 403 -----------------------
+    {
+        let other = untrusted_log_signer();
+        let tree = TreeWithTimestamp::new(1, record_hash(b"x"), now_millis());
+        let cp = tree.sign(LOG_ORIGIN, &[], &[&other], &mut rng()).unwrap();
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            403,
+            "untrusted key: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----- (7) Trusted (name, id) but garbage signature bytes → 403 -----
+    //
+    // Per c2sp.org/signed-note, a signature line that claims a trusted
+    // `(name, id)` but whose bytes fail to verify makes the note
+    // malformed. The mirror MUST surface this as 403 Forbidden (same
+    // as "no trusted signature at all"), matching the witness behaviour.
+    {
+        let verifier = signer.verifier();
+        let tree = TreeWithTimestamp::new(1, record_hash(b"x"), now_millis());
+        // Sign a valid checkpoint, then replace the log's real
+        // signature line with one carrying the right `(name, id)` but
+        // garbage bytes.
+        let cp = tree.sign(LOG_ORIGIN, &[], &[&signer], &mut rng()).unwrap();
+        let parsed = Note::from_bytes(&cp).unwrap();
+        let bogus = NoteSignature::new(verifier.name().clone(), verifier.key_id(), vec![0u8; 64]);
+        let tampered = Note::new(parsed.text(), &[bogus]).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &tampered).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            403,
+            "trusted key + bad sig bytes: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----------------------- (8) Bad consistency proof → 422 -----------------------
+    // Advance our local log by one more leaf so we need a proof to
+    // submit it, then hand-craft a wrong proof of the right length.
+    log.push(b"leaf 4");
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let correct = log.consistency_proof(2);
+        let bogus = vec![Hash([0u8; HASH_SIZE]); correct.len().max(1)];
+        let body = serialize_add_checkpoint_request(2, &bogus, &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "bad proof: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----------------------- (9) old_size > checkpoint.size → 400 -----------------------
+    {
+        // Build a small independent log so checkpoint.size is
+        // controllably small.
+        let mut small = ToyLog::new();
+        small.push(b"x");
+        let cp = small.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(999, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            400,
+            "old > checkpoint size: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // ----------------------- (10) Malformed body → 400 -----------------------
+    {
+        let r = post_add_checkpoint(b"old 0\n").await;
+        assert_eq!(
+            r.status,
+            400,
+            "malformed body: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+}
