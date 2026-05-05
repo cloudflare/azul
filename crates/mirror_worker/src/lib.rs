@@ -42,6 +42,7 @@ use tlog_mirror::TicketMacer;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+mod add_entries;
 mod frontend_worker;
 mod mirror_state_do;
 

@@ -11,6 +11,13 @@
 //!   with one spec-mandated exception: the mirror MUST NOT cosign in
 //!   this process. Successful responses have an empty body and HTTP
 //!   status 200.
+//! - `POST /add-entries` — [c2sp.org/tlog-mirror#add-entries][add-e].
+//!   Ingests entries against a known pending checkpoint. Currently a
+//!   parse-and-verify only implementation (slice C4a; see
+//!   [`crate::add_entries`]). Persistence and cosignature emission
+//!   land in C4b/C4c.
+//! - `GET /metadata` — mirror identity, ML-DSA-44 SPKI,
+//!   `mirror_algorithm`, prefixes, and the per-log configuration.
 //! - `GET /` — root status string. Convenience only; not part of the
 //!   spec.
 //!
@@ -19,13 +26,11 @@
 //! of the "check old-pending-size, verify proof, update pending"
 //! sequence follows from the DO's single-threaded fetch handler.
 //!
-//! Future slices will add `POST /add-entries` (entry ingestion + mirror
-//! cosignature emission), `GET /metadata` (mirror identity + per-log
-//! configuration, including the ML-DSA-44 mirror cosigner public key),
-//! and the [tlog-tiles][tiles] read interface served at
-//! `<monitoring_prefix>/<encoded origin>/...`.
+//! Future slices will add the [tlog-tiles][tiles] read interface
+//! served at `<monitoring_prefix>/<encoded origin>/...`.
 //!
 //! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
+//! [add-e]: https://c2sp.org/tlog-mirror#add-entries
 //! [`MirrorState`]: crate::mirror_state_do
 //! [tiles]: https://c2sp.org/tlog-tiles
 
@@ -63,6 +68,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     Router::new()
         .post_async("/add-checkpoint", |req, ctx| async move {
             add_checkpoint(req, ctx.env).await
+        })
+        .post_async("/add-entries", |req, ctx| async move {
+            crate::add_entries::add_entries(req, ctx.env).await
         })
         .get("/metadata", |_req, ctx| metadata(&ctx.env))
         .get("/", |_req, _ctx| {
