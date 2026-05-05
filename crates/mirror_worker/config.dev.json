@@ -1,0 +1,15 @@
+{
+    "logging_level": "info",
+    "mirror_name": "dev.mirror.example",
+    "description": "Local-dev mirror for smoke testing",
+    "submission_prefix": "http://localhost:8787/",
+    "monitoring_prefix": "http://localhost:8787/",
+    "logs": {
+        "example.com/log1": {
+            "description": "Dev-only log. SPKI matches the keypair embedded in tests/tlog_mirror.rs.",
+            "log_public_keys": [
+                "MCowBQYDK2VwAyEAzdnT3CQc3ag2fmKnO1ntodIm0wfsymDkK89IOrHKLWc="
+            ]
+        }
+    }
+}
