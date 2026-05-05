@@ -25,7 +25,8 @@
 //!
 //! Steps covered (happy-path + basic error codes per the spec):
 //!
-//! 1. `GET /` returns the configured mirror identity.
+//! 1. `GET /metadata` returns the mirror's identity, ML-DSA-44 SPKI,
+//!    `mirror_algorithm = "subtree/v1"`, and the configured log list.
 //! 2. First `add-checkpoint` (`old=0`, no proof) → 200 with empty body.
 //! 3. Second `add-checkpoint` with consistency proof → 200, advancing
 //!    pending state.
@@ -55,6 +56,8 @@
 
 use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey as Ed25519SigningKey};
 use rand::rng;
+use serde::Deserialize;
+use serde_with::{base64::Base64, serde_as};
 use signed_note::{KeyName, Note, NoteSignature};
 use std::time::Duration;
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
@@ -212,21 +215,46 @@ async fn post_add_checkpoint(body: &[u8]) -> AddCheckpointResult {
     }
 }
 
-async fn fetch_root() -> String {
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct MetadataResponse {
+    mirror_name: String,
+    #[allow(dead_code)]
+    description: Option<String>,
+    #[serde_as(as = "Base64")]
+    mirror_public_key: Vec<u8>,
+    mirror_algorithm: String,
+    submission_prefix: String,
+    #[allow(dead_code)]
+    monitoring_prefix: String,
+    logs: Vec<LogMetadata>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct LogMetadata {
+    #[allow(dead_code)]
+    description: Option<String>,
+    origin: String,
+    #[serde_as(as = "Vec<Base64>")]
+    log_public_keys: Vec<Vec<u8>>,
+}
+
+async fn fetch_metadata() -> MetadataResponse {
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/", base_url()))
+        .get(format!("{}/metadata", base_url()))
         .send()
         .await
-        .expect("root request");
-    assert_eq!(resp.status().as_u16(), 200, "root status");
-    resp.text().await.expect("root text")
+        .expect("metadata request");
+    assert_eq!(resp.status().as_u16(), 200, "metadata status");
+    resp.json().await.expect("metadata json")
 }
 
 async fn wait_for_mirror() {
     for _ in 0..30 {
         if reqwest::Client::new()
-            .get(format!("{}/", base_url()))
+            .get(format!("{}/metadata", base_url()))
             .send()
             .await
             .is_ok()
@@ -250,16 +278,21 @@ async fn wait_for_mirror() {
 async fn tlog_mirror_end_to_end() {
     wait_for_mirror().await;
 
-    // ----------------------- (1) GET / -----------------------
-    //
-    // The mirror does not yet expose a `/metadata` endpoint; this slice
-    // ships only `add-checkpoint` and a status root. Pin that the root
-    // identifies the configured mirror.
-    let root = fetch_root().await;
-    assert!(
-        root.contains("dev.mirror.example") && root.contains("c2sp.org/tlog-mirror"),
-        "root does not look like a mirror status page: {root:?}",
+    // ----------------------- (1) GET /metadata -----------------------
+    let meta = fetch_metadata().await;
+    assert_eq!(meta.mirror_name, "dev.mirror.example");
+    assert!(!meta.mirror_public_key.is_empty());
+    assert_eq!(
+        meta.mirror_algorithm, "subtree/v1",
+        "dev mirror loads ML-DSA-44 from .dev.vars; algorithm must surface as subtree/v1",
     );
+    assert!(meta.submission_prefix.starts_with("http"));
+    let log_meta = meta
+        .logs
+        .iter()
+        .find(|l| l.origin == LOG_ORIGIN)
+        .unwrap_or_else(|| panic!("metadata does not list the {LOG_ORIGIN} origin"));
+    assert_eq!(log_meta.log_public_keys.len(), 1);
 
     let signer = log_signer();
     let mut log = ToyLog::new();
