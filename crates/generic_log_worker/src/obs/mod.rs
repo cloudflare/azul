@@ -2,6 +2,7 @@ use axum::http::header;
 
 pub mod logs;
 pub mod metrics;
+pub mod sentry;
 
 #[derive(Clone)]
 pub struct Wshim {

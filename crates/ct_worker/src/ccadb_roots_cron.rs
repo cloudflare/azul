@@ -17,7 +17,7 @@ use x509_cert::{
 };
 use x509_util::CertPool;
 
-use crate::CONFIG;
+use crate::{CONFIG, init_sentry};
 
 // A KV namespace with this binding must be configured in 'wrangler.jsonc' if
 // any log shards have 'enable_ccadb_roots=true'.
@@ -29,25 +29,35 @@ pub(crate) fn ccadb_roots_filename(name: &str) -> String {
 
 #[event(scheduled)]
 async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let mut keys = Vec::new();
-    for (name, params) in &CONFIG.logs {
-        if params.enable_ccadb_roots {
-            keys.push(ccadb_roots_filename(name));
+    init_sentry(&env);
+    generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
+        let mut keys = Vec::new();
+        for (name, params) in &CONFIG.logs {
+            if params.enable_ccadb_roots {
+                keys.push(ccadb_roots_filename(name));
+            }
         }
-    }
-    log::info!("Updating CCADB roots for keys: {keys:?}");
-    let kv = match env.kv(CCADB_ROOTS_NAMESPACE) {
-        Ok(kv) => kv,
-        Err(e) => {
-            log::warn!("Failed to get KV namespace '{CCADB_ROOTS_NAMESPACE}': {e}");
-            return;
+        log::info!("Updating CCADB roots for keys: {keys:?}");
+        let kv = match env.kv(CCADB_ROOTS_NAMESPACE) {
+            Ok(kv) => kv,
+            Err(e) => {
+                log::warn!("Failed to get KV namespace '{CCADB_ROOTS_NAMESPACE}': {e}");
+                return;
+            }
+        };
+        if let Err(e) = update_ccadb_roots(&keys, &kv).await {
+            log::warn!("Failed to update CCADB roots: {e}");
+            generic_log_worker::obs::sentry::capture_error_and_flush(
+                &e,
+                sentry_core::Level::Error,
+                &[("handler", "scheduled"), ("cron", "ccadb_roots")],
+            )
+            .await;
+        } else {
+            log::info!("Successfully updated CCADB roots");
         }
-    };
-    if let Err(e) = update_ccadb_roots(&keys, &kv).await {
-        log::warn!("Failed to update CCADB roots: {e}");
-    } else {
-        log::info!("Successfully updated CCADB roots");
-    }
+    })
+    .await;
 }
 
 /// Update CCADB roots at each of the provided keys. Roots are never removed

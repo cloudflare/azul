@@ -12,7 +12,7 @@
                 // DEPLOY_ENV is used in build.rs to select the per-environment
                 // config. Change '--release' to '--dev' to compile with debug
                 // symbols.
-                "command": "cargo install -q worker-build@0.7.5 && DEPLOY_ENV=dev worker-build --release"
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev worker-build --release --panic-unwind"
             },
             "workers_dev": true,
             "durable_objects": {

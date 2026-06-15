@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{CONFIG, load_checkpoint_cosigner, load_origin};
+use crate::{CONFIG, init_sentry, load_checkpoint_cosigner, load_origin};
 use bootstrap_mtc_api::BootstrapMtcPendingLogEntry;
 use generic_log_worker::{CLEANER_BINDING, CleanerConfig, GenericCleaner, get_durable_object_name};
 use signed_note::VerifierList;
@@ -11,6 +11,10 @@ use worker::*;
 
 #[durable_object(alarm)]
 struct Cleaner(GenericCleaner);
+
+// SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
+// is required by `wasm-bindgen` when building with `panic=unwind`.
+impl std::panic::RefUnwindSafe for Cleaner {}
 
 impl DurableObject for Cleaner {
     fn new(state: State, env: Env) -> Self {
@@ -31,14 +35,23 @@ impl DurableObject for Cleaner {
             clean_interval: Duration::from_secs(params.clean_interval_secs),
         };
 
+        init_sentry(&env);
         Cleaner(GenericCleaner::new(state, &env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        self.0.fetch(req).await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_fetch"), ("do_type", "cleaner")],
+            self.0.fetch(req),
+        )
+        .await
     }
 
     async fn alarm(&self) -> Result<Response> {
-        self.0.alarm().await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_alarm"), ("do_type", "cleaner")],
+            self.0.alarm(),
+        )
+        .await
     }
 }

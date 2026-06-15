@@ -207,6 +207,16 @@ impl WitnessSigner {
 /// requests reuse the parsed key.
 static WITNESS_SIGNER: OnceLock<WitnessSigner> = OnceLock::new();
 
+/// Initialize sentry from the `SENTRY_DSN` environment variable.
+///
+/// Does nothing when the variable is absent or empty, allowing deployments
+/// without sentry support.
+pub(crate) fn init_sentry(env: &Env) {
+    if let Ok(dsn) = env.var("SENTRY_DSN") {
+        let _ = generic_log_worker::obs::sentry::init(&dsn.to_string(), env!("DEPLOY_ENV"));
+    }
+}
+
 /// Load (or return the already-cached) witness signer.
 ///
 /// The signing algorithm is derived from the OID in the

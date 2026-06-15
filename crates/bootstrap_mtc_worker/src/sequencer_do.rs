@@ -5,7 +5,9 @@
 
 use std::{collections::VecDeque, time::Duration};
 
-use crate::{BootstrapMtcSequenceMetadata, CONFIG, load_checkpoint_cosigner, load_origin};
+use crate::{
+    BootstrapMtcSequenceMetadata, CONFIG, init_sentry, load_checkpoint_cosigner, load_origin,
+};
 use bootstrap_mtc_api::{
     BootstrapMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY,
     LandmarkSequence,
@@ -25,6 +27,10 @@ use worker::*;
 
 #[durable_object(alarm)]
 struct Sequencer(GenericSequencer<BootstrapMtcLogEntry, BootstrapMtcSequenceMetadata>);
+
+// SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
+// is required by `wasm-bindgen` when building with `panic=unwind`.
+impl std::panic::RefUnwindSafe for Sequencer {}
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
@@ -49,15 +55,24 @@ impl DurableObject for Sequencer {
             checkpoint_callback: checkpoint_callback(&env, name),
         };
 
+        init_sentry(&env);
         Sequencer(GenericSequencer::new(state, env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        self.0.fetch(req).await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_fetch"), ("do_type", "sequencer")],
+            self.0.fetch(req),
+        )
+        .await
     }
 
     async fn alarm(&self) -> Result<Response> {
-        self.0.alarm().await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_alarm"), ("do_type", "sequencer")],
+            self.0.alarm(),
+        )
+        .await
     }
 }
 

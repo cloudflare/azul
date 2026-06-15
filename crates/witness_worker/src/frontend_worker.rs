@@ -77,20 +77,25 @@ async fn fetch(
     env: Env,
     ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
+    crate::init_sentry(&env);
     let wshim = Wshim::from_env(&env);
     let registry = metrics::registry();
-    let response = Router::new()
-        .route("/add-checkpoint", post(add_checkpoint))
-        .route("/sign-subtree", post(sign_subtree))
-        .route("/metadata", get(metadata))
-        .route("/", get(root))
-        .layer(middleware::from_fn_with_state(
-            (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
-            request_metrics,
-        ))
-        .with_state(env)
-        .call(req)
-        .await?;
+    let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
+        Router::new()
+            .route("/add-checkpoint", post(add_checkpoint))
+            .route("/sign-subtree", post(sign_subtree))
+            .route("/metadata", get(metadata))
+            .route("/", get(root))
+            .layer(middleware::from_fn_with_state(
+                (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
+                request_metrics,
+            ))
+            .with_state(env)
+            .call(req)
+            .await
+    })
+    .await?;
+    generic_log_worker::obs::sentry::flush().await;
     if let Ok(wshim) = wshim {
         ctx.wait_until(async move {
             wshim.flush(&generic_log_worker::obs::logs::LOGGER).await;

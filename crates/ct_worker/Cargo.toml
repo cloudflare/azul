@@ -37,7 +37,9 @@ config = { path = "./config", package = "ct_worker_config" }
 generic_log_worker.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
+getrandom_03.workspace = true
 log.workspace = true
+sentry-core.workspace = true
 p256.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -59,3 +61,6 @@ csv.workspace = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(wasm_bindgen_unstable_test_coverage)',
 ] }
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom", "getrandom_03", "sentry-core"]

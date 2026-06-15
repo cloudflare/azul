@@ -26,7 +26,7 @@ jobs:
         run: cargo install wasm-pack@0.13.1 --locked
 
       - name: Install worker-build
-        run: cargo install worker-build@0.7.5 --locked
+        run: cargo install worker-build@0.8.5 --locked
 
       - name: Build ct_worker (dev environment)
         working-directory: crates/ct_worker
@@ -74,7 +74,7 @@ jobs:
         run: cargo install wasm-pack@0.13.1 --locked
 
       - name: Install worker-build
-        run: cargo install worker-build@0.7.5 --locked
+        run: cargo install worker-build@0.8.5 --locked
 
       - name: Build bootstrap_mtc_worker (dev environment, with dev-bootstrap-roots)
         working-directory: crates/bootstrap_mtc_worker
@@ -123,7 +123,7 @@ jobs:
       # uses worker-build for its wasm build, unlike the CT and MTC jobs
       # which also compile *_wasm sibling crates that need wasm-pack.
       - name: Install worker-build
-        run: cargo install worker-build@0.7.5 --locked
+        run: cargo install worker-build@0.8.5 --locked
 
       - name: Build witness_worker (dev environment)
         working-directory: crates/witness_worker

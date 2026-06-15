@@ -86,12 +86,27 @@ struct WitnessState {
     state: State,
 }
 
+// SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
+// is required by `wasm-bindgen` when building with `panic=unwind`.
+impl std::panic::RefUnwindSafe for WitnessState {}
+
 impl DurableObject for WitnessState {
-    fn new(state: State, _env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
+        crate::init_sentry(&env);
         Self { state }
     }
 
-    async fn fetch(&self, mut req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_fetch"), ("do_type", "witness_state")],
+            self.fetch_inner(req),
+        )
+        .await
+    }
+}
+
+impl WitnessState {
+    async fn fetch_inner(&self, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Post, "/check-and-update") => {

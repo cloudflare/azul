@@ -24,31 +24,49 @@ pub(crate) const CCADB_ROOTS_FILENAME: &str = "mtc_bootstrap_roots.pem";
 
 #[event(scheduled)]
 async fn main(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    // Update CCADB roots
-    log::info!("Updating CCADB roots");
-    match env.kv(CCADB_ROOTS_NAMESPACE) {
-        Ok(kv) => {
-            if let Err(e) = update_ccadb_roots(&kv).await {
-                log::warn!("Failed to update CCADB roots: {e}");
-            } else {
-                log::info!("Successfully updated CCADB roots");
+    crate::init_sentry(&env);
+    generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
+        // Update CCADB roots
+        log::info!("Updating CCADB roots");
+        match env.kv(CCADB_ROOTS_NAMESPACE) {
+            Ok(kv) => {
+                if let Err(e) = update_ccadb_roots(&kv).await {
+                    log::warn!("Failed to update CCADB roots: {e}");
+                    generic_log_worker::obs::sentry::capture_error_and_flush(
+                        &e,
+                        sentry_core::Level::Error,
+                        &[("handler", "scheduled"), ("cron", "ccadb_roots")],
+                    )
+                    .await;
+                } else {
+                    log::info!("Successfully updated CCADB roots");
+                }
             }
+            Err(e) => log::warn!("Failed to get KV namespace '{CCADB_ROOTS_NAMESPACE}': {e}"),
         }
-        Err(e) => log::warn!("Failed to get KV namespace '{CCADB_ROOTS_NAMESPACE}': {e}"),
-    }
 
-    // Update CT logs for SCT validation
-    log::info!("Updating CT logs");
-    match env.kv(crate::ct_logs_cron::CT_LOGS_NAMESPACE) {
-        Ok(kv) => match crate::ct_logs_cron::update_ct_logs(&kv).await {
-            Ok(()) => log::info!("Successfully updated CT logs"),
-            Err(e) => log::warn!("Failed to update CT logs: {e}"),
-        },
-        Err(e) => log::warn!(
-            "Failed to get KV namespace '{}': {e}",
-            crate::ct_logs_cron::CT_LOGS_NAMESPACE
-        ),
-    }
+        // Update CT logs for SCT validation
+        log::info!("Updating CT logs");
+        match env.kv(crate::ct_logs_cron::CT_LOGS_NAMESPACE) {
+            Ok(kv) => match crate::ct_logs_cron::update_ct_logs(&kv).await {
+                Ok(()) => log::info!("Successfully updated CT logs"),
+                Err(e) => {
+                    log::warn!("Failed to update CT logs: {e}");
+                    generic_log_worker::obs::sentry::capture_error_and_flush(
+                        &e,
+                        sentry_core::Level::Error,
+                        &[("handler", "scheduled"), ("cron", "ct_logs")],
+                    )
+                    .await;
+                }
+            },
+            Err(e) => log::warn!(
+                "Failed to get KV namespace '{}': {e}",
+                crate::ct_logs_cron::CT_LOGS_NAMESPACE
+            ),
+        }
+    })
+    .await;
 }
 
 /// Update CCADB roots at each of the provided keys. Roots are pruned to match
