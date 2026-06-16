@@ -15,10 +15,11 @@ use der::{
     Any, Encode, Tag,
 };
 use generic_log_worker::{
-    batcher_id_from_lookup_key, deserialize, get_durable_object_stub, init_logging,
-    load_public_bucket,
+    batcher_id_from_lookup_key, deserialize,
+    frontend::request_metrics,
+    get_durable_object_stub, init_logging, load_public_bucket,
     log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
-    obs::Wshim,
+    obs::{metrics, Wshim},
     serialize,
     util::{now_millis, WorkerByteStream},
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
@@ -37,6 +38,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
+    middleware,
     response::{AppendHeaders, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -99,6 +101,7 @@ async fn main(
     ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     let wshim = Wshim::from_env(&env);
+    let registry = metrics::registry();
     let response = Router::new()
         .route("/logs/{log}/get-roots", get(get_roots))
         .route("/logs/{log}/add-entry", post(add_entry))
@@ -107,11 +110,18 @@ async fn main(
         .route("/logs/{log}/metadata", get(metadata))
         .route("/logs/{log}/sequencer_id", get(sequencer_id))
         .route("/logs/{log}/{*key}", get(get_object))
+        .layer(middleware::from_fn_with_state(
+            (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
+            request_metrics,
+        ))
         .with_state(env)
         .call(req)
         .await?;
     if let Ok(wshim) = wshim {
-        ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
+        ctx.wait_until(async move {
+            wshim.flush(&generic_log_worker::obs::logs::LOGGER).await;
+            wshim.flush(&registry).await;
+        });
     }
     Ok(response)
 }

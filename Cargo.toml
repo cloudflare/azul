@@ -81,7 +81,7 @@ debug = 1
 
 [workspace.dependencies]
 anyhow = "1.0"
-axum = { version = "0.8", default-features = false, features = ["json"] }
+axum = { version = "0.8", default-features = false, features = ["json", "matched-path"] }
 base64 = "0.22"
 base64ct = "1.8.0"
 bitcode = { version = "0.6.6", features = ["serde"] }

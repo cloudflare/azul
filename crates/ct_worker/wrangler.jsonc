@@ -23,6 +23,9 @@
                 "pattern": "static-ct-dev.cloudflareresearch.com",
                 "custom_domain": true
             },
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
             "kv_namespaces": [
                 {
                     "id": "e4aab0c89ebe492c9c81c444c78a31ff",
@@ -135,6 +138,9 @@
                 "pattern": "static-ct.cloudflareresearch.com",
                 "custom_domain": true
             },
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
             "kv_namespaces": [
                 {
                     "id": "e4aab0c89ebe492c9c81c444c78a31ff",
@@ -219,6 +225,9 @@
                 "https://ct.cloudflare.com/logs/raio2027h1a/*",
                 "https://ct.cloudflare.com/logs/raio2027h2a/*"
             ],
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
             "kv_namespaces": [
                 {
                     "id": "12fa8928b30541d6b5c26ddf173c9acd",
@@ -305,7 +314,7 @@
                     "enabled": true,
                     "head_sampling_rate": 0.05
                 }
-            }, 
+            },
             "logpush": true
         }
     }

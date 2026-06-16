@@ -6,9 +6,13 @@
 use crate::{load_roots, load_signing_key, StaticCTSequenceMetadata, CONFIG};
 use config::TemporalInterval;
 use generic_log_worker::{
-    batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
-    init_logging, load_cache_kv, load_public_bucket, obs::Wshim, put_cache_entry_metadata,
-    serialize, util::WorkerByteStream, ObjectBucket, ENTRY_ENDPOINT,
+    batcher_id_from_lookup_key, deserialize,
+    frontend::request_metrics,
+    get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
+    obs::{metrics, Wshim},
+    put_cache_entry_metadata, serialize,
+    util::WorkerByteStream,
+    ObjectBucket, ENTRY_ENDPOINT,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -23,6 +27,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
+    middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -73,6 +78,7 @@ async fn main(
     ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     let wshim = Wshim::from_env(&env);
+    let registry = metrics::registry();
     let response = Router::new()
         .route("/logs/{log}/ct/v1/get-roots", get(get_roots))
         .route("/logs/{log}/ct/v1/add-chain", post(add_chain))
@@ -80,11 +86,18 @@ async fn main(
         .route("/logs/{log}/log.v3.json", get(log_v3_json))
         .route("/logs/{log}/sequencer_id", get(sequencer_id))
         .route("/logs/{log}/{*key}", get(get_object))
+        .layer(middleware::from_fn_with_state(
+            (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
+            request_metrics,
+        ))
         .with_state(env)
         .call(req)
         .await?;
     if let Ok(wshim) = wshim {
-        ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
+        ctx.wait_until(async move {
+            wshim.flush(&generic_log_worker::obs::logs::LOGGER).await;
+            wshim.flush(&registry).await;
+        });
     }
     Ok(response)
 }
@@ -178,9 +191,11 @@ impl IntoResponse for AppError {
                 (StatusCode::BAD_REQUEST, "Unknown log").into_response()
             }
             Self::ReadonlyLog => {
-                (StatusCode::SERVICE_UNAVAILABLE,
-                 [(header::RETRY_AFTER, "300")],
-                 "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes.",).into_response()
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "300")],
+                    "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes."
+                ).into_response()
             }
             Self::RedirectToMonitorApi(url) => (
                 StatusCode::NOT_FOUND,
