@@ -49,11 +49,11 @@ impl Wshim {
                 return;
             }
         };
-        if response.status_code() != 200 {
+        if !response.status().is_success() {
             worker::console_error!(
                 "post to wshim /{} failed with status code: {}",
                 E::endpoint(),
-                response.status_code()
+                response.status().as_u16()
             );
         }
     }

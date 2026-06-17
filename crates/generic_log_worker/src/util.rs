@@ -3,6 +3,7 @@
 
 //! Utility functions.
 
+use futures_util::StreamExt as _;
 #[cfg(test)]
 use parking_lot::ReentrantMutex;
 #[cfg(test)]
@@ -42,4 +43,25 @@ pub(crate) fn set_freeze_time(b: bool) {
 #[cfg(test)]
 pub(crate) fn set_global_time(time: u64) {
     GLOBAL_TIME.store(time, Ordering::Relaxed);
+}
+
+pub struct WorkerByteStream(worker::send::SendWrapper<worker::ByteStream>);
+impl WorkerByteStream {
+    #[must_use]
+    pub fn new(stream: worker::ByteStream) -> Self {
+        Self(worker::send::SendWrapper::new(stream))
+    }
+}
+
+impl futures_util::Stream for WorkerByteStream {
+    type Item = Result<Vec<u8>, worker::Error>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.as_mut().0 .0.poll_next_unpin(cx)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0 .0.size_hint()
+    }
 }

@@ -38,6 +38,7 @@ parking_lot.workspace = true
 futures-executor.workspace = true
 
 [dependencies]
+axum.workspace = true
 base64.workspace = true
 config = { path = "./config", package = "ct_worker_config" }
 generic_log_worker.workspace = true
@@ -53,7 +54,8 @@ signed_note.workspace = true
 tlog_core.workspace = true
 tlog_entry.workspace = true
 tlog_checkpoint.workspace = true
-worker.workspace = true
+tower-service.workspace = true
+worker = { workspace = true, features = ["http", "axum"] }
 x509-cert.workspace = true
 x509_util.workspace = true
 chrono.workspace = true

@@ -8,7 +8,7 @@ use config::TemporalInterval;
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize, get_cached_metadata, get_durable_object_stub,
     init_logging, load_cache_kv, load_public_bucket, obs::Wshim, put_cache_entry_metadata,
-    serialize, ObjectBucket, ENTRY_ENDPOINT,
+    serialize, util::WorkerByteStream, ObjectBucket, ENTRY_ENDPOINT,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -19,6 +19,16 @@ use tlog_entry::{LogEntry, PendingLogEntry, PendingLogEntryBlob};
 use worker::*;
 use x509_cert::der::Encode;
 
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use tower_service::Service;
+
 // The Maximum Merge Delay (MMD) of a log indicates the maximum period of time
 // between when a SCT is issued and the corresponding entry is sequenced in the
 // log. For Azul-based logs, this is effectively zero since SCT issuance happens
@@ -26,8 +36,6 @@ use x509_cert::der::Encode;
 // maximum allowed in Chrome's policy, 60 seconds, to allow future flexibility.
 // For details, see https://github.com/C2SP/C2SP/issues/79.
 const MAX_MERGE_DELAY_SECS: usize = 60;
-
-const UNKNOWN_LOG_MSG: &str = "unknown log";
 
 #[serde_as]
 #[derive(Serialize)]
@@ -56,165 +64,272 @@ fn start() {
 ///
 /// # Errors
 ///
-/// Returns an error if any unhandled internal errors occur while processing the request.
-///
-/// # Panics
-///
-/// Panics if there are issues parsing route parameters, which should never happen.
+/// Returns an error if any unhandled internal error occurs while processing the
+/// request.
 #[event(fetch, respond_with_errors)]
-async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+async fn main(
+    req: HttpRequest,
+    env: Env,
+    ctx: Context,
+) -> Result<axum::http::Response<axum::body::Body>> {
     let wshim = Wshim::from_env(&env);
-    // Use an outer router as middleware to check that the log name is valid.
     let response = Router::new()
-        .or_else_any_method_async("/logs/:log/*route", |req, ctx| async move {
-            let name = if let Some(name) = ctx.param("log") {
-                if CONFIG.logs.contains_key(name) {
-                    &name.clone()
-                } else {
-                    return Err(UNKNOWN_LOG_MSG.into());
-                }
-            } else {
-                return Err("missing 'log' route param".into());
-            };
-
-            // Now that we've validated the log name, use an inner router to
-            // handle the request.
-            Router::with_data(name)
-                .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
-                    get_roots(&ctx.env, ctx.data).await
-                })
-                .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {
-                    add_chain_or_pre_chain(req, &ctx.env, ctx.data, false).await
-                })
-                .post_async("/logs/:log/ct/v1/add-pre-chain", |req, ctx| async move {
-                    add_chain_or_pre_chain(req, &ctx.env, ctx.data, true).await
-                })
-                .get("/logs/:log/log.v3.json", |_req, ctx| {
-                    log_v3_json(&ctx.env, ctx.data)
-                })
-                .get("/logs/:log/sequencer_id", |_req, ctx| {
-                    sequencer_id(&ctx.env, ctx.data)
-                })
-                .get_async("/logs/:log/*key", |_req, ctx| async move {
-                    get_object(&ctx.env, ctx.data, ctx.param("key").unwrap()).await
-                })
-                .run(req, ctx.env)
-                .await
-        })
-        .run(req, env)
-        .await
-        .or_else(|e| match e {
-            Error::RustError(ref msg) if msg == UNKNOWN_LOG_MSG => {
-                Response::error("Unknown log", 400)
-            }
-            _ => {
-                log::warn!("Internal error: {e}");
-                Response::error("Internal error", 500)
-            }
-        });
+        .route("/logs/{log}/ct/v1/get-roots", get(get_roots))
+        .route("/logs/{log}/ct/v1/add-chain", post(add_chain))
+        .route("/logs/{log}/ct/v1/add-pre-chain", post(add_pre_chain))
+        .route("/logs/{log}/log.v3.json", get(log_v3_json))
+        .route("/logs/{log}/sequencer_id", get(sequencer_id))
+        .route("/logs/{log}/{*key}", get(get_object))
+        .with_state(env)
+        .call(req)
+        .await?;
     if let Ok(wshim) = wshim {
         ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
     }
-    response
+    Ok(response)
 }
 
-/// `GET /logs/:log/ct/v1/get-roots`
-async fn get_roots(env: &Env, name: &str) -> Result<Response> {
-    Response::from_json(&GetRootsResponse {
-        certificates: x509_util::certs_to_bytes(&load_roots(env, name).await?.certs).unwrap(),
-    })
+#[derive(serde::Deserialize)]
+struct PathParams<Rest> {
+    log: String,
+    #[serde(flatten)]
+    rest: Rest,
 }
 
-/// `GET /logs/:log/log.v3.json`
-fn log_v3_json(env: &Env, name: &str) -> Result<Response> {
-    let params = &CONFIG.logs[name];
-    let verifying_key = load_signing_key(env, name)?.verifying_key();
+#[derive(serde::Deserialize)]
+struct Key {
+    key: String,
+}
+
+impl<T> axum::extract::FromRequestParts<Env> for PathParams<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Env,
+    ) -> Result<Self, Self::Rejection> {
+        let Path(params) = Path::<PathParams<T>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| {
+                AppError::InternalServerError("path param does not have log field".into())
+            })?;
+        if CONFIG.logs.contains_key(&params.log) {
+            Ok(params)
+        } else {
+            Err(AppError::UnknownLog)
+        }
+    }
+}
+
+/// Result type for the route handlers: each builds a [`worker::Response`] which
+/// is converted into an axum response at the boundary via the worker crate's
+/// `axum` feature.
+type ApiResult<T> = std::result::Result<T, AppError>;
+
+enum AppError {
+    InternalServerError(String),
+    NotFound,
+    BadRequest(String),
+    UnknownLog,
+    ReadonlyLog,
+    RedirectToMonitorApi(&'static str),
+}
+
+impl From<Error> for AppError {
+    fn from(err: Error) -> Self {
+        Self::InternalServerError(err.to_string())
+    }
+}
+
+impl From<String> for AppError {
+    fn from(msg: String) -> Self {
+        Self::InternalServerError(msg)
+    }
+}
+
+impl From<&str> for AppError {
+    fn from(msg: &str) -> Self {
+        Self::InternalServerError(msg.to_owned())
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::InternalServerError(msg) => {
+                log::error!("Internal error: {msg}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error",
+                )
+                    .into_response()
+            }
+            AppError::NotFound => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+            Self::BadRequest(e) => {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Bad request{}{e}", if e.is_empty() { "" } else { ": " })
+                ).into_response()
+            }
+            Self::UnknownLog => {
+                (StatusCode::BAD_REQUEST, "Unknown log").into_response()
+            }
+            Self::ReadonlyLog => {
+                (StatusCode::SERVICE_UNAVAILABLE,
+                 [(header::RETRY_AFTER, "300")],
+                 "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes.",).into_response()
+            }
+            Self::RedirectToMonitorApi(url) => (
+                StatusCode::NOT_FOUND,
+                format!("Use {url} for monitoring API"),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /logs/{log}/ct/v1/get-roots`
+#[worker::send]
+async fn get_roots(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
+    Ok((
+        StatusCode::OK,
+        Json(GetRootsResponse {
+            certificates: x509_util::certs_to_bytes(&load_roots(&env, &log).await?.certs).unwrap(),
+        }),
+    ))
+}
+
+/// `POST /logs/{log}/ct/v1/add-chain`
+#[worker::send]
+async fn add_chain(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+    body: Bytes,
+) -> ApiResult<impl IntoResponse> {
+    add_chain_or_pre_chain(body, &env, &log, false).await
+}
+
+/// `POST /logs/{log}/ct/v1/add-pre-chain`
+#[worker::send]
+async fn add_pre_chain(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+    body: Bytes,
+) -> ApiResult<impl IntoResponse> {
+    add_chain_or_pre_chain(body, &env, &log, true).await
+}
+
+/// `GET /logs/{log}/log.v3.json`
+#[worker::send]
+async fn log_v3_json(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
+    let params = &CONFIG.logs[&log];
+    let verifying_key = load_signing_key(&env, &log)?.verifying_key();
     let log_id = &static_ct_api::log_id_from_key(verifying_key).map_err(|e| e.to_string())?;
     let key = verifying_key
         .to_public_key_der()
         .map_err(|e| e.to_string())?;
-    Response::from_json(&LogV3JsonResponse {
-        description: &params.description,
-        log_type: &params.log_type,
-        log_id,
-        key: key.as_bytes(),
-        submission_url: &params.submission_url,
-        monitoring_url: if params.monitoring_url.is_empty() {
-            &params.submission_url
-        } else {
-            &params.monitoring_url
-        },
-        mmd: MAX_MERGE_DELAY_SECS,
-        temporal_interval: &params.temporal_interval,
-    })
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&LogV3JsonResponse {
+            description: &params.description,
+            log_type: &params.log_type,
+            log_id,
+            key: key.as_bytes(),
+            submission_url: &params.submission_url,
+            monitoring_url: if params.monitoring_url.is_empty() {
+                &params.submission_url
+            } else {
+                &params.monitoring_url
+            },
+            mmd: MAX_MERGE_DELAY_SECS,
+            temporal_interval: &params.temporal_interval,
+        })
+        .unwrap(),
+    )
+        .into_response())
 }
 
-/// `GET /logs/:log/sequencer_id`
-fn sequencer_id(env: &Env, name: &str) -> Result<Response> {
+/// `GET /logs/{log}/sequencer_id`
+#[worker::send]
+async fn sequencer_id(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
     // Print out the Durable Object ID of the sequencer to allow looking it up
     // in internal Cloudflare dashboards. This value does not need to be secret.
     let namespace = env.durable_object("SEQUENCER")?;
-    let object_id = namespace.id_from_name(name)?;
-    Response::ok(object_id.to_string())
+    let object_id = namespace.id_from_name(&log)?;
+    Ok((StatusCode::OK, object_id.to_string()))
 }
 
-/// `GET /logs/:log/*key` -- direct read-through to the public R2 bucket when
+/// `GET /logs/{log}/{*key}` — direct read-through to the public R2 bucket when
 /// the log's `monitoring_url` is unspecified.
-async fn get_object(env: &Env, name: &str, key: &str) -> Result<Response> {
+#[worker::send]
+async fn get_object(
+    State(env): State<Env>,
+    PathParams {
+        log,
+        rest: Key { key },
+    }: PathParams<Key>,
+) -> ApiResult<impl IntoResponse> {
     // Enable direct access to the bucket via the Worker if monitoring_url is
     // unspecified.
-    if CONFIG.logs[name].monitoring_url.is_empty() {
-        let bucket = load_public_bucket(env, name)?;
+    if CONFIG.logs[&log].monitoring_url.is_empty() {
+        let bucket = load_public_bucket(&env, &log)?;
         if let Some(obj) = bucket.get(key).execute().await? {
-            Response::from_body(
-                obj.body()
-                    .ok_or("R2 object missing body")?
-                    .response_body()?,
-            )
-            .map(|r| r.with_headers(headers_from_http_metadata(obj.http_metadata())))
+            let body = obj
+                .body()
+                .ok_or_else(|| AppError::InternalServerError("R2 object missing body".into()))?
+                .stream()?;
+            Ok((
+                StatusCode::OK,
+                headers_from_http_metadata(obj.http_metadata()),
+                axum::body::Body::from_stream(WorkerByteStream::new(body)),
+            ))
         } else {
-            Response::error("Not found", 404)
+            Err(AppError::NotFound)
         }
     } else {
-        Response::error(
-            format!(
-                "Use {} for monitoring API",
-                CONFIG.logs[name].monitoring_url
-            ),
-            404,
-        )
+        // TODO: should this be an HTTP redirect instead of a 404?
+        Err(AppError::RedirectToMonitorApi(
+            &CONFIG.logs[&log].monitoring_url,
+        ))
     }
 }
 
 #[allow(clippy::too_many_lines)]
 async fn add_chain_or_pre_chain(
-    mut req: Request,
+    body: Bytes,
     env: &Env,
-    name: &str,
+    log: &str,
     expect_precert: bool,
-) -> Result<Response> {
-    let params = &CONFIG.logs[name];
+) -> ApiResult<impl IntoResponse> {
+    let params = &CONFIG.logs[log];
     if params.read_only {
-        return Response::error(
-            "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes.",
-            503,
-        )
-        .map(|r| {
-            let h = Headers::new();
-            h.set("Retry-After", "300").unwrap();
-            r.with_headers(h)
-        });
+        return Err(AppError::ReadonlyLog);
     }
-    let req: AddChainRequest = match req.json().await {
+    let req: AddChainRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(e) => {
-            log::debug!("{name}: Invalid add-(pre)chain request: {e}");
-            return Response::error("Invalid add-[pre-]chain request", 400);
+            log::debug!("{log}: Invalid add-(pre)chain request: {e}");
+            return Err(AppError::BadRequest(
+                "Invalid add-[pre-]chain request".into(),
+            ));
         }
     };
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
-    let roots = load_roots(env, name).await?;
+    let roots = load_roots(env, log).await?;
     let (pending_entry, found_root_idx) = match static_ct_api::partially_validate_chain(
         &req.chain,
         roots,
@@ -231,28 +346,28 @@ async fn add_chain_or_pre_chain(
     ) {
         Ok(v) => v,
         Err(e) => {
-            log::debug!("{name}: Bad request: {e}");
-            return Response::error("Bad request", 400);
+            log::debug!("{log}: Bad request: {e}");
+            return Err(AppError::BadRequest(String::new()));
         }
     };
 
     // Retrieve the sequenced entry for this pending log entry by first checking the
     // deduplication cache and then sending a request to the DO to sequence the entry.
     let lookup_key = pending_entry.lookup_key();
-    let signing_key = load_signing_key(env, name)?;
+    let signing_key = load_signing_key(env, log)?;
 
     // Check if entry is cached and return right away if so.
     if params.enable_dedup {
         if let Some(metadata) =
-            get_cached_metadata::<StaticCTSequenceMetadata>(&load_cache_kv(env, name)?, &lookup_key)
+            get_cached_metadata::<StaticCTSequenceMetadata>(&load_cache_kv(env, log)?, &lookup_key)
                 .await?
         {
-            log::debug!("{name}: Entry is cached");
+            log::debug!("{log}: Entry is cached");
             let entry =
                 StaticCTLogEntry::new(pending_entry, metadata.leaf_index(), metadata.timestamp());
             let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
                 .map_err(|e| e.to_string())?;
-            return Response::from_json(&sct);
+            return Ok((StatusCode::OK, Json(sct)).into_response());
         }
     }
 
@@ -260,7 +375,7 @@ async fn add_chain_or_pre_chain(
 
     // First persist issuers. Use a block so memory is deallocated sooner.
     {
-        let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
+        let public_bucket = ObjectBucket::new(load_public_bucket(env, log)?);
         let mut issuers = req.chain[1..]
             .iter()
             .map(Vec::as_slice)
@@ -274,7 +389,7 @@ async fn add_chain_or_pre_chain(
             issuers.push(&root_bytes);
         }
 
-        generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
+        generic_log_worker::upload_issuers(&public_bucket, &issuers, log).await?;
     }
 
     // Submit entry to be sequenced, either via a batcher or directly to the
@@ -283,7 +398,7 @@ async fn add_chain_or_pre_chain(
         let shard_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
         get_durable_object_stub(
             env,
-            name,
+            log,
             shard_id,
             if shard_id.is_some() {
                 "BATCHER"
@@ -310,17 +425,17 @@ async fn add_chain_or_pre_chain(
         .await?;
     if response.status_code() != 200 {
         // Return the response from the sequencing directly to the client.
-        return Ok(response);
+        return Ok(response.into());
     }
     let metadata = deserialize::<StaticCTSequenceMetadata>(&response.bytes().await?)?;
     if params.num_batchers == 0 && params.enable_dedup {
         // Write sequenced entry to the long-term deduplication cache in Workers
         // KV as there are no batchers configured to do it for us.
-        if put_cache_entry_metadata(&load_cache_kv(env, name)?, &pending_entry, metadata)
+        if put_cache_entry_metadata(&load_cache_kv(env, log)?, &pending_entry, metadata)
             .await
             .is_err()
         {
-            log::warn!("{name}: Failed to write entry to deduplication cache");
+            log::warn!("{log}: Failed to write entry to deduplication cache");
         }
     }
     let entry = StaticCTLogEntry {
@@ -330,19 +445,19 @@ async fn add_chain_or_pre_chain(
     };
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
-    Response::from_json(&sct)
+    Ok((StatusCode::OK, Json(sct)).into_response())
 }
 
-fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
-    let h = Headers::new();
+fn headers_from_http_metadata(meta: HttpMetadata) -> HeaderMap {
+    let mut h = HeaderMap::new();
     if let Some(hdr) = meta.cache_control {
-        h.append("Cache-Control", &hdr).unwrap();
+        h.append("Cache-Control", hdr.try_into().unwrap());
     }
     if let Some(hdr) = meta.content_encoding {
-        h.append("Content-Encoding", &hdr).unwrap();
+        h.append("Content-Encoding", hdr.try_into().unwrap());
     }
     if let Some(hdr) = meta.content_type {
-        h.append("Content-Type", &hdr).unwrap();
+        h.append("Content-Type", hdr.try_into().unwrap());
     }
     h
 }

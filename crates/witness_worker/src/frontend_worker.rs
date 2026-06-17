@@ -41,8 +41,17 @@ use crate::{
     witness_state_do::{state_stub, CheckAndUpdateRequest, LatestCheckpoint},
     WitnessSigner, CONFIG,
 };
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};
+use tower_service::Service;
 
 /// Entry point: initialize logging and dispatch to the router.
 #[event(start)]
@@ -58,33 +67,85 @@ fn start() {
     let _ = console_log::init_with_level(level);
 }
 
-/// Top-level `#[event(fetch)]` handler.
+/// Top-level `#[event(fetch)]` handler. Delegates to the axum [`router`].
 #[event(fetch, respond_with_errors)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    // /sign-subtree is OPTIONAL per c2sp.org/tlog-witness; we register
-    // the route unconditionally and the handler returns 404 when the
-    // configured signing key isn't ML-DSA-44. This keeps the routing
-    // table static (no need to touch the witness signer at startup just
-    // to decide whether to register a route).
-    Router::new()
-        .post_async("/add-checkpoint", |req, ctx| async move {
-            add_checkpoint(req, ctx.env).await
-        })
-        .post_async("/sign-subtree", |req, ctx| async move {
-            sign_subtree(req, ctx.env).await
-        })
-        .get("/metadata", |_req, ctx| metadata(&ctx.env))
-        .get("/", |_req, _ctx| root())
-        .run(req, env)
-        .await
+async fn fetch(
+    req: HttpRequest,
+    env: Env,
+    _ctx: Context,
+) -> Result<axum::http::Response<axum::body::Body>> {
+    Ok(Router::new()
+        .route("/add-checkpoint", post(add_checkpoint))
+        .route("/sign-subtree", post(sign_subtree))
+        .route("/metadata", get(metadata))
+        .route("/", get(root))
+        .with_state(env)
+        .call(req)
+        .await?)
 }
 
 /// `GET /` -- witness identity string.
-fn root() -> Result<Response> {
-    Response::ok(format!(
-        "{} — c2sp.org/tlog-witness witness\n",
-        CONFIG.witness_name
-    ))
+async fn root() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!("{} — c2sp.org/tlog-witness witness\n", CONFIG.witness_name),
+    )
+}
+
+/// Result type for axum handlers in this module: each handler builds a
+/// [`worker::Response`] which is converted to an axum response at the
+/// boundary via the `From<worker::Response>` impl from the worker crate's
+/// `axum` feature.
+type ApiResult<T> = std::result::Result<T, AppError>;
+
+enum AppError {
+    InternalServerError(String),
+    BadRequest(String),
+    NotFound,
+    UnknownLogOrigin,
+    NoValidSignatures,
+    ReferenceCheckpointNotCosignedByThisWitness,
+    SubtreeConsistencyProofFailed,
+}
+
+impl From<worker::Error> for AppError {
+    fn from(err: worker::Error) -> Self {
+        Self::InternalServerError(err.to_string())
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            AppError::InternalServerError(error) => {
+                log::error!("unhandled error: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+            AppError::BadRequest(e) => {
+                (StatusCode::BAD_REQUEST, format!("Bad request: {e}")).into_response()
+            }
+            AppError::NotFound => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+            AppError::UnknownLogOrigin => {
+                (StatusCode::NOT_FOUND, "Unknown log origin").into_response()
+            }
+            AppError::NoValidSignatures => (
+                StatusCode::FORBIDDEN,
+                "No valid signatures from trusted log keys",
+            )
+                .into_response(),
+            AppError::ReferenceCheckpointNotCosignedByThisWitness => (
+                StatusCode::FORBIDDEN,
+                "Reference checkpoint is not cosigned by this witness",
+            )
+                .into_response(),
+            AppError::SubtreeConsistencyProofFailed => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Subtree consistency proof failed",
+            )
+                .into_response(),
+        }
+    }
 }
 
 /// Response body for the `/metadata` endpoint.
@@ -121,9 +182,10 @@ struct LogMetadata<'a> {
     log_public_keys: Vec<&'a [u8]>,
 }
 
-/// `GET /metadata` handler.
-fn metadata(env: &Env) -> Result<Response> {
-    let witness_public_key = load_witness_public_key_der(env)?;
+/// `GET /metadata` route handler.
+#[worker::send]
+async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
+    let witness_public_key = load_witness_public_key_der(&env)?;
     let logs: Vec<LogMetadata> = CONFIG
         .logs
         .iter()
@@ -144,10 +206,10 @@ fn metadata(env: &Env) -> Result<Response> {
             .unwrap_or(&CONFIG.submission_prefix),
         logs,
     };
-    Response::from_json(&body)
+    Ok((StatusCode::OK, Json(body)))
 }
 
-/// Handle `POST /add-checkpoint`.
+/// `POST /add-checkpoint` route handler.
 ///
 /// The flow mirrors the MUSTs listed in the spec, in order:
 ///
@@ -169,7 +231,8 @@ fn metadata(env: &Env) -> Result<Response> {
 /// "check then write" pair is atomic per origin.
 ///
 /// [`WitnessState`]: crate::witness_state_do
-async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
+#[worker::send]
+async fn add_checkpoint(State(env): State<Env>, body: Bytes) -> ApiResult<impl IntoResponse> {
     // (1) Parse.
     //
     // Cap the request body at `MAX_ADD_CHECKPOINT_BODY_SIZE` so a
@@ -179,12 +242,10 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
     // note (capped at `signed_note::MAX_NOTE_SIZE = 1 MiB`); anything
     // larger is guaranteed to be rejected downstream and we avoid the
     // allocation by rejecting it here.
-    let body = req.bytes().await?;
     if body.len() > MAX_ADD_CHECKPOINT_BODY_SIZE {
-        return Response::error(
-            format!("Bad request: body exceeds {MAX_ADD_CHECKPOINT_BODY_SIZE} bytes"),
-            400,
-        );
+        return Err(AppError::BadRequest(format!(
+            "body exceeds {MAX_ADD_CHECKPOINT_BODY_SIZE} bytes"
+        )));
     }
     let AddCheckpointRequest {
         old_size,
@@ -194,10 +255,9 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
         Ok(r) => r,
         Err(e) => {
             log::warn!("add-checkpoint: malformed request: {e}");
-            return Response::error(format!("Bad request: {e}"), 400);
+            return Err(AppError::BadRequest(e.to_string()));
         }
     };
-
     // (2) Parse the checkpoint body and look up the log by its origin.
     //
     // `CheckpointText::from_bytes` validates the full checkpoint shape
@@ -209,14 +269,13 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
         Ok(t) => t,
         Err(e) => {
             log::warn!("add-checkpoint: malformed checkpoint text: {e:?}");
-            return Response::error(format!("Bad request: {e}"), 400);
+            return Err(AppError::BadRequest(e.to_string()));
         }
     };
     let origin = cp_text.origin();
     let Some(verifiers) = log_verifiers(origin) else {
-        return Response::error("Unknown log origin", 404);
+        return Err(AppError::UnknownLogOrigin);
     };
-
     // (3) Verify the checkpoint signature against trusted log keys.
     //
     // Per c2sp.org/tlog-witness, the witness accepts the checkpoint as
@@ -240,26 +299,21 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
         match e {
             NoteError::UnverifiedNote | NoteError::InvalidSignature { .. } => {
                 log::info!("add-checkpoint: rejecting note: {e:?}");
-                return Response::error("No valid signatures from trusted log keys", 403);
+                return Err(AppError::NoValidSignatures);
             }
             _ => {
                 log::warn!("add-checkpoint: verify failed: {e:?}");
-                return Response::error(format!("Bad request: {e}"), 400);
+                return Err(AppError::BadRequest(e.to_string()));
             }
         }
     }
-
     // (4) Range check.
     if old_size > cp_text.size() {
-        return Response::error(
-            format!(
-                "Bad request: old_size {old_size} > checkpoint size {}",
-                cp_text.size()
-            ),
-            400,
-        );
+        return Err(AppError::BadRequest(format!(
+            "old_size {old_size} > checkpoint size {}",
+            cp_text.size()
+        )));
     }
-
     // (5, 6, 7) Atomic check-proof-and-update against the per-origin DO.
     // See [`dispatch_check_and_update`] for the status-code mapping.
     let update = CheckAndUpdateRequest {
@@ -271,7 +325,6 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
     if let Some(resp) = dispatch_check_and_update(&env, origin, &update).await? {
         return Ok(resp);
     }
-
     // (8) Produce and return the cosignature.
     //
     // The witness's algorithm (Ed25519 or ML-DSA-44) is determined at
@@ -287,12 +340,10 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
         .sign(now, &cp_text)
         .map_err(|e| Error::from(format!("signing: {e:?}")))?;
     let body = serialize_add_checkpoint_response(std::slice::from_ref(&note_sig));
-    let headers = Headers::new();
-    headers.set("content-type", "text/plain; charset=utf-8")?;
-    Ok(Response::from_body(ResponseBody::Body(body))?.with_headers(headers))
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
 }
 
-/// Handle `POST /sign-subtree`.
+/// `POST /sign-subtree` handler.
 ///
 /// OPTIONAL endpoint per [c2sp.org/tlog-witness#sign-subtree][spec].
 /// Wired up only when the witness is configured with an ML-DSA-44
@@ -330,8 +381,14 @@ async fn add_checkpoint(mut req: Request, env: Env) -> Result<Response> {
 ///    the resulting `subtree/v1` signature line.
 ///
 /// [spec]: https://c2sp.org/tlog-witness#sign-subtree
-#[allow(clippy::too_many_lines)] // single-handler pattern; mirrors add-checkpoint.
-async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
+#[allow(clippy::too_many_lines)]
+// single-handler pattern; mirrors add-checkpoint.
+// Owned `env`/`body` keep this signature symmetric with the async
+// `add_checkpoint_inner`; being synchronous it would otherwise trip
+// `needless_pass_by_value` for values it only reads.
+#[allow(clippy::needless_pass_by_value)]
+#[worker::send]
+async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<impl IntoResponse> {
     // The handler exists in the route table for both algorithms, but the
     // spec marks the endpoint as OPTIONAL: an Ed25519 witness simply
     // doesn't support it. Surface that as 404, matching the spec's
@@ -342,16 +399,14 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
         ..
     } = signer
     else {
-        return Response::error("Not Found", 404);
+        return Err(AppError::NotFound);
     };
 
     // (1) Parse the body.
-    let body = req.bytes().await?;
     if body.len() > MAX_SIGN_SUBTREE_BODY_SIZE {
-        return Response::error(
-            format!("Bad request: body exceeds {MAX_SIGN_SUBTREE_BODY_SIZE} bytes"),
-            400,
-        );
+        return Err(AppError::BadRequest(format!(
+            "body exceeds {MAX_SIGN_SUBTREE_BODY_SIZE} bytes"
+        )));
     }
     let SignSubtreeRequest {
         subtree_start,
@@ -364,7 +419,7 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
         Ok(r) => r,
         Err(e) => {
             log::warn!("sign-subtree: malformed request: {e}");
-            return Response::error(format!("Bad request: {e}"), 400);
+            return Err(AppError::BadRequest(e.to_string()));
         }
     };
 
@@ -376,22 +431,19 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
         Ok(t) => t,
         Err(e) => {
             log::warn!("sign-subtree: malformed checkpoint text: {e:?}");
-            return Response::error(format!("Bad request: {e}"), 400);
+            return Err(AppError::BadRequest(e.to_string()));
         }
     };
     if subtree_end > cp_text.size() {
-        return Response::error(
-            format!(
-                "Bad request: subtree end {subtree_end} > checkpoint size {}",
-                cp_text.size(),
-            ),
-            400,
-        );
+        return Err(AppError::BadRequest(format!(
+            "subtree end {subtree_end} > checkpoint size {}",
+            cp_text.size(),
+        )));
     }
     let subtree = match Subtree::new(subtree_start, subtree_end) {
         Ok(s) => s,
         Err(e) => {
-            return Response::error(format!("Bad request: invalid subtree: {e:?}"), 400);
+            return Err(AppError::BadRequest(format!("invalid subtree: {e:?}")));
         }
     };
 
@@ -402,7 +454,7 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
     // the witness operator.
     let origin = cp_text.origin();
     if log_verifiers(origin).is_none() {
-        return Response::error("Unknown log origin", 404);
+        return Err(AppError::UnknownLogOrigin);
     }
 
     // (4) Stateless verification: the submitted checkpoint MUST carry
@@ -415,14 +467,11 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
         match e {
             NoteError::UnverifiedNote | NoteError::InvalidSignature { .. } => {
                 log::info!("sign-subtree: rejecting note: {e:?}");
-                return Response::error(
-                    "Forbidden: reference checkpoint is not cosigned by this witness",
-                    403,
-                );
+                return Err(AppError::ReferenceCheckpointNotCosignedByThisWitness);
             }
             _ => {
                 log::warn!("sign-subtree: verify failed: {e:?}");
-                return Response::error(format!("Bad request: {e}"), 400);
+                return Err(AppError::BadRequest(e.to_string()));
             }
         }
     }
@@ -437,10 +486,7 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
     )
     .is_err()
     {
-        return Response::error(
-            "Unprocessable Entity: subtree consistency proof failed",
-            422,
-        );
+        return Err(AppError::SubtreeConsistencyProofFailed);
     }
 
     // (6) Sign the subtree. Per the spec the timestamp on a non-zero-
@@ -452,10 +498,11 @@ async fn sign_subtree(mut req: Request, env: Env) -> Result<Response> {
     // signature is bound by the same verification window — the request
     // is meaningful even with a zero timestamp.
     let note_sig = subtree_signer.sign_subtree(0, origin, &subtree, &subtree_hash);
-    let body = serialize_sign_subtree_response(std::slice::from_ref(&note_sig));
-    let headers = Headers::new();
-    headers.set("content-type", "text/plain; charset=utf-8")?;
-    Ok(Response::from_body(ResponseBody::Body(body))?.with_headers(headers))
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        serialize_sign_subtree_response(std::slice::from_ref(&note_sig)),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +547,7 @@ async fn dispatch_check_and_update(
     env: &Env,
     origin: &str,
     update: &CheckAndUpdateRequest,
-) -> Result<Option<Response>> {
+) -> Result<Option<axum::response::Response>> {
     let stub = state_stub(env, origin)?;
     let mut resp = stub
         .fetch_with_request(Request::new_with_init(
@@ -525,32 +572,36 @@ async fn dispatch_check_and_update(
         }
         409 => {
             let current: LatestCheckpoint = resp.json().await?;
-            Ok(Some(tlog_size_conflict(&current)?))
+            Ok(Some(tlog_size_conflict(&current)))
         }
-        422 => Ok(Some(Response::error(
-            "Unprocessable Entity: consistency proof failed",
-            422,
-        )?)),
+        422 => Ok(Some(
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Unprocessable Entity: consistency proof failed",
+            )
+                .into_response(),
+        )),
         400 => {
             let msg = resp.text().await.unwrap_or_else(|_| "Bad request".into());
-            Ok(Some(Response::error(format!("Bad request: {msg}"), 400)?))
+            Ok(Some(AppError::BadRequest(msg).into_response()))
         }
-        status => Ok(Some(Response::error(
-            format!("Internal error: DO returned {status}"),
-            500,
-        )?)),
+        status => Ok(Some(
+            AppError::InternalServerError(format!("Internal error: DO returned {status}"))
+                .into_response(),
+        )),
     }
 }
 
 /// Build the 409 response body per the spec:
 /// `text/x.tlog.size` content type, decimal latest size followed by a newline.
-fn tlog_size_conflict(current: &LatestCheckpoint) -> Result<Response> {
+fn tlog_size_conflict(current: &LatestCheckpoint) -> axum::response::Response {
     let body = format!("{}\n", current.size);
-    let headers = Headers::new();
-    headers.set("content-type", CONTENT_TYPE_TLOG_SIZE)?;
-    Ok(Response::from_body(ResponseBody::Body(body.into_bytes()))?
-        .with_status(409)
-        .with_headers(headers))
+    (
+        StatusCode::CONFLICT,
+        [(header::CONTENT_TYPE, CONTENT_TYPE_TLOG_SIZE)],
+        body,
+    )
+        .into_response()
 }
 
 #[cfg(test)]

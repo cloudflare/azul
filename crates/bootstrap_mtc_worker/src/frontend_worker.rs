@@ -20,7 +20,7 @@ use generic_log_worker::{
     log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
     obs::Wshim,
     serialize,
-    util::now_millis,
+    util::{now_millis, WorkerByteStream},
     ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
 };
 use serde::{Deserialize, Serialize};
@@ -32,13 +32,21 @@ use tlog_core::LeafIndex;
 use tlog_entry::{PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
+
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    http::{header, HeaderMap, StatusCode},
+    response::{AppendHeaders, IntoResponse},
+    routing::{get, post},
+    Json, Router,
+};
+use tower_service::Service;
 use x509_cert::{
     attr::AttributeTypeAndValue,
     name::{RdnSequence, RelativeDistinguishedName},
     time::{Time, Validity},
 };
-
-const UNKNOWN_LOG_MSG: &str = "unknown log";
 
 #[serde_as]
 #[derive(Serialize)]
@@ -82,110 +90,330 @@ fn start() {
 ///
 /// # Errors
 ///
-/// Returns an error if any unhandled internal errors occur while processing the request.
-///
-/// # Panics
-///
-/// Panics if there are issues parsing route parameters, which should never happen.
+/// Returns an error if any unhandled internal error occurs while processing the
+/// request.
 #[event(fetch, respond_with_errors)]
-async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+async fn main(
+    req: HttpRequest,
+    env: Env,
+    ctx: Context,
+) -> Result<axum::http::Response<axum::body::Body>> {
     let wshim = Wshim::from_env(&env);
-    // Use an outer router as middleware to check that the log name is valid.
     let response = Router::new()
-        .or_else_any_method_async("/logs/:log/*route", |req, ctx| async move {
-            let name = if let Some(name) = ctx.param("log") {
-                if CONFIG.logs.contains_key(name) {
-                    &name.clone()
-                } else {
-                    return Err(UNKNOWN_LOG_MSG.into());
-                }
-            } else {
-                return Err("missing 'log' route param".into());
-            };
-
-            // Now that we've validated the log name, use an inner router to
-            // handle the request.
-            Router::with_data(name)
-                .get_async("/logs/:log/get-roots", |_req, ctx| async move {
-                    get_roots(&ctx.env, ctx.data).await
-                })
-                .post_async("/logs/:log/add-entry", |req, ctx| async move {
-                    add_entry(req, &ctx.env, ctx.data).await
-                })
-                .post_async("/logs/:log/get-certificate", |req, ctx| async move {
-                    get_certificate(req, &ctx.env, ctx.data).await
-                })
-                .get_async("/logs/:log/get-landmark-bundle", |_req, ctx| async move {
-                    get_landmark_bundle(&ctx.env, ctx.data).await
-                })
-                .get("/logs/:log/metadata", |_req, ctx| {
-                    metadata(&ctx.env, ctx.data)
-                })
-                .get("/logs/:log/sequencer_id", |_req, ctx| {
-                    sequencer_id(&ctx.env, ctx.data)
-                })
-                .get_async("/logs/:log/*key", |_req, ctx| async move {
-                    get_object(&ctx.env, ctx.data, ctx.param("key").unwrap()).await
-                })
-                .run(req, ctx.env)
-                .await
-        })
-        .run(req, env)
-        .await
-        .or_else(|e| match e {
-            Error::RustError(ref msg) if msg == UNKNOWN_LOG_MSG => {
-                Response::error("Unknown log", 400)
-            }
-            _ => {
-                log::warn!("Internal error: {e}");
-                Response::error("Internal error", 500)
-            }
-        });
+        .route("/logs/{log}/get-roots", get(get_roots))
+        .route("/logs/{log}/add-entry", post(add_entry))
+        .route("/logs/{log}/get-certificate", post(get_certificate))
+        .route("/logs/{log}/get-landmark-bundle", get(get_landmark_bundle))
+        .route("/logs/{log}/metadata", get(metadata))
+        .route("/logs/{log}/sequencer_id", get(sequencer_id))
+        .route("/logs/{log}/{*key}", get(get_object))
+        .with_state(env)
+        .call(req)
+        .await?;
     if let Ok(wshim) = wshim {
         ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
     }
-    response
+    Ok(response)
 }
 
-/// `GET /logs/:log/get-roots`
-async fn get_roots(env: &Env, name: &str) -> Result<Response> {
-    Response::from_json(&GetRootsResponse {
-        certificates: x509_util::certs_to_bytes(&load_roots(env, name).await?.certs).unwrap(),
-    })
+#[derive(serde::Deserialize)]
+struct PathParams<Rest> {
+    log: String,
+    #[serde(flatten)]
+    rest: Rest,
 }
 
-/// `POST /logs/:log/get-certificate`
-async fn get_certificate(mut req: Request, env: &Env, name: &str) -> Result<Response> {
-    let params = &CONFIG.logs[name];
+#[derive(serde::Deserialize)]
+struct Key {
+    key: String,
+}
+
+impl<T> axum::extract::FromRequestParts<Env> for PathParams<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Env,
+    ) -> Result<Self, Self::Rejection> {
+        let Path(params) = Path::<PathParams<T>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| {
+                AppError::InternalServerError("path param does not have log field".into())
+            })?;
+        if CONFIG.logs.contains_key(&params.log) {
+            Ok(params)
+        } else {
+            Err(AppError::UnknownLog)
+        }
+    }
+}
+
+/// Result type for the route handlers: each builds a [`worker::Response`] which
+/// is converted into an axum response at the boundary via the worker crate's
+/// `axum` feature.
+type ApiResult<T> = std::result::Result<T, AppError>;
+
+enum AppError {
+    InternalServerError(String),
+    NotFound,
+    BadRequest(String),
+    UnknownLog,
+    FailedToSerializeSignaturelessCert(bootstrap_mtc_api::MtcError),
+    SubtreeInclusionProofFailed(tlog_core::TlogError),
+    LeafIndexBeforeFirstActiveLandmark,
+    LeafIndexNotInLog,
+    RedirectToMonitorApi(&'static str),
+    LeafIndexPendingLandmark { retry_after: u64 },
+}
+
+impl From<Error> for AppError {
+    fn from(err: Error) -> Self {
+        Self::InternalServerError(err.to_string())
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::InternalServerError(msg) => {
+                log::error!("Internal error: {msg}");
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error",
+                )
+                    .into_response()
+            }
+            AppError::NotFound => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+            Self::BadRequest(e) => (
+                StatusCode::BAD_REQUEST,
+                format!("Bad request{}{e}", if e.is_empty() { "" } else { ": " }),
+            )
+                .into_response(),
+            Self::UnknownLog => {
+                (axum::http::StatusCode::BAD_REQUEST, "Unknown log").into_response()
+            }
+            Self::FailedToSerializeSignaturelessCert(e) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Failed to serialize signatureless cert: {e}"),
+            )
+                .into_response(),
+            Self::SubtreeInclusionProofFailed(e) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response()
+            }
+            Self::LeafIndexBeforeFirstActiveLandmark => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Leaf index is before first active landmark",
+            )
+                .into_response(),
+            Self::LeafIndexNotInLog => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "Leaf index is not in log").into_response()
+            }
+            Self::LeafIndexPendingLandmark { retry_after } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                AppendHeaders([(header::RETRY_AFTER, retry_after.to_string())]),
+                "Leaf index will be covered by next landmark",
+            )
+                .into_response(),
+            Self::RedirectToMonitorApi(url) => (
+                StatusCode::NOT_FOUND,
+                format!("Use {url} for monitoring API"),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// `GET /logs/{log}/get-roots`
+#[worker::send]
+async fn get_roots(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
+    Ok((
+        StatusCode::OK,
+        Json(GetRootsResponse {
+            certificates: x509_util::certs_to_bytes(&load_roots(&env, &log).await?.certs).unwrap(),
+        }),
+    ))
+}
+
+/// `POST /logs/{log}/add-entry`
+#[worker::send]
+async fn add_entry(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+    body: Bytes,
+) -> ApiResult<impl IntoResponse> {
+    let params = &CONFIG.logs[&log];
+    let req: AddEntryRequest =
+        serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let issuer = build_issuer_rdn(&params.log_id).map_err(AppError::BadRequest)?;
+    let mut validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)
+        .map_err(AppError::BadRequest)?;
+
+    let roots = load_roots(&env, &log).await?;
+    let (pending_entry, found_root_idx) =
+        match bootstrap_mtc_api::validate_chain(&req.chain, roots, &issuer, &mut validity) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("{log}: Bad request: {e}");
+                return Err(AppError::BadRequest(String::new()));
+            }
+        };
+
+    // SCT validation (if enabled for this log shard)
+    if params.enable_sct_validation {
+        use crate::ct_logs_cron::load_ct_logs;
+        use sct_validator::{SctValidationResult, SctValidator};
+
+        // Load the CT log list from KV
+        let ct_logs = load_ct_logs(&env).await?;
+        let validator = SctValidator::new(ct_logs);
+
+        // Get leaf and issuer DER for SCT validation
+        let leaf_der = req
+            .chain
+            .first()
+            .ok_or_else(|| AppError::BadRequest("Chain is empty".into()))?;
+        let issuer_der = resolve_issuer_for_sct(&req.chain, roots).map_err(AppError::BadRequest)?;
+
+        let validation_time_secs = now_millis() / 1000;
+
+        match validator.validate_embedded_scts(leaf_der, &issuer_der, validation_time_secs) {
+            Ok(SctValidationResult::Valid) => {
+                log::info!("{log}: SCT validation passed");
+            }
+            Ok(SctValidationResult::ValidWithWarnings(warnings)) => {
+                log::info!(
+                    "{log}: SCT validation passed with {} warnings",
+                    warnings.len()
+                );
+                for warning in &warnings {
+                    log::debug!("{log}: SCT warning: {warning:?}");
+                }
+            }
+            Ok(SctValidationResult::StaleLogList) => {
+                log::warn!("{log}: SCT validation skipped (stale log list)");
+            }
+            Err(e) => {
+                log::warn!("{log}: SCT validation failed: {e}");
+                return Err(AppError::BadRequest(format!("SCT validation failed: {e}")));
+            }
+        }
+    }
+
+    // Retrieve the sequenced entry for this pending log entry by sending a request to the DO to
+    // sequence the entry.
+    let lookup_key = pending_entry.lookup_key();
+
+    // First persist issuers. Use a block so memory is deallocated sooner.
+    {
+        let public_bucket = ObjectBucket::new(load_public_bucket(&env, &log)?);
+        let mut issuers = req.chain[1..]
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<&[u8]>>();
+
+        // Make sure the found root is persisted as well, if the add-chain
+        // request did not include the root.
+        let root_bytes;
+        if let Some(idx) = found_root_idx {
+            root_bytes = roots.certs[idx]
+                .to_der()
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            issuers.push(&root_bytes);
+        }
+
+        generic_log_worker::upload_issuers(&public_bucket, &issuers, &log).await?;
+    }
+
+    // Submit entry to be sequenced, either via a batcher or directly to the
+    // sequencer.
+    let stub = {
+        let shard_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
+        get_durable_object_stub(
+            &env,
+            &log,
+            shard_id,
+            if shard_id.is_some() {
+                "BATCHER"
+            } else {
+                "SEQUENCER"
+            },
+            params.location_hint.as_deref(),
+        )?
+    };
+    let serialized = serialize(&PendingLogEntryBlob {
+        lookup_key,
+        data: serialize(&pending_entry)?,
+    })?;
+    let mut response = stub
+        .fetch_with_request(Request::new_with_init(
+            &format!("http://fake_url.com{ENTRY_ENDPOINT}"),
+            &RequestInit {
+                method: Method::Post,
+                body: Some(serialized.into()),
+                ..Default::default()
+            },
+        )?)
+        .await?;
+    if response.status_code() != 200 {
+        // Return the response from the sequencing directly to the client.
+        return Ok(response.into());
+    }
+    let metadata = deserialize::<BootstrapMtcSequenceMetadata>(&response.bytes().await?)?;
+    Ok((
+        StatusCode::OK,
+        Json(AddEntryResponse {
+            leaf_index: metadata.leaf_index(),
+            timestamp: metadata.timestamp(),
+            not_before: validity.not_before.to_unix_duration().as_secs(),
+            not_after: validity.not_after.to_unix_duration().as_secs(),
+        }),
+    )
+        .into_response())
+}
+
+/// `POST /logs/{log}/get-certificate`
+#[worker::send]
+async fn get_certificate(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+    body: Bytes,
+) -> ApiResult<impl IntoResponse> {
+    let params = &CONFIG.logs[&log];
     let Ok(GetCertificateRequest {
         leaf_index,
         spki_der,
-    }) = req.json().await
+    }) = serde_json::from_slice(&body)
     else {
-        return Response::error("Unexpected input", 400);
+        return Err(AppError::BadRequest("Unexpected input".into()));
     };
-    let object_backend = ObjectBucket::new(load_public_bucket(env, name)?);
+    let object_backend = ObjectBucket::new(load_public_bucket(&env, &log)?);
     // Fetch the current checkpoint to know which tiles to fetch
     // (full or partials).
     let (checkpoint, _checkpoint_bytes) =
-        get_current_checkpoint(env, name, &object_backend).await?;
+        get_current_checkpoint(&env, &log, &object_backend).await?;
     if leaf_index >= checkpoint.size() {
-        return Response::error("Leaf index is not in log", 422);
+        return Err(AppError::LeafIndexNotInLog);
     }
 
-    let seq = get_landmark_sequence(name, &object_backend).await?;
+    let seq = get_landmark_sequence(&log, &object_backend).await?;
     if leaf_index < seq.first_index() {
-        return Response::error("Leaf index is before first active landmark", 422);
+        return Err(AppError::LeafIndexBeforeFirstActiveLandmark);
     }
     let Some((landmark_id, landmark_subtree)) = seq.subtree_for_index(leaf_index) else {
         // The leaf index might be between the latest landmark and the current
         // tree size. Set Retry-After to the expected time for the next landmark
         // so the client can try again later.
-        let headers = Headers::new();
         let i = params.landmark_interval_secs as u64;
-        headers.set("Retry-After", &format!("{}", i - (now_millis() / 1000) % i))?;
-        return Response::error("Leaf index will be covered by next landmark", 503)
-            .map(|r| r.with_headers(headers));
+        return Err(AppError::LeafIndexPendingLandmark {
+            retry_after: i - (now_millis() / 1000) % i,
+        });
     };
 
     // Fetch the log entry for the leaf index.
@@ -196,7 +424,7 @@ async fn get_certificate(mut req: Request, env: &Env, name: &str) -> Result<Resp
         checkpoint.hash(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // Get the inclusion proof.
     let proof = match prove_subtree_inclusion(
@@ -210,8 +438,8 @@ async fn get_certificate(mut req: Request, env: &Env, name: &str) -> Result<Resp
     .await
     {
         Ok(p) => p,
-        Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
-        Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+        Err(ProofError::Tlog(s)) => return Err(AppError::SubtreeInclusionProofFailed(s)),
+        Err(ProofError::Other(e)) => return Err(AppError::BadRequest(e.to_string())),
     };
 
     // Construct the signatureless certificate.
@@ -223,66 +451,109 @@ async fn get_certificate(mut req: Request, env: &Env, name: &str) -> Result<Resp
         proof,
     ) {
         Ok(data) => data,
-        Err(e) => {
-            return Response::error(format!("Failed to serialize signatureless cert: {e}"), 422)
-        }
+        Err(e) => return Err(AppError::FailedToSerializeSignaturelessCert(e)),
     };
 
-    Response::from_json(&GetCertificateResponse { data, landmark_id })
+    Ok((
+        StatusCode::OK,
+        Json(GetCertificateResponse { data, landmark_id }),
+    ))
 }
 
-/// `GET /logs/:log/metadata`
-fn metadata(env: &Env, name: &str) -> Result<Response> {
-    let params = &CONFIG.logs[name];
-    let cosigner = load_checkpoint_cosigner(env, name);
-    Response::from_json(&MetadataResponse {
-        description: &params.description,
-        log_id: cosigner.log_id().to_string(),
-        cosigner_id: cosigner.cosigner_id().to_string(),
-        cosigner_public_key: cosigner.verifying_key(),
-        submission_url: &params.submission_url,
-        monitoring_url: if params.monitoring_url.is_empty() {
-            &params.submission_url
-        } else {
-            &params.monitoring_url
-        },
-    })
+/// `GET /logs/{log}/get-landmark-bundle`
+#[worker::send]
+async fn get_landmark_bundle(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
+    let object_backend = ObjectBucket::new(load_public_bucket(&env, &log)?);
+
+    // Fetch the current landmark bundle from R2 (already encoded in JSON) and return it
+    let Some(landmark_bundle_bytes) = object_backend.fetch(LANDMARK_BUNDLE_KEY).await? else {
+        return Err(AppError::InternalServerError(
+            "failed to get landmark bundle".into(),
+        ));
+    };
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        landmark_bundle_bytes,
+    ))
 }
 
-/// `GET /logs/:log/sequencer_id`
-fn sequencer_id(env: &Env, name: &str) -> Result<Response> {
+/// `GET /logs/{log}/metadata`
+#[worker::send]
+async fn metadata(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
+    let params = &CONFIG.logs[&log];
+    let cosigner = load_checkpoint_cosigner(&env, &log);
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_vec(&MetadataResponse {
+            description: &params.description,
+            log_id: cosigner.log_id().to_string(),
+            cosigner_id: cosigner.cosigner_id().to_string(),
+            cosigner_public_key: cosigner.verifying_key(),
+            submission_url: &params.submission_url,
+            monitoring_url: if params.monitoring_url.is_empty() {
+                &params.submission_url
+            } else {
+                &params.monitoring_url
+            },
+        })
+        .unwrap(),
+    ))
+}
+
+/// `GET /logs/{log}/sequencer_id`
+#[worker::send]
+async fn sequencer_id(
+    State(env): State<Env>,
+    PathParams { log, .. }: PathParams<()>,
+) -> ApiResult<impl IntoResponse> {
     // Print out the Durable Object ID of the sequencer to allow looking it up
     // in internal Cloudflare dashboards. This value does not need to be secret.
     let namespace = env.durable_object("SEQUENCER")?;
-    let object_id = namespace.id_from_name(name)?;
-    Response::ok(object_id.to_string())
+    let object_id = namespace.id_from_name(&log)?;
+    Ok((StatusCode::OK, object_id.to_string()))
 }
 
-/// `GET /logs/:log/*key` -- direct read-through to the public R2 bucket when
+/// `GET /logs/{log}/{*key}` — direct read-through to the public R2 bucket when
 /// the log's `monitoring_url` is unspecified.
-async fn get_object(env: &Env, name: &str, key: &str) -> Result<Response> {
+#[worker::send]
+async fn get_object(
+    State(env): State<Env>,
+    PathParams {
+        log,
+        rest: Key { key },
+    }: PathParams<Key>,
+) -> ApiResult<impl IntoResponse> {
     // Enable direct access to the bucket via the Worker if monitoring_url is
     // unspecified.
-    if CONFIG.logs[name].monitoring_url.is_empty() {
-        let bucket = load_public_bucket(env, name)?;
+    if CONFIG.logs[&log].monitoring_url.is_empty() {
+        let bucket = load_public_bucket(&env, &log)?;
         if let Some(obj) = bucket.get(key).execute().await? {
-            Response::from_body(
-                obj.body()
-                    .ok_or("R2 object missing body")?
-                    .response_body()?,
-            )
-            .map(|r| r.with_headers(headers_from_http_metadata(obj.http_metadata())))
+            let body = obj
+                .body()
+                .ok_or_else(|| AppError::InternalServerError("R2 object missing body".into()))?
+                .stream()?;
+            Ok((
+                StatusCode::OK,
+                headers_from_http_metadata(obj.http_metadata()),
+                axum::body::Body::from_stream(WorkerByteStream::new(body)),
+            ))
         } else {
-            Response::error("Not found", 404)
+            Err(AppError::NotFound)
         }
     } else {
-        Response::error(
-            format!(
-                "Use {} for monitoring API",
-                CONFIG.logs[name].monitoring_url
-            ),
-            404,
-        )
+        // TODO: should this be an HTTP redirect instead of a 404?
+        Err(AppError::RedirectToMonitorApi(
+            &CONFIG.logs[&log].monitoring_url,
+        ))
     }
 }
 
@@ -346,141 +617,6 @@ fn resolve_issuer_for_sct(
         .map_err(|e| format!("failed to encode issuer: {e}"))
 }
 
-#[allow(clippy::too_many_lines)]
-async fn add_entry(mut req: Request, env: &Env, name: &str) -> Result<Response> {
-    let params = &CONFIG.logs[name];
-    let req: AddEntryRequest = req.json().await?;
-
-    let issuer = build_issuer_rdn(&params.log_id)?;
-    let mut validity = build_validity(now_millis(), params.max_certificate_lifetime_secs as u64)?;
-
-    let roots = load_roots(env, name).await?;
-    let (pending_entry, found_root_idx) =
-        match bootstrap_mtc_api::validate_chain(&req.chain, roots, &issuer, &mut validity) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("{name}: Bad request: {e}");
-                return Response::error("Bad request", 400);
-            }
-        };
-
-    // SCT validation (if enabled for this log shard)
-    if params.enable_sct_validation {
-        use crate::ct_logs_cron::load_ct_logs;
-        use sct_validator::{SctValidationResult, SctValidator};
-
-        // Load the CT log list from KV
-        let ct_logs = load_ct_logs(env).await?;
-        let validator = SctValidator::new(ct_logs);
-
-        // Get leaf and issuer DER for SCT validation
-        let leaf_der = req.chain.first().ok_or("Chain is empty")?;
-        let issuer_der = resolve_issuer_for_sct(&req.chain, roots)?;
-
-        let validation_time_secs = now_millis() / 1000;
-
-        match validator.validate_embedded_scts(leaf_der, &issuer_der, validation_time_secs) {
-            Ok(SctValidationResult::Valid) => {
-                log::info!("{name}: SCT validation passed");
-            }
-            Ok(SctValidationResult::ValidWithWarnings(warnings)) => {
-                log::info!(
-                    "{name}: SCT validation passed with {} warnings",
-                    warnings.len()
-                );
-                for warning in &warnings {
-                    log::debug!("{name}: SCT warning: {warning:?}");
-                }
-            }
-            Ok(SctValidationResult::StaleLogList) => {
-                log::warn!("{name}: SCT validation skipped (stale log list)");
-            }
-            Err(e) => {
-                log::warn!("{name}: SCT validation failed: {e}");
-                return Response::error(format!("SCT validation failed: {e}"), 400);
-            }
-        }
-    }
-
-    // Retrieve the sequenced entry for this pending log entry by sending a request to the DO to
-    // sequence the entry.
-    let lookup_key = pending_entry.lookup_key();
-
-    // First persist issuers. Use a block so memory is deallocated sooner.
-    {
-        let public_bucket = ObjectBucket::new(load_public_bucket(env, name)?);
-        let mut issuers = req.chain[1..]
-            .iter()
-            .map(Vec::as_slice)
-            .collect::<Vec<&[u8]>>();
-
-        // Make sure the found root is persisted as well, if the add-chain
-        // request did not include the root.
-        let root_bytes;
-        if let Some(idx) = found_root_idx {
-            root_bytes = roots.certs[idx].to_der().map_err(|e| e.to_string())?;
-            issuers.push(&root_bytes);
-        }
-
-        generic_log_worker::upload_issuers(&public_bucket, &issuers, name).await?;
-    }
-
-    // Submit entry to be sequenced, either via a batcher or directly to the
-    // sequencer.
-    let stub = {
-        let shard_id = batcher_id_from_lookup_key(&lookup_key, params.num_batchers);
-        get_durable_object_stub(
-            env,
-            name,
-            shard_id,
-            if shard_id.is_some() {
-                "BATCHER"
-            } else {
-                "SEQUENCER"
-            },
-            params.location_hint.as_deref(),
-        )?
-    };
-    let serialized = serialize(&PendingLogEntryBlob {
-        lookup_key,
-        data: serialize(&pending_entry)?,
-    })?;
-    let mut response = stub
-        .fetch_with_request(Request::new_with_init(
-            &format!("http://fake_url.com{ENTRY_ENDPOINT}"),
-            &RequestInit {
-                method: Method::Post,
-                body: Some(serialized.into()),
-                ..Default::default()
-            },
-        )?)
-        .await?;
-    if response.status_code() != 200 {
-        // Return the response from the sequencing directly to the client.
-        return Ok(response);
-    }
-    let metadata = deserialize::<BootstrapMtcSequenceMetadata>(&response.bytes().await?)?;
-    Response::from_json(&AddEntryResponse {
-        leaf_index: metadata.leaf_index(),
-        timestamp: metadata.timestamp(),
-        not_before: validity.not_before.to_unix_duration().as_secs(),
-        not_after: validity.not_after.to_unix_duration().as_secs(),
-    })
-}
-
-async fn get_landmark_bundle(env: &Env, name: &str) -> Result<Response> {
-    let object_backend = ObjectBucket::new(load_public_bucket(env, name)?);
-
-    // Fetch the current landmark bundle from R2 (already encoded in JSON) and return it
-    let Some(landmark_bundle_bytes) = object_backend.fetch(LANDMARK_BUNDLE_KEY).await? else {
-        return Err("failed to get landmark bundle".into());
-    };
-
-    Ok(ResponseBuilder::new()
-        .with_header("content-type", "application/json")?
-        .body(ResponseBody::Body(landmark_bundle_bytes)))
-}
-
 async fn get_current_checkpoint(
     env: &Env,
     name: &str,
@@ -516,16 +652,16 @@ async fn get_landmark_sequence(
     Ok(landmark_sequence)
 }
 
-fn headers_from_http_metadata(meta: HttpMetadata) -> Headers {
-    let h = Headers::new();
+fn headers_from_http_metadata(meta: HttpMetadata) -> HeaderMap {
+    let mut h = HeaderMap::new();
     if let Some(hdr) = meta.cache_control {
-        h.append("Cache-Control", &hdr).unwrap();
+        h.append("Cache-Control", hdr.try_into().unwrap());
     }
     if let Some(hdr) = meta.content_encoding {
-        h.append("Content-Encoding", &hdr).unwrap();
+        h.append("Content-Encoding", hdr.try_into().unwrap());
     }
     if let Some(hdr) = meta.content_type {
-        h.append("Content-Type", &hdr).unwrap();
+        h.append("Content-Type", hdr.try_into().unwrap());
     }
     h
 }
