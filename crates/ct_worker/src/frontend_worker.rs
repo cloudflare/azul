@@ -81,12 +81,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
             // handle the request.
             Router::with_data(name)
                 .get_async("/logs/:log/ct/v1/get-roots", |_req, ctx| async move {
-                    Response::from_json(&GetRootsResponse {
-                        certificates: x509_util::certs_to_bytes(
-                            &load_roots(&ctx.env, ctx.data).await?.certs,
-                        )
-                        .unwrap(),
-                    })
+                    get_roots(&ctx.env, ctx.data).await
                 })
                 .post_async("/logs/:log/ct/v1/add-chain", |req, ctx| async move {
                     add_chain_or_pre_chain(req, &ctx.env, ctx.data, false).await
@@ -95,67 +90,13 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                     add_chain_or_pre_chain(req, &ctx.env, ctx.data, true).await
                 })
                 .get("/logs/:log/log.v3.json", |_req, ctx| {
-                    let name = ctx.data;
-                    let params = &CONFIG.logs[name];
-                    let verifying_key = load_signing_key(&ctx.env, name)?.verifying_key();
-                    let log_id = &static_ct_api::log_id_from_key(verifying_key)
-                        .map_err(|e| e.to_string())?;
-                    let key = verifying_key
-                        .to_public_key_der()
-                        .map_err(|e| e.to_string())?;
-                    Response::from_json(&LogV3JsonResponse {
-                        description: &params.description,
-                        log_type: &params.log_type,
-                        log_id,
-                        key: key.as_bytes(),
-                        submission_url: &params.submission_url,
-                        monitoring_url: if params.monitoring_url.is_empty() {
-                            &params.submission_url
-                        } else {
-                            &params.monitoring_url
-                        },
-                        mmd: MAX_MERGE_DELAY_SECS,
-                        temporal_interval: &params.temporal_interval,
-                    })
+                    log_v3_json(&ctx.env, ctx.data)
                 })
                 .get("/logs/:log/sequencer_id", |_req, ctx| {
-                    // Print out the Durable Object ID of the sequencer to allow
-                    // looking it up in internal Cloudflare dashboards. This
-                    // value does not need to be kept secret.
-                    let name = ctx.data;
-                    let namespace = ctx.env.durable_object("SEQUENCER")?;
-                    let object_id = namespace.id_from_name(name)?;
-                    Response::ok(object_id.to_string())
+                    sequencer_id(&ctx.env, ctx.data)
                 })
                 .get_async("/logs/:log/*key", |_req, ctx| async move {
-                    let name = ctx.data;
-                    let key = ctx.param("key").unwrap();
-
-                    // Enable direct access to the bucket via the Worker if
-                    // monitoring_url is unspecified.
-                    if CONFIG.logs[name].monitoring_url.is_empty() {
-                        let bucket = load_public_bucket(&ctx.env, name)?;
-                        if let Some(obj) = bucket.get(key).execute().await? {
-                            Response::from_body(
-                                obj.body()
-                                    .ok_or("R2 object missing body")?
-                                    .response_body()?,
-                            )
-                            .map(|r| {
-                                r.with_headers(headers_from_http_metadata(obj.http_metadata()))
-                            })
-                        } else {
-                            Response::error("Not found", 404)
-                        }
-                    } else {
-                        Response::error(
-                            format!(
-                                "Use {} for monitoring API",
-                                CONFIG.logs[name].monitoring_url
-                            ),
-                            404,
-                        )
-                    }
+                    get_object(&ctx.env, ctx.data, ctx.param("key").unwrap()).await
                 })
                 .run(req, ctx.env)
                 .await
@@ -175,6 +116,74 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
     }
     response
+}
+
+/// `GET /logs/:log/ct/v1/get-roots`
+async fn get_roots(env: &Env, name: &str) -> Result<Response> {
+    Response::from_json(&GetRootsResponse {
+        certificates: x509_util::certs_to_bytes(&load_roots(env, name).await?.certs).unwrap(),
+    })
+}
+
+/// `GET /logs/:log/log.v3.json`
+fn log_v3_json(env: &Env, name: &str) -> Result<Response> {
+    let params = &CONFIG.logs[name];
+    let verifying_key = load_signing_key(env, name)?.verifying_key();
+    let log_id = &static_ct_api::log_id_from_key(verifying_key).map_err(|e| e.to_string())?;
+    let key = verifying_key
+        .to_public_key_der()
+        .map_err(|e| e.to_string())?;
+    Response::from_json(&LogV3JsonResponse {
+        description: &params.description,
+        log_type: &params.log_type,
+        log_id,
+        key: key.as_bytes(),
+        submission_url: &params.submission_url,
+        monitoring_url: if params.monitoring_url.is_empty() {
+            &params.submission_url
+        } else {
+            &params.monitoring_url
+        },
+        mmd: MAX_MERGE_DELAY_SECS,
+        temporal_interval: &params.temporal_interval,
+    })
+}
+
+/// `GET /logs/:log/sequencer_id`
+fn sequencer_id(env: &Env, name: &str) -> Result<Response> {
+    // Print out the Durable Object ID of the sequencer to allow looking it up
+    // in internal Cloudflare dashboards. This value does not need to be secret.
+    let namespace = env.durable_object("SEQUENCER")?;
+    let object_id = namespace.id_from_name(name)?;
+    Response::ok(object_id.to_string())
+}
+
+/// `GET /logs/:log/*key` -- direct read-through to the public R2 bucket when
+/// the log's `monitoring_url` is unspecified.
+async fn get_object(env: &Env, name: &str, key: &str) -> Result<Response> {
+    // Enable direct access to the bucket via the Worker if monitoring_url is
+    // unspecified.
+    if CONFIG.logs[name].monitoring_url.is_empty() {
+        let bucket = load_public_bucket(env, name)?;
+        if let Some(obj) = bucket.get(key).execute().await? {
+            Response::from_body(
+                obj.body()
+                    .ok_or("R2 object missing body")?
+                    .response_body()?,
+            )
+            .map(|r| r.with_headers(headers_from_http_metadata(obj.http_metadata())))
+        } else {
+            Response::error("Not found", 404)
+        }
+    } else {
+        Response::error(
+            format!(
+                "Use {} for monitoring API",
+                CONFIG.logs[name].monitoring_url
+            ),
+            404,
+        )
+    }
 }
 
 #[allow(clippy::too_many_lines)]

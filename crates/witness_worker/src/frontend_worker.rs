@@ -74,14 +74,17 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             sign_subtree(req, ctx.env).await
         })
         .get("/metadata", |_req, ctx| metadata(&ctx.env))
-        .get("/", |_req, _ctx| {
-            Response::ok(format!(
-                "{} — c2sp.org/tlog-witness witness\n",
-                CONFIG.witness_name
-            ))
-        })
+        .get("/", |_req, _ctx| root())
         .run(req, env)
         .await
+}
+
+/// `GET /` -- witness identity string.
+fn root() -> Result<Response> {
+    Response::ok(format!(
+        "{} — c2sp.org/tlog-witness witness\n",
+        CONFIG.witness_name
+    ))
 }
 
 /// Response body for the `/metadata` endpoint.

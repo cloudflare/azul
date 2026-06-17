@@ -107,156 +107,25 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
             // handle the request.
             Router::with_data(name)
                 .get_async("/logs/:log/get-roots", |_req, ctx| async move {
-                    Response::from_json(&GetRootsResponse {
-                        certificates: x509_util::certs_to_bytes(
-                            &load_roots(&ctx.env, ctx.data).await?.certs,
-                        )
-                        .unwrap(),
-                    })
+                    get_roots(&ctx.env, ctx.data).await
                 })
                 .post_async("/logs/:log/add-entry", |req, ctx| async move {
                     add_entry(req, &ctx.env, ctx.data).await
                 })
-                .post_async("/logs/:log/get-certificate", |mut req, ctx| async move {
-                    let name = ctx.data;
-                    let params = &CONFIG.logs[name];
-                    let Ok(GetCertificateRequest {
-                        leaf_index,
-                        spki_der,
-                    }) = req.json().await
-                    else {
-                        return Response::error("Unexpected input", 400);
-                    };
-                    let object_backend = ObjectBucket::new(load_public_bucket(&ctx.env, name)?);
-                    // Fetch the current checkpoint to know which tiles to fetch
-                    // (full or partials).
-                    let (checkpoint, _checkpoint_bytes) =
-                        get_current_checkpoint(&ctx.env, name, &object_backend).await?;
-                    if leaf_index >= checkpoint.size() {
-                        return Response::error("Leaf index is not in log", 422);
-                    }
-
-                    let seq = get_landmark_sequence(name, &object_backend).await?;
-                    if leaf_index < seq.first_index() {
-                        return Response::error("Leaf index is before first active landmark", 422);
-                    }
-                    let Some((landmark_id, landmark_subtree)) = seq.subtree_for_index(leaf_index)
-                    else {
-                        // The leaf index might be between the latest landmark
-                        // and the current tree size. Set Retry-After to the
-                        // expected time for the next landmark so the client can
-                        // try again later.
-                        let headers = Headers::new();
-                        let i = params.landmark_interval_secs as u64;
-                        headers
-                            .set("Retry-After", &format!("{}", i - (now_millis() / 1000) % i))?;
-                        return Response::error("Leaf index will be covered by next landmark", 503)
-                            .map(|r| r.with_headers(headers));
-                    };
-
-                    // Fetch the log entry for the leaf index.
-                    let log_entry = read_leaf::<BootstrapMtcLogEntry>(
-                        &object_backend,
-                        leaf_index,
-                        checkpoint.size(),
-                        checkpoint.hash(),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                    // Get the inclusion proof.
-                    let proof = match prove_subtree_inclusion(
-                        checkpoint.size(),
-                        *checkpoint.hash(),
-                        landmark_subtree.lo(),
-                        landmark_subtree.hi(),
-                        leaf_index,
-                        &object_backend,
-                    )
-                    .await
-                    {
-                        Ok(p) => p,
-                        Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
-                        Err(ProofError::Other(e)) => return Err(e.to_string().into()),
-                    };
-
-                    // Construct the signatureless certificate.
-                    let data = match serialize_signatureless_cert(
-                        &log_entry,
-                        leaf_index,
-                        &spki_der,
-                        &landmark_subtree,
-                        proof,
-                    ) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            return Response::error(
-                                format!("Failed to serialize signatureless cert: {e}"),
-                                422,
-                            )
-                        }
-                    };
-
-                    Response::from_json(&GetCertificateResponse { data, landmark_id })
+                .post_async("/logs/:log/get-certificate", |req, ctx| async move {
+                    get_certificate(req, &ctx.env, ctx.data).await
                 })
                 .get_async("/logs/:log/get-landmark-bundle", |_req, ctx| async move {
                     get_landmark_bundle(&ctx.env, ctx.data).await
                 })
                 .get("/logs/:log/metadata", |_req, ctx| {
-                    let name = ctx.data;
-                    let params = &CONFIG.logs[name];
-                    let cosigner = load_checkpoint_cosigner(&ctx.env, name);
-                    Response::from_json(&MetadataResponse {
-                        description: &params.description,
-                        log_id: cosigner.log_id().to_string(),
-                        cosigner_id: cosigner.cosigner_id().to_string(),
-                        cosigner_public_key: cosigner.verifying_key(),
-                        submission_url: &params.submission_url,
-                        monitoring_url: if params.monitoring_url.is_empty() {
-                            &params.submission_url
-                        } else {
-                            &params.monitoring_url
-                        },
-                    })
+                    metadata(&ctx.env, ctx.data)
                 })
                 .get("/logs/:log/sequencer_id", |_req, ctx| {
-                    // Print out the Durable Object ID of the sequencer to allow
-                    // looking it up in internal Cloudflare dashboards. This
-                    // value does not need to be kept secret.
-                    let name = ctx.data;
-                    let namespace = ctx.env.durable_object("SEQUENCER")?;
-                    let object_id = namespace.id_from_name(name)?;
-                    Response::ok(object_id.to_string())
+                    sequencer_id(&ctx.env, ctx.data)
                 })
                 .get_async("/logs/:log/*key", |_req, ctx| async move {
-                    let name = ctx.data;
-                    let key = ctx.param("key").unwrap();
-
-                    // Enable direct access to the bucket via the Worker if
-                    // monitoring_url is unspecified.
-                    if CONFIG.logs[name].monitoring_url.is_empty() {
-                        let bucket = load_public_bucket(&ctx.env, name)?;
-                        if let Some(obj) = bucket.get(key).execute().await? {
-                            Response::from_body(
-                                obj.body()
-                                    .ok_or("R2 object missing body")?
-                                    .response_body()?,
-                            )
-                            .map(|r| {
-                                r.with_headers(headers_from_http_metadata(obj.http_metadata()))
-                            })
-                        } else {
-                            Response::error("Not found", 404)
-                        }
-                    } else {
-                        Response::error(
-                            format!(
-                                "Use {} for monitoring API",
-                                CONFIG.logs[name].monitoring_url
-                            ),
-                            404,
-                        )
-                    }
+                    get_object(&ctx.env, ctx.data, ctx.param("key").unwrap()).await
                 })
                 .run(req, ctx.env)
                 .await
@@ -276,6 +145,145 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         ctx.wait_until(async move { wshim.flush(&generic_log_worker::obs::logs::LOGGER).await });
     }
     response
+}
+
+/// `GET /logs/:log/get-roots`
+async fn get_roots(env: &Env, name: &str) -> Result<Response> {
+    Response::from_json(&GetRootsResponse {
+        certificates: x509_util::certs_to_bytes(&load_roots(env, name).await?.certs).unwrap(),
+    })
+}
+
+/// `POST /logs/:log/get-certificate`
+async fn get_certificate(mut req: Request, env: &Env, name: &str) -> Result<Response> {
+    let params = &CONFIG.logs[name];
+    let Ok(GetCertificateRequest {
+        leaf_index,
+        spki_der,
+    }) = req.json().await
+    else {
+        return Response::error("Unexpected input", 400);
+    };
+    let object_backend = ObjectBucket::new(load_public_bucket(env, name)?);
+    // Fetch the current checkpoint to know which tiles to fetch
+    // (full or partials).
+    let (checkpoint, _checkpoint_bytes) =
+        get_current_checkpoint(env, name, &object_backend).await?;
+    if leaf_index >= checkpoint.size() {
+        return Response::error("Leaf index is not in log", 422);
+    }
+
+    let seq = get_landmark_sequence(name, &object_backend).await?;
+    if leaf_index < seq.first_index() {
+        return Response::error("Leaf index is before first active landmark", 422);
+    }
+    let Some((landmark_id, landmark_subtree)) = seq.subtree_for_index(leaf_index) else {
+        // The leaf index might be between the latest landmark and the current
+        // tree size. Set Retry-After to the expected time for the next landmark
+        // so the client can try again later.
+        let headers = Headers::new();
+        let i = params.landmark_interval_secs as u64;
+        headers.set("Retry-After", &format!("{}", i - (now_millis() / 1000) % i))?;
+        return Response::error("Leaf index will be covered by next landmark", 503)
+            .map(|r| r.with_headers(headers));
+    };
+
+    // Fetch the log entry for the leaf index.
+    let log_entry = read_leaf::<BootstrapMtcLogEntry>(
+        &object_backend,
+        leaf_index,
+        checkpoint.size(),
+        checkpoint.hash(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Get the inclusion proof.
+    let proof = match prove_subtree_inclusion(
+        checkpoint.size(),
+        *checkpoint.hash(),
+        landmark_subtree.lo(),
+        landmark_subtree.hi(),
+        leaf_index,
+        &object_backend,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(ProofError::Tlog(s)) => return Response::error(s.to_string(), 422),
+        Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+    };
+
+    // Construct the signatureless certificate.
+    let data = match serialize_signatureless_cert(
+        &log_entry,
+        leaf_index,
+        &spki_der,
+        &landmark_subtree,
+        proof,
+    ) {
+        Ok(data) => data,
+        Err(e) => {
+            return Response::error(format!("Failed to serialize signatureless cert: {e}"), 422)
+        }
+    };
+
+    Response::from_json(&GetCertificateResponse { data, landmark_id })
+}
+
+/// `GET /logs/:log/metadata`
+fn metadata(env: &Env, name: &str) -> Result<Response> {
+    let params = &CONFIG.logs[name];
+    let cosigner = load_checkpoint_cosigner(env, name);
+    Response::from_json(&MetadataResponse {
+        description: &params.description,
+        log_id: cosigner.log_id().to_string(),
+        cosigner_id: cosigner.cosigner_id().to_string(),
+        cosigner_public_key: cosigner.verifying_key(),
+        submission_url: &params.submission_url,
+        monitoring_url: if params.monitoring_url.is_empty() {
+            &params.submission_url
+        } else {
+            &params.monitoring_url
+        },
+    })
+}
+
+/// `GET /logs/:log/sequencer_id`
+fn sequencer_id(env: &Env, name: &str) -> Result<Response> {
+    // Print out the Durable Object ID of the sequencer to allow looking it up
+    // in internal Cloudflare dashboards. This value does not need to be secret.
+    let namespace = env.durable_object("SEQUENCER")?;
+    let object_id = namespace.id_from_name(name)?;
+    Response::ok(object_id.to_string())
+}
+
+/// `GET /logs/:log/*key` -- direct read-through to the public R2 bucket when
+/// the log's `monitoring_url` is unspecified.
+async fn get_object(env: &Env, name: &str, key: &str) -> Result<Response> {
+    // Enable direct access to the bucket via the Worker if monitoring_url is
+    // unspecified.
+    if CONFIG.logs[name].monitoring_url.is_empty() {
+        let bucket = load_public_bucket(env, name)?;
+        if let Some(obj) = bucket.get(key).execute().await? {
+            Response::from_body(
+                obj.body()
+                    .ok_or("R2 object missing body")?
+                    .response_body()?,
+            )
+            .map(|r| r.with_headers(headers_from_http_metadata(obj.http_metadata())))
+        } else {
+            Response::error("Not found", 404)
+        }
+    } else {
+        Response::error(
+            format!(
+                "Use {} for monitoring API",
+                CONFIG.logs[name].monitoring_url
+            ),
+            404,
+        )
+    }
 }
 
 /// Builds the issuer RDN with the trust anchor ID.
