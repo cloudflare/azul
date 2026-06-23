@@ -6,6 +6,7 @@ use base64::Engine;
 
 pub mod batcher_do;
 pub mod cleaner_do;
+pub mod frontend;
 pub mod log_ops;
 pub mod obs;
 pub mod sequencer_do;

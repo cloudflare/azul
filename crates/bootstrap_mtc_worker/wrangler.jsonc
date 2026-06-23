@@ -21,6 +21,9 @@
                 // should NOT be enabled in a production deployment).
                 "command": "cargo install -q worker-build@0.7.5 && DEPLOY_ENV=dev worker-build --release --features dev-bootstrap-roots"
             },
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
             "workers_dev": true,
             "kv_namespaces": [
                 {
@@ -122,6 +125,9 @@
                     "enabled": true,
                     "invocation_logs": true
                 }
+            },
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
             },
             "migrations": [
                 {

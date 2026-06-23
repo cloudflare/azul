@@ -23,6 +23,9 @@
                     }
                 ]
             },
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
             "migrations": [
                 {
                     "tag": "v1",

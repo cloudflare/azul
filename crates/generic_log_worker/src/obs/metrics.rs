@@ -198,6 +198,49 @@ impl ObjectMetrics {
     }
 }
 
+#[derive(Clone)]
+pub struct FrontendWorkerMetrics {
+    pub http_request_duration_ms: HistogramVec,
+    pub http_request_total: CounterVec,
+    pub versioned_requests_total: CounterVec,
+}
+
+impl FrontendWorkerMetrics {
+    #[must_use]
+    pub fn new(r: &Registry) -> Self {
+        let http_request_duration_ms = register_histogram_vec_with_registry!(
+            "http_request_duration_ms",
+            "Duration of an http request made to the frontend worker",
+            &["path", "log"],
+            vec![50., 100., 200., 400., 1000., 2000., 4000.],
+            r
+        )
+        .unwrap();
+
+        let http_request_total = register_counter_vec_with_registry!(
+            "http_request_total",
+            "Total number of http requests to the frontend worker",
+            &["path", "log"],
+            r,
+        )
+        .unwrap();
+
+        let versioned_requests_total = register_counter_vec_with_registry!(
+            "versioned_requests_total",
+            "Total number of requests that succeeded by version",
+            &["status", "version"],
+            r
+        )
+        .unwrap();
+
+        Self {
+            http_request_duration_ms,
+            http_request_total,
+            versioned_requests_total,
+        }
+    }
+}
+
 // Perform a potentially-lossy conversion to f64 from the input type.
 pub(crate) trait AsF64 {
     fn as_f64(&self) -> f64;
@@ -222,7 +265,17 @@ pub(crate) fn millis_diff_as_secs(start: u64, end: u64) -> f64 {
     (end.as_f64() - start.as_f64()) / 1e3
 }
 
-impl super::WshimData for &prometheus::Registry {
+#[must_use]
+#[allow(clippy::missing_panics_doc)] // can never panic
+pub fn registry() -> Registry {
+    Registry::new_custom(
+        None,
+        Some([("env".to_owned(), env!("DEPLOY_ENV").to_owned())].into()),
+    )
+    .expect("only panic when prefix is an empty string")
+}
+
+impl super::WshimData for &Registry {
     fn endpoint() -> &'static str {
         "prometheus"
     }

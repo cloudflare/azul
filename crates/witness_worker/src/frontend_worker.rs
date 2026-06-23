@@ -24,7 +24,11 @@
 //! [signsub]: https://c2sp.org/tlog-witness#sign-subtree
 //! [`WitnessState`]: crate::witness_state_do
 
-use generic_log_worker::util::now_millis;
+use generic_log_worker::{
+    frontend::request_metrics,
+    obs::{metrics, Wshim},
+    util::now_millis,
+};
 use signed_note::{NoteError, NoteVerifier, VerifierList};
 use tlog_checkpoint::{CheckpointSigner, CheckpointText};
 use tlog_core::Subtree;
@@ -45,6 +49,7 @@ use axum::{
     body::Bytes,
     extract::State,
     http::{header, StatusCode},
+    middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -72,16 +77,29 @@ fn start() {
 async fn fetch(
     req: HttpRequest,
     env: Env,
-    _ctx: Context,
+    ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
-    Ok(Router::new()
+    let wshim = Wshim::from_env(&env);
+    let registry = metrics::registry();
+    let response = Router::new()
         .route("/add-checkpoint", post(add_checkpoint))
         .route("/sign-subtree", post(sign_subtree))
         .route("/metadata", get(metadata))
         .route("/", get(root))
+        .layer(middleware::from_fn_with_state(
+            (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
+            request_metrics,
+        ))
         .with_state(env)
         .call(req)
-        .await?)
+        .await?;
+    if let Ok(wshim) = wshim {
+        ctx.wait_until(async move {
+            wshim.flush(&generic_log_worker::obs::logs::LOGGER).await;
+            wshim.flush(&registry).await;
+        });
+    }
+    Ok(response)
 }
 
 /// `GET /` -- witness identity string.
