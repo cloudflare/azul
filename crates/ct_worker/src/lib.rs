@@ -4,7 +4,7 @@
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 use crate::ccadb_roots_cron::{ccadb_roots_filename, update_ccadb_roots, CCADB_ROOTS_NAMESPACE};
-use config::AppConfig;
+use config::{AppConfig, LogType};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use signed_note::KeyName;
@@ -134,20 +134,25 @@ async fn load_roots(env: &Env, name: &str) -> Result<Arc<CertPool>> {
         }
     }
 
+    let log_config = &CONFIG.logs[name];
+
     // Build the pool for this request. If another request concurrently built
     // and stored one first, we discard ours and return the stored value.
     // This avoids awaiting an OnceLock initialized by another request context,
     // which the Workers runtime would cancel as a cross-request deadlock.
-    let pem = include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem"));
     let mut pool = CertPool::default();
-    // load_pem_chain fails on empty input: https://github.com/RustCrypto/formats/pull/1965
-    if !pem.is_empty() {
-        pool.append_certs_from_pem(pem)
-            .map_err(|e| format!("failed to load PEM chain: {e}"))?;
+
+    if log_config.log_type == Some(LogType::Test) {
+        let pem = include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem"));
+        // load_pem_chain fails on empty input: https://github.com/RustCrypto/formats/pull/1965
+        if !pem.is_empty() {
+            pool.append_certs_from_pem(pem)
+                .map_err(|e| format!("failed to load PEM chain: {e}"))?;
+        }
     }
 
     // Load additional roots from the CCADB roots file in Workers KV.
-    if CONFIG.logs[name].enable_ccadb_roots {
+    if log_config.enable_ccadb_roots {
         let key = ccadb_roots_filename(name);
         let kv = env.kv(CCADB_ROOTS_NAMESPACE)?;
         let pem = if let Some(pem) = kv.get(&key).text().await? {

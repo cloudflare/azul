@@ -5,6 +5,7 @@
 
 use chrono::Months;
 use config::AppConfig;
+use config::LogType;
 use std::env;
 use std::fs;
 use url::Url;
@@ -33,16 +34,26 @@ fn main() {
         panic!("failed to deserialize JSON config '{config_file}': {e}");
     });
     for (name, params) in &conf.logs {
-        // Chrome's CT policy (https://googlechrome.github.io/CertificateTransparency/log_policy.html) states:
-        // "The certificate expiry ranges for CT Logs must be no longer than one calendar year and should be no shorter than six months."
+        // r2 bucket names must begin and end with an alphanumeric character, only contain
+        // lowercase letters, numbers, and hyphens, and be between 3 and 63 characters long.
+        const R2_BUCKET_PREFIX_LEN: usize = "static-ct-public-".len();
         assert!(
-            (params.temporal_interval.start_inclusive + Months::new(6)
-                ..=params.temporal_interval.start_inclusive + Months::new(12))
-                .contains(&params.temporal_interval.end_exclusive),
-            "{name} invalid temporal interval: [{}, {})",
-            params.temporal_interval.start_inclusive,
-            params.temporal_interval.end_exclusive
+            name.chars().all(|c| c.is_ascii_lowercase() || c.is_numeric())
+                && (3..R2_BUCKET_PREFIX_LEN).contains(&name.len()),
+            "invalid shard name '{name}'. Shard names only contain lowercase letters, numbers, and be between 3 and {R2_BUCKET_PREFIX_LEN} characters long."
         );
+        if params.log_type != Some(LogType::Test) {
+            // Chrome's CT policy (https://googlechrome.github.io/CertificateTransparency/log_policy.html) states:
+            // "The certificate expiry ranges for CT Logs must be no longer than one calendar year and should be no shorter than six months."
+            assert!(
+                (params.temporal_interval.start_inclusive + Months::new(6)
+                    ..=params.temporal_interval.start_inclusive + Months::new(12))
+                    .contains(&params.temporal_interval.end_exclusive),
+                "{name} invalid temporal interval: [{}, {})",
+                params.temporal_interval.start_inclusive,
+                params.temporal_interval.end_exclusive
+            );
+        }
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {
             assert!(
