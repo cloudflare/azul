@@ -10,9 +10,9 @@ use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use signed_note::KeyName;
 use static_ct_api::StaticCTCheckpointSigner;
 use std::collections::HashMap;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner};
-use worker::{Env, Result};
+use worker::{send::SendWrapper, Date, Env, Result};
 use x509_util::CertPool;
 
 mod batcher_do;
@@ -32,7 +32,6 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 
 static SIGNING_KEY_MAP: OnceLock<HashMap<String, OnceLock<EcdsaSigningKey>>> = OnceLock::new();
 static WITNESS_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
-static ROOTS: OnceLock<CertPool> = OnceLock::new();
 
 pub(crate) fn load_signing_key(env: &Env, name: &str) -> Result<&'static EcdsaSigningKey> {
     let once = &SIGNING_KEY_MAP.get_or_init(|| {
@@ -100,10 +99,39 @@ pub(crate) fn load_origin(name: &str) -> KeyName {
     .expect("invalid origin name")
 }
 
-async fn load_roots(env: &Env, name: &str) -> Result<&'static CertPool> {
+struct CachedRoot {
+    not_after: SendWrapper<Date>,
+    pool: Arc<CertPool>,
+}
+
+impl CachedRoot {
+    fn new(pool: CertPool) -> Self {
+        // this is an extreme case where a worker isolate lasts for more than a day, which is the
+        // time it takes for the update roots cron job to run.
+        const ONE_DAY_MILLIS: u64 = 24 * 60 * 60 * 1000;
+        let now = Date::now();
+        Self {
+            not_after: SendWrapper(Date::new(worker::DateInit::Millis(
+                now.as_millis() + ONE_DAY_MILLIS,
+            ))),
+            pool: Arc::new(pool),
+        }
+    }
+
+    fn not_expired(&self) -> bool {
+        let now = Date::now();
+        now.as_millis() < self.not_after.as_millis()
+    }
+}
+
+async fn load_roots(env: &Env, name: &str) -> Result<Arc<CertPool>> {
+    static ROOTS: LazyLock<Mutex<HashMap<String, CachedRoot>>> = LazyLock::new(Mutex::default);
+
     // Fast path: already initialized.
-    if let Some(pool) = ROOTS.get() {
-        return Ok(pool);
+    if let Some(pool) = ROOTS.lock().unwrap().get(name) {
+        if pool.not_expired() {
+            return Ok(Arc::clone(&pool.pool));
+        }
     }
 
     // Build the pool for this request. If another request concurrently built
@@ -139,6 +167,7 @@ async fn load_roots(env: &Env, name: &str) -> Result<&'static CertPool> {
 
     // Store the pool if no other request got there first; either way return
     // the value now in the cell.
-    let _ = ROOTS.set(pool);
-    Ok(ROOTS.get().expect("just set"))
+    let mut roots = ROOTS.lock().unwrap();
+    let _ = roots.insert(name.to_string(), CachedRoot::new(pool));
+    Ok(Arc::clone(&roots.get(name).expect("just set").pool))
 }
