@@ -347,7 +347,7 @@ async fn add_chain_or_pre_chain(
     let roots = load_roots(env, log).await?;
     let (pending_entry, found_root_idx) = match static_ct_api::partially_validate_chain(
         &req.chain,
-        roots,
+        &roots,
         Some(
             u64::try_from(params.temporal_interval.start_inclusive.timestamp_millis())
                 .unwrap_or_default(),
