@@ -18,10 +18,18 @@ pub struct AppConfig {
     pub logs: HashMap<String, LogParams>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogType {
+    Prod,
+    Test,
+    MonitoringOnly,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct LogParams {
     pub description: Option<String>,
-    pub log_type: Option<String>,
+    pub log_type: Option<LogType>,
     #[serde(default)]
     pub monitoring_url: String,
     pub submission_url: String,

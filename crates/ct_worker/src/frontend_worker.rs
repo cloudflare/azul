@@ -4,7 +4,7 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{load_roots, load_signing_key, StaticCTSequenceMetadata, CONFIG};
-use config::TemporalInterval;
+use config::{LogType, TemporalInterval};
 use generic_log_worker::{
     batcher_id_from_lookup_key, deserialize,
     frontend::request_metrics,
@@ -48,7 +48,7 @@ struct LogV3JsonResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    log_type: &'a Option<String>,
+    log_type: Option<LogType>,
     #[serde_as(as = "Base64")]
     log_id: &'a [u8],
     #[serde_as(as = "Base64")]
@@ -257,7 +257,7 @@ async fn log_v3_json(
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&LogV3JsonResponse {
             description: &params.description,
-            log_type: &params.log_type,
+            log_type: params.log_type,
             log_id,
             key: key.as_bytes(),
             submission_url: &params.submission_url,

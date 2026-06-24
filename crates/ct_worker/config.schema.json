@@ -18,7 +18,7 @@
             "description": "Dictionary CT log shard names to configurations.",
             "additionalProperties": false,
             "patternProperties": {
-                "^[a-zA-Z0-9_]+$": {
+                "^[a-z0-9]+$": {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
