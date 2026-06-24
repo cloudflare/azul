@@ -24,6 +24,9 @@ while true; do
     esac
 done
 
+wrangler() {
+    npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" "$@"
+}
 
 # https://github.com/cloudflare/azul/pull/169#discussion_r2582145507
 location=()
@@ -32,35 +35,37 @@ if [ "${LOCATION}" ]; then
 fi
 
 # Create R2 bucket if it does not already exist
-npx wrangler \
-    -e="${ENV}" \
-    -c "${WRANGLER_CONF}" \
-    r2 bucket create \
-    "static-ct-public-${LOG_NAME}" \
-    --update-config \
-    --binding "public_${LOG_NAME}" "${location[@]}"
+bucket_name=static-ct-public-${LOG_NAME}
+if wrangler r2 bucket info "$bucket_name" 2>/dev/null ; then
+    echo "r2 bucket '$bucket_name' already exists"
+else
+    wrangler r2 bucket create "$bucket_name" \
+        --update-config \
+        --binding "public_${LOG_NAME}" "${location[@]}"
+fi
 
 # Create KV namespace if it does not already exist
-npx wrangler \
-    -e="${ENV}" \
-    -c "${WRANGLER_CONF}" \
-    kv namespace create \
-    "static-ct-cache-${LOG_NAME}" \
-    --update-config \
-    --binding "cache_${LOG_NAME}"
+namespace_name=static-ct-cache-${LOG_NAME}
+if wrangler kv namespace list | jq '.[].title' -r | grep -q "$namespace_name"; then
+    echo "kv namespace '$namespace_name' already exists"
+else
+    wrangler kv namespace create "$namespace_name" \
+        --update-config \
+        --binding "cache_${LOG_NAME}"
+fi
 
 # Create witness and log signing keys if they do not already exist
-if npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" secret list | grep -q "WITNESS_KEY_${LOG_NAME}"; then
+if wrangler secret list | grep -q "WITNESS_KEY_${LOG_NAME}"; then
 	echo "WITNESS_KEY_${LOG_NAME} already exists"
 else
 	openssl genpkey -algorithm ed25519 |
-        npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" secret put "WITNESS_KEY_${LOG_NAME}"
+        wrangler secret put "WITNESS_KEY_${LOG_NAME}"
 fi
-if npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" secret list | grep -q "SIGNING_KEY_${LOG_NAME}"; then
+if wrangler secret list | grep -q "SIGNING_KEY_${LOG_NAME}"; then
 	echo "SIGNING_KEY_${LOG_NAME} already exists"
 else
 	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 |
-        npx wrangler -e="${ENV}" -c "${WRANGLER_CONF}" secret put "SIGNING_KEY_${LOG_NAME}"
+        wrangler secret put "SIGNING_KEY_${LOG_NAME}"
 fi
 
 echo "DONE"
