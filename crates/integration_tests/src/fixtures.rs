@@ -32,8 +32,8 @@ use anyhow::{Context, Result};
 use const_oid::AssociatedOid;
 use crypto_common::Generate;
 use der::{
-    asn1::{Ia5String, Null},
     Decode, Encode, Length, Writer,
+    asn1::{Ia5String, Null},
 };
 use p256::{ecdsa::SigningKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
@@ -42,8 +42,8 @@ use x509_cert::{
     builder::{Builder, CertificateBuilder},
     certificate::{Certificate, TbsCertificate},
     ext::{
-        pkix::{name::GeneralName, ExtendedKeyUsage, SubjectAltName},
         Criticality, Extension,
+        pkix::{ExtendedKeyUsage, SubjectAltName, name::GeneralName},
     },
     name::Name,
     serial_number::SerialNumber,

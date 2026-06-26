@@ -12,7 +12,7 @@
 //! References:
 //! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/note/note_test.go)
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use signed_note::{Ed25519NoteVerifier, Note, NoteError, VerifierList};
 use std::hint::black_box;
 

@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
-use crate::{compute_key_id, KeyName, NoteError, NoteSigner, NoteVerifier, SignatureType};
+use crate::{KeyName, NoteError, NoteSigner, NoteVerifier, SignatureType, compute_key_id};
 use base64::prelude::*;
 use ed25519_dalek::{
     Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,

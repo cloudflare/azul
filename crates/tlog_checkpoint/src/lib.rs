@@ -54,9 +54,9 @@
 //! [tlog-go]: https://pkg.go.dev/golang.org/x/mod/sumdb/tlog
 //! [sunlight]: https://github.com/FiloSottile/sunlight
 
-use base64::{prelude::BASE64_STANDARD, Engine};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use rand::{seq::SliceRandom, Rng, RngExt};
+use rand::{Rng, RngExt, seq::SliceRandom};
 use sha2::{Digest, Sha256};
 use signed_note::{
     Ed25519NoteVerifier, KeyName, Note, NoteError, NoteSignature, NoteVerifier, VerifierList,

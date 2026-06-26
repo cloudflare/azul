@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use tlog_core::{
-    node_hash, split_stored_hash_index, stored_hash_index, tree_hash_indexes, Hash, HashReader,
-    TlogError, HASH_SIZE,
+    HASH_SIZE, Hash, HashReader, TlogError, node_hash, split_stored_hash_index, stored_hash_index,
+    tree_hash_indexes,
 };
 
 // To limit the size of any particular directory listing, we encode the (possibly very large)
@@ -794,11 +794,10 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
     use tlog_core::{
-        consistency_proof, evaluate_subtree_inclusion_proof, inclusion_proof, record_hash,
+        Subtree, consistency_proof, evaluate_subtree_inclusion_proof, inclusion_proof, record_hash,
         stored_hash_count, stored_hash_index, stored_hashes, subtree_consistency_proof,
         subtree_hash, subtree_inclusion_proof, tree_hash, verify_consistency_proof,
         verify_inclusion_proof, verify_subtree_consistency_proof, verify_subtree_inclusion_proof,
-        Subtree,
     };
 
     /// In-memory `HashReader` paired with [`TestTilesStorage`] in the

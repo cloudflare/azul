@@ -146,7 +146,7 @@ async fn get_roots_returns_valid_certs() {
     );
 
     for (i, cert_der) in roots.certificates.iter().enumerate() {
-        use x509_cert::{der::Decode, Certificate};
+        use x509_cert::{Certificate, der::Decode};
         Certificate::from_der(cert_der)
             .unwrap_or_else(|e| panic!("certificate[{i}] is not valid DER: {e}"));
     }

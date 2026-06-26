@@ -51,7 +51,7 @@
 //! [`witness_worker`]: ../../../crates/witness_worker
 //! [`c2sp.org/tlog-witness`]: https://c2sp.org/tlog-witness
 
-use ed25519_dalek::{pkcs8::DecodePrivateKey, SigningKey as Ed25519SigningKey};
+use ed25519_dalek::{SigningKey as Ed25519SigningKey, pkcs8::DecodePrivateKey};
 use ml_dsa::MlDsa44;
 use rand::rng;
 use serde::Deserialize;
@@ -60,13 +60,13 @@ use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
 use tlog_core::{
-    consistency_proof, record_hash, stored_hashes, subtree_consistency_proof, tree_hash, Hash,
-    HashReader, Subtree, TlogError, HASH_SIZE,
+    HASH_SIZE, Hash, HashReader, Subtree, TlogError, consistency_proof, record_hash, stored_hashes,
+    subtree_consistency_proof, tree_hash,
 };
 use tlog_cosignature::SubtreeV1NoteVerifier;
 use tlog_witness::{
-    parse_add_checkpoint_response, parse_sign_subtree_response, serialize_add_checkpoint_request,
-    serialize_sign_subtree_request, CONTENT_TYPE_TLOG_SIZE,
+    CONTENT_TYPE_TLOG_SIZE, parse_add_checkpoint_response, parse_sign_subtree_response,
+    serialize_add_checkpoint_request, serialize_sign_subtree_request,
 };
 
 // ---------------------------------------------------------------------------

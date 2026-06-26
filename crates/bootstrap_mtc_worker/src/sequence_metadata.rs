@@ -5,7 +5,7 @@
 //! bootstrap MTC sequencer.
 
 use generic_log_worker::{
-    deserialize_sequence_metadata_entries, serialize_sequence_metadata_entries, SequencerMetadata,
+    SequencerMetadata, deserialize_sequence_metadata_entries, serialize_sequence_metadata_entries,
 };
 use serde::{Deserialize, Serialize};
 use tlog_checkpoint::UnixTimestampMillis;

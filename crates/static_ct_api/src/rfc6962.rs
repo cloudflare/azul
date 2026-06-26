@@ -24,9 +24,9 @@ use crate::{PrecertData, StaticCTError, StaticCTPendingLogEntry};
 use der::{
     asn1::Null,
     oid::{
+        AssociatedOid, ObjectIdentifier,
         db::rfc5280::ID_KP_SERVER_AUTH,
         db::rfc6962::{CT_PRECERT_POISON, CT_PRECERT_SIGNING_CERT},
-        AssociatedOid, ObjectIdentifier,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -34,9 +34,9 @@ use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
 use tlog_checkpoint::UnixTimestampMillis;
 use x509_cert::{
-    der::Encode, ext::pkix::ExtendedKeyUsage, impl_newtype, Certificate, TbsCertificate,
+    Certificate, TbsCertificate, der::Encode, ext::pkix::ExtendedKeyUsage, impl_newtype,
 };
-use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
+use x509_util::{CertPool, ValidationOptions, validate_chain_lax};
 
 // Data structures for the [Static CT Submission APIs](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md#submission-apis),
 // a subset of the APIs from [RFC 6962](https://datatracker.ietf.org/doc/html/rfc6962).
@@ -243,7 +243,7 @@ pub fn build_precert_tbs(tbs: &TbsCertificate) -> Result<Vec<u8>, StaticCTError>
 mod tests {
     use super::*;
     use chrono::prelude::*;
-    use der::{asn1::OctetString, Decode};
+    use der::{Decode, asn1::OctetString};
     use x509_cert::ext::Extension;
     use x509_cert::{Certificate, TbsCertificate};
 
@@ -369,10 +369,12 @@ mod tests {
         let tbs = TbsCertificate::from_der(&der).unwrap();
 
         // Ensure CT poison is removed.
-        assert!(precert
-            .get_extension::<CTPrecertPoison>()
-            .unwrap()
-            .is_some());
+        assert!(
+            precert
+                .get_extension::<CTPrecertPoison>()
+                .unwrap()
+                .is_some()
+        );
         assert!(tbs.get_extension::<CTPrecertPoison>().unwrap().is_none());
     }
 

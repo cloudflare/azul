@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use crate::{load_checkpoint_cosigner, load_origin, CONFIG};
+use crate::{CONFIG, load_checkpoint_cosigner, load_origin};
 use bootstrap_mtc_api::BootstrapMtcPendingLogEntry;
-use generic_log_worker::{get_durable_object_name, CleanerConfig, GenericCleaner, CLEANER_BINDING};
+use generic_log_worker::{CLEANER_BINDING, CleanerConfig, GenericCleaner, get_durable_object_name};
 use signed_note::VerifierList;
 use tlog_checkpoint::CheckpointSigner;
 use tlog_entry::PendingLogEntry;

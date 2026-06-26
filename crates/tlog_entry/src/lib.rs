@@ -20,7 +20,7 @@
 //! [spec]: https://c2sp.org/tlog-tiles
 
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{io::Read, marker::PhantomData};
 

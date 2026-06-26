@@ -20,7 +20,7 @@ pub mod verify;
 
 pub use error::{PolicyError, SctError, SctWarning};
 pub use policy::check_chrome_policy;
-pub use sct::{extract_scts_from_cert, ParsedSct};
+pub use sct::{ParsedSct, extract_scts_from_cert};
 pub use verify::verify_sct_signature;
 
 use base64::prelude::*;

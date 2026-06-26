@@ -12,7 +12,7 @@
 //! [`sign_subtree`]: crate::sign_subtree
 
 use base64::prelude::*;
-use tlog_core::{Hash, HASH_SIZE};
+use tlog_core::{HASH_SIZE, Hash};
 
 /// Maximum number of consistency-proof lines a client may send in either
 /// the `add-checkpoint` or `sign-subtree` request, per

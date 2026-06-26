@@ -5,11 +5,11 @@
 
 use std::mem::size_of;
 
+use crate::CtLog;
 use crate::error::SctError;
 use crate::sct::{ParsedSct, SignatureAlgorithm};
-use crate::CtLog;
 use length_prefixed::WriteLengthPrefixedBytesExt;
-use p256::ecdsa::{signature::Verifier, Signature as P256Signature};
+use p256::ecdsa::{Signature as P256Signature, signature::Verifier};
 use sha2::{Digest, Sha256};
 
 // RFC 6962 constants for the signed data structure

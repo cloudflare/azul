@@ -39,23 +39,25 @@ fn main() {
     });
     for (name, params) in conf.logs {
         // Make sure we can create the RDN sequence for the issuer log ID.
-        let _ = RdnSequence::from(vec![RelativeDistinguishedName::try_from(vec![
-            AttributeTypeAndValue {
+        let _ = RdnSequence::from(vec![
+            RelativeDistinguishedName::try_from(vec![AttributeTypeAndValue {
                 oid: ID_RDNA_TRUSTANCHOR_ID,
                 value: Any::new(
                     Tag::Utf8String,
                     Utf8StringRef::new(&params.log_id).unwrap().as_bytes(),
                 )
                 .unwrap(),
-            },
-        ])
-        .unwrap()]);
+            }])
+            .unwrap(),
+        ]);
 
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {
             assert!(
-                ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",]
-                    .contains(&location.as_str()),
+                [
+                    "wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",
+                ]
+                .contains(&location.as_str()),
                 "{name} invalid location hint: {location}"
             );
         }

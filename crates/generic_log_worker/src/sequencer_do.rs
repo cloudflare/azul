@@ -6,17 +6,15 @@
 use std::{cell::RefCell, future::Future, pin::Pin, time::Duration};
 
 use crate::{
-    deserialize, get_durable_object_stub, load_public_bucket,
-    log_ops::{self, add_leaf_to_pool, CreateError, PoolState, SequenceState},
+    BATCH_ENDPOINT, CLEANER_BINDING, DedupCache, ENTRY_ENDPOINT, LookupKey, MemoryCache,
+    ObjectBucket, SequencerMetadata, deserialize, get_durable_object_stub, load_public_bucket,
+    log_ops::{self, CreateError, PoolState, SequenceState, add_leaf_to_pool},
     obs::{
-        self,
-        metrics::{millis_diff_as_secs, ObjectMetrics, SequencerMetrics},
-        Wshim,
+        self, Wshim,
+        metrics::{ObjectMetrics, SequencerMetrics, millis_diff_as_secs},
     },
     serialize,
     util::now_millis,
-    DedupCache, LookupKey, MemoryCache, ObjectBucket, SequencerMetadata, BATCH_ENDPOINT,
-    CLEANER_BINDING, ENTRY_ENDPOINT,
 };
 use futures_util::future::join_all;
 use log::{error, info};
@@ -243,7 +241,7 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
         {
             Err(CreateError::LogExists) => info!("{name}: Log exists, not creating"),
             Err(CreateError::Other(msg)) => {
-                return Err(format!("{name}: failed to create: {msg}").into())
+                return Err(format!("{name}: failed to create: {msg}").into());
             }
             Ok(()) => {}
         }
@@ -284,9 +282,10 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
 
         // If the tree is empty, add the log's initial entry if it has one.
         if self.sequence_state.borrow().tree_size() == 0
-            && let Some(entry) = L::initial_entry() {
-                add_leaf_to_pool(&self.pool_state, &self.cache, &self.config, entry);
-            }
+            && let Some(entry) = L::initial_entry()
+        {
+            add_leaf_to_pool(&self.pool_state, &self.cache, &self.config, entry);
+        }
 
         // Start sequencing loop (OK if alarm is already scheduled).
         self.do_state

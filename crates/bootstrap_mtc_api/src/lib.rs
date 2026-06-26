@@ -10,9 +10,9 @@ pub use relative_oid::*;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use der::{
-    asn1::{BitString, OctetString},
-    oid::{db::rfc5280, ObjectIdentifier},
     Any, Decode, Encode, Sequence, ValueOrd,
+    asn1::{BitString, OctetString},
+    oid::{ObjectIdentifier, db::rfc5280},
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use serde::{Deserialize, Serialize};
@@ -29,18 +29,18 @@ use tlog_core::{Hash, LeafIndex, Proof, Subtree, TlogError};
 use tlog_entry::{LogEntry, PendingLogEntry, TlogTilesLogEntry, TlogTilesPendingLogEntry};
 use tlog_tiles::PathElem;
 use x509_cert::{
+    Certificate, TbsCertificate,
     certificate::Version,
     ext::{
-        pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages},
         Extension, Extensions,
+        pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages},
     },
     name::{Name, RdnSequence},
     serial_number::SerialNumber,
     spki::{AlgorithmIdentifier, SubjectPublicKeyInfo},
     time::Validity,
-    Certificate, TbsCertificate,
 };
-use x509_util::{validate_chain_lax, CertPool, ValidationOptions};
+use x509_util::{CertPool, ValidationOptions, validate_chain_lax};
 
 // The OID to use for experimentaion. Eventually, we'll switch to "1.3.6.1.5.5.7.TBD1.TBD2"
 // as described in <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-log-ids>.
@@ -217,7 +217,7 @@ pub fn serialize_signatureless_cert(
     let entry = match MerkleTreeCertEntry::decode(&log_entry.0.inner.data)? {
         MerkleTreeCertEntry::TbsCertEntry(entry) => entry,
         MerkleTreeCertEntry::NullEntry => {
-            return Err(MtcError::Dynamic("no tbs cert entry for null entry".into()))
+            return Err(MtcError::Dynamic("no tbs cert entry for null entry".into()));
         }
     };
     let spki: SubjectPublicKeyInfo<Any, BitString> = SubjectPublicKeyInfo::from_der(spki_der)?;
@@ -611,7 +611,7 @@ pub fn validate_correspondence(
             (None, None) => return Ok(()),
             // If mismatched, that's an error.
             (Some(_), None) | (None, Some(_)) => {
-                return Err(MtcError::Dynamic("mismatched extensions".into()))
+                return Err(MtcError::Dynamic("mismatched extensions".into()));
             }
             // Otherwise both the log entry and bootstrap cert have
             // extensions. Check them below.
@@ -657,7 +657,7 @@ pub fn validate_correspondence(
                 id => {
                     return Err(MtcError::Dynamic(format!(
                         "log entry has unsupported extension {id}"
-                    )))
+                    )));
                 }
             }
         }
@@ -800,7 +800,7 @@ pub fn validate_chain(
 mod tests {
     use der::asn1::UtcTime;
     use std::time::Duration;
-    use x509_cert::{time::Time, Certificate};
+    use x509_cert::{Certificate, time::Time};
     use x509_util::{build_chain, certs_to_bytes};
 
     use super::*;

@@ -4,44 +4,44 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{
-    load_checkpoint_cosigner, load_origin, load_roots, BootstrapMtcSequenceMetadata, CONFIG,
+    BootstrapMtcSequenceMetadata, CONFIG, load_checkpoint_cosigner, load_origin, load_roots,
 };
 use bootstrap_mtc_api::{
-    serialize_signatureless_cert, AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry,
-    GetRootsResponse, LandmarkSequence, ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY,
+    AddEntryRequest, AddEntryResponse, BootstrapMtcLogEntry, GetRootsResponse,
+    ID_RDNA_TRUSTANCHOR_ID, LANDMARK_BUNDLE_KEY, LANDMARK_KEY, LandmarkSequence,
+    serialize_signatureless_cert,
 };
 use der::{
-    asn1::{UtcTime, Utf8StringRef},
     Any, Encode, Tag,
+    asn1::{UtcTime, Utf8StringRef},
 };
 use generic_log_worker::{
-    batcher_id_from_lookup_key, deserialize,
+    ENTRY_ENDPOINT, ObjectBackend, ObjectBucket, batcher_id_from_lookup_key, deserialize,
     frontend::request_metrics,
     get_durable_object_stub, init_logging, load_public_bucket,
-    log_ops::{prove_subtree_inclusion, read_leaf, ProofError, CHECKPOINT_KEY},
-    obs::{metrics, Wshim},
+    log_ops::{CHECKPOINT_KEY, ProofError, prove_subtree_inclusion, read_leaf},
+    obs::{Wshim, metrics},
     serialize,
-    util::{now_millis, WorkerByteStream},
-    ObjectBackend, ObjectBucket, ENTRY_ENDPOINT,
+    util::{WorkerByteStream, now_millis},
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
 use std::time::Duration;
-use tlog_checkpoint::{open_checkpoint, CheckpointSigner, CheckpointText};
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, open_checkpoint};
 use tlog_core::LeafIndex;
 use tlog_entry::{PendingLogEntry, PendingLogEntryBlob};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     middleware,
     response::{AppendHeaders, IntoResponse},
     routing::{get, post},
-    Json, Router,
 };
 use tower_service::Service;
 use x509_cert::{

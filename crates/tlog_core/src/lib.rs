@@ -32,8 +32,8 @@
 
 use base64::prelude::*;
 use serde::{
-    de::{self, Visitor},
     Deserialize,
+    de::{self, Visitor},
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -984,7 +984,6 @@ impl Subtree {
 
         // The indexes are sorted in increasing order. In order to compute the
         // root hash, start from the rightmost index and hash up.
-        
 
         hashes
             .drain(0..num_hashes)
@@ -1175,13 +1174,10 @@ mod tests {
         let proof = subtree_inclusion_proof(&subtree, 2, &storage).unwrap();
 
         // leaf_index below subtree.lo underflows.
-        assert!(evaluate_subtree_inclusion_proof(
-            &proof,
-            &Subtree::new(2, 4).unwrap(),
-            1,
-            leaves[1]
-        )
-        .is_err());
+        assert!(
+            evaluate_subtree_inclusion_proof(&proof, &Subtree::new(2, 4).unwrap(), 1, leaves[1])
+                .is_err()
+        );
         // leaf_index at or above subtree.hi is rejected.
         assert!(evaluate_subtree_inclusion_proof(&proof, &subtree, 4, leaves[0]).is_err());
         // Empty proof when the leaf needs one is rejected by step 5 of

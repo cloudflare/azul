@@ -59,9 +59,9 @@ impl futures_util::Stream for WorkerByteStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.as_mut().0 .0.poll_next_unpin(cx)
+        self.as_mut().0.0.poll_next_unpin(cx)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0 .0.size_hint()
+        self.0.0.size_hint()
     }
 }

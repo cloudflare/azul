@@ -4,21 +4,21 @@
 //! Assertion helpers for CT-specific cryptographic verification: SCT signatures,
 //! checkpoint signatures, and Merkle inclusion proofs.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use p256::{pkcs8::DecodePublicKey, pkcs8::EncodePublicKey};
 use sct_validator::{
+    CtLog, LogState,
     sct::{ParsedSct, SctSignature, SignatureAlgorithm},
     verify::verify_sct_signature,
-    CtLog, LogState,
 };
 use sha2::{Digest, Sha256};
 use signed_note::{Ed25519NoteVerifier, KeyName, VerifierList};
 use static_ct_api::{Extensions, RFC6962NoteVerifier, StaticCTLogEntry};
-use tlog_checkpoint::{open_checkpoint, CheckpointText};
+use tlog_checkpoint::{CheckpointText, open_checkpoint};
 use tlog_core::HashReader;
 use tlog_entry::{LogEntry, TileIterator};
 use tlog_tiles::{PathElem, PreloadedTlogTileReader, TileHashReader, TlogTile};
-use x509_cert::{der::Decode, der::Encode, Certificate};
+use x509_cert::{Certificate, der::Decode, der::Encode};
 
 use crate::client::{AddChainResponse, CtClient, LogV3JsonResponse};
 

@@ -14,8 +14,8 @@
 //!
 //! [spec]: https://c2sp.org/tlog-witness
 
-use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
+use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use serde::Deserialize;
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier};
