@@ -3,16 +3,15 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{load_roots, load_signing_key, StaticCTSequenceMetadata, CONFIG};
+use crate::{CONFIG, StaticCTSequenceMetadata, load_roots, load_signing_key};
 use config::{LogType, TemporalInterval};
 use generic_log_worker::{
-    batcher_id_from_lookup_key, deserialize,
+    ENTRY_ENDPOINT, ObjectBucket, batcher_id_from_lookup_key, deserialize,
     frontend::request_metrics,
     get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
-    obs::{metrics, Wshim},
+    obs::{Wshim, metrics},
     put_cache_entry_metadata, serialize,
     util::WorkerByteStream,
-    ObjectBucket, ENTRY_ENDPOINT,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -24,13 +23,13 @@ use worker::*;
 use x509_cert::der::Encode;
 
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use tower_service::Service;
 
@@ -328,7 +327,7 @@ async fn add_chain_or_pre_chain(
     env: &Env,
     log: &str,
     expect_precert: bool,
-) -> ApiResult<impl IntoResponse> {
+) -> ApiResult<impl IntoResponse + use<>> {
     let params = &CONFIG.logs[log];
     if params.read_only {
         return Err(AppError::ReadonlyLog);
@@ -372,18 +371,17 @@ async fn add_chain_or_pre_chain(
     let signing_key = load_signing_key(env, log)?;
 
     // Check if entry is cached and return right away if so.
-    if params.enable_dedup {
-        if let Some(metadata) =
+    if params.enable_dedup
+        && let Some(metadata) =
             get_cached_metadata::<StaticCTSequenceMetadata>(&load_cache_kv(env, log)?, &lookup_key)
                 .await?
-        {
-            log::debug!("{log}: Entry is cached");
-            let entry =
-                StaticCTLogEntry::new(pending_entry, metadata.leaf_index(), metadata.timestamp());
-            let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-                .map_err(|e| e.to_string())?;
-            return Ok((StatusCode::OK, Json(sct)).into_response());
-        }
+    {
+        log::debug!("{log}: Entry is cached");
+        let entry =
+            StaticCTLogEntry::new(pending_entry, metadata.leaf_index(), metadata.timestamp());
+        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
+            .map_err(|e| e.to_string())?;
+        return Ok((StatusCode::OK, Json(sct)).into_response());
     }
 
     // Entry is not cached, so we need to sequence it.

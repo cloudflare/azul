@@ -3,16 +3,16 @@
 
 use byteorder::{BigEndian, WriteBytesExt};
 use ed25519_dalek::{
-    ed25519::signature::{self, Signer},
     SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
     VerifyingKey as Ed25519VerifyingKey,
+    ed25519::signature::{self, Signer},
 };
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier};
 use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_core::{Hash, LeafIndex};
 
-use crate::{RelativeOid, ID_RDNA_TRUSTANCHOR_ID};
+use crate::{ID_RDNA_TRUSTANCHOR_ID, RelativeOid};
 
 pub type TrustAnchorID = RelativeOid;
 
@@ -235,7 +235,7 @@ fn serialize_mtc_subtree_signature_input(
 #[cfg(test)]
 mod tests {
 
-    use tlog_checkpoint::{open_checkpoint, TreeWithTimestamp};
+    use tlog_checkpoint::{TreeWithTimestamp, open_checkpoint};
     use tlog_core::record_hash;
 
     use super::*;

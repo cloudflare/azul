@@ -6,10 +6,10 @@
 use der::{Decode, Encode, Error as DerError, Sequence};
 use sha2::{Digest, Sha256};
 use signature::Verifier;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use x509_cert::{
-    ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
     Certificate,
+    ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier},
 };
 
 /// Converts a vector of certificates into an array of DER-encoded certificates.
@@ -170,10 +170,9 @@ impl CertPool {
         if let Some((_, aki)) = cert
             .tbs_certificate()
             .get_extension::<AuthorityKeyIdentifier>()?
+            && let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?)
         {
-            if let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?) {
-                return Ok(indexes);
-            }
+            return Ok(indexes);
         }
         if let Some(indexes) = self
             .by_name

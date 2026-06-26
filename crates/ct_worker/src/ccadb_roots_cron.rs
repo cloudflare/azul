@@ -8,12 +8,12 @@ use chrono::DateTime;
 use generic_log_worker::util::now_millis;
 use std::fmt::Write;
 use worker::{
-    event, kv::KvStore, Env, Fetch, Headers, Method, Request, RequestInit, Result, ScheduleContext,
-    ScheduledEvent,
+    Env, Fetch, Headers, Method, Request, RequestInit, Result, ScheduleContext, ScheduledEvent,
+    event, kv::KvStore,
 };
 use x509_cert::{
-    der::{DecodePem, EncodePem},
     Certificate,
+    der::{DecodePem, EncodePem},
 };
 use x509_util::CertPool;
 

@@ -7,8 +7,8 @@ use crate::error::SctError;
 use const_oid::AssociatedOid;
 use der::Decode;
 use x509_cert::ext::{
-    pkix::sct::{SignedCertificateTimestamp, SignedCertificateTimestampList},
     Extension,
+    pkix::sct::{SignedCertificateTimestamp, SignedCertificateTimestampList},
 };
 
 /// A parsed SCT from a certificate.
@@ -84,7 +84,7 @@ fn find_and_parse_scts(
             return Err(SctError::Other(format!(
                 "certificate has {} SCT extensions, expected 1",
                 sct_extensions.len()
-            )))
+            )));
         }
     };
 

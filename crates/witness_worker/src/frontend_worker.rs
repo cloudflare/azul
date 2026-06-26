@@ -26,33 +26,31 @@
 
 use generic_log_worker::{
     frontend::request_metrics,
-    obs::{metrics, Wshim},
+    obs::{Wshim, metrics},
     util::now_millis,
 };
 use signed_note::{NoteError, NoteVerifier, VerifierList};
 use tlog_checkpoint::{CheckpointSigner, CheckpointText};
 use tlog_core::Subtree;
 use tlog_witness::{
-    parse_add_checkpoint_request, parse_sign_subtree_request, serialize_add_checkpoint_response,
-    serialize_sign_subtree_response, AddCheckpointRequest, SignSubtreeRequest,
-    CONTENT_TYPE_TLOG_SIZE,
+    AddCheckpointRequest, CONTENT_TYPE_TLOG_SIZE, SignSubtreeRequest, parse_add_checkpoint_request,
+    parse_sign_subtree_request, serialize_add_checkpoint_response, serialize_sign_subtree_response,
 };
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 use crate::{
-    load_witness_public_key_der, load_witness_signer, log_verifiers,
-    witness_state_do::{state_stub, CheckAndUpdateRequest, LatestCheckpoint},
-    WitnessSigner, CONFIG,
+    CONFIG, WitnessSigner, load_witness_public_key_der, load_witness_signer, log_verifiers,
+    witness_state_do::{CheckAndUpdateRequest, LatestCheckpoint, state_stub},
 };
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};

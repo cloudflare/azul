@@ -84,13 +84,13 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use ml_dsa::{
-    signature::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
     EncodedSignature as MlDsaEncodedSignature, ExpandedSigningKey as MlDsaExpandedSigningKey,
     MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
+    signature::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
 };
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
-use tlog_core::{Hash, Subtree, HASH_SIZE};
+use tlog_core::{HASH_SIZE, Hash, Subtree};
 
 /// The fixed 12-byte label prefix domain-separating `subtree/v1` from
 /// other cosignature formats.

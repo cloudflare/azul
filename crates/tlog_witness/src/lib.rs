@@ -58,14 +58,14 @@ mod common;
 mod sign_subtree;
 
 pub use add_checkpoint::{
-    parse_add_checkpoint_request, parse_add_checkpoint_response, serialize_add_checkpoint_request,
-    serialize_add_checkpoint_response, AddCheckpointRequest,
+    AddCheckpointRequest, parse_add_checkpoint_request, parse_add_checkpoint_response,
+    serialize_add_checkpoint_request, serialize_add_checkpoint_response,
 };
 pub use common::{
-    TlogWitnessError, CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE,
+    CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, TlogWitnessError,
 };
 pub use sign_subtree::{
+    MAX_CHECKPOINT_SIGNATURES, MAX_SUBTREE_COSIGNATURE_LINES, SignSubtreeRequest,
     parse_sign_subtree_request, parse_sign_subtree_response, serialize_sign_subtree_request,
-    serialize_sign_subtree_response, SignSubtreeRequest, MAX_CHECKPOINT_SIGNATURES,
-    MAX_SUBTREE_COSIGNATURE_LINES,
+    serialize_sign_subtree_response,
 };

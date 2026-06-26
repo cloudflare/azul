@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
-use crate::{load_checkpoint_signers, load_origin, StaticCTSequenceMetadata, CONFIG};
+use crate::{CONFIG, StaticCTSequenceMetadata, load_checkpoint_signers, load_origin};
 use generic_log_worker::{
-    empty_checkpoint_callback, get_durable_object_name, GenericSequencer, SequencerConfig,
-    SEQUENCER_BINDING,
+    GenericSequencer, SEQUENCER_BINDING, SequencerConfig, empty_checkpoint_callback,
+    get_durable_object_name,
 };
 use static_ct_api::StaticCTLogEntry;
 #[allow(clippy::wildcard_imports)]

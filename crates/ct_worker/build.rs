@@ -38,7 +38,8 @@ fn main() {
         // lowercase letters, numbers, and hyphens, and be between 3 and 63 characters long.
         const R2_BUCKET_PREFIX_LEN: usize = "static-ct-public-".len();
         assert!(
-            name.chars().all(|c| c.is_ascii_lowercase() || c.is_numeric())
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_numeric())
                 && (3..R2_BUCKET_PREFIX_LEN).contains(&name.len()),
             "invalid shard name '{name}'. Shard names only contain lowercase letters, numbers, and be between 3 and {R2_BUCKET_PREFIX_LEN} characters long."
         );
@@ -57,8 +58,10 @@ fn main() {
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {
             assert!(
-                ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",]
-                    .contains(&location.as_str()),
+                [
+                    "wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",
+                ]
+                .contains(&location.as_str()),
                 "{name} invalid location hint: {location}"
             );
         }
@@ -85,7 +88,9 @@ fn main() {
         );
     } else if conf.logs.values().any(|params| !params.enable_ccadb_roots) {
         // If any log shards have 'enable_ccadb_roots' set to false, require a roots file.
-        panic!("{roots_file} must exist and contain at least one certificate if any logs have 'enable_ccadb_roots' set to false");
+        panic!(
+            "{roots_file} must exist and contain at least one certificate if any logs have 'enable_ccadb_roots' set to false"
+        );
     }
 
     // Copy to OUT_DIR.

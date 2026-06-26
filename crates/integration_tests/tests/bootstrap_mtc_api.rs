@@ -28,7 +28,7 @@ use integration_tests::{
     fixtures::{garbage_chain, make_bootstrap_mtc_chain},
 };
 use tokio::sync::OnceCell;
-use x509_cert::{der::Decode, Certificate};
+use x509_cert::{Certificate, der::Decode};
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -33,7 +33,7 @@ mod tests {
     use std::io::Read;
     use std::path::PathBuf;
     use tlog_core::{
-        record_hash, verify_consistency_proof, verify_inclusion_proof, Hash, TlogError,
+        Hash, TlogError, record_hash, verify_consistency_proof, verify_inclusion_proof,
     };
     use url::form_urlencoded;
 
@@ -114,8 +114,9 @@ mod tests {
         verify_inclusion_proof(&rp.proof, root.size, root.hash, 10000, hash)?;
 
         let url = format!(
-        "http://ct.googleapis.com/logs/argon2020/ct/v1/get-sth-consistency?first=3654490&second={}",
-        root.size);
+            "http://ct.googleapis.com/logs/argon2020/ct/v1/get-sth-consistency?first=3654490&second={}",
+            root.size
+        );
         let tp: CtConsistencyProof = http_get(&url);
 
         let oh = Hash::parse_hash("AuIZ5V6sDUj1vn3Y1K85oOaQ7y+FJJKtyRTl1edIKBQ=")?;

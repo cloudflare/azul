@@ -48,13 +48,13 @@
 
 use config::AppConfig;
 use ed25519_dalek::{
-    pkcs8::{DecodePrivateKey as _, DecodePublicKey as _, EncodePublicKey as _},
     SigningKey as Ed25519SigningKey,
+    pkcs8::{DecodePrivateKey as _, DecodePublicKey as _, EncodePublicKey as _},
 };
 use ml_dsa::MlDsa44;
 use pkcs8::{
-    der::oid::db::{fips204::ID_ML_DSA_44, rfc8410::ID_ED_25519},
     PrivateKeyInfoRef, SecretDocument,
+    der::oid::db::{fips204::ID_ML_DSA_44, rfc8410::ID_ED_25519},
 };
 use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier, VerifierList};
 use std::collections::HashMap;
@@ -303,7 +303,7 @@ mod tests {
     //! in the PEM's `AlgorithmIdentifier`. These tests cover both
     //! supported algorithms and the error path for an unsupported OID.
 
-    use super::{build_witness_signer, WitnessSigner};
+    use super::{WitnessSigner, build_witness_signer};
     use ed25519_dalek::pkcs8::EncodePrivateKey as _;
 
     /// Generate a deterministic Ed25519 PEM from a seed byte.

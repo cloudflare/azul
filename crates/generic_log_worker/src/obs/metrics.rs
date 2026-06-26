@@ -4,10 +4,10 @@
 //! Metrics for CT log operations.
 
 use prometheus::{
-    self, register_counter_vec_with_registry, register_counter_with_registry,
+    self, Counter, CounterVec, Gauge, Histogram, HistogramVec, Registry,
+    register_counter_vec_with_registry, register_counter_with_registry,
     register_gauge_with_registry, register_histogram_vec_with_registry,
-    register_histogram_with_registry, Counter, CounterVec, Gauge, Histogram, HistogramVec,
-    Registry,
+    register_histogram_with_registry,
 };
 
 // Metrics for the Sequencer DO. Use Cloudflare

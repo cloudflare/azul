@@ -1,8 +1,8 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 
 pub mod batcher_do;
 pub mod cleaner_do;
@@ -19,7 +19,7 @@ pub use sequencer_do::*;
 
 use log::{error, info};
 use log_ops::UploadOptions;
-use obs::metrics::{millis_diff_as_secs, AsF64, ObjectMetrics};
+use obs::metrics::{AsF64, ObjectMetrics, millis_diff_as_secs};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -35,8 +35,8 @@ use tlog_entry::PendingLogEntry;
 use tokio::sync::Mutex;
 use util::now_millis;
 use worker::{
-    js_sys, kv, kv::KvStore, wasm_bindgen, Bucket, Env, Error, HttpMetadata, Result, State,
-    Storage, Stub,
+    Bucket, Env, Error, HttpMetadata, Result, State, Storage, Stub, js_sys, kv, kv::KvStore,
+    wasm_bindgen,
 };
 
 use crate::obs::metrics::SequencerMetrics;
@@ -1006,9 +1006,9 @@ mod tests {
         let deserialized = TestMetadata::deserialize_cache_entries(&serialized).unwrap();
         assert_eq!(deserialized.len(), 2);
         assert_eq!(deserialized[0].0, key1);
-        assert_eq!(deserialized[0].1 .0, 42);
+        assert_eq!(deserialized[0].1.0, 42);
         assert_eq!(deserialized[1].0, key2);
-        assert_eq!(deserialized[1].1 .0, 99);
+        assert_eq!(deserialized[1].1.0, 99);
     }
 
     #[test]

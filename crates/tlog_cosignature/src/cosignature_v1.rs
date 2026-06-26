@@ -140,7 +140,7 @@ impl NoteVerifier for CosignatureV1NoteVerifier {
 #[cfg(test)]
 mod tests {
 
-    use tlog_checkpoint::{open_checkpoint, TreeWithTimestamp};
+    use tlog_checkpoint::{TreeWithTimestamp, open_checkpoint};
     use tlog_core::record_hash;
 
     use super::*;

@@ -60,7 +60,7 @@ default-members = [
 [workspace.package]
 version = "0.2.0"
 authors = ["Luke Valenta <lvalenta@cloudflare.com>"]
-edition = "2021"
+edition = "2024"
 license = "BSD-3-Clause"
 readme = "README.md"
 homepage = "https://github.com/cloudflare/azul"

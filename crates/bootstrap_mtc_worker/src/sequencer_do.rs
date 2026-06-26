@@ -5,16 +5,15 @@
 
 use std::{collections::VecDeque, time::Duration};
 
-use crate::{load_checkpoint_cosigner, load_origin, BootstrapMtcSequenceMetadata, CONFIG};
+use crate::{BootstrapMtcSequenceMetadata, CONFIG, load_checkpoint_cosigner, load_origin};
 use bootstrap_mtc_api::{
-    BootstrapMtcLogEntry, LandmarkSequence, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY,
-    LANDMARK_KEY,
+    BootstrapMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY,
+    LandmarkSequence,
 };
 use generic_log_worker::{
-    get_durable_object_name, load_public_bucket,
-    log_ops::{prove_subtree_consistency, ProofError},
-    CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
-    SEQUENCER_BINDING,
+    CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SEQUENCER_BINDING,
+    SequencerConfig, get_durable_object_name, load_public_bucket,
+    log_ops::{ProofError, prove_subtree_consistency},
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};

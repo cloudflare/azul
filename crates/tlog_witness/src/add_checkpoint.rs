@@ -26,10 +26,10 @@
 //! standard [`signed_note::Note::from_bytes`] routine consuming the rest of
 //! the body.
 
-use crate::common::{
-    parse_proof_line, parse_tree_size_decimal, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE,
-};
 use crate::TlogWitnessError;
+use crate::common::{
+    MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, parse_proof_line, parse_tree_size_decimal,
+};
 use base64::prelude::*;
 use signed_note::{Note, NoteSignature};
 use tlog_core::Hash;

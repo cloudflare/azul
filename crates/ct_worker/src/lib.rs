@@ -3,7 +3,7 @@
 
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
-use crate::ccadb_roots_cron::{ccadb_roots_filename, update_ccadb_roots, CCADB_ROOTS_NAMESPACE};
+use crate::ccadb_roots_cron::{CCADB_ROOTS_NAMESPACE, ccadb_roots_filename, update_ccadb_roots};
 use config::{AppConfig, LogType};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
@@ -12,7 +12,7 @@ use static_ct_api::StaticCTCheckpointSigner;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner};
-use worker::{send::SendWrapper, Date, Env, Result};
+use worker::{Date, Env, Result, send::SendWrapper};
 use x509_util::CertPool;
 
 mod batcher_do;
@@ -128,10 +128,10 @@ async fn load_roots(env: &Env, name: &str) -> Result<Arc<CertPool>> {
     static ROOTS: LazyLock<Mutex<HashMap<String, CachedRoot>>> = LazyLock::new(Mutex::default);
 
     // Fast path: already initialized.
-    if let Some(pool) = ROOTS.lock().unwrap().get(name) {
-        if pool.not_expired() {
-            return Ok(Arc::clone(&pool.pool));
-        }
+    if let Some(pool) = ROOTS.lock().unwrap().get(name)
+        && pool.not_expired()
+    {
+        return Ok(Arc::clone(&pool.pool));
     }
 
     let log_config = &CONFIG.logs[name];

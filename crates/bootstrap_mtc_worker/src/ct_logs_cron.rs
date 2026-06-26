@@ -4,7 +4,7 @@
 //! Cron job to fetch CT log list from Google. Same pattern as `ccadb_roots_cron`.
 
 use sct_validator::CtLogList;
-use worker::{kv::KvStore, Env, Fetch, Headers, Method, Request, RequestInit, Result};
+use worker::{Env, Fetch, Headers, Method, Request, RequestInit, Result, kv::KvStore};
 
 pub(crate) const CT_LOGS_NAMESPACE: &str = "ct_logs";
 pub(crate) const CT_LOGS_FILENAME: &str = "ct_log_list.json";

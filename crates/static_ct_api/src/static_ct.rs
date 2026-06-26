@@ -109,9 +109,9 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use length_prefixed::{ReadLengthPrefixedBytesExt, WriteLengthPrefixedBytesExt};
 use p256::{
     ecdsa::{
-        signature::{Signer, Verifier},
         Signature as EcdsaSignature, SigningKey as EcdsaSigningKey,
         VerifyingKey as EcdsaVerifyingKey,
+        signature::{Signer, Verifier},
     },
     pkcs8::EncodePublicKey,
 };

@@ -20,9 +20,9 @@
 
 use crate::SequencerMetadata;
 use crate::{
-    obs::metrics::{millis_diff_as_secs, AsF64, SequencerMetrics},
-    util::now_millis,
     CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequencerConfig,
+    obs::metrics::{AsF64, SequencerMetrics, millis_diff_as_secs},
+    util::now_millis,
 };
 use anyhow::{anyhow, bail};
 use futures_util::future::try_join_all;
@@ -40,10 +40,10 @@ use std::{
 };
 use thiserror::Error;
 use tlog_checkpoint::{TreeWithTimestamp, UnixTimestampMillis};
-use tlog_core::{Hash, HashReader, Proof, Subtree, TlogError, HASH_SIZE};
+use tlog_core::{HASH_SIZE, Hash, HashReader, Proof, Subtree, TlogError};
 use tlog_entry::{LogEntry, PendingLogEntry, TileIterator};
 use tlog_tiles::{PreloadedTlogTileReader, TileHashReader, TlogTile, TlogTileRecorder};
-use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::sync::watch::{Receiver, Sender, channel};
 
 /// The maximum tile level is 63 (<c2sp.org/static-ct-api>), so safe to use [`u8::MAX`] as
 /// the special level for data tiles. The Go implementation uses -1.
@@ -384,7 +384,9 @@ impl SequenceState {
                 // It's possible that we crashed between committing a new checkpoint to DO storage and
                 // uploading it to the object storage backend. Apply the staged tiles before continuing.
                 warn!(
-                    "{name}: Checkpoint in object storage is older than DO storage checkpoint; old_size={}, size={}", c1.size(), c.size()
+                    "{name}: Checkpoint in object storage is older than DO storage checkpoint; old_size={}, size={}",
+                    c1.size(),
+                    c.size()
                 );
                 let staged_uploads = lock.get_multipart(STAGING_KEY).await?;
                 apply_staged_uploads(object, &staged_uploads, c.size(), c.hash()).await?;
@@ -842,20 +844,19 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
     let mut data_tile = Vec::new();
-    if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY) {
-        if t.tile.width() < TlogTile::FULL_WIDTH {
-            data_tile.clone_from(&t.b);
-        }
+    if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY)
+        && t.tile.width() < TlogTile::FULL_WIDTH
+    {
+        data_tile.clone_from(&t.b);
     }
 
     // Load the current partial auxiliary tile, if configured.
     let mut aux_tile = Vec::new();
-    if L::Pending::AUX_TILE_PATH.is_some() {
-        if let Some(t) = edge_tiles.get(&AUX_TILE_LEVEL_KEY) {
-            if t.tile.width() < TlogTile::FULL_WIDTH {
-                aux_tile.clone_from(&t.b);
-            }
-        }
+    if L::Pending::AUX_TILE_PATH.is_some()
+        && let Some(t) = edge_tiles.get(&AUX_TILE_LEVEL_KEY)
+        && t.tile.width() < TlogTile::FULL_WIDTH
+    {
+        aux_tile.clone_from(&t.b);
     }
 
     let mut overlay = HashMap::new();
@@ -865,10 +866,10 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     let mut cache_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        if n == 0 {
-            if let Some(initial_entry) = L::initial_entry() {
-                assert_eq!(entry.lookup_key(), initial_entry.lookup_key());
-            }
+        if n == 0
+            && let Some(initial_entry) = L::initial_entry()
+        {
+            assert_eq!(entry.lookup_key(), initial_entry.lookup_key());
         }
 
         // Add the entry and metadata to our lists of things sequenced.
@@ -1413,7 +1414,7 @@ mod tests {
     use itertools::Itertools;
     use p256::ecdsa::SigningKey as EcdsaSigningKey;
     use prometheus::Registry;
-    use rand::{rngs::SmallRng, Rng, RngExt, SeedableRng};
+    use rand::{Rng, RngExt, SeedableRng, rngs::SmallRng};
     use signed_note::{KeyName, Note};
     use static_ct_api::{
         PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,

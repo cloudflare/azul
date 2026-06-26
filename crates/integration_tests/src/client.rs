@@ -6,7 +6,7 @@
 // These are test helpers, not public library API — doc exhaustiveness is not required.
 #![allow(clippy::missing_errors_doc)]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};

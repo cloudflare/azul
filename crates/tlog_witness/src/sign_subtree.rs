@@ -39,10 +39,10 @@ use base64::prelude::*;
 use signed_note::{Note, NoteSignature};
 use tlog_core::Hash;
 
-use crate::common::{
-    parse_proof_line, parse_tree_size_decimal, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE,
-};
 use crate::TlogWitnessError;
+use crate::common::{
+    MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, parse_proof_line, parse_tree_size_decimal,
+};
 
 /// Maximum number of subtree-cosignature lines a client may send in a
 /// `sign-subtree` request, per
@@ -612,9 +612,9 @@ mod tests {
         body.extend_from_slice(BASE64_STANDARD.encode([0u8; 32]).as_bytes());
         body.push(b'\n');
         body.push(b'\n'); // header / checkpoint separator.
-                          // Reference checkpoint claiming to be signed-note shape: it has
-                          // a `\n\n` between body and "signature" block, but the signature
-                          // line is not a valid `— name b64\n` line.
+        // Reference checkpoint claiming to be signed-note shape: it has
+        // a `\n\n` between body and "signature" block, but the signature
+        // line is not a valid `— name b64\n` line.
         body.extend_from_slice(b"example.com/log\n1\n");
         body.extend_from_slice(BASE64_STANDARD.encode([0u8; 32]).as_bytes());
         body.push(b'\n');
