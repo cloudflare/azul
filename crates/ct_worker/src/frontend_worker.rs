@@ -328,7 +328,7 @@ async fn add_chain_or_pre_chain(
     env: &Env,
     log: &str,
     expect_precert: bool,
-) -> ApiResult<impl IntoResponse> {
+) -> ApiResult<impl IntoResponse + use<>> {
     let params = &CONFIG.logs[log];
     if params.read_only {
         return Err(AppError::ReadonlyLog);
@@ -372,8 +372,8 @@ async fn add_chain_or_pre_chain(
     let signing_key = load_signing_key(env, log)?;
 
     // Check if entry is cached and return right away if so.
-    if params.enable_dedup {
-        if let Some(metadata) =
+    if params.enable_dedup
+        && let Some(metadata) =
             get_cached_metadata::<StaticCTSequenceMetadata>(&load_cache_kv(env, log)?, &lookup_key)
                 .await?
         {
@@ -384,7 +384,6 @@ async fn add_chain_or_pre_chain(
                 .map_err(|e| e.to_string())?;
             return Ok((StatusCode::OK, Json(sct)).into_response());
         }
-    }
 
     // Entry is not cached, so we need to sequence it.
 

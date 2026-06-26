@@ -128,11 +128,10 @@ async fn load_roots(env: &Env, name: &str) -> Result<Arc<CertPool>> {
     static ROOTS: LazyLock<Mutex<HashMap<String, CachedRoot>>> = LazyLock::new(Mutex::default);
 
     // Fast path: already initialized.
-    if let Some(pool) = ROOTS.lock().unwrap().get(name) {
-        if pool.not_expired() {
+    if let Some(pool) = ROOTS.lock().unwrap().get(name)
+        && pool.not_expired() {
             return Ok(Arc::clone(&pool.pool));
         }
-    }
 
     let log_config = &CONFIG.logs[name];
 

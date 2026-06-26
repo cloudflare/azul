@@ -283,11 +283,10 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
         .map_err(|e| e.to_string())?;
 
         // If the tree is empty, add the log's initial entry if it has one.
-        if self.sequence_state.borrow().tree_size() == 0 {
-            if let Some(entry) = L::initial_entry() {
+        if self.sequence_state.borrow().tree_size() == 0
+            && let Some(entry) = L::initial_entry() {
                 add_leaf_to_pool(&self.pool_state, &self.cache, &self.config, entry);
             }
-        }
 
         // Start sequencing loop (OK if alarm is already scheduled).
         self.do_state

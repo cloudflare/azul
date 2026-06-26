@@ -170,11 +170,9 @@ impl CertPool {
         if let Some((_, aki)) = cert
             .tbs_certificate()
             .get_extension::<AuthorityKeyIdentifier>()?
-        {
-            if let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?) {
+            && let Some(indexes) = self.by_subject_key_id.get(&aki.to_der()?) {
                 return Ok(indexes);
             }
-        }
         if let Some(indexes) = self
             .by_name
             .get(&cert.tbs_certificate().issuer().to_string())

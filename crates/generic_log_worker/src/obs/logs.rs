@@ -76,13 +76,11 @@ impl log::Log for Logger {
 
         console_log::log(record);
         let mut fields = HashMap::new();
-        if let Some(module) = record.module_path() {
-            if let Some(file) = record.file() {
-                if let Some(line) = record.line() {
+        if let Some(module) = record.module_path()
+            && let Some(file) = record.file()
+                && let Some(line) = record.line() {
                     fields.insert("location".to_owned(), format!("{module}::{file}:{line}"));
                 }
-            }
-        }
         record
             .key_values()
             .visit(&mut Visitor(&mut fields))

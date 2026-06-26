@@ -842,21 +842,18 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
     let mut data_tile = Vec::new();
-    if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY) {
-        if t.tile.width() < TlogTile::FULL_WIDTH {
+    if let Some(t) = edge_tiles.get(&DATA_TILE_LEVEL_KEY)
+        && t.tile.width() < TlogTile::FULL_WIDTH {
             data_tile.clone_from(&t.b);
         }
-    }
 
     // Load the current partial auxiliary tile, if configured.
     let mut aux_tile = Vec::new();
-    if L::Pending::AUX_TILE_PATH.is_some() {
-        if let Some(t) = edge_tiles.get(&AUX_TILE_LEVEL_KEY) {
-            if t.tile.width() < TlogTile::FULL_WIDTH {
+    if L::Pending::AUX_TILE_PATH.is_some()
+        && let Some(t) = edge_tiles.get(&AUX_TILE_LEVEL_KEY)
+            && t.tile.width() < TlogTile::FULL_WIDTH {
                 aux_tile.clone_from(&t.b);
             }
-        }
-    }
 
     let mut overlay = HashMap::new();
     let mut n = old_size;
@@ -865,11 +862,10 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     let mut cache_metadata = Vec::with_capacity(entries.len());
 
     for (entry, sender) in entries {
-        if n == 0 {
-            if let Some(initial_entry) = L::initial_entry() {
+        if n == 0
+            && let Some(initial_entry) = L::initial_entry() {
                 assert_eq!(entry.lookup_key(), initial_entry.lookup_key());
             }
-        }
 
         // Add the entry and metadata to our lists of things sequenced.
         // `M::new` constructs the application-specific metadata, which may

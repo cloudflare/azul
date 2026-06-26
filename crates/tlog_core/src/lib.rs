@@ -984,15 +984,15 @@ impl Subtree {
 
         // The indexes are sorted in increasing order. In order to compute the
         // root hash, start from the rightmost index and hash up.
-        let root_hash = hashes
+        
+
+        hashes
             .drain(0..num_hashes)
             .rev()
             .reduce(|fringe, sibling| node_hash(sibling, fringe))
             // This expect is safe because the loop to calculate num_tree ensures
             // it's > 0 if the subtree has a non-zero range.
-            .expect("num_tree must be positive for a valid subtree range");
-
-        root_hash
+            .expect("num_tree must be positive for a valid subtree range")
     }
 
     /// Helper function to implement the `SUBTREE_SUBPROOF` traversal logic from
