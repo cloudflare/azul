@@ -3126,6 +3126,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlog_mirror"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "byteorder",
+ "hmac",
+ "sha2",
+ "thiserror 2.0.17",
+ "tlog_core",
+]
+
+[[package]]
 name = "tlog_tiles"
 version = "0.2.0"
 dependencies = [
