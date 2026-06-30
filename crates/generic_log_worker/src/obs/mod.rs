@@ -1,3 +1,5 @@
+use axum::http::header;
+
 pub mod logs;
 pub mod metrics;
 
@@ -34,8 +36,8 @@ impl Wshim {
                 Some(worker::RequestInit {
                     method: worker::Method::Post,
                     headers: worker::Headers::from_iter([(
-                        "Authorization".to_owned(),
-                        format!("Bearer: {}", self.token),
+                        header::AUTHORIZATION.to_string(),
+                        format!("Bearer {}", self.token),
                     )]),
                     body: Some(data.to_body().into()),
                     ..Default::default()

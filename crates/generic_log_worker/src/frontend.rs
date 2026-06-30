@@ -33,7 +33,7 @@ pub async fn request_metrics(
             .observe((now_millis() - start) as f64);
         metrics
             .http_request_total
-            .with_label_values(&[path.as_str(), &log])
+            .with_label_values(&[path.as_str(), &log, response.status().as_str()])
             .inc();
     }
     let version = env
