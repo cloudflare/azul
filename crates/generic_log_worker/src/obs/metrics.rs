@@ -220,7 +220,7 @@ impl FrontendWorkerMetrics {
         let http_request_total = register_counter_vec_with_registry!(
             "http_request_total",
             "Total number of http requests to the frontend worker",
-            &["path", "log"],
+            &["path", "log", "status"],
             r,
         )
         .unwrap();
