@@ -212,7 +212,7 @@ impl FrontendWorkerMetrics {
             "http_request_duration_ms",
             "Duration of an http request made to the frontend worker",
             &["path", "log"],
-            vec![50., 100., 200., 400., 1000., 2000., 4000.],
+            vec![50., 100., 500., 1000., 2000., 4000., 8000., 10_000.],
             r
         )
         .unwrap();
