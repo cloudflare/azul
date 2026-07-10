@@ -247,12 +247,12 @@ async fn add_entry_appears_in_checkpoint() {
         let checkpoint_bytes = client.get_checkpoint().await.expect("fetching checkpoint");
         // Parse tree size from the checkpoint text (second line).
         let text = String::from_utf8_lossy(&checkpoint_bytes);
-        if let Some(size_str) = text.lines().nth(1) {
-            if let Ok(size) = size_str.trim().parse::<u64>() {
-                last_size = size;
-                if size >= min_size {
-                    return;
-                }
+        if let Some(size_str) = text.lines().nth(1)
+            && let Ok(size) = size_str.trim().parse::<u64>()
+        {
+            last_size = size;
+            if size >= min_size {
+                return;
             }
         }
         if attempt + 1 < MAX_RETRIES {
