@@ -321,9 +321,9 @@ mod tests {
     /// produce with `openssl genpkey -algorithm ML-DSA-44`) so this
     /// exercises the real load path.
     fn ml_dsa_44_pem(seed: u8) -> String {
-        use ml_dsa::KeyGen as _;
+        use ml_dsa::SigningKey;
         use pkcs8::EncodePrivateKey as _;
-        let sk = ml_dsa::MlDsa44::from_seed(&ml_dsa::B32::from([seed; 32]));
+        let sk = SigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::B32::from([seed; 32]));
         sk.to_pkcs8_pem(pkcs8::LineEnding::LF)
             .expect("encode ML-DSA-44 PEM")
             .to_string()
