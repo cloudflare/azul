@@ -30,7 +30,7 @@ jobs:
 
       - name: Build ct_worker (dev environment)
         working-directory: crates/ct_worker
-        run: DEPLOY_ENV=dev worker-build --release
+        run: DEPLOY_ENV=dev worker-build --release --panic-unwind
 
       # .dev.vars contains the per-shard signing and witness keys used by
       # wrangler dev. These are dev-only keys (not production secrets) and are
@@ -79,7 +79,7 @@ jobs:
       - name: Build bootstrap_mtc_worker (dev environment, with dev-bootstrap-roots)
         working-directory: crates/bootstrap_mtc_worker
         # wrangler.jsonc dev build already includes --features dev-bootstrap-roots
-        run: DEPLOY_ENV=dev worker-build --release --features dev-bootstrap-roots
+        run: DEPLOY_ENV=dev worker-build --release --panic-unwind --features dev-bootstrap-roots
 
       # .dev.vars contains the per-log signing and cosigning keys used by
       # wrangler dev. These are dev-only keys (not production secrets) and are
@@ -127,7 +127,7 @@ jobs:
 
       - name: Build witness_worker (dev environment)
         working-directory: crates/witness_worker
-        run: DEPLOY_ENV=dev worker-build --release
+        run: DEPLOY_ENV=dev worker-build --release --panic-unwind
 
       # .dev.vars contains the WITNESS_SIGNING_KEY used by wrangler dev. This
       # is a dev-only key (not a production secret) and is committed to the
