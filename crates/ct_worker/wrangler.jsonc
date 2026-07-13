@@ -17,7 +17,10 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev worker-build --release --panic-unwind"
+                // RUSTFLAGS: force legacy Wasm EH so wasm-bindgen 0.2.126's
+                // wasmparser accepts the module (modern exnref opcodes from
+                // nightly ≥2026-05-09 are not yet supported).
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "route": {
                 "pattern": "static-ct-dev.cloudflareresearch.com",
@@ -132,7 +135,8 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=cftest worker-build --release --panic-unwind"
+                // RUSTFLAGS: force legacy Wasm EH (see dev env comment).
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=cftest RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "route": {
                 "pattern": "static-ct.cloudflareresearch.com",
@@ -216,7 +220,8 @@
             "build": {
                 // Change '--release' to '--dev' to compile with debug symbols.
                 // DEPLOY_ENV is used in build.rs to select per-environment config and roots.
-                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=raio worker-build --release --panic-unwind"
+                // RUSTFLAGS: force legacy Wasm EH (see dev env comment).
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=raio RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "routes": [
                 "https://ct.cloudflare.com/logs/raio2025h2b/*",
