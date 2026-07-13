@@ -22,7 +22,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -Dwarnings -Dclippy::pedantic
         continue-on-error: true
       - name: Unused dependencies (advisory)
-        run: cargo install cargo-machete --quiet && cargo machete
+        run: cargo install cargo-shear --quiet && cargo shear
         continue-on-error: true
       - name: Formatting (advisory)
         run: cargo fmt --all --check

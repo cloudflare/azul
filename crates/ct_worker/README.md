@@ -200,7 +200,7 @@ profiling and debugging. Use `worker-build --dev` as the build command in `wrang
 
 ## Check for unnecessary dependencies
 
-    cargo machete
+    cargo shear
 
 ## Acknowledgements
 
