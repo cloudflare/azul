@@ -4004,6 +4004,7 @@ dependencies = [
  "console_log",
  "ed25519-dalek",
  "generic_log_worker",
+ "getrandom 0.3.4",
  "getrandom 0.4.2",
  "hex",
  "jsonschema",
