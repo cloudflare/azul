@@ -3211,6 +3211,7 @@ dependencies = [
  "aes-gcm-siv",
  "base64",
  "byteorder",
+ "rand",
  "thiserror 2.0.17",
  "tlog_core",
 ]

@@ -22,7 +22,7 @@ pub mod wire;
 mod error;
 
 pub use error::{ParseError, TicketError};
-pub use ticket::{TAG_LEN, TicketSealer};
+pub use ticket::{NONCE_LEN, TAG_LEN, TicketSealer};
 pub use wire::{
     AddEntriesRequestHeader, EntryPackage, MAX_HASHES_PER_PROOF, MIRROR_INFO_CONTENT_TYPE,
     MirrorInfo, PACKAGE_ALIGNMENT, PackageRanges, package_ranges,

@@ -38,6 +38,11 @@ pub enum ParseError {
     #[error("num_hashes {0} exceeds spec maximum of 63")]
     TooManyHashes(u8),
 
+    /// An entry package's entry count exceeded the spec's per-package
+    /// maximum of [`PACKAGE_ALIGNMENT`](crate::PACKAGE_ALIGNMENT) (256).
+    #[error("entry package has {0} entries, spec maximum is 256")]
+    TooManyEntries(u64),
+
     /// The `text/x.tlog.mirror-info` body did not have exactly three
     /// newline-terminated lines.
     #[error("mirror-info body is malformed: {0}")]
@@ -62,10 +67,11 @@ pub enum ParseError {
 /// Errors returned by [`TicketSealer`](crate::TicketSealer).
 #[derive(Debug, Error)]
 pub enum TicketError {
-    /// The sealed ticket was shorter than the AEAD tag length
-    /// ([`TAG_LEN`](crate::TAG_LEN), 16 bytes), so it cannot possibly be
-    /// a valid ticket.
-    #[error("sealed ticket too short: {0} bytes, need at least 16")]
+    /// The sealed ticket was shorter than the prepended nonce
+    /// ([`NONCE_LEN`](crate::NONCE_LEN), 12 bytes) plus the AEAD tag
+    /// ([`TAG_LEN`](crate::TAG_LEN), 16 bytes), so it cannot possibly be a
+    /// valid ticket.
+    #[error("sealed ticket too short: {0} bytes, need at least 28")]
     TooShort(usize),
 
     /// AEAD decryption failed: the ticket, tag, key, or associated data

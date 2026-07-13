@@ -9,24 +9,28 @@
 //! AES-256-GCM-SIV to enforce that opacity, so clients cannot depend on
 //! the ticket's internal format.
 //!
-//! Sealing is deterministic (fixed nonce): identical `(payload, aad)`
-//! inputs yield identical tickets, which is safe because AES-GCM-SIV is
-//! nonce-misuse resistant. `aad` is authenticated but not encrypted;
-//! callers pass the log origin to bind a ticket to its log.
+//! A fresh random 96-bit nonce is generated per [`seal`](TicketSealer::seal)
+//! and prepended to the ciphertext, so the sealed ticket is
+//! `nonce || ciphertext || tag`. RFC 8452 recommends against fixing
+//! the nonce, so we do not: a random nonce keeps the security margin even
+//! under a long-lived key without bounding the number of tickets. `aad` is
+//! authenticated but not encrypted; callers pass the log origin to bind a
+//! ticket to its log.
 
 use aes_gcm_siv::{
     Aes256GcmSiv, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
+use rand::RngExt;
 
 use crate::error::TicketError;
 
 /// Length of the AES-GCM-SIV authentication tag, in bytes.
 pub const TAG_LEN: usize = 16;
 
-/// Fixed nonce; deterministic sealing is safe under AES-GCM-SIV's
-/// nonce-misuse resistance (see module docs).
-const NONCE: [u8; 12] = [0u8; 12];
+/// Length of the AES-GCM-SIV nonce, in bytes. Prepended to every sealed
+/// ticket (see module docs).
+pub const NONCE_LEN: usize = 12;
 
 /// AES-256-GCM-SIV ticket sealer, keyed with the operator's secret.
 #[derive(Clone)]
@@ -43,33 +47,50 @@ impl TicketSealer {
         Self { cipher }
     }
 
-    /// Seal a payload, returning `ciphertext || tag`. `aad` is
-    /// authenticated but not encrypted and must match on
-    /// [`open`](Self::open).
+    /// Seal a payload, returning `nonce || ciphertext || tag` with a fresh
+    /// random nonce. `aad` is authenticated but not encrypted and must
+    /// match on [`open`](Self::open).
     ///
     /// # Panics
     /// Only if the input exceeds AES-GCM-SIV's length limit (~64 GiB),
     /// which ticket payloads never approach.
     #[must_use]
     pub fn seal(&self, payload: &[u8], aad: &[u8]) -> Vec<u8> {
-        self.cipher
-            .encrypt(&Nonce::from(NONCE), Payload { msg: payload, aad })
-            .expect("AES-GCM-SIV encryption cannot fail for in-memory ticket payloads")
+        let mut nonce = [0u8; NONCE_LEN];
+        rand::rng().fill(&mut nonce[..]);
+        let ciphertext = self
+            .cipher
+            .encrypt(&Nonce::from(nonce), Payload { msg: payload, aad })
+            .expect("AES-GCM-SIV encryption cannot fail for in-memory ticket payloads");
+        let mut sealed = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        sealed.extend_from_slice(&nonce);
+        sealed.extend_from_slice(&ciphertext);
+        sealed
     }
 
-    /// Open a sealed ticket, returning the decrypted payload. `aad` must
-    /// match the value passed to [`seal`](Self::seal).
+    /// Open a sealed ticket (`nonce || ciphertext || tag`), returning the
+    /// decrypted payload. `aad` must match the value passed to
+    /// [`seal`](Self::seal).
     ///
     /// # Errors
-    /// [`TicketError::TooShort`] if `sealed` cannot contain a tag, or
-    /// [`TicketError::AuthenticationFailed`] if the ticket, tag, key, or
-    /// `aad` do not match. Verification is constant-time.
+    /// [`TicketError::TooShort`] if `sealed` cannot contain a nonce and
+    /// tag, or [`TicketError::AuthenticationFailed`] if the ticket, tag,
+    /// key, or `aad` do not match. Verification is constant-time.
     pub fn open(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, TicketError> {
-        if sealed.len() < TAG_LEN {
+        if sealed.len() < NONCE_LEN + TAG_LEN {
             return Err(TicketError::TooShort(sealed.len()));
         }
+        let (nonce_bytes, ciphertext) = sealed.split_at(NONCE_LEN);
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(nonce_bytes);
         self.cipher
-            .decrypt(&Nonce::from(NONCE), Payload { msg: sealed, aad })
+            .decrypt(
+                &Nonce::from(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|_| TicketError::AuthenticationFailed)
     }
 }
@@ -89,20 +110,23 @@ mod tests {
         let s = sealer();
         let payload = b"signed-checkpoint-bytes-here";
         let sealed = s.seal(payload, AAD);
-        // Ciphertext is the payload length plus the appended tag.
-        assert_eq!(sealed.len(), payload.len() + TAG_LEN);
+        // Sealed ticket is the prepended nonce, the payload, and the tag.
+        assert_eq!(sealed.len(), NONCE_LEN + payload.len() + TAG_LEN);
         let opened = s.open(&sealed, AAD).unwrap();
         assert_eq!(opened, payload);
     }
 
     #[test]
-    fn seal_is_deterministic() {
+    fn seal_is_randomized() {
         let s = sealer();
         let payload = b"same plaintext";
-        // Identical (payload, aad) produce identical tickets: the fixed
-        // nonce makes the ticket a content-addressable handle on the
-        // pending checkpoint, which is safe under AES-GCM-SIV.
-        assert_eq!(s.seal(payload, AAD), s.seal(payload, AAD));
+        // A fresh random nonce per seal means identical (payload, aad)
+        // inputs produce distinct tickets (RFC 8452 §9), yet both open.
+        let a = s.seal(payload, AAD);
+        let b = s.seal(payload, AAD);
+        assert_ne!(a, b);
+        assert_eq!(s.open(&a, AAD).unwrap(), payload);
+        assert_eq!(s.open(&b, AAD).unwrap(), payload);
     }
 
     #[test]
@@ -144,8 +168,8 @@ mod tests {
     fn open_rejects_tampered_ciphertext() {
         let s = sealer();
         let mut sealed = s.seal(b"hello", AAD);
-        // Flip a bit in the ciphertext body.
-        sealed[0] ^= 0x01;
+        // Flip a bit in the ciphertext body (just past the nonce).
+        sealed[NONCE_LEN] ^= 0x01;
         let err = s.open(&sealed, AAD).unwrap_err();
         assert!(matches!(err, TicketError::AuthenticationFailed));
     }
@@ -174,8 +198,8 @@ mod tests {
     fn seal_open_roundtrip_empty_payload() {
         let s = sealer();
         let sealed = s.seal(b"", AAD);
-        // Empty payload: sealed ticket is exactly the tag.
-        assert_eq!(sealed.len(), TAG_LEN);
+        // Empty payload: sealed ticket is exactly the nonce plus the tag.
+        assert_eq!(sealed.len(), NONCE_LEN + TAG_LEN);
         assert_eq!(s.open(&sealed, AAD).unwrap(), b"");
     }
 }

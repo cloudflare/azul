@@ -97,10 +97,23 @@ impl AddEntriesRequestHeader {
     /// Write the header.
     ///
     /// # Errors
-    /// [`io::ErrorKind::InvalidInput`] if `log_origin` or `ticket` exceeds
-    /// the u16 length-prefix limit (65535 bytes); otherwise the writer's
-    /// IO errors.
+    /// [`io::ErrorKind::InvalidInput`] if `upload_start > upload_end`
+    /// (which [`read_from`](Self::read_from) rejects), or if `log_origin`
+    /// or `ticket` exceeds the u16 length-prefix limit (65535 bytes);
+    /// otherwise the writer's IO errors.
     pub fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        // Keep read/write symmetric: the spec requires
+        // upload_start <= upload_end, and read_from enforces it, so refuse
+        // to serialize an inverted range.
+        if self.upload_start > self.upload_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "upload_start ({}) > upload_end ({})",
+                    self.upload_start, self.upload_end
+                ),
+            ));
+        }
         let log_origin_size =
             u16::try_from(self.log_origin.len()).map_err(|_| oversize("log_origin"))?;
         let ticket_size = u16::try_from(self.ticket.len()).map_err(|_| oversize("ticket"))?;
@@ -188,9 +201,16 @@ impl EntryPackage {
     /// package's range from [`package_ranges`].
     ///
     /// # Errors
-    /// [`ParseError::Io`] on short reads, or [`ParseError::TooManyHashes`]
-    /// if `num_hashes` exceeds 63.
+    /// [`ParseError::TooManyEntries`] if `num_entries` exceeds
+    /// [`PACKAGE_ALIGNMENT`] (256), [`ParseError::Io`] on short reads, or
+    /// [`ParseError::TooManyHashes`] if `num_hashes` exceeds 63.
     pub fn read_from<R: Read>(mut reader: R, num_entries: u64) -> Result<Self, ParseError> {
+        // Reject oversized counts before allocating, so hostile wire input
+        // can't request a huge `Vec::with_capacity`. The spec caps each
+        // package at PACKAGE_ALIGNMENT (256) entries.
+        if num_entries > PACKAGE_ALIGNMENT {
+            return Err(ParseError::TooManyEntries(num_entries));
+        }
         let num_entries = usize::try_from(num_entries)
             .map_err(|_| io::Error::other("num_entries overflows usize"))?;
         let mut entries = Vec::with_capacity(num_entries);
@@ -218,9 +238,23 @@ impl EntryPackage {
     /// Write one entry package.
     ///
     /// # Errors
-    /// [`io::ErrorKind::InvalidInput`] if the proof exceeds 63 hashes or
-    /// any entry exceeds 65535 bytes; otherwise the writer's IO errors.
+    /// [`io::ErrorKind::InvalidInput`] if the package holds more than
+    /// [`PACKAGE_ALIGNMENT`] (256) entries, the proof exceeds 63 hashes,
+    /// or any entry exceeds 65535 bytes; otherwise the writer's IO errors.
     pub fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        // Keep read/write symmetric: never serialize a package larger than
+        // the spec's per-package maximum that `read_from` would reject.
+        // Compare as u64 so the check is target-pointer-width independent
+        // and cannot panic.
+        if u64::try_from(self.entries.len()).map_or(true, |n| n > PACKAGE_ALIGNMENT) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "entry package has {} entries, max is {PACKAGE_ALIGNMENT}",
+                    self.entries.len()
+                ),
+            ));
+        }
         if self.proof.len() > usize::from(MAX_HASHES_PER_PROOF) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -335,24 +369,9 @@ impl MirrorInfo {
     }
 }
 
-/// Strict decimal-`u64` parser for the `text/x.tlog.mirror-info` body.
-/// Rejects empty input, leading zeros (except the literal `"0"`), signs,
-/// whitespace, and any non-ASCII-decimal byte, enforcing one canonical
-/// encoding per integer.
+/// Decimal-`u64` parser for the `text/x.tlog.mirror-info` body.
 fn parse_decimal_u64(field: &'static str, value: &str) -> Result<u64, ParseError> {
-    if value.is_empty() {
-        return Err(ParseError::InvalidDecimal {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    if value.len() > 1 && value.starts_with('0') {
-        return Err(ParseError::InvalidDecimal {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    if !value.bytes().all(|b| b.is_ascii_digit()) {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(ParseError::InvalidDecimal {
             field,
             value: value.to_owned(),
@@ -403,6 +422,23 @@ mod tests {
         assert_eq!(buf, vec![0u8; 20]);
         let parsed = AddEntriesRequestHeader::read_from(Cursor::new(&buf)).unwrap();
         assert_eq!(parsed, header);
+    }
+
+    #[test]
+    fn header_write_rejects_upload_range_inverted() {
+        // write_to must refuse an inverted range, keeping it symmetric with
+        // read_from (which rejects upload_start > upload_end).
+        let header = AddEntriesRequestHeader {
+            log_origin: "log.example/m1".to_owned(),
+            upload_start: 100,
+            upload_end: 50,
+            ticket: Vec::new(),
+        };
+        let mut buf = Vec::new();
+        let err = header.write_to(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        // Nothing should have been written before the validation failure.
+        assert!(buf.is_empty());
     }
 
     #[test]
@@ -515,6 +551,38 @@ mod tests {
     }
 
     #[test]
+    fn entry_package_rejects_too_many_entries_on_read() {
+        // num_entries above PACKAGE_ALIGNMENT (256) must be rejected before
+        // allocating, so hostile input can't force a huge allocation.
+        let err = EntryPackage::read_from(Cursor::new(&[]), PACKAGE_ALIGNMENT + 1).unwrap_err();
+        assert!(matches!(err, ParseError::TooManyEntries(n) if n == PACKAGE_ALIGNMENT + 1));
+    }
+
+    #[test]
+    fn entry_package_accepts_max_entries_on_read() {
+        // Exactly PACKAGE_ALIGNMENT (256) entries is the spec maximum and
+        // must still parse. Each entry is a single u16 length prefix of 0.
+        let buf = vec![0u8; usize::try_from(PACKAGE_ALIGNMENT).unwrap() * 2 + 1];
+        let pkg = EntryPackage::read_from(Cursor::new(&buf), PACKAGE_ALIGNMENT).unwrap();
+        assert_eq!(
+            pkg.entries.len(),
+            usize::try_from(PACKAGE_ALIGNMENT).unwrap()
+        );
+        assert!(pkg.proof.is_empty());
+    }
+
+    #[test]
+    fn entry_package_rejects_too_many_entries_on_write() {
+        let pkg = EntryPackage {
+            entries: vec![Vec::new(); usize::try_from(PACKAGE_ALIGNMENT).unwrap() + 1],
+            proof: vec![],
+        };
+        let mut buf = Vec::new();
+        let err = pkg.write_to(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn entry_package_rejects_too_many_hashes_on_read() {
         let mut buf = Vec::new();
         // Zero entries, num_hashes = 64 (exceeds 63).
@@ -596,16 +664,13 @@ mod tests {
     }
 
     #[test]
-    fn mirror_info_rejects_leading_zero() {
-        let body = b"0100\n50\nAQID\n";
-        let err = MirrorInfo::parse(body).unwrap_err();
-        assert!(matches!(
-            err,
-            ParseError::InvalidDecimal {
-                field: "tree_size",
-                ..
-            }
-        ));
+    fn mirror_info_accepts_leading_zero() {
+        // Allow leading zeros for compatibility with Go's strconv.ParseUint.
+        let info = MirrorInfo::parse(b"0100\n00042\nAQID\n").unwrap();
+        assert_eq!(info.tree_size, 100);
+        assert_eq!(info.next_entry, 42);
+        // to_body remains canonical (no leading zeros) when serializing.
+        assert_eq!(info.to_body(), b"100\n42\nAQID\n");
     }
 
     #[test]
