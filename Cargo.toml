@@ -67,6 +67,14 @@ homepage = "https://github.com/cloudflare/azul"
 repository = "https://github.com/cloudflare/azul"
 description = "An implementation of the Static Certificate Transparency API on Cloudflare Workers"
 
+[workspace.metadata.cargo-shear]
+# getrandom is never imported directly. It is declared by the wasm crates
+# solely so its `wasm_js` feature activates the correct backend for all
+# transitive dependents; cargo-shear can't see this feature-only edge. A
+# workspace-level ignore covers every member plus the workspace dependency
+# itself.
+ignored = ["getrandom"]
+
 [profile.release]
 opt-level = "s"
 # Recommendations from https://developers.cloudflare.com/workers/languages/rust/#binary-size-wasm-opt:

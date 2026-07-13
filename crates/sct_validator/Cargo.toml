@@ -21,7 +21,6 @@ p256.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-signature.workspace = true
 spki.workspace = true
 thiserror.workspace = true
 x509-cert = { workspace = true, features = ["sct"] }
