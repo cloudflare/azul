@@ -68,6 +68,3 @@ sct_validator.workspace = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(wasm_bindgen_unstable_test_coverage)',
 ] }
-
-[package.metadata.cargo-machete]
-ignored = ["getrandom", "getrandom_03", "sentry-core"]

@@ -73,7 +73,7 @@ description = "An implementation of the Static Certificate Transparency API on C
 # transitive dependents; cargo-shear can't see this feature-only edge. A
 # workspace-level ignore covers every member plus the workspace dependency
 # itself.
-ignored = ["getrandom"]
+ignored = ["getrandom", "getrandom_03"]
 
 [profile.release]
 opt-level = "s"
