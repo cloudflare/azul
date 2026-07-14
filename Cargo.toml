@@ -20,6 +20,7 @@ members = [
     "crates/tlog_core",
     "crates/tlog_cosignature",
     "crates/tlog_entry",
+    "crates/tlog_mirror",
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
     "crates/tlog_witness",
@@ -49,6 +50,7 @@ default-members = [
     "crates/tlog_core",
     "crates/tlog_cosignature",
     "crates/tlog_entry",
+    "crates/tlog_mirror",
     "crates/tlog_tiles",
     "crates/tlog_tiles_wasm",
     "crates/tlog_witness",
@@ -88,6 +90,10 @@ opt-level = 3
 debug = 1
 
 [workspace.dependencies]
+# aes-gcm-siv has no stable release on the current RustCrypto trait
+# batch (aead 0.6), so it stays on a pre-release (as does rsa, below);
+# the rc still resolves aead/cipher up to their stable releases.
+aes-gcm-siv = { version = "0.12.0-rc.3", default-features = false, features = ["aes", "alloc"] }
 anyhow = "1.0"
 axum = { version = "0.8", default-features = false, features = ["json", "matched-path"] }
 base64 = "0.22"
@@ -140,6 +146,7 @@ tlog_checkpoint = { path = "crates/tlog_checkpoint", version = "0.2.0" }
 tlog_core = { path = "crates/tlog_core", version = "0.2.0" }
 tlog_cosignature = { path = "crates/tlog_cosignature", version = "0.2.0" }
 tlog_entry = { path = "crates/tlog_entry", version = "0.2.0" }
+tlog_mirror = { path = "crates/tlog_mirror", version = "0.2.0" }
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
 tlog_witness = { path = "crates/tlog_witness", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }

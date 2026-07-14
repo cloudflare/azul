@@ -1,0 +1,29 @@
+[package]
+name = "tlog_mirror"
+# Held back from crates.io while c2sp.org/tlog-mirror stabilizes. Lift
+# the publish gate (and remove this comment) once the spec is final.
+publish = false
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "An implementation of c2sp.org/tlog-mirror"
+categories = ["cryptography"]
+keywords = ["transparency", "mirror", "checkpoint", "crypto", "pki"]
+
+[package.metadata.release]
+release = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+aes-gcm-siv.workspace = true
+base64.workspace = true
+byteorder.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tlog_core.workspace = true
