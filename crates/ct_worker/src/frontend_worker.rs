@@ -3,7 +3,7 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{CONFIG, StaticCTSequenceMetadata, load_roots, load_signing_key};
+use crate::{CONFIG, StaticCTSequenceMetadata, init_sentry, load_roots, load_signing_key};
 use config::{LogType, TemporalInterval};
 use generic_log_worker::{
     ENTRY_ENDPOINT, ObjectBucket, batcher_id_from_lookup_key, deserialize,
@@ -76,22 +76,31 @@ async fn main(
     env: Env,
     ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
+    init_sentry(&env);
     let wshim = Wshim::from_env(&env);
     let registry = metrics::registry();
-    let response = Router::new()
-        .route("/logs/{log}/ct/v1/get-roots", get(get_roots))
-        .route("/logs/{log}/ct/v1/add-chain", post(add_chain))
-        .route("/logs/{log}/ct/v1/add-pre-chain", post(add_pre_chain))
-        .route("/logs/{log}/log.v3.json", get(log_v3_json))
-        .route("/logs/{log}/sequencer_id", get(sequencer_id))
-        .route("/logs/{log}/{*key}", get(get_object))
-        .layer(middleware::from_fn_with_state(
-            (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
-            request_metrics,
-        ))
-        .with_state(env)
-        .call(req)
-        .await?;
+    let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
+        Router::new()
+            .route("/logs/{log}/ct/v1/get-roots", get(get_roots))
+            .route("/logs/{log}/ct/v1/add-chain", post(add_chain))
+            .route("/logs/{log}/ct/v1/add-pre-chain", post(add_pre_chain))
+            .route("/logs/{log}/log.v3.json", get(log_v3_json))
+            .route("/logs/{log}/sequencer_id", get(sequencer_id))
+            .route("/logs/{log}/{*key}", get(get_object))
+            .layer(middleware::from_fn_with_state(
+                (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
+                request_metrics,
+            ))
+            .with_state(env)
+            .call(req)
+            .await
+    })
+    .await?;
+    // Flush any buffered Sentry envelopes (e.g. from panics caught by
+    // catch_unwind_and_flush — the panic hook captures the event, and
+    // catch_unwind_and_flush ensures the transport is flushed before
+    // re-panicking). This explicit flush handles non-panic error paths.
+    generic_log_worker::obs::sentry::flush().await;
     if let Ok(wshim) = wshim {
         ctx.wait_until(async move {
             wshim.flush(&generic_log_worker::obs::logs::LOGGER).await;

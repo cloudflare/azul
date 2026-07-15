@@ -34,6 +34,7 @@ log = { workspace = true, features = ["kv"] }
 p256.workspace = true
 prometheus.workspace = true
 rand.workspace = true
+sentry-core.workspace = true
 serde-wasm-bindgen.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true

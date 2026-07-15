@@ -75,12 +75,16 @@ description = "An implementation of the Static Certificate Transparency API on C
 # transitive dependents; cargo-shear can't see this feature-only edge. A
 # workspace-level ignore covers every member plus the workspace dependency
 # itself.
-ignored = ["getrandom"]
+ignored = ["getrandom", "getrandom_03"]
 
 [profile.release]
 opt-level = "s"
 # Recommendations from https://developers.cloudflare.com/workers/languages/rust/#binary-size-wasm-opt:
-strip = true
+# NOTE: `strip = true` is omitted because it strips the `target_features`
+# custom section from the .wasm binary, which breaks wasm-bindgen's externref
+# transform (required for catch wrappers and panic=unwind support).
+# See: https://github.com/cloudflare/workers-rs/issues/1014
+# `wasm-opt` (run automatically by worker-build) handles size optimization.
 lto = true
 codegen-units = 1
 
@@ -116,6 +120,8 @@ ed25519-dalek = { version = "3.0.0", features = ["pem"] }
 futures-executor = "0.3.31"
 futures-util = "0.3.31"
 getrandom = { version = "0.4", features = ["wasm_js"] }
+# getrandom 0.3 is needed for sentry-core's transitive dep: sentry-types -> rand 0.9 -> getrandom 0.3
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 hex = "0.4"
 itertools = "0.14.0"
 jsonschema = "0.30"
@@ -131,6 +137,7 @@ parking_lot = "0.12"
 prometheus = "0.14"
 rand = "0.10"
 rand_core = "0.10"
+sentry-core = { version = "0.48", default-features = false, features = ["client"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6.5"
 serde_bytes = "0.11"
@@ -154,7 +161,7 @@ tower-service = "0.3.3"
 reqwest = { version = "0.12", features = ["json"] }
 url = "2.2"
 wasm-bindgen = "0.2"
-worker = "0.7.4"
+worker = "0.8.5"
 x509-cert = "0.3.0"
 
 x509_util = { path = "crates/x509_util" }

@@ -35,6 +35,16 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 static SIGNING_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> = OnceLock::new();
 static ROOTS: OnceLock<CertPool> = OnceLock::new();
 
+/// Initialize sentry from the `SENTRY_DSN` environment variable.
+///
+/// Does nothing when the variable is absent or empty, allowing deployments
+/// without sentry support.
+pub(crate) fn init_sentry(env: &Env) {
+    if let Ok(dsn) = env.var("SENTRY_DSN") {
+        let _ = generic_log_worker::obs::sentry::init(&dsn.to_string(), env!("DEPLOY_ENV"));
+    }
+}
+
 pub(crate) fn load_signing_key(env: &Env, name: &str) -> Result<&'static Ed25519SigningKey> {
     load_ed25519_key(env, name, &SIGNING_KEY_MAP, &format!("SIGNING_KEY_{name}"))
 }

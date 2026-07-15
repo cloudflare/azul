@@ -12,7 +12,10 @@
                 // DEPLOY_ENV is used in build.rs to select the per-environment
                 // config. Change '--release' to '--dev' to compile with debug
                 // symbols.
-                "command": "cargo install -q worker-build@0.7.5 && DEPLOY_ENV=dev worker-build --release"
+                // RUSTFLAGS: force legacy Wasm EH so wasm-bindgen 0.2.126's
+                // wasmparser accepts the module (modern exnref opcodes from
+                // nightly ≥2026-05-09 are not yet supported).
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "workers_dev": true,
             "durable_objects": {
