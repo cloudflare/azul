@@ -35,9 +35,13 @@ use axum::{
 };
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};
-use signed_note::NoteError;
-use tlog_checkpoint::CheckpointText;
-use tlog_witness::{AddCheckpointRequest, CONTENT_TYPE_TLOG_SIZE, parse_add_checkpoint_request};
+use signed_note::{NoteError, NoteVerifier, VerifierList};
+use tlog_checkpoint::{CheckpointSigner as _, CheckpointText};
+use tlog_core::{Subtree, verify_subtree_consistency_proof};
+use tlog_witness::{
+    AddCheckpointRequest, CONTENT_TYPE_TLOG_SIZE, SignSubtreeRequest, parse_add_checkpoint_request,
+    parse_sign_subtree_request, serialize_sign_subtree_response,
+};
 use tower_service::Service as _;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -69,11 +73,20 @@ async fn fetch(
     // handler is captured and shipped before the WASM isolate is torn
     // down. `Router`'s `Service::Error` is `Infallible`; the `?` below
     // performs the trivial conversion into `worker::Error`.
+    //
+    // `/add-entries` streams a potentially large (optionally gzip) body,
+    // so it uses the raw `Request` extractor with no `DefaultBodyLimit`;
+    // the buffered endpoints cap their bodies via the layer.
     let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
         Router::new()
             .route(
                 "/add-checkpoint",
                 post(add_checkpoint).layer(DefaultBodyLimit::max(MAX_ADD_CHECKPOINT_BODY_SIZE)),
+            )
+            .route("/add-entries", post(crate::add_entries::add_entries))
+            .route(
+                "/sign-subtree",
+                post(sign_subtree).layer(DefaultBodyLimit::max(MAX_SIGN_SUBTREE_BODY_SIZE)),
             )
             .route("/metadata", get(metadata))
             .route("/", get(root))
@@ -97,16 +110,21 @@ async fn root() -> impl IntoResponse {
 }
 
 /// Error type for the mirror's axum handlers, mapped to an HTTP status by
-/// [`IntoResponse`].
-enum AppError {
+/// [`IntoResponse`]. Success and special-body responses (the 200
+/// cosignature, the 409/202 `text/x.tlog.mirror-info` and `text/x.tlog.size`
+/// bodies) are built as axum responses directly, not via this enum.
+pub(crate) enum AppError {
     InternalServerError(String),
     BadRequest(String),
+    UnsupportedMediaType(String),
+    UnprocessableEntity(String),
     UnknownLogOrigin,
     NoValidSignatures,
+    ReferenceCheckpointNotCosignedByThisMirror,
 }
 
 /// Result type for the mirror's axum handlers.
-type ApiResult<T> = std::result::Result<T, AppError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, AppError>;
 
 impl From<worker::Error> for AppError {
     fn from(err: worker::Error) -> Self {
@@ -124,12 +142,25 @@ impl IntoResponse for AppError {
             AppError::BadRequest(e) => {
                 (StatusCode::BAD_REQUEST, format!("Bad request: {e}")).into_response()
             }
+            AppError::UnsupportedMediaType(e) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, e).into_response()
+            }
+            AppError::UnprocessableEntity(e) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Unprocessable Entity: {e}"),
+            )
+                .into_response(),
             AppError::UnknownLogOrigin => {
                 (StatusCode::NOT_FOUND, "Unknown log origin").into_response()
             }
             AppError::NoValidSignatures => (
                 StatusCode::FORBIDDEN,
                 "No valid signatures from trusted log keys",
+            )
+                .into_response(),
+            AppError::ReferenceCheckpointNotCosignedByThisMirror => (
+                StatusCode::FORBIDDEN,
+                "Reference checkpoint not cosigned by this mirror",
             )
                 .into_response(),
         }
@@ -314,9 +345,129 @@ async fn add_checkpoint(
     Ok(StatusCode::OK.into_response())
 }
 
+/// `POST /sign-subtree` handler.
+///
+/// OPTIONAL endpoint per [c2sp.org/tlog-witness#sign-subtree][spec], which
+/// the mirror inherits (the same cosigner emitted by `add-entries` signs
+/// the subtree). The mirror's cosigner is always ML-DSA-44 / `subtree/v1`,
+/// so this endpoint is always available.
+///
+/// Verification of the reference checkpoint is stateless: the submitted
+/// checkpoint MUST carry one of the mirror's own past `subtree/v1`
+/// cosignatures (the whole-tree cosignature it emits on a successful
+/// `add-entries`). This is safe for the same reason as in the witness: the
+/// mirror only cosigns a checkpoint after fully ingesting and verifying
+/// every entry up to that size, so a checkpoint bearing the mirror's
+/// cosignature proves the mirror holds that tree. `/sign-subtree` therefore
+/// inherits the trust window of `/add-entries`.
+///
+/// [spec]: https://c2sp.org/tlog-witness#sign-subtree
+#[allow(clippy::too_many_lines)]
+#[worker::send]
+async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::response::Response> {
+    let subtree_signer = load_mirror_signer(&env)?.as_subtree_signer();
+
+    let SignSubtreeRequest {
+        subtree_start,
+        subtree_end,
+        subtree_hash,
+        subtree_cosignatures: _,
+        consistency_proof,
+        checkpoint,
+    } = match parse_sign_subtree_request(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("sign-subtree: malformed request: {e}");
+            return Err(AppError::BadRequest(e.to_string()));
+        }
+    };
+
+    // Parse the reference checkpoint and bound-check the subtree.
+    // `Subtree::new` enforces `start < end` and the power-of-two
+    // alignment; `subtree_end <= size` is checked explicitly.
+    let cp_text = match CheckpointText::from_bytes(checkpoint.text()) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("sign-subtree: malformed checkpoint text: {e:?}");
+            return Err(AppError::BadRequest(format!("{e:?}")));
+        }
+    };
+    if subtree_end > cp_text.size() {
+        return Err(AppError::BadRequest(format!(
+            "subtree end {subtree_end} > checkpoint size {}",
+            cp_text.size()
+        )));
+    }
+    let subtree = match Subtree::new(subtree_start, subtree_end) {
+        Ok(s) => s,
+        Err(e) => return Err(AppError::BadRequest(format!("invalid subtree: {e:?}"))),
+    };
+
+    // Look up the log by its origin. Subtree DoS-protection cosignatures
+    // in the request are ignored: this implementation applies no
+    // pre-screening policy, as the spec leaves their use to the operator.
+    let origin = cp_text.origin();
+    if log_verifiers(origin).is_none() {
+        return Err(AppError::UnknownLogOrigin);
+    }
+
+    // Stateless verification: the checkpoint MUST carry one of this
+    // mirror's own past `subtree/v1` cosignatures. The verifier
+    // reconstructs the cosigned message from the checkpoint's
+    // origin/size/hash with start = 0, end = size and rejects anything
+    // else.
+    let mirror_verifier: Box<dyn NoteVerifier> = subtree_signer.verifier();
+    if let Err(e) = checkpoint.verify(&VerifierList::new(vec![mirror_verifier])) {
+        match e {
+            NoteError::UnverifiedNote | NoteError::InvalidSignature { .. } => {
+                log::info!("sign-subtree: reference checkpoint not cosigned by this mirror: {e:?}");
+                return Err(AppError::ReferenceCheckpointNotCosignedByThisMirror);
+            }
+            _ => {
+                log::warn!("sign-subtree: checkpoint verify failed: {e:?}");
+                return Err(AppError::BadRequest(e.to_string()));
+            }
+        }
+    }
+
+    // Verify the subtree consistency proof against the reference
+    // checkpoint root.
+    if verify_subtree_consistency_proof(
+        &consistency_proof,
+        cp_text.size(),
+        *cp_text.hash(),
+        &subtree,
+        subtree_hash,
+    )
+    .is_err()
+    {
+        return Err(AppError::UnprocessableEntity(
+            "subtree consistency proof failed".to_owned(),
+        ));
+    }
+
+    // Sign the subtree. Per the spec the timestamp on a subtree
+    // cosignature MUST be zero; we use zero uniformly.
+    let note_sig = subtree_signer.sign_subtree(0, origin, &subtree, &subtree_hash);
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        serialize_sign_subtree_response(std::slice::from_ref(&note_sig)),
+    )
+        .into_response())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Maximum `sign-subtree` request body, enforced by the route's
+/// [`DefaultBodyLimit`] layer. A well-formed request is a `subtree` range
+/// line, a base64 hash line, up to 8 subtree cosignature lines (~3.3 KiB
+/// each for ML-DSA-44), up to 63 base64 consistency-proof hash lines, and
+/// a reference checkpoint of up to `signed_note::MAX_NOTE_SIZE` (1 MiB);
+/// 1 MiB plus 64 KiB of headroom covers that.
+const MAX_SIGN_SUBTREE_BODY_SIZE: usize = 1_024 * 1_024 + 64 * 1_024;
 
 /// Maximum `add-checkpoint` request body, enforced by the route's
 /// [`DefaultBodyLimit`] layer. A well-formed request is an `old <N>`

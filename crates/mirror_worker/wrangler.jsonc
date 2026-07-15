@@ -16,7 +16,7 @@
                 // wasmparser accepts the module (modern exnref opcodes from
                 // nightly >=2026-05-09 are not yet supported).
                 // --panic-unwind: build with panic=unwind so the sentry
-                // catch-unwind guards in the fetch/DO handlers can report
+                // catch-unwind guards in the fetch/alarm handlers can report
                 // panics before the isolate is torn down.
                 "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
@@ -26,13 +26,36 @@
                     {
                         "name": "MIRROR_STATE",
                         "class_name": "MirrorState"
+                    },
+                    // Per-origin partial-tile cleaner. Cleans orphaned
+                    // partial tiles (superseded by wider/full tiles) from
+                    // the public bucket on a periodic alarm; see
+                    // `src/cleaner_do.rs`.
+                    {
+                        "name": "MIRROR_CLEANER",
+                        "class_name": "MirrorCleaner"
                     }
                 ]
             },
+            // Public R2 bucket backing the mirrored copy of every origin
+            // log. The mirror stores each origin under a distinct
+            // `<origin hash>/` key prefix (see `crate::storage`), so a
+            // single bucket serves all configured logs. Served publicly
+            // via the c2sp.org/tlog-tiles read interface.
+            "r2_buckets": [
+                {
+                    "bucket_name": "tlog-mirror-public-dev",
+                    "binding": "PUBLIC_BUCKET"
+                }
+            ],
             "migrations": [
                 {
                     "tag": "v1",
                     "new_sqlite_classes": ["MirrorState"]
+                },
+                {
+                    "tag": "v2",
+                    "new_sqlite_classes": ["MirrorCleaner"]
                 }
             ]
         }
