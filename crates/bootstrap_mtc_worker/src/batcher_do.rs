@@ -1,5 +1,5 @@
 use crate::{BootstrapMtcSequenceMetadata, CONFIG, init_sentry};
-use generic_log_worker::{BATCHER_BINDING, BatcherConfig, GenericBatcher, get_durable_object_name};
+use generic_log_worker::{BatcherConfig, GenericBatcher, get_sharded_durable_object_base_name};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -12,22 +12,14 @@ impl std::panic::RefUnwindSafe for Batcher {}
 
 impl DurableObject for Batcher {
     fn new(state: State, env: Env) -> Self {
-        let name = get_durable_object_name(
-            &env,
-            &state,
-            BATCHER_BINDING,
-            &mut CONFIG
-                .logs
-                .iter()
-                .map(|(name, params)| (name.as_str(), params.num_batchers)),
-        );
-        let params = &CONFIG.logs[name];
+        let name = get_sharded_durable_object_base_name(&state);
+        let params = &CONFIG.logs[&name];
         let config = BatcherConfig {
-            name: name.to_string(),
             max_batch_entries: params.max_batch_entries,
             batch_timeout_millis: params.batch_timeout_millis,
             enable_dedup: false, // deduplication is not currently supported
             location_hint: params.location_hint.clone(),
+            name,
         };
         init_sentry(&env);
         Batcher(GenericBatcher::new(state, env, config))

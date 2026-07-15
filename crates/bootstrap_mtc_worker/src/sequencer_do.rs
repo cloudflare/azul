@@ -13,8 +13,8 @@ use bootstrap_mtc_api::{
     LandmarkSequence,
 };
 use generic_log_worker::{
-    CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SEQUENCER_BINDING,
-    SequencerConfig, get_durable_object_name, load_public_bucket,
+    CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
+    load_public_bucket,
     log_ops::{ProofError, prove_subtree_consistency},
 };
 use serde::{Deserialize, Serialize};
@@ -34,25 +34,23 @@ impl std::panic::RefUnwindSafe for Sequencer {}
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
-        let name = get_durable_object_name(
-            &env,
-            &state,
-            SEQUENCER_BINDING,
-            &mut CONFIG.logs.keys().map(|name| (name.as_str(), 0)),
-        );
-        let params = &CONFIG.logs[name];
+        let name = state
+            .id()
+            .name()
+            .expect("durable object name not provided by runtime");
+        let params = &CONFIG.logs[&name];
 
         let config = SequencerConfig {
-            name: name.to_string(),
-            origin: load_origin(name),
-            checkpoint_signers: vec![Box::new(load_checkpoint_cosigner(&env, name))],
+            origin: load_origin(&name),
+            checkpoint_signers: vec![Box::new(load_checkpoint_cosigner(&env, &name))],
             checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extension for MTC
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
             enable_dedup: false, // deduplication is not currently supported
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
-            checkpoint_callback: checkpoint_callback(&env, name),
+            checkpoint_callback: checkpoint_callback(&env, &name),
+            name,
         };
 
         init_sentry(&env);

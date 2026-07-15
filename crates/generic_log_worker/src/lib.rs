@@ -81,38 +81,25 @@ where
     bitcode::deserialize::<T>(bytes).map_err(|e| Error::RustError(e.to_string()))
 }
 
-/// Get the name for this Durable Object enumerating all possibilities.
+/// Get the base log name for this sharded Durable Object.
+///
+/// Sharded Durable Objects are addressed as `{name}_{shard_id:x}` (see
+/// [`get_durable_object_stub`]), so the trailing shard suffix is stripped to
+/// recover the base log name.
 ///
 /// # Panics
-/// Panics if the name can't be found (e.g., if the wrong binding is used).
-pub fn get_durable_object_name<'a>(
-    env: &Env,
-    state: &State,
-    binding: &str,
-    name_shard_tuples: &mut impl Iterator<Item = (&'a str, u8)>,
-) -> &'a str {
-    let id = state.id();
-    let namespace = env.durable_object(binding).unwrap();
-
-    let (name, _) = name_shard_tuples
-        .find(|(name, num_shards)| {
-            if *num_shards > 0 {
-                for shard_id in 0..*num_shards {
-                    if id
-                        == namespace
-                            .id_from_name(&format!("{name}_{shard_id:x}"))
-                            .unwrap()
-                    {
-                        return true;
-                    }
-                }
-                false
-            } else {
-                id == namespace.id_from_name(name).unwrap()
-            }
-        })
-        .expect("unable to find durable object name");
-    name
+///
+/// Panics if the runtime does not provide a name, or if the name does not
+/// contain a shard suffix.
+#[must_use]
+pub fn get_sharded_durable_object_base_name(state: &State) -> String {
+    let name = state
+        .id()
+        .name()
+        .expect("durable object name not provided by runtime");
+    name.rsplit_once('_')
+        .map(|(base, _)| base.to_string())
+        .expect("sharded durable object name missing shard suffix")
 }
 
 /// Retrieve a Durable Object stub for the given parameters.

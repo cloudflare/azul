@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{CONFIG, init_sentry, load_checkpoint_cosigner, load_origin};
 use bootstrap_mtc_api::BootstrapMtcPendingLogEntry;
-use generic_log_worker::{CLEANER_BINDING, CleanerConfig, GenericCleaner, get_durable_object_name};
+use generic_log_worker::{CleanerConfig, GenericCleaner};
 use signed_note::VerifierList;
 use tlog_checkpoint::CheckpointSigner;
 use tlog_entry::PendingLogEntry;
@@ -18,21 +18,19 @@ impl std::panic::RefUnwindSafe for Cleaner {}
 
 impl DurableObject for Cleaner {
     fn new(state: State, env: Env) -> Self {
-        let name = get_durable_object_name(
-            &env,
-            &state,
-            CLEANER_BINDING,
-            &mut CONFIG.logs.keys().map(|name| (name.as_str(), 0)),
-        );
-        let params = &CONFIG.logs[name];
+        let name = state
+            .id()
+            .name()
+            .expect("durable object name not provided by runtime");
+        let params = &CONFIG.logs[&name];
 
         let config = CleanerConfig {
-            name: name.to_string(),
-            origin: load_origin(name),
+            origin: load_origin(&name),
             data_path: BootstrapMtcPendingLogEntry::DATA_TILE_PATH,
             aux_path: BootstrapMtcPendingLogEntry::AUX_TILE_PATH,
-            verifiers: VerifierList::new(vec![load_checkpoint_cosigner(&env, name).verifier()]),
+            verifiers: VerifierList::new(vec![load_checkpoint_cosigner(&env, &name).verifier()]),
             clean_interval: Duration::from_secs(params.clean_interval_secs),
+            name,
         };
 
         init_sentry(&env);
