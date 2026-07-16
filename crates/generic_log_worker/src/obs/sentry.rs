@@ -44,6 +44,13 @@ use sha2::{Digest, Sha256};
 pub struct WorkerTransport {
     dsn: sentry_core::types::Dsn,
     envelopes: Mutex<Vec<Envelope>>,
+    /// Cloudflare Access service-token client ID (`CF-Access-Client-ID`
+    /// header). Required when the Sentry ingest endpoint is behind
+    /// Cloudflare Access.
+    access_client_id: Option<String>,
+    /// Cloudflare Access service-token client secret
+    /// (`CF-Access-Client-Secret` header).
+    access_client_secret: Option<String>,
 }
 
 impl Transport for &'static WorkerTransport {
@@ -81,7 +88,12 @@ static PANIC_HOOK_TRANSPORT: OnceLock<WorkerTransport> = OnceLock::new();
 /// when `SENTRY_DSN` is not configured.
 #[must_use]
 #[allow(clippy::too_many_lines)] // Panic-hook event construction is deliberately inline; see safety comments.
-pub fn init(dsn: &str, environment: &str) -> Option<&'static WorkerTransport> {
+pub fn init(
+    dsn: &str,
+    environment: &str,
+    access_client_id: Option<&str>,
+    access_client_secret: Option<&str>,
+) -> Option<&'static WorkerTransport> {
     use std::sync::Once;
     static HOOK: Once = Once::new();
 
@@ -93,6 +105,8 @@ pub fn init(dsn: &str, environment: &str) -> Option<&'static WorkerTransport> {
     let transport = PANIC_HOOK_TRANSPORT.get_or_init(|| WorkerTransport {
         dsn: parsed_dsn.clone(),
         envelopes: Mutex::default(),
+        access_client_id: access_client_id.map(String::from),
+        access_client_secret: access_client_secret.map(String::from),
     });
     let client = sentry_core::Client::from(ClientOptions {
         dsn: Some(parsed_dsn),
@@ -374,6 +388,12 @@ pub async fn flush() {
                 if let Ok(h) = r.headers_mut() {
                     let _ = h.set("Content-Type", "application/x-sentry-envelope");
                     let _ = h.set("X-Sentry-Auth", &auth);
+                    if let Some(id) = &transport.access_client_id {
+                        let _ = h.set("CF-Access-Client-ID", id);
+                    }
+                    if let Some(secret) = &transport.access_client_secret {
+                        let _ = h.set("CF-Access-Client-Secret", secret);
+                    }
                 }
                 r
             }
