@@ -6,10 +6,7 @@
 use std::time::Duration;
 
 use crate::{CONFIG, StaticCTSequenceMetadata, init_sentry, load_checkpoint_signers, load_origin};
-use generic_log_worker::{
-    GenericSequencer, SEQUENCER_BINDING, SequencerConfig, empty_checkpoint_callback,
-    get_durable_object_name,
-};
+use generic_log_worker::{GenericSequencer, SequencerConfig, empty_checkpoint_callback};
 use static_ct_api::StaticCTLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -23,18 +20,15 @@ impl std::panic::RefUnwindSafe for Sequencer {}
 
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
-        let name = get_durable_object_name(
-            &env,
-            &state,
-            SEQUENCER_BINDING,
-            &mut CONFIG.logs.keys().map(|name| (name.as_str(), 0)),
-        );
-        let params = &CONFIG.logs[name];
+        let name = state
+            .id()
+            .name()
+            .expect("durable object name not provided by runtime");
+        let params = &CONFIG.logs[&name];
 
         let config = SequencerConfig {
-            name: name.to_string(),
-            origin: load_origin(name),
-            checkpoint_signers: load_checkpoint_signers(&env, name),
+            origin: load_origin(&name),
+            checkpoint_signers: load_checkpoint_signers(&env, &name),
             checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extensions for CT
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
@@ -42,6 +36,7 @@ impl DurableObject for Sequencer {
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
             checkpoint_callback: empty_checkpoint_callback(),
+            name,
         };
 
         init_sentry(&env);
