@@ -28,7 +28,15 @@ use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::{Hash, LeafIndex};
 use tlog_tiles::PathElem;
 
-pub const LOOKUP_KEY_LEN: usize = 16;
+/// Length of a deduplication-cache lookup key, in bytes.
+///
+/// This is the full width of a SHA-256 digest. Using the entire digest (rather
+/// than a truncation) is a security requirement: the lookup key is what binds a
+/// resubmitted certificate to a previously issued SCT, so a collision in the
+/// key lets an attacker obtain an SCT for a certificate that was never
+/// incorporated into the log. See
+/// <https://github.com/cloudflare/azul/issues/251>.
+pub const LOOKUP_KEY_LEN: usize = 32;
 pub type LookupKey = [u8; LOOKUP_KEY_LEN];
 
 /// An opaque `PendingLogEntry` that can be passed around without requiring full
@@ -159,11 +167,8 @@ impl PendingLogEntry for TlogTilesPendingLogEntry {
     }
 
     fn lookup_key(&self) -> LookupKey {
-        let hash = Sha256::digest(&self.data);
-        let mut lookup_key = LookupKey::default();
-        lookup_key.copy_from_slice(&hash[..LOOKUP_KEY_LEN]);
-
-        lookup_key
+        // Use the full SHA-256 digest as the lookup key (see `LOOKUP_KEY_LEN`).
+        Sha256::digest(&self.data).into()
     }
 }
 
