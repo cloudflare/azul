@@ -39,7 +39,20 @@ static WITNESS_KEY_MAP: OnceLock<HashMap<String, OnceLock<Ed25519SigningKey>>> =
 /// without sentry support.
 pub(crate) fn init_sentry(env: &Env) {
     if let Ok(dsn) = env.var("SENTRY_DSN") {
-        let _ = generic_log_worker::obs::sentry::init(&dsn.to_string(), env!("DEPLOY_ENV"));
+        let access_id = env
+            .var("SENTRY_ACCESS_CLIENT_ID")
+            .ok()
+            .map(|v| v.to_string());
+        let access_secret = env
+            .secret("SENTRY_ACCESS_CLIENT_SECRET")
+            .ok()
+            .map(|v| v.to_string());
+        let _ = generic_log_worker::obs::sentry::init(
+            &dsn.to_string(),
+            env!("DEPLOY_ENV"),
+            access_id.as_deref(),
+            access_secret.as_deref(),
+        );
     }
 }
 
