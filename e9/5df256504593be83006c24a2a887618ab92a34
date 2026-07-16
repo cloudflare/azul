@@ -1,0 +1,19 @@
+crates/generic_log_worker/src/lib.rs
+  s_033e41b6791430::t_316c58f81cef79 34,471-480,482,484,486-489,498,507-509,513-514,519,522,1000-1001,1024,1036,1052,1057-1058,1060-1062,1068,1080-1082,1105-1108,1113-1114,1122,1127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e95df256504593be83006c24a2a887618ab92a34",
+  "prompts": {},
+  "sessions": {
+    "s_033e41b6791430": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0951bddd1ffeO6CtAi5WQjtsr8",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
