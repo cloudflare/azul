@@ -18,12 +18,10 @@ use tlog_entry::LookupKey;
 ///
 /// Wire-format constraints (do not change without migration):
 ///
-/// 1. **Durable Object dedup ring buffer**: 32-byte binary layout
-///    `[16-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`.
-///    This format matches the one previously used when the type was
-///    `(LeafIndex, UnixTimestampMillis)`; preserving it avoids a one-time deserialize
-///    warning on deploy as the sequencer loads any entries already in DO
-///    storage.
+/// 1. **Durable Object dedup ring buffer**: 48-byte binary layout
+///    `[32-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`.
+///    The lookup key is the full SHA-256 digest; see
+///    `tlog_entry::LOOKUP_KEY_LEN`.
 /// 2. **DO→Worker RPC**: `bitcode` sequence of the two u64 fields (preserved by
 ///    the tuple-struct layout).
 ///

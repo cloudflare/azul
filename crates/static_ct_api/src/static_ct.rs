@@ -193,14 +193,11 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
         // Add certificate with a 24-bit length prefix
         buffer.write_length_prefixed(&self.certificate, 3).unwrap();
 
-        // Compute the SHA-256 hash of the buffer
-        let hash = Sha256::digest(&buffer);
-
-        // Return the first 16 bytes of the hash as the lookup key.
-        let mut cache_hash = [0u8; 16];
-        cache_hash.copy_from_slice(&hash[..16]);
-
-        cache_hash
+        // Return the full SHA-256 hash of the buffer as the lookup key. Using
+        // the entire digest (rather than a truncation) is a security
+        // requirement; see `tlog_entry::LOOKUP_KEY_LEN` and
+        // <https://github.com/cloudflare/azul/issues/251>.
+        Sha256::digest(&buffer).into()
     }
 }
 

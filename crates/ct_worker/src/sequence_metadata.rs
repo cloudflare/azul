@@ -16,8 +16,8 @@ use tlog_entry::LookupKey;
 ///
 /// Wire-format constraints (do not change without migration):
 ///
-/// 1. **Durable Object dedup ring buffer**: 32-byte binary layout
-///    `[16-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`,
+/// 1. **Durable Object dedup ring buffer**: 48-byte binary layout
+///    `[32-byte lookup key | 8-byte leaf_index BE | 8-byte timestamp BE]`,
 ///    handled via [`serialize_sequence_metadata_entries`] /
 ///    [`deserialize_sequence_metadata_entries`].
 /// 2. **KV long-term dedup cache metadata**: JSON array `[leaf_index, timestamp]`.

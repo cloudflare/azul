@@ -56,10 +56,17 @@ pub const CHECKPOINT_KEY: &str = "checkpoint";
 const STAGING_KEY: &str = "staging";
 
 // Limit on the number of entries per batch. Tune this parameter to avoid
-// running into various size limitations. For instance, unexpectedly large
-// leaves (e.g., with PQ signatures) could cause us to exceed the 128MB Workers
-// memory limit. Storing 4000 10KB certificates is 40MB.
-const MAX_POOL_SIZE: usize = 4000;
+// running into various size limitations:
+//
+//   * Workers isolate memory (128MB): unexpectedly large leaves (e.g., with PQ
+//     signatures) inflate the pool. Storing 2500 10KB certificates is 25MB.
+//   * Durable Object storage per-value limit (128 KiB): each sequencing round
+//     serializes its entries into a single DO storage value in the dedup ring
+//     buffer, at `CACHE_RECORD_LEN` (48) bytes per entry. 2500 * 48 = 120,000
+//     bytes, which stays under the 131,072-byte cap (ceiling is 2730). Because
+//     one round maps to one DO value, this bound doubles as the per-value size
+//     guard, avoiding the need to chunk batches across multiple keys.
+const MAX_POOL_SIZE: usize = 2500;
 
 /// Ephemeral state for pooling entries to the CT log.
 ///
