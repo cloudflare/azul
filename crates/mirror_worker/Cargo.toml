@@ -1,0 +1,47 @@
+# Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+[package]
+name = "mirror_worker"
+publish = false
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "A transparency-log mirror (c2sp.org/tlog-mirror) on Cloudflare Workers"
+categories = ["cryptography"]
+keywords = ["transparency", "mirror", "crypto", "pki"]
+
+[package.metadata.release]
+release = false
+
+# https://github.com/rustwasm/wasm-pack/issues/1351
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+config = { path = "./config", package = "mirror_worker_config" }
+jsonschema.workspace = true
+serde_json.workspace = true
+
+[dependencies]
+axum.workspace = true
+config = { path = "./config", package = "mirror_worker_config" }
+console_error_panic_hook.workspace = true
+console_log.workspace = true
+getrandom.workspace = true
+log.workspace = true
+serde_json.workspace = true
+tower-service.workspace = true
+worker = { workspace = true, features = ["http", "axum"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(wasm_bindgen_unstable_test_coverage)',
+] }

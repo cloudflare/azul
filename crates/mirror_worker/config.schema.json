@@ -1,0 +1,69 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["mirror_name", "submission_prefix", "logs"],
+    "additionalProperties": false,
+    "properties": {
+        "logging_level": {
+            "type": "string",
+            "enum": ["trace", "debug", "info", "warn", "error"]
+        },
+        "mirror_name": {
+            "type": "string",
+            "description": "The mirror's identity, as it appears in cosignature lines and on /metadata. Per c2sp.org/signed-note, this MUST NOT contain '+', whitespace, or control characters.",
+            "pattern": "^[^+\\s]+$"
+        },
+        "description": {
+            "type": "string"
+        },
+        "submission_prefix": {
+            "type": "string",
+            "description": "URL prefix for write APIs (e.g. https://mirror.example/)."
+        },
+        "monitoring_prefix": {
+            "type": "string",
+            "description": "URL prefix for read APIs (the tlog-tiles read interface served at <monitoring_prefix>/<encoded origin>/...)."
+        },
+        "clean_interval_secs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 3600,
+            "description": "How often (in seconds) the per-origin partial-tile cleaner wakes to clean orphaned partial tiles from object storage. Defaults to 3600 (one hour) when omitted."
+        },
+        "logs": {
+            "type": "object",
+            "description": "CAs this mirror mirrors, keyed by log_key_name: the CA cosigner's note-signature name (the CA ID) on the checkpoints it ingests. Used as a signed-note key name at runtime, so per c2sp.org/signed-note it MUST NOT contain '+', whitespace, or control characters.",
+            "propertyNames": {
+                "pattern": "^[^+\\s]+$"
+            },
+            "additionalProperties": {
+                "type": "object",
+                "required": ["log_public_keys", "min_log_number", "max_log_number"],
+                "additionalProperties": false,
+                "properties": {
+                    "description": {"type": "string"},
+                    "log_public_keys": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "string",
+                            "description": "A DER-encoded ML-DSA-44 SubjectPublicKeyInfo, base64-encoded. The mirror accepts subtree/v1 checkpoint signatures from any of these keys and ignores signatures from others."
+                        }
+                    },
+                    "min_log_number": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                        "description": "Lowest accepted MTC log number. MTC log numbers start at 1. The mirror serves a log at each origin <log_key_name>.0.<N> for N in [min_log_number, max_log_number]."
+                    },
+                    "max_log_number": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                        "description": "Highest accepted MTC log number (inclusive). Must be >= min_log_number."
+                    }
+                }
+            }
+        }
+    }
+}

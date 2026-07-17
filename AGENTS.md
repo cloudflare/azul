@@ -58,6 +58,7 @@ npx wrangler -e=${ENV} tail
 - Worker build is handled by `worker-build`, not `cargo build` directly — wrangler.jsonc invokes it automatically
 - Config types live in separate sub-crates: `crates/ct_worker/config/`, `crates/bootstrap_mtc_worker/config/`
 - `DEPLOY_ENV=<env>` env var must be set when invoking `worker-build` manually; wrangler.jsonc sets it per environment
+- Route HTTP with `axum::Router` (worker features `["http", "axum"]`), not the `worker::Router`. The `#[event(fetch)]` handler takes a `HttpRequest`, returns `axum::http::Response<axum::body::Body>`, and dispatches via `tower_service::Service::call`; handlers return `impl IntoResponse`. See `witness_worker`/`ct_worker` for the pattern.
 
 
 ## Workflow

@@ -1,0 +1,23 @@
+{
+    "name": "tlog-mirror",
+    "main": "build/worker/shim.mjs",
+    "compatibility_date": "2026-07-17",
+    "workers_dev": false,
+    "build": {
+        "command": "echo 'Default environment not configured. Please specify an environment with the \"-e\" flag.' && exit 1"
+    },
+    "env": {
+        "dev": {
+            "build": {
+                // DEPLOY_ENV is used in build.rs to select the per-environment
+                // config. Change '--release' to '--dev' to compile with debug
+                // symbols.
+                // RUSTFLAGS: force legacy Wasm EH so wasm-bindgen 0.2.126's
+                // wasmparser accepts the module (modern exnref opcodes from
+                // nightly >=2026-05-09 are not yet supported).
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release"
+            },
+            "workers_dev": true
+        }
+    }
+}
