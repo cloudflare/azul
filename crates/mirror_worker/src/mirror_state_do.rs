@@ -186,24 +186,28 @@ impl MirrorState {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Post, "/get-state") => {
-                let snapshot = self.read_snapshot().await;
+                let snapshot = self.read_snapshot().await?;
                 Response::from_json(&snapshot)
             }
             (Method::Post, "/commit") => {
                 // Compare-and-swap advance of the mirror checkpoint:
-                //   * size > pending.size: commit beyond what was
-                //     accepted as pending; 400.
+                //   * size > next_entry.size: commit beyond the
+                //     persisted-entry frontier, i.e. cosigning entries
+                //     that have not been durably written yet; 400. This
+                //     preserves `committed.size <= next_entry.size`. Since
+                //     `next_entry.size <= pending.size`, it also rejects
+                //     commits beyond the accepted pending checkpoint.
                 //   * size < committed.size: a concurrent add-entries
                 //     already advanced past us. Spec forbids rolling
                 //     back, so no-op and return the current state.
                 //   * otherwise: advance committed.
                 let body: CommitRequest = req.json().await?;
-                let snapshot = self.read_snapshot().await;
-                if body.size > snapshot.pending.size {
+                let snapshot = self.read_snapshot().await?;
+                if body.size > snapshot.next_entry.size {
                     return Response::error(
                         format!(
-                            "commit beyond pending: requested size {} > pending size {}",
-                            body.size, snapshot.pending.size
+                            "commit beyond persisted-entry frontier: requested size {} > next_entry size {}",
+                            body.size, snapshot.next_entry.size
                         ),
                         400,
                     );
@@ -238,8 +242,7 @@ impl MirrorState {
                     .state
                     .storage()
                     .get(PENDING_KEY)
-                    .await
-                    .unwrap_or(None)
+                    .await?
                     .unwrap_or_default();
                 if current.size != body.old_size {
                     // Return the latest pending so the caller can build a
@@ -303,7 +306,7 @@ impl MirrorState {
     ///     reached here; return the current frontier without rewinding.
     ///   * otherwise: advance to `(size, hash)`.
     async fn advance_next_entry(&self, body: AdvanceNextEntryRequest) -> Result<Response> {
-        let snapshot = self.read_snapshot().await;
+        let snapshot = self.read_snapshot().await?;
         if body.size > snapshot.pending.size {
             return Response::error(
                 format!(
@@ -326,33 +329,16 @@ impl MirrorState {
 
     /// Read `pending`, `committed`, and `next_entry` from DO storage.
     /// Missing keys default to the zero state ("no state yet").
-    async fn read_snapshot(&self) -> MirrorStateSnapshot {
-        let pending: PendingCheckpoint = self
-            .state
-            .storage()
-            .get(PENDING_KEY)
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let committed: CommittedCheckpoint = self
-            .state
-            .storage()
-            .get(COMMITTED_KEY)
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let next_entry: NextEntry = self
-            .state
-            .storage()
-            .get(NEXT_ENTRY_KEY)
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-        MirrorStateSnapshot {
+    async fn read_snapshot(&self) -> Result<MirrorStateSnapshot> {
+        let storage = self.state.storage();
+        let pending: PendingCheckpoint = storage.get(PENDING_KEY).await?.unwrap_or_default();
+        let committed: CommittedCheckpoint = storage.get(COMMITTED_KEY).await?.unwrap_or_default();
+        let next_entry: NextEntry = storage.get(NEXT_ENTRY_KEY).await?.unwrap_or_default();
+        Ok(MirrorStateSnapshot {
             pending,
             committed,
             next_entry,
-        }
+        })
     }
 }
 

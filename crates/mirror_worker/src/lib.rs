@@ -184,9 +184,9 @@ fn build_mirror_signer(pem: &str) -> Result<MirrorSigner> {
         .map_err(|e| Error::from(format!("PrivateKeyInfo parse: {e}")))?;
     match pk_info.algorithm.oid {
         ID_ML_DSA_44 => {
-            // ml-dsa's PKCS#8 stores only the 32-byte seed; `from_pkcs8_pem`
+            // ml-dsa's PKCS#8 stores only the 32-byte seed; `from_pkcs8_der`
             // expands it on the way in.
-            let expanded = ml_dsa::ExpandedSigningKey::<MlDsa44>::from_pkcs8_pem(pem)
+            let expanded = ml_dsa::ExpandedSigningKey::<MlDsa44>::from_pkcs8_der(doc.as_bytes())
                 .map_err(|e| Error::from(format!("ML-DSA-44 PKCS#8 parse: {e}")))?;
             let public_key_der = expanded
                 .verifying_key()
