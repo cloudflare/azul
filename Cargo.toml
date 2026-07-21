@@ -12,6 +12,8 @@ members = [
     "crates/generic_log_worker",
     "crates/integration_tests",
     "crates/length_prefixed",
+    "crates/mirror_worker",
+    "crates/mirror_worker/config",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
@@ -42,6 +44,8 @@ default-members = [
     "crates/ct_worker",
     "crates/generic_log_worker",
     "crates/length_prefixed",
+    "crates/mirror_worker",
+    "crates/mirror_worker/config",
     "crates/sct_validator",
     "crates/signed_note",
     "crates/signed_note_wasm",
@@ -153,7 +157,6 @@ tlog_checkpoint = { path = "crates/tlog_checkpoint", version = "0.2.0" }
 tlog_core = { path = "crates/tlog_core", version = "0.2.0" }
 tlog_cosignature = { path = "crates/tlog_cosignature", version = "0.2.0" }
 tlog_entry = { path = "crates/tlog_entry", version = "0.2.0" }
-tlog_mirror = { path = "crates/tlog_mirror", version = "0.2.0" }
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
 tlog_witness = { path = "crates/tlog_witness", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }

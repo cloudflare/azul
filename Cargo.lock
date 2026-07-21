@@ -1852,6 +1852,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror_worker"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "console_error_panic_hook",
+ "console_log",
+ "getrandom 0.4.2",
+ "jsonschema",
+ "log",
+ "mirror_worker_config",
+ "serde_json",
+ "tower-service",
+ "worker",
+]
+
+[[package]]
+name = "mirror_worker_config"
+version = "0.2.0"
+dependencies = [
+ "ml-dsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "signed_note",
+ "tlog_cosignature",
+]
+
+[[package]]
 name = "ml-dsa"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

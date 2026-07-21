@@ -1,0 +1,18 @@
+{
+    "logging_level": "info",
+    "mirror_name": "dev.mirror.example",
+    "description": "Local-dev mirror for smoke testing",
+    "submission_prefix": "http://localhost:8787/",
+    "monitoring_prefix": "http://localhost:8787/",
+    "clean_interval_secs": 5,
+    "logs": {
+        "oid/1.3.6.1.4.1.32473.2": {
+            "description": "Dev-only MTC CA cosigner. Key name is the CA ID; the mirror serves log numbers 1-6 as origins oid/1.3.6.1.4.1.32473.2.0.<N>. log_public_keys holds a dev-only ML-DSA-44 SPKI.",
+            "min_log_number": 1,
+            "max_log_number": 6,
+            "log_public_keys": [
+                "MIIFMjALBglghkgBZQMEAxEDggUhAMUP9YKtqA5Sb9kyZi1dJLMWSNEae05DELoJsDcc9tCh/dmDLuE4GPlVMYk9LkspRWBVHVLBrrlAeQjxth+7tyL42ecaETWNo2bVNTEWkMPY9OdLXHbYXTOHOCu7moIYutMK5MBKE3JvaqGJO+wXmeOINWHDGYHC1uNNc2zB5LTTLLqjrewynvFtggXpuVnZnIHZespFVFnoHIx5kL843uNedlUk5VBTGXYyZJsb1gHyFs11IaTguPiBLQpxhclDAMEfSdZfzC1rdirvO+3RhTVbRCEFd8bz724ExTEcubEY/x8e7kzs1E4X+Rnw8GBXgzN8A9NaoZOd3Mo8ID84Z3/UeoZyg3Y7gkmiNn40Y4S7IdCFwLcohJQWzrt/nLKTxtJUh7TbwyUIhmXjqYJkcRD5M+WxZbG+oH5Xm47XVYHTRmfDq5JJCz5K033kcoNxx8IhQJlK7hbmsDw3J6GAoAK7iu4Spbb/gjpYWKusnVYsjGRcDSr3Slp3r4z0+7WwZtWaQsNY/dg0kWIRuyprnBeacaw/GMfI2AeKIFcCe6tpYCWpY7IUC2+qvVg1L+YbwEiOIoqTQ466Mbp9tJOBWfro3dVNu2j3IwEa7pBUCeqtZFwVWiQqRKQ2wnpltTsEFaEGyOMxJTVvt2vROYftncrsoMHq3m1Yd8UN9UBFNtx18LNYEHFa0Mfsh1WcuYy333dSQ+0P/xRfSoFabNhJJ7KPJHeHuFGS+fHTv2VVsi2IiS8NTmd/8Q6DiSxA1s3wcp4oRZz5qA6o0ryXj2yXj+f64xOf+OqhFbmLsExwGWbBwnLZv3cd2AEydlD8Gzqy0x8XjCRt0/NNb8gXdaYCpe+42VQO8rcQK05qzVnxJ+XPaB2cY1DupWLtyqnUCEU9+Ua1oOds1HVCLiCVBCNCZz1hqfcqs1qGWedfg82i5SEKEn0h3mSRgLCMu/bGwlHny9p7GIXxZbj6GTOWf6EFevigS5l5q5j+KQgb1ujkTJCC6B1EdPHMwCbF9RKImvwZioWPwlHUcvfKxvJSDqryUbPVlJp5HuW4LljW0SmocMYPxumRQYrdxRHSMPEKqEtFOC5eenuiGnIpRvarKkHLF2vePK3j4HHE9yxpr8nXbWAyiJIo8NMnXjC+03QYdB7mobWVWfraLZhCHE60X31xb+p/VGsCweYV6FWkyJBm6z616savZr4M4BVBG/1PULRUNstdNSS/N/4ljzF3u6S3/lZj2ox2biN84cHKra80RLj5CNfnHko/kM8TPFHOAYm+KVFnoypdrYcOMzHW5hdBBemx7isREdqzzVkt3AUKCKLuXHITsOIJu3BtsvN1YX5VaFkQ/RxKAqZv4QXOvRJafW1hJ5zbYlh5KWKoGG8kRNVych7WiwY/+zi0SSw3vJznszqkQMUKkwptrLAZzpFHUztXxkBAqPkXGJ/8XuThA8VCT0IfbmfaHABnuR/KM+M4AdZUq+cJ/BJcaeXGl2vueFtaQrQiuEh3x0H4iHlOu3LIbCDRuUyMIUdJ7uwTtkB+WJFUKDiIYAfUKsWmYEtCBiR5dD5WRwCVlEnJmfYLTWuxAq6cE8V3pkOggotP/U6UKArfLn8JOt+i0CR96C2zMY1aG365ULSXT9QQ/P3u03ogg2y01cUoolz3Ges2D0nhwv0h7x4lBp+d10kFxPSoL7bXujHTQNSqn5zzpWNgijUi3xXAFCh14C0frEW4jRLst3v0mIUNIYi9/LDy41mhkSA="
+            ]
+        }
+    }
+}
