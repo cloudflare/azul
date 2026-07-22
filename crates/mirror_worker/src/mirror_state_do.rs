@@ -171,13 +171,23 @@ struct MirrorState {
     state: State,
 }
 
+// SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
+// is required by `wasm-bindgen` when building with `panic=unwind` (so the
+// sentry catch-unwind guard can wrap the fetch handler).
+impl std::panic::RefUnwindSafe for MirrorState {}
+
 impl DurableObject for MirrorState {
-    fn new(state: State, _env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
+        crate::init_sentry(&env);
         Self { state }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        self.fetch_inner(req).await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_fetch"), ("do_type", "mirror_state")],
+            self.fetch_inner(req),
+        )
+        .await
     }
 }
 
