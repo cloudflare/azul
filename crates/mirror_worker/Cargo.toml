@@ -35,7 +35,9 @@ axum.workspace = true
 config = { path = "./config", package = "mirror_worker_config" }
 console_error_panic_hook.workspace = true
 console_log.workspace = true
+generic_log_worker.workspace = true
 getrandom.workspace = true
+getrandom_03.workspace = true
 hex.workspace = true
 log.workspace = true
 ml-dsa.workspace = true

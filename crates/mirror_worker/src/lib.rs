@@ -213,6 +213,31 @@ pub(crate) fn load_mirror_public_key_der(env: &Env) -> Result<&'static [u8]> {
     Ok(load_mirror_signer(env)?.public_key_der())
 }
 
+/// Initialize sentry from the `SENTRY_DSN` environment variable.
+///
+/// Does nothing when the variable is absent or empty, allowing
+/// deployments without sentry support. Called at the top of the frontend
+/// `fetch` handler and in each Durable Object's `new`, so a panic anywhere
+/// in the worker is captured and flushed.
+pub(crate) fn init_sentry(env: &Env) {
+    if let Ok(dsn) = env.var("SENTRY_DSN") {
+        let access_id = env
+            .var("SENTRY_ACCESS_CLIENT_ID")
+            .ok()
+            .map(|v| v.to_string());
+        let access_secret = env
+            .secret("SENTRY_ACCESS_CLIENT_SECRET")
+            .ok()
+            .map(|v| v.to_string());
+        let _ = generic_log_worker::obs::sentry::init(
+            &dsn.to_string(),
+            env!("DEPLOY_ENV"),
+            access_id.as_deref(),
+            access_secret.as_deref(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod signer_tests {
     //! Unit tests for the mirror signer loader: only ML-DSA-44 keys are
