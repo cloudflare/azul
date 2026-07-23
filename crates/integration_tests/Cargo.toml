@@ -48,7 +48,9 @@ tokio = { version = "1", features = ["full"] }
 [dev-dependencies]
 # Used only by the integration test binaries in tests/, not by the shared
 # support library in src/.
+flate2.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true
 tlog_cosignature.workspace = true
+tlog_mirror.workspace = true
 tlog_witness.workspace = true

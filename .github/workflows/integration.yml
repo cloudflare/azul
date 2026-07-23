@@ -4,7 +4,6 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -156,5 +155,50 @@ jobs:
 
       - name: Run TLog Witness integration tests
         run: cargo test -p integration_tests --test tlog_witness --verbose
+        env:
+          BASE_URL: http://localhost:8787
+
+  integration-tlog-mirror:
+    name: TLog Mirror Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.80.0
+
+      - name: Install worker-build
+        run: cargo install worker-build@0.8.5 --locked
+
+      - name: Build mirror_worker (dev environment)
+        working-directory: crates/mirror_worker
+        run: DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind
+
+      - name: Start wrangler dev
+        working-directory: crates/mirror_worker
+        run: wrangler -e=dev dev --port 8787 --persist-to .wrangler/state &
+
+      - name: Wait for wrangler dev to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8787/metadata > /dev/null 2>&1; then
+              echo "wrangler dev is ready"
+              exit 0
+            fi
+            echo "Waiting for wrangler dev... attempt $i/30"
+            sleep 2
+          done
+          echo "wrangler dev failed to start in time"
+          exit 1
+
+      - name: Run TLog Mirror integration tests
+        run: cargo test -p integration_tests --test tlog_mirror --verbose
         env:
           BASE_URL: http://localhost:8787
