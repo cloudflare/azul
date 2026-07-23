@@ -121,6 +121,7 @@ der = { version = "0.8", features = ["oid"] }
 # (crypto-common 0.2 / signature 3.0), so it remains pinned to a pre-release.
 # The rest of the batch is now stable.
 ed25519-dalek = { version = "3.0.0", features = ["pem"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures-executor = "0.3.31"
 futures-util = "0.3.31"
 getrandom = { version = "0.4", features = ["wasm_js"] }
@@ -157,6 +158,7 @@ tlog_checkpoint = { path = "crates/tlog_checkpoint", version = "0.2.0" }
 tlog_core = { path = "crates/tlog_core", version = "0.2.0" }
 tlog_cosignature = { path = "crates/tlog_cosignature", version = "0.2.0" }
 tlog_entry = { path = "crates/tlog_entry", version = "0.2.0" }
+tlog_mirror = { path = "crates/tlog_mirror", version = "0.2.0" }
 tlog_tiles = { path = "crates/tlog_tiles", version = "0.2.0" }
 tlog_witness = { path = "crates/tlog_witness", version = "0.2.0" }
 tokio = { version = "1", features = ["sync"] }
