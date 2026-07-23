@@ -64,18 +64,26 @@ async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
-    // `Router`'s `Service::Error` is `Infallible`; `?` performs the
-    // trivial conversion into `worker::Error`.
-    Ok(Router::new()
-        .route(
-            "/add-checkpoint",
-            post(add_checkpoint).layer(DefaultBodyLimit::max(MAX_ADD_CHECKPOINT_BODY_SIZE)),
-        )
-        .route("/metadata", get(metadata))
-        .route("/", get(root))
-        .with_state(env)
-        .call(req)
-        .await?)
+    crate::init_sentry(&env);
+    // Wrap the router in the sentry catch/flush guard so a panic in any
+    // handler is captured and shipped before the WASM isolate is torn
+    // down. `Router`'s `Service::Error` is `Infallible`; the `?` below
+    // performs the trivial conversion into `worker::Error`.
+    let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
+        Router::new()
+            .route(
+                "/add-checkpoint",
+                post(add_checkpoint).layer(DefaultBodyLimit::max(MAX_ADD_CHECKPOINT_BODY_SIZE)),
+            )
+            .route("/metadata", get(metadata))
+            .route("/", get(root))
+            .with_state(env)
+            .call(req)
+            .await
+    })
+    .await?;
+    generic_log_worker::obs::sentry::flush().await;
+    Ok(response)
 }
 
 /// `GET /` -- mirror identity string. Convenience only; not part of the

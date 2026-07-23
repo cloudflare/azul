@@ -15,7 +15,10 @@
                 // RUSTFLAGS: force legacy Wasm EH so wasm-bindgen 0.2.126's
                 // wasmparser accepts the module (modern exnref opcodes from
                 // nightly >=2026-05-09 are not yet supported).
-                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release"
+                // --panic-unwind: build with panic=unwind so the sentry
+                // catch-unwind guards in the fetch/DO handlers can report
+                // panics before the isolate is torn down.
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "workers_dev": true,
             "durable_objects": {
