@@ -143,8 +143,7 @@ impl WitnessState {
                     .state
                     .storage()
                     .get(STATE_KEY)
-                    .await
-                    .unwrap_or(None)
+                    .await?
                     .unwrap_or_default();
                 if current.size != body.old_size {
                     // Spec: respond with the latest size so the caller can

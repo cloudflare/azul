@@ -17,7 +17,21 @@
                 // nightly >=2026-05-09 are not yet supported).
                 "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release"
             },
-            "workers_dev": true
+            "workers_dev": true,
+            "durable_objects": {
+                "bindings": [
+                    {
+                        "name": "MIRROR_STATE",
+                        "class_name": "MirrorState"
+                    }
+                ]
+            },
+            "migrations": [
+                {
+                    "tag": "v1",
+                    "new_sqlite_classes": ["MirrorState"]
+                }
+            ]
         }
     }
 }
