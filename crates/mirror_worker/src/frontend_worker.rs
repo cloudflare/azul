@@ -69,12 +69,17 @@ async fn fetch(
     // handler is captured and shipped before the WASM isolate is torn
     // down. `Router`'s `Service::Error` is `Infallible`; the `?` below
     // performs the trivial conversion into `worker::Error`.
+    //
+    // `/add-entries` streams a potentially large (optionally gzip) body,
+    // so it uses the raw `Request` extractor with no `DefaultBodyLimit`;
+    // the buffered endpoints cap their bodies via the layer.
     let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
         Router::new()
             .route(
                 "/add-checkpoint",
                 post(add_checkpoint).layer(DefaultBodyLimit::max(MAX_ADD_CHECKPOINT_BODY_SIZE)),
             )
+            .route("/add-entries", post(crate::add_entries::add_entries))
             .route("/metadata", get(metadata))
             .route("/", get(root))
             .with_state(env)
@@ -97,16 +102,20 @@ async fn root() -> impl IntoResponse {
 }
 
 /// Error type for the mirror's axum handlers, mapped to an HTTP status by
-/// [`IntoResponse`].
-enum AppError {
+/// [`IntoResponse`]. Success and special-body responses (the 200
+/// cosignature, the 409/202 `text/x.tlog.mirror-info` and `text/x.tlog.size`
+/// bodies) are built as axum responses directly, not via this enum.
+pub(crate) enum AppError {
     InternalServerError(String),
     BadRequest(String),
+    UnsupportedMediaType(String),
+    UnprocessableEntity(String),
     UnknownLogOrigin,
     NoValidSignatures,
 }
 
 /// Result type for the mirror's axum handlers.
-type ApiResult<T> = std::result::Result<T, AppError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, AppError>;
 
 impl From<worker::Error> for AppError {
     fn from(err: worker::Error) -> Self {
@@ -124,6 +133,14 @@ impl IntoResponse for AppError {
             AppError::BadRequest(e) => {
                 (StatusCode::BAD_REQUEST, format!("Bad request: {e}")).into_response()
             }
+            AppError::UnsupportedMediaType(e) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, e).into_response()
+            }
+            AppError::UnprocessableEntity(e) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Unprocessable Entity: {e}"),
+            )
+                .into_response(),
             AppError::UnknownLogOrigin => {
                 (StatusCode::NOT_FOUND, "Unknown log origin").into_response()
             }
