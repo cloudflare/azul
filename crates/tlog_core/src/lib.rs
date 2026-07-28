@@ -601,6 +601,245 @@ pub fn evaluate_subtree_inclusion_proof(
     Ok(r)
 }
 
+/// Reads hashes from an in-memory post-order storage slice, indexed by
+/// [`stored_hash_index`].
+///
+/// Used internally to reconstruct proofs over the Merkle tree whose leaves
+/// are a cached layer's node hashes (see [`reconstruct_inclusion_proof`]).
+struct SliceReader<'a>(&'a [Hash]);
+
+impl HashReader for SliceReader<'_> {
+    fn read_hashes(&self, indexes: &[u64]) -> Result<Vec<Hash>, TlogError> {
+        indexes
+            .iter()
+            .map(|&i| {
+                usize::try_from(i)
+                    .ok()
+                    .and_then(|i| self.0.get(i).copied())
+                    .ok_or(TlogError::BadMath)
+            })
+            .collect()
+    }
+}
+
+/// Returns `1 << level`, erroring on an out-of-range `level`.
+fn layer_width(level: u8) -> Result<u64, TlogError> {
+    if level >= 64 {
+        return Err(TlogError::BadMath);
+    }
+    Ok(1_u64 << level)
+}
+
+/// Number of nodes on the layer at `level` of `subtree`, i.e. the number of
+/// leaves of the Merkle tree built over that layer: `ceil((hi - lo) / 2^level)`.
+fn subtree_layer_len(subtree: &Subtree, level: u8) -> Result<u64, TlogError> {
+    let width = layer_width(level)?;
+    Ok((subtree.hi - subtree.lo).div_ceil(width))
+}
+
+/// Returns the aligned level-`level` node of `subtree` that contains
+/// `leaf_index`, i.e. the subtree `[lo + q*2^level, min(lo + (q+1)*2^level, hi))`
+/// where `q = (leaf_index - lo) >> level`.
+fn containing_layer_node(
+    subtree: &Subtree,
+    level: u8,
+    leaf_index: u64,
+) -> Result<Subtree, TlogError> {
+    if !subtree.contains(leaf_index) {
+        return Err(TlogError::ConditionNotMet(format!(
+            "{subtree} does not contain leaf {leaf_index}"
+        )));
+    }
+    let width = layer_width(level)?;
+    let q = (leaf_index - subtree.lo) / width;
+    let node_lo = subtree.lo + q * width;
+    let node_hi = node_lo.saturating_add(width).min(subtree.hi);
+    Subtree::new(node_lo, node_hi)
+}
+
+/// Builds an in-memory post-order storage for the Merkle tree whose leaves are
+/// `cached_layer`, treating each cached hash as an opaque leaf hash (not a
+/// record to be re-hashed). The result is indexed by [`stored_hash_index`] and
+/// can be read via [`SliceReader`].
+fn build_layer_storage(cached_layer: &[Hash]) -> Result<Vec<Hash>, TlogError> {
+    let m = u64::try_from(cached_layer.len()).map_err(|_| TlogError::BadMath)?;
+    let mut storage: Vec<Hash> =
+        Vec::with_capacity(usize::try_from(stored_hash_count(m)).unwrap_or(0));
+    for (j, &h) in cached_layer.iter().enumerate() {
+        let j = u64::try_from(j).map_err(|_| TlogError::BadMath)?;
+        let hashes = stored_hashes_for_record_hash(j, h, &SliceReader(&storage))?;
+        storage.extend(hashes);
+    }
+    Ok(storage)
+}
+
+/// Returns the shallowest level `d` (counted from the leaves, so level 0 is the
+/// leaves) such that caching the layer at `d` of `subtree` yields at most
+/// `max_nodes` nodes, i.e. the smallest `d` with `ceil((hi - lo) / 2^d) <= max_nodes`.
+///
+/// This is a policy helper for callers that want to bound the size of the
+/// cached layer (e.g. a fixed predistribution budget). Choosing the shallowest
+/// conforming level minimizes the per-entry proof prefix (which has at most `d`
+/// hashes) while keeping the layer within budget. Pass the result to
+/// [`cache_layer`], [`inclusion_proof_prefix`], and
+/// [`reconstruct_inclusion_proof`]; store it alongside the cache, since
+/// reconstruction requires the same `level`.
+///
+/// The per-entry prefix bound `d` grows by one each time the subtree size
+/// doubles. To bound the prefix instead of the cache, choose `level` directly.
+///
+/// # Errors
+///
+/// Returns an error if `max_nodes` is 0, or (only for astronomically large
+/// subtrees) if no level below 64 satisfies the bound.
+pub fn level_for_max_nodes(subtree: &Subtree, max_nodes: u64) -> Result<u8, TlogError> {
+    if max_nodes == 0 {
+        return Err(TlogError::ConditionNotMet(
+            "`max_nodes` must be nonzero".into(),
+        ));
+    }
+    let n = subtree.hi - subtree.lo;
+    for level in 0..64_u8 {
+        if n.div_ceil(1_u64 << level) <= max_nodes {
+            return Ok(level);
+        }
+    }
+    Err(TlogError::ConditionNotMet(format!(
+        "no level < 64 caps {subtree} to {max_nodes} nodes"
+    )))
+}
+
+/// Computes and returns the hashes of the nodes on the layer at `level` of
+/// `subtree`, left to right.
+///
+/// The layer at `level` consists of the aligned nodes covering `2^level`
+/// entries each (the rightmost node may cover fewer), namely the subtrees
+/// `[lo + j*2^level, min(lo + (j+1)*2^level, hi))` for `j = 0, 1, ...`. These
+/// `M = ceil((hi - lo) / 2^level)` hashes are the leaves of a Merkle tree whose
+/// Merkle Tree Hash equals the root of `subtree` (see [`cached_layer_root`]).
+///
+/// Caching a layer lets a party reconstruct the upper part of any subtree
+/// inclusion proof without access to the full tree: given a short per-entry
+/// *proof prefix* up to the cached layer (see [`inclusion_proof_prefix`]),
+/// [`reconstruct_inclusion_proof`] rebuilds the complete proof to the subtree
+/// root. For any level with more than one node, the subtree root is not itself
+/// a cached node: it is derived by hashing the layer (see [`cached_layer_root`]),
+/// never stored. A `level` of 0 caches every leaf. At the other extreme, a
+/// `level` at or above `ceil(log2(hi - lo))` collapses the layer to a single
+/// node equal to the subtree root; this is a degenerate no-op cache, since the
+/// proof prefix then spans the whole subtree and reconstruction adds nothing.
+///
+/// # Errors
+///
+/// Returns an error if `level >= 64`, if `read_hashes` fails, or if a computed
+/// layer node is not a valid [`Subtree`].
+pub fn cache_layer<R: HashReader>(
+    subtree: &Subtree,
+    level: u8,
+    r: &R,
+) -> Result<Vec<Hash>, TlogError> {
+    let width = layer_width(level)?;
+    let mut layer = Vec::new();
+    let mut lo = subtree.lo;
+    while lo < subtree.hi {
+        let hi = lo.saturating_add(width).min(subtree.hi);
+        layer.push(subtree_hash(&Subtree::new(lo, hi)?, r)?);
+        lo = hi;
+    }
+    Ok(layer)
+}
+
+/// Computes the Merkle Tree Hash over `cached_layer`, treating each cached hash
+/// as a leaf. When `cached_layer` was produced by [`cache_layer`] over a
+/// subtree, this equals that subtree's root hash. This lets a party holding
+/// only the cached layer verify it against an external commitment (e.g. a
+/// cosignature over the subtree) before serving reconstructed proofs.
+///
+/// # Errors
+///
+/// Returns an error on internal storage-index math failures.
+pub fn cached_layer_root(cached_layer: &[Hash]) -> Result<Hash, TlogError> {
+    let m = u64::try_from(cached_layer.len()).map_err(|_| TlogError::BadMath)?;
+    if m == 0 {
+        return Ok(EMPTY_HASH);
+    }
+    let storage = build_layer_storage(cached_layer)?;
+    tree_hash(m, &SliceReader(&storage))
+}
+
+/// Returns the *proof prefix* for `leaf_index`: the inclusion proof from the
+/// leaf up to its aligned level-`level` ancestor node, i.e. the bottom portion
+/// of the full subtree inclusion proof that lies strictly below the cached
+/// layer.
+///
+/// This is the small, per-entry part of an inclusion proof that a party must
+/// retain (or publish) alongside a single cached layer; the upper part is
+/// recovered by [`reconstruct_inclusion_proof`]. It has at most `level` hashes.
+///
+/// # Errors
+///
+/// Returns an error if `leaf_index` is outside `subtree`, if `level >= 64`, or
+/// if `read_hashes` fails.
+pub fn inclusion_proof_prefix<R: HashReader>(
+    subtree: &Subtree,
+    level: u8,
+    leaf_index: u64,
+    r: &R,
+) -> Result<Proof, TlogError> {
+    let node = containing_layer_node(subtree, level, leaf_index)?;
+    subtree_inclusion_proof(&node, leaf_index, r)
+}
+
+/// Reconstructs a full subtree inclusion proof for `leaf_index` from a cached
+/// layer and a proof prefix.
+///
+/// Given `cached_layer` (the layer at `level` of `subtree`, as produced by
+/// [`cache_layer`]) and `prefix` (the proof from the leaf up to its level-`level`
+/// ancestor, as produced by [`inclusion_proof_prefix`]), this returns a proof
+/// identical to [`subtree_inclusion_proof`] for the same leaf: `prefix`
+/// followed by the reconstructed upper hashes.
+///
+/// The upper hashes are the siblings on the path from the leaf's level-`level`
+/// ancestor to the subtree root. Each such sibling is a node at height at or
+/// above the cached layer, so its hash is computable from `cached_layer` alone
+/// (as an inclusion proof of leaf `(leaf_index - lo) >> level` in the Merkle
+/// tree over the cached layer). No access to the full tree is required.
+///
+/// # Errors
+///
+/// Returns an error if `leaf_index` is outside `subtree`, if `level >= 64`, or
+/// if `cached_layer`'s length does not match the layer at `level` of `subtree`.
+pub fn reconstruct_inclusion_proof(
+    cached_layer: &[Hash],
+    subtree: &Subtree,
+    level: u8,
+    leaf_index: u64,
+    prefix: &Proof,
+) -> Result<Proof, TlogError> {
+    if !subtree.contains(leaf_index) {
+        return Err(TlogError::ConditionNotMet(format!(
+            "{subtree} does not contain leaf {leaf_index}"
+        )));
+    }
+    let width = layer_width(level)?;
+    let m = u64::try_from(cached_layer.len()).map_err(|_| TlogError::BadMath)?;
+    if m != subtree_layer_len(subtree, level)? {
+        return Err(TlogError::ConditionNotMet(format!(
+            "cached layer has {m} nodes, expected {} for {subtree} at level {level}",
+            subtree_layer_len(subtree, level)?
+        )));
+    }
+    // Index of the leaf's level-`level` ancestor among the cached-layer nodes.
+    let q = (leaf_index - subtree.lo) / width;
+    let storage = build_layer_storage(cached_layer)?;
+    let upper = inclusion_proof(m, q, &SliceReader(&storage))?;
+
+    let mut full = Vec::with_capacity(prefix.len() + upper.len());
+    full.extend_from_slice(prefix);
+    full.extend(upper);
+    Ok(full)
+}
+
 /// Returns the proof that the tree of size `n` contains as a prefix all the
 /// records from the tree of smaller size `m`.
 ///
@@ -1242,5 +1481,235 @@ mod tests {
                 Some(Subtree::new(65, 66).unwrap())
             )
         );
+    }
+
+    /// Narrow a `u64` index to `usize` for slice access in tests.
+    fn us(i: u64) -> usize {
+        usize::try_from(i).unwrap()
+    }
+
+    /// Build in-memory storage for a tree of `n` records with deterministic
+    /// leaf data, returning `(storage, leaf_hashes)`.
+    fn build_tree(n: u64) -> (TestHashStorage, Vec<Hash>) {
+        let mut storage = TestHashStorage::new();
+        let mut leaves = Vec::new();
+        for i in 0..n {
+            let data = format!("leaf {i}");
+            leaves.push(record_hash(data.as_bytes()));
+            let hashes = stored_hashes(i, data.as_bytes(), &storage).unwrap();
+            storage.extend(hashes);
+        }
+        (storage, leaves)
+    }
+
+    /// A cached layer is the set of leaves of a Merkle tree whose root is the
+    /// subtree root, for every level.
+    #[test]
+    fn test_cached_layer_root_matches_subtree_hash() {
+        for n in 1..=40u64 {
+            let (storage, _) = build_tree(n);
+            let subtree = Subtree::new(0, n).unwrap();
+            let root = subtree_hash(&subtree, &storage).unwrap();
+            for level in 0..8u8 {
+                let layer = cache_layer(&subtree, level, &storage).unwrap();
+                assert_eq!(
+                    u64::try_from(layer.len()).unwrap(),
+                    subtree_layer_len(&subtree, level).unwrap(),
+                    "n={n} level={level}: unexpected layer length"
+                );
+                assert_eq!(
+                    cached_layer_root(&layer).unwrap(),
+                    root,
+                    "n={n} level={level}: cached-layer root != subtree root"
+                );
+            }
+        }
+    }
+
+    /// `prefix ++ reconstructed_upper` equals the full subtree inclusion proof,
+    /// across a range of tree sizes, cache levels, and leaves. The
+    /// reconstruction uses only the cached layer and the prefix.
+    #[test]
+    fn test_reconstruct_equals_full_inclusion_proof() {
+        for n in 1..=40u64 {
+            let (storage, leaves) = build_tree(n);
+            let subtree = Subtree::new(0, n).unwrap();
+            let root = subtree_hash(&subtree, &storage).unwrap();
+            for level in 0..8u8 {
+                let layer = cache_layer(&subtree, level, &storage).unwrap();
+                let width = layer_width(level).unwrap();
+                for leaf in 0..n {
+                    let want = subtree_inclusion_proof(&subtree, leaf, &storage).unwrap();
+
+                    let prefix = inclusion_proof_prefix(&subtree, level, leaf, &storage).unwrap();
+                    assert!(
+                        u64::try_from(prefix.len()).unwrap() <= u64::from(level),
+                        "n={n} level={level} leaf={leaf}: prefix too long"
+                    );
+
+                    let got = reconstruct_inclusion_proof(&layer, &subtree, level, leaf, &prefix)
+                        .unwrap();
+                    assert_eq!(
+                        got, want,
+                        "n={n} level={level} leaf={leaf}: reconstructed proof mismatch"
+                    );
+
+                    // The reconstructed proof verifies against the subtree root.
+                    verify_subtree_inclusion_proof(&got, &subtree, root, leaf, leaves[us(leaf)])
+                        .unwrap();
+
+                    // The prefix alone verifies against the cached node it targets.
+                    let q = leaf / width;
+                    let node_lo = q * width;
+                    let node_hi = (node_lo + width).min(n);
+                    let node = Subtree::new(node_lo, node_hi).unwrap();
+                    verify_subtree_inclusion_proof(
+                        &prefix,
+                        &node,
+                        layer[us(q)],
+                        leaf,
+                        leaves[us(leaf)],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    /// When `2^level >= N` (the cut is at or above the subtree height), the
+    /// layer collapses to a single node equal to the subtree root, the proof
+    /// prefix is the entire inclusion proof, and reconstruction adds nothing.
+    #[test]
+    fn test_reconstruct_level_at_or_above_height() {
+        for n in [1u64, 3, 5, 7, 8, 13] {
+            let (storage, leaves) = build_tree(n);
+            let subtree = Subtree::new(0, n).unwrap();
+            let root = subtree_hash(&subtree, &storage).unwrap();
+            // Smallest level with 2^level >= n, plus levels well above it.
+            let min_level = u8::try_from(n.next_power_of_two().trailing_zeros()).unwrap();
+            for level in [min_level, 10, 30] {
+                let layer = cache_layer(&subtree, level, &storage).unwrap();
+                assert_eq!(layer.len(), 1, "n={n} level={level}: layer not a single node");
+                assert_eq!(layer[0], root, "n={n} level={level}: cached node != root");
+                for leaf in 0..n {
+                    let want = subtree_inclusion_proof(&subtree, leaf, &storage).unwrap();
+                    let prefix = inclusion_proof_prefix(&subtree, level, leaf, &storage).unwrap();
+                    // The prefix is the whole proof; the cache contributes nothing.
+                    assert_eq!(prefix, want, "n={n} level={level} leaf={leaf}: prefix != full");
+                    let got =
+                        reconstruct_inclusion_proof(&layer, &subtree, level, leaf, &prefix).unwrap();
+                    assert_eq!(got, prefix, "n={n} level={level} leaf={leaf}: suffix not empty");
+                    verify_subtree_inclusion_proof(&got, &subtree, root, leaf, leaves[us(leaf)])
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    /// `level_for_max_nodes` returns the shallowest level within budget, and
+    /// that level produces a conforming, reconstructable cache.
+    #[test]
+    fn test_level_for_max_nodes() {
+        // A zero budget is rejected.
+        let subtree = Subtree::new(0, 10).unwrap();
+        assert!(level_for_max_nodes(&subtree, 0).is_err());
+        // A budget at or above the size caches every leaf (level 0).
+        assert_eq!(level_for_max_nodes(&subtree, 10).unwrap(), 0);
+        assert_eq!(level_for_max_nodes(&subtree, 1000).unwrap(), 0);
+
+        for n in 1..=64u64 {
+            let subtree = Subtree::new(0, n).unwrap();
+            let (storage, _) = build_tree(n);
+            for max_nodes in 1..=n {
+                let d = level_for_max_nodes(&subtree, max_nodes).unwrap();
+                let width = layer_width(d).unwrap();
+
+                // Within budget.
+                assert!(
+                    n.div_ceil(width) <= max_nodes,
+                    "n={n} max_nodes={max_nodes} d={d}: over budget"
+                );
+                // Shallowest: one level shallower would exceed the budget.
+                if d > 0 {
+                    let shallower = layer_width(d - 1).unwrap();
+                    assert!(
+                        n.div_ceil(shallower) > max_nodes,
+                        "n={n} max_nodes={max_nodes} d={d}: not shallowest"
+                    );
+                }
+
+                // The chosen level yields a cache within budget that
+                // reconstructs a full proof.
+                let layer = cache_layer(&subtree, d, &storage).unwrap();
+                assert!(u64::try_from(layer.len()).unwrap() <= max_nodes);
+
+                let leaf = n / 2;
+                let prefix = inclusion_proof_prefix(&subtree, d, leaf, &storage).unwrap();
+                let got = reconstruct_inclusion_proof(&layer, &subtree, d, leaf, &prefix).unwrap();
+                let want = subtree_inclusion_proof(&subtree, leaf, &storage).unwrap();
+                assert_eq!(
+                    got, want,
+                    "n={n} max_nodes={max_nodes} d={d}: proof mismatch"
+                );
+            }
+        }
+    }
+
+    /// Reconstruction also works for offset (non-zero `start`) subtrees.
+    #[test]
+    fn test_reconstruct_offset_subtree() {
+        let (storage, leaves) = build_tree(64);
+        let subtree = Subtree::new(8, 16).unwrap();
+        let root = subtree_hash(&subtree, &storage).unwrap();
+        let level = 2;
+        let layer = cache_layer(&subtree, level, &storage).unwrap();
+        for leaf in 8..16 {
+            let want = subtree_inclusion_proof(&subtree, leaf, &storage).unwrap();
+            let prefix = inclusion_proof_prefix(&subtree, level, leaf, &storage).unwrap();
+            let got = reconstruct_inclusion_proof(&layer, &subtree, level, leaf, &prefix).unwrap();
+            assert_eq!(got, want, "leaf={leaf}: reconstructed proof mismatch");
+            verify_subtree_inclusion_proof(&got, &subtree, root, leaf, leaves[us(leaf)]).unwrap();
+        }
+    }
+
+    /// Reconstruction holds at scale, over a large offset subtree and several
+    /// cache levels, spot-checking a spread of leaves.
+    #[test]
+    fn test_reconstruct_large_offset_subtree() {
+        let (storage, leaves) = build_tree(4096);
+        // Valid offset subtree with a non-power-of-two size: start (2048) is a
+        // multiple of BIT_CEIL(1536) = 2048.
+        let subtree = Subtree::new(2048, 2048 + 1536).unwrap();
+        let root = subtree_hash(&subtree, &storage).unwrap();
+        for level in [0u8, 1, 4, 7, 11, 12] {
+            let layer = cache_layer(&subtree, level, &storage).unwrap();
+            assert_eq!(cached_layer_root(&layer).unwrap(), root);
+            for leaf in (subtree.lo()..subtree.hi()).step_by(37) {
+                let want = subtree_inclusion_proof(&subtree, leaf, &storage).unwrap();
+                let prefix = inclusion_proof_prefix(&subtree, level, leaf, &storage).unwrap();
+                let got =
+                    reconstruct_inclusion_proof(&layer, &subtree, level, leaf, &prefix).unwrap();
+                assert_eq!(got, want, "level={level} leaf={leaf}: mismatch");
+                verify_subtree_inclusion_proof(&got, &subtree, root, leaf, leaves[us(leaf)])
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Reconstruction rejects a cached layer whose length does not match the
+    /// requested subtree/level, and a leaf outside the subtree.
+    #[test]
+    fn test_reconstruct_rejects_bad_inputs() {
+        let (storage, _) = build_tree(16);
+        let subtree = Subtree::new(0, 16).unwrap();
+        let layer = cache_layer(&subtree, 2, &storage).unwrap();
+        let prefix = inclusion_proof_prefix(&subtree, 2, 5, &storage).unwrap();
+
+        // Wrong level for this cached layer.
+        assert!(reconstruct_inclusion_proof(&layer, &subtree, 3, 5, &prefix).is_err());
+        // Leaf outside the subtree.
+        assert!(reconstruct_inclusion_proof(&layer, &subtree, 2, 16, &prefix).is_err());
+        // Truncated cached layer.
+        assert!(reconstruct_inclusion_proof(&layer[..1], &subtree, 2, 5, &prefix).is_err());
     }
 }

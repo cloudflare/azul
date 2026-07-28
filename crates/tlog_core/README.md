@@ -8,6 +8,13 @@ inclusion / consistency proof builders and verifiers (with the subtree
 variants from [draft-ietf-plants-merkle-tree-certs][mtc]). It is
 transport-agnostic: no HTTP, no tile encoding, no checkpoint signing.
 
+It also supports *inclusion proof reconstruction*: `cache_layer` caches the
+node hashes on a layer at a chosen level of a subtree, and given a per-entry
+`inclusion_proof_prefix` up to that layer, `reconstruct_inclusion_proof`
+rebuilds the full subtree inclusion proof without access to the rest of the
+tree. The cached layer is the set of leaves of a Merkle tree whose root is the
+subtree root (`cached_layer_root`).
+
 Higher-level crates that build on top of `tlog_core`:
 
 - [`tlog_tiles`](../tlog_tiles): the [C2SP tlog-tiles][tt] HTTP wire format.
