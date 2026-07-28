@@ -232,9 +232,9 @@ pub(crate) struct SequenceState {
 
 /// A description of a transparency log tile along with the contained bytes.
 #[derive(Clone, Default, Debug)]
-struct TileWithBytes {
-    tile: TlogTile,
-    b: Vec<u8>,
+pub struct TileWithBytes {
+    pub tile: TlogTile,
+    pub b: Vec<u8>,
 }
 
 /// An error that can occur when creating a log.
@@ -524,7 +524,7 @@ pub enum ProofError {
     #[error(transparent)]
     Tlog(#[from] tlog_core::TlogError),
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(#[from] worker::Error),
 }
 
 /// Returns an inclusion proof that the leaf at index `leaf_index` is included
@@ -634,7 +634,7 @@ async fn tile_reader_for_indexes(
     tree_size: u64,
     indexes: &[u64],
     object: &impl ObjectBackend,
-) -> Result<PreloadedTlogTileReader, anyhow::Error> {
+) -> worker::Result<PreloadedTlogTileReader> {
     // Record the tiles that we'll need.
     let tiles_to_fetch = {
         let tile_reader = TlogTileRecorder::default();
@@ -647,7 +647,11 @@ async fn tile_reader_for_indexes(
         // already collected the data we needed.
         match hash_reader.read_hashes(indexes) {
             Err(TlogError::RecordedTilesOnly) => {}
-            _ => bail!("expected to get a RecordedTilesOnly error"),
+            _ => {
+                return Err(worker::Error::from(
+                    "expected to get a RecordedTilesOnly error",
+                ));
+            }
         }
 
         tile_reader.0.into_inner()
@@ -658,7 +662,10 @@ async fn tile_reader_for_indexes(
     let mut all_tile_data = HashMap::new();
     for tile in tiles_to_fetch {
         let Some(tile_data) = object.fetch(&tile.path()).await? else {
-            bail!("tile not found in object backend: {}", tile.path());
+            return Err(worker::Error::from(format!(
+                "tile not found in object backend: {}",
+                tile.path()
+            )));
         };
         all_tile_data.insert(tile, tile_data);
     }
@@ -1182,11 +1189,16 @@ async fn apply_staged_uploads(
 }
 
 /// Read and verify the tiles on the right edge of the tree from the object backend.
-async fn read_edge_tiles(
+///
+/// # Errors
+///
+/// Returns an error if a required tile is missing from the object backend or
+/// fails authentication against `tree_hash`.
+pub async fn read_edge_tiles(
     object: &impl ObjectBackend,
     tree_size: u64,
     tree_hash: &Hash,
-) -> Result<HashMap<u8, TileWithBytes>, anyhow::Error> {
+) -> worker::Result<HashMap<u8, TileWithBytes>> {
     // Fetch the right-most edge tiles by reading the last leaf. TileHashReader
     // will fetch and verify the right tiles as a side-effect.
     let indexes = vec![tlog_core::stored_hash_index(0, tree_size - 1)];
@@ -1194,7 +1206,9 @@ async fn read_edge_tiles(
 
     // Verify the leaf tile against the tree hash.
     let hash_reader = TileHashReader::new(tree_size, *tree_hash, &tile_reader);
-    hash_reader.read_hashes(&indexes).map_err(|e| anyhow!(e))?;
+    hash_reader
+        .read_hashes(&indexes)
+        .map_err(|e| worker::Error::from(e.to_string()))?;
 
     let mut edge_tiles: HashMap<u8, TileWithBytes> = HashMap::new();
     for (tile, b) in tile_reader.0 {
@@ -1273,9 +1287,9 @@ pub async fn read_leaf<L: LogEntry>(
 
 /// Returns hashes from `edge_tiles` or from the overlay cache.
 #[derive(Debug)]
-struct HashReaderWithOverlay<'a> {
-    edge_tiles: &'a HashMap<u8, TileWithBytes>,
-    overlay: &'a HashMap<u64, Hash>,
+pub struct HashReaderWithOverlay<'a> {
+    pub edge_tiles: &'a HashMap<u8, TileWithBytes>,
+    pub overlay: &'a HashMap<u64, Hash>,
 }
 
 impl HashReader for HashReaderWithOverlay<'_> {
