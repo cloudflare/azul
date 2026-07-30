@@ -34,7 +34,9 @@ use generic_log_worker::{
     log_ops::{HashReaderWithOverlay, TileWithBytes, UploadOptions, read_edge_tiles},
 };
 use length_prefixed::{ReadLengthPrefixedBytesExt as _, WriteLengthPrefixedBytesExt as _};
-use tlog_core::{Hash, record_hash, stored_hash_index, stored_hashes_for_record_hash};
+use tlog_core::{
+    Hash, HashReader as _, record_hash, stored_hash_index, stored_hashes_for_record_hash,
+};
 use tlog_tiles::{PathElem, TlogTile};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -103,6 +105,58 @@ pub(crate) async fn read_persisted_leaves(
         out.push(entry);
     }
     Ok(out)
+}
+
+/// Authenticate a reloaded partial entry bundle before it is extended and
+/// re-served.
+///
+/// The bytes come back from object storage untrusted. New-leaf hashes are
+/// computed only from the freshly-uploaded entries and the authenticated
+/// edge tiles, and the recomputed root never reads the reloaded bundle
+/// bytes, so a corrupted or tampered partial bundle would otherwise be
+/// silently re-uploaded and served.
+///
+/// Confirms the bundle decodes to exactly the `[subtree_start,
+/// persisted_size)` leaves as length-prefixed entries with no trailing
+/// bytes, and that each decoded entry's `record_hash` matches the
+/// authenticated leaf hash from `edge_tiles`.
+///
+/// # Errors
+///
+/// Returns an error if the bundle is truncated, carries trailing bytes, a
+/// leaf hash is unavailable, or a decoded entry does not match its
+/// authenticated leaf hash.
+fn verify_partial_bundle(
+    bytes: &[u8],
+    subtree_start: u64,
+    persisted_size: u64,
+    edge_tiles: &HashMap<u8, TileWithBytes>,
+) -> Result<()> {
+    let overlay = HashMap::new();
+    let reader = HashReaderWithOverlay {
+        edge_tiles,
+        overlay: &overlay,
+    };
+    let mut cur: &[u8] = bytes;
+    for leaf in subtree_start..persisted_size {
+        let entry = cur
+            .read_length_prefixed(2)
+            .map_err(|e| Error::from(format!("partial entry bundle leaf {leaf} truncated: {e}")))?;
+        let want = reader
+            .read_hashes(&[stored_hash_index(0, leaf)])
+            .map_err(|e| Error::from(format!("missing persisted leaf hash {leaf}: {e:?}")))?;
+        if record_hash(&entry) != want[0] {
+            return Err(Error::from(format!(
+                "partial entry bundle leaf {leaf} does not match its authenticated hash"
+            )));
+        }
+    }
+    if !cur.is_empty() {
+        return Err(Error::from(
+            "partial entry bundle has trailing bytes past the persisted frontier",
+        ));
+    }
+    Ok(())
 }
 
 /// Serialize one entry into its tlog-tiles entry-bundle framing (a
@@ -179,14 +233,18 @@ pub(crate) async fn persist_entries(
     };
 
     // Load the current partial entry bundle so we extend rather than
-    // overwrite it. Only exists when the frontier is mid-tile.
+    // overwrite it. Only exists when the frontier is mid-tile. The reloaded
+    // bytes are untrusted (storage could return corrupted or tampered
+    // data), so authenticate them before extending and re-serving them.
     let mut data_tile = Vec::new();
     if persisted_size > 0 && !persisted_size.is_multiple_of(TILE_WIDTH) {
+        let subtree_start = (persisted_size / TILE_WIDTH) * TILE_WIDTH;
         let partial = TlogTile::from_index(stored_hash_index(0, persisted_size - 1))
             .with_data_path(PathElem::Entries);
         data_tile = object.fetch(partial.path()).await?.ok_or_else(|| {
             Error::from(format!("partial entry bundle missing: {}", partial.path()))
         })?;
+        verify_partial_bundle(&data_tile, subtree_start, persisted_size, &edge_tiles)?;
     }
 
     // Replay leaves, flushing entry bundles at 256-entry boundaries.
@@ -369,6 +427,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(root1, reference_root(800));
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_rejects_tampered_partial_bundle() {
+        let obj = MemBackend::default();
+        // First commit to a mid-tile size (300), leaving a partial bundle
+        // [256, 300) that the next commit reloads and extends.
+        let root0 = persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
+            .await
+            .unwrap();
+
+        // Corrupt a byte inside an entry of the persisted partial bundle
+        // while keeping its length framing valid, so it still decodes but no
+        // longer matches its authenticated leaf hash.
+        let key = TlogTile::from_index(stored_hash_index(0, 299))
+            .with_data_path(PathElem::Entries)
+            .path();
+        let mut bytes = obj
+            .fetch(&key)
+            .await
+            .unwrap()
+            .expect("partial bundle stored");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        obj.upload(&key, bytes, &immutable_tile_opts())
+            .await
+            .unwrap();
+
+        // The next incremental commit reloads the tampered bundle and must
+        // reject it rather than re-serve unverified bytes.
+        assert!(
+            persist_entries(&obj, 300, root0, 800, &leaves(300..800))
+                .await
+                .is_err(),
+            "tampered partial bundle must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_rejects_truncated_partial_bundle() {
+        let obj = MemBackend::default();
+        let root0 = persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
+            .await
+            .unwrap();
+
+        // Drop the trailing bytes of the partial bundle: it no longer
+        // decodes to the full [256, 300) range.
+        let key = TlogTile::from_index(stored_hash_index(0, 299))
+            .with_data_path(PathElem::Entries)
+            .path();
+        let mut bytes = obj
+            .fetch(&key)
+            .await
+            .unwrap()
+            .expect("partial bundle stored");
+        bytes.truncate(bytes.len() - 3);
+        obj.upload(&key, bytes, &immutable_tile_opts())
+            .await
+            .unwrap();
+
+        assert!(
+            persist_entries(&obj, 300, root0, 800, &leaves(300..800))
+                .await
+                .is_err(),
+            "truncated partial bundle must be rejected"
+        );
     }
 
     #[tokio::test]
