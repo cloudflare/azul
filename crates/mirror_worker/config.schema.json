@@ -30,6 +30,13 @@
             "default": 3600,
             "description": "How often (in seconds) the per-origin partial-tile cleaner wakes to clean orphaned partial tiles from object storage. Defaults to 3600 (one hour) when omitted."
         },
+        "commit_packages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1024,
+            "default": 32,
+            "description": "How many entry packages add-entries verifies before flushing them to storage and advancing the persisted-entry frontier. Bounds in-memory buffering and gives durable mid-request progress on large uploads. Defaults to 32 (the recommended per-request package budget) when omitted; capped at 1024 to bound worst-case buffering."
+        },
         "logs": {
             "type": "object",
             "description": "CAs this mirror mirrors, keyed by log_key_name: the CA cosigner's note-signature name (the CA ID) on the checkpoints it ingests. Used as a signed-note key name at runtime, so per c2sp.org/signed-note it MUST NOT contain '+', whitespace, or control characters.",

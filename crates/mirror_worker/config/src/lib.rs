@@ -62,6 +62,13 @@ pub struct AppConfig {
     /// back to a one-hour default (see [`Self::clean_interval_secs`]).
     /// Consumed by [`mirror_worker`](../mirror_worker/)'s `cleaner_do`.
     pub clean_interval_secs: Option<u64>,
+    /// How many entry packages the `add-entries` handler verifies before
+    /// flushing them to storage and advancing the persisted-entry
+    /// frontier. Bounds in-memory buffering and gives durable mid-request
+    /// progress on large uploads. `None` falls back to a default of 32
+    /// (see [`Self::commit_packages`]). Consumed by
+    /// [`mirror_worker`](../mirror_worker/)'s `add_entries`.
+    pub commit_packages: Option<u64>,
     /// CAs this mirror mirrors, keyed by `log_key_name`: the CA
     /// cosigner's note-signature name (the CA ID) carried by the
     /// checkpoints it ingests.
@@ -118,6 +125,17 @@ impl AppConfig {
         self.clean_interval_secs.unwrap_or(3600)
     }
 
+    /// How many entry packages `add-entries` commits per flush, falling
+    /// back to 32 when `commit_packages` is unset. 32 matches the
+    /// per-request package budget clients are recommended to stay within
+    /// (tlog-mirror "Implementation Considerations"), so a compliant
+    /// single-request upload still commits once, while larger uploads
+    /// flush every 32 packages instead of buffering the whole body.
+    #[must_use]
+    pub fn commit_packages(&self) -> u64 {
+        self.commit_packages.unwrap_or(32)
+    }
+
     /// Validate the configuration beyond what `serde` and the JSON schema
     /// can express.
     ///
@@ -141,9 +159,9 @@ impl AppConfig {
     ///    signed-note key name length cap, since each origin is itself
     ///    used as a checkpoint origin.
     ///
-    /// Simple single-field bounds (e.g. the log-number ranges) are
-    /// expressed in `config.schema.json` and enforced by the build
-    /// script, so they are not re-checked here.
+    /// Simple single-field bounds (e.g. `commit_packages` and the
+    /// log-number ranges) are expressed in `config.schema.json` and
+    /// enforced by the build script, so they are not re-checked here.
     ///
     /// `log_key_name` uniqueness across log entries is not checked here;
     /// it is enforced earlier, during deserialization (see
@@ -340,6 +358,7 @@ mod tests {
             submission_prefix: "https://mirror.example/".to_owned(),
             monitoring_prefix: None,
             clean_interval_secs: None,
+            commit_packages: None,
             logs: HashMap::from([(
                 "example.com/log1".to_owned(),
                 LogParams {
@@ -465,6 +484,14 @@ mod tests {
     }
 
     #[test]
+    fn commit_packages_defaults_to_32() {
+        let mut cfg = good_app_config();
+        assert_eq!(cfg.commit_packages(), 32);
+        cfg.commit_packages = Some(8);
+        assert_eq!(cfg.commit_packages(), 8);
+    }
+
+    #[test]
     fn validate_rejects_inverted_window() {
         let cfg = with_log(|log| {
             log.min_log_number = 45;
@@ -532,6 +559,7 @@ mod tests {
             submission_prefix: "https://mirror.example/".to_owned(),
             monitoring_prefix: None,
             clean_interval_secs: None,
+            commit_packages: None,
             logs: HashMap::from([(
                 "a".repeat(250),
                 LogParams {
