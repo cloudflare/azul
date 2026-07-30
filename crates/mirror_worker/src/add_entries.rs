@@ -140,6 +140,29 @@ pub(crate) async fn add_entries(
         return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
     }
 
+    // Spec (add-entries "Processing"): reject when excess_entries is too
+    // large. These are entries in [upload_start, next_entry) that are
+    // already persisted, so they are re-verified (subtree consistency) but
+    // not re-saved. Without a bound a client could set upload_start=0 and
+    // force the mirror to re-verify the entire persisted prefix on every
+    // request (a cheap DoS). A legitimate resume sets upload_start to the
+    // persisted frontier, or, when the frontier is mid-tile, to the
+    // frontier rounded down to a 256 boundary; excess_entries is then at
+    // most one package (256), which is our threshold.
+    let excess = excess_entries(
+        header.upload_start,
+        header.upload_end,
+        snapshot.next_entry.size,
+    );
+    if excess > PACKAGE_ALIGNMENT {
+        log::info!(
+            "add-entries: rejecting upload_start={us} with excess_entries {excess} > {PACKAGE_ALIGNMENT} (next_entry={ne})",
+            us = header.upload_start,
+            ne = snapshot.next_entry.size,
+        );
+        return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
+    }
+
     let first_prefix = first_package_prefix(&env, &header, snapshot.next_entry.size).await?;
 
     verify_and_persist(
@@ -311,6 +334,16 @@ async fn verify_and_persist(
     }
 
     cosign_and_serve(env, header, target, &bucket).await
+}
+
+/// The spec's `excess_entries = min(upload_end, next_entry) -
+/// upload_start`: the count of already-persisted entries a request
+/// re-verifies without re-saving (see add-entries "Processing").
+///
+/// Saturates at 0 so an `upload_start` above the frontier (rejected
+/// separately) can't underflow.
+fn excess_entries(upload_start: u64, upload_end: u64, next_entry: u64) -> u64 {
+    next_entry.min(upload_end).saturating_sub(upload_start)
 }
 
 /// Outcome of reading the next entry package from the buffered body.
@@ -787,11 +820,12 @@ impl HashReader for MapReader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MapReader, verify_package};
+    use super::{MapReader, excess_entries, verify_package};
     use crate::mirror_state_do::PendingCheckpoint;
     use std::collections::HashMap;
     use tlog_core::{Hash, Subtree, stored_hash_index, stored_hashes, tree_hash};
     use tlog_mirror::EntryPackage;
+    use tlog_mirror::PACKAGE_ALIGNMENT;
 
     /// Deterministic distinct entry bytes for leaf `i`.
     fn entry(i: u64) -> Vec<u8> {
@@ -894,5 +928,47 @@ mod tests {
         let (prefix, mut pkg, cp) = fixture(1000, 256, 300, 512);
         pkg.entries[0] = b"not the real entry".to_vec();
         assert!(verify_package(&prefix, &pkg, 256, 512, &cp).is_err());
+    }
+
+    #[test]
+    fn excess_entries_resume_at_frontier_is_zero() {
+        // The common resume: upload_start == next_entry, no overlap.
+        assert_eq!(excess_entries(2816, 3000, 2816), 0);
+    }
+
+    #[test]
+    fn excess_entries_mid_tile_resume_within_one_package() {
+        // Mid-tile frontier: client rounds upload_start down to the 256
+        // boundary, so overlap is the sub-256 tail and is accepted.
+        let next_entry = 600;
+        let upload_start = 512; // 600 rounded down to a 256 boundary
+        assert_eq!(
+            excess_entries(upload_start, 1000, next_entry),
+            next_entry - upload_start
+        );
+        assert!(excess_entries(upload_start, 1000, next_entry) <= PACKAGE_ALIGNMENT);
+    }
+
+    #[test]
+    fn excess_entries_from_zero_reverifies_whole_prefix() {
+        // The DoS case: upload_start=0 against a large frontier forces
+        // re-verification of the entire persisted prefix, well over the
+        // one-package threshold.
+        let excess = excess_entries(0, 10_000, 5_000);
+        assert_eq!(excess, 5_000);
+        assert!(excess > PACKAGE_ALIGNMENT);
+    }
+
+    #[test]
+    fn excess_entries_bounded_by_upload_end() {
+        // Only entries below upload_end count as already-persisted overlap.
+        assert_eq!(excess_entries(100, 300, 5_000), 200);
+    }
+
+    #[test]
+    fn excess_entries_saturates_above_frontier() {
+        // upload_start past the frontier (rejected separately) must not
+        // underflow.
+        assert_eq!(excess_entries(5_000, 6_000, 4_000), 0);
     }
 }
