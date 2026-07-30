@@ -1,4 +1,4 @@
-name: Bonk
+name: Big Bonk
 
 on:
   issue_comment:
@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bonk:
-    if: github.event.sender.type != 'Bot' && (contains(github.event.comment.body, '/bonk') || contains(github.event.comment.body, '@ask-bonk')) && !contains(github.event.comment.body, '/bigbonk')
+  bigbonk:
+    if: github.event.sender.type != 'Bot' && contains(github.event.comment.body, '/bigbonk')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -28,22 +28,20 @@ jobs:
         with:
           fetch-depth: 1
       - run: rustup update stable && rustup default stable
-      - name: Run Bonk
+      - name: Run Big Bonk
         uses: ask-bonk/ask-bonk/github@main
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
           CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
           # Auto-approve tool calls in CI so Bonk doesn't stall on prompts.
-          # cf-aig-skip-cache bypasses the AI Gateway response cache: without
-          # it, re-running `/bonk review` on the same PR returns the first
-          # run's cached completion, so reviews go stale after a force-push.
-          # OpenCode forwards provider.<id>.options.headers on every request.
+          # cf-aig-skip-cache bypasses the AI Gateway response cache so a
+          # re-run reflects the current PR instead of a cached completion.
           OPENCODE_CONFIG_CONTENT: '{"permission":"allow","provider":{"cloudflare-ai-gateway":{"options":{"headers":{"cf-aig-skip-cache":"true"}}}}}'
         with:
-          # Default tier: fast Workers AI model, no BYOK key required. Use
-          # /bigbonk (bigbonk.yml) for a deeper Claude review.
-          model: "cloudflare-ai-gateway/workers-ai/@cf/moonshotai/kimi-k2.6"
+          # Heavy tier: Claude via the gateway's Anthropic BYOK key (shared
+          # with cloudflare-docs). Higher quality, higher cost than /bonk.
+          model: "cloudflare-ai-gateway/anthropic/claude-opus-4-6"
           opencode_version: "1.17.7"
-          mentions: "/bonk,@ask-bonk"
+          mentions: "/bigbonk"
           permissions: CODEOWNERS
