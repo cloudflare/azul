@@ -35,7 +35,11 @@ jobs:
           CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
           # Auto-approve tool calls in CI so Bonk doesn't stall on prompts.
-          OPENCODE_CONFIG_CONTENT: '{"permission":"allow"}'
+          # cf-aig-skip-cache bypasses the AI Gateway response cache: without
+          # it, re-running `/bonk review` on the same PR returns the first
+          # run's cached completion, so reviews go stale after a force-push.
+          # OpenCode forwards provider.<id>.options.headers on every request.
+          OPENCODE_CONFIG_CONTENT: '{"permission":"allow","provider":{"cloudflare-ai-gateway":{"options":{"headers":{"cf-aig-skip-cache":"true"}}}}}'
         with:
           # Workers AI reasoning model: works with the gateway creds above.
           # anthropic/* routing needs the gateway's stored Anthropic key (BYOK),
