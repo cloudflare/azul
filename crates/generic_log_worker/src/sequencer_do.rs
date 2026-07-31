@@ -194,7 +194,7 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
     where
         F: AsyncFnOnce(SequencerMetrics) -> R,
     {
-        let registry = obs::metrics::registry();
+        let registry = obs::metrics::registry_with_log(&self.config.name);
         let metrics = SequencerMetrics::new(&registry);
         // a bit of a hack but makes the rest of the code simpler.
         // We setup metrics here so that the closure f can then use these reset metrics.
