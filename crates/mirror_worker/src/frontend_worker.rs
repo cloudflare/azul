@@ -155,6 +155,16 @@ impl From<worker::Error> for AppError {
     }
 }
 
+impl From<crate::body::BodyError> for AppError {
+    fn from(err: crate::body::BodyError) -> Self {
+        match err {
+            // Malformed/truncated gzip is a client fault.
+            crate::body::BodyError::Decode(msg) => Self::BadRequest(msg),
+            crate::body::BodyError::Transport(e) => Self::InternalServerError(e.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         match self {

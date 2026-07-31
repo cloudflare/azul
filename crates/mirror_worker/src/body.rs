@@ -31,10 +31,31 @@ use worker::*;
 
 use crate::frontend_worker::{ApiResult, AppError};
 
+/// An error surfaced by a [`BodyStream`], distinguishing a client-side
+/// decode fault from a transport failure so the `add-entries` handler can
+/// map each to the right HTTP status (see `From<BodyError> for AppError`).
+#[derive(Debug)]
+pub(crate) enum BodyError {
+    /// Malformed or truncated gzip body: a client fault, mapped to 400.
+    Decode(String),
+    /// Transport failure reading the underlying request body: mapped to
+    /// 500.
+    Transport(Error),
+}
+
+impl std::fmt::Display for BodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BodyError::Decode(e) => write!(f, "{e}"),
+            BodyError::Transport(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// A boxed, `Unpin` body stream, the common type the `add-entries`
 /// handler feeds to [`crate::stream_buffer::StreamBuffer`] regardless of
 /// whether the request body was identity- or gzip-encoded.
-pub(crate) type BodyStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>>>>>;
+pub(crate) type BodyStream = Pin<Box<dyn Stream<Item = std::result::Result<Vec<u8>, BodyError>>>>;
 
 /// Open the request body as a decoded chunk stream, honoring
 /// `Content-Encoding`.
@@ -62,7 +83,7 @@ pub(crate) fn decoded_stream(
     // `Result<Vec<u8>>` chunk contract the buffer/gunzip pipeline expects.
     let raw = body.into_data_stream().map(|r| {
         r.map(|b| b.to_vec())
-            .map_err(|e| Error::from(e.to_string()))
+            .map_err(|e| BodyError::Transport(Error::from(e.to_string())))
     });
     let stream: BodyStream = match encoding.as_str() {
         "" | "identity" => Box::pin(raw),
@@ -125,7 +146,7 @@ impl GzipInflater {
 /// terminal `Err` item, after which the stream ends.
 pub(crate) fn gunzip<S>(inner: S) -> BodyStream
 where
-    S: Stream<Item = Result<Vec<u8>>> + Unpin + 'static,
+    S: Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin + 'static,
 {
     struct DecodeState<S> {
         inner: S,
@@ -151,7 +172,7 @@ where
                             Ok(out) => out,
                             Err(e) => {
                                 st.done = true;
-                                return Some((Err(e), st));
+                                return Some((Err(BodyError::Decode(e.to_string())), st));
                             }
                         };
                         // A chunk may not yet yield any plaintext (partial
@@ -172,7 +193,7 @@ where
                         return match inflater.finish() {
                             Ok(tail) if !tail.is_empty() => Some((Ok(tail), st)),
                             Ok(_) => None,
-                            Err(e) => Some((Err(e), st)),
+                            Err(e) => Some((Err(BodyError::Decode(e.to_string())), st)),
                         };
                     }
                 }
@@ -199,13 +220,15 @@ mod tests {
     fn chunked_stream(
         bytes: &[u8],
         size: usize,
-    ) -> impl Stream<Item = Result<Vec<u8>>> + Unpin + 'static {
-        let chunks: Vec<Result<Vec<u8>>> =
+    ) -> impl Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin + 'static {
+        let chunks: Vec<std::result::Result<Vec<u8>, BodyError>> =
             bytes.chunks(size.max(1)).map(|c| Ok(c.to_vec())).collect();
         stream::iter(chunks)
     }
 
-    async fn collect(mut s: impl Stream<Item = Result<Vec<u8>>> + Unpin) -> Result<Vec<u8>> {
+    async fn collect(
+        mut s: impl Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+    ) -> std::result::Result<Vec<u8>, BodyError> {
         let mut out = Vec::new();
         while let Some(item) = s.next().await {
             out.extend_from_slice(&item?);
@@ -249,7 +272,10 @@ mod tests {
         // ends mid-member; finish() must report the truncation.
         compressed.truncate(compressed.len() - 6);
         let err = collect(gunzip(chunked_stream(&compressed, 4))).await;
-        assert!(err.is_err(), "truncated gzip must surface an error");
+        assert!(
+            matches!(err, Err(BodyError::Decode(_))),
+            "truncated gzip must surface a client decode error"
+        );
     }
 
     #[tokio::test]
@@ -259,14 +285,18 @@ mod tests {
         let mid = compressed.len() / 2;
         compressed[mid] ^= 0xff;
         let err = collect(gunzip(chunked_stream(&compressed, 5))).await;
-        assert!(err.is_err(), "corrupt gzip must surface an error");
+        assert!(
+            matches!(err, Err(BodyError::Decode(_))),
+            "corrupt gzip must surface a client decode error"
+        );
     }
 
     #[tokio::test]
     async fn upstream_error_propagates() {
         let compressed = gzip(b"partial");
-        let mut chunks: Vec<Result<Vec<u8>>> = vec![Ok(compressed[..4].to_vec())];
-        chunks.push(Err(Error::from("boom")));
+        let mut chunks: Vec<std::result::Result<Vec<u8>, BodyError>> =
+            vec![Ok(compressed[..4].to_vec())];
+        chunks.push(Err(BodyError::Transport(Error::from("boom"))));
         let err = collect(gunzip(stream::iter(chunks))).await;
         assert!(err.is_err(), "upstream stream error must propagate");
     }

@@ -48,7 +48,8 @@ use worker::*;
 use generic_log_worker::{ObjectBackend, util::now_millis};
 
 use crate::{
-    body, commit,
+    body::{self, BodyError},
+    commit,
     frontend_worker::{ApiResult, AppError},
     load_mirror_signer, load_ticket_sealer, log_verifiers,
     mirror_state_do::{
@@ -237,7 +238,7 @@ async fn stream_and_commit<S>(
     first_prefix: &[Vec<u8>],
 ) -> ApiResult<axum::response::Response>
 where
-    S: futures_util::Stream<Item = Result<Vec<u8>>> + Unpin,
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
 {
     let bucket = load_origin_bucket(env, &header.log_origin)?;
 
@@ -379,7 +380,7 @@ async fn persist_packages<S, O>(
     start: &NextEntry,
 ) -> ApiResult<StreamResult>
 where
-    S: futures_util::Stream<Item = Result<Vec<u8>>> + Unpin,
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
     O: ObjectBackend,
 {
     // config.schema.json caps commit_packages (max 1024), enforced by the
@@ -796,7 +797,7 @@ enum ParseOutcome {
 /// retry-on-`UnexpectedEof` loop terminates.
 async fn parse_header<S>(buf: &mut StreamBuffer<S>) -> ApiResult<AddEntriesRequestHeader>
 where
-    S: futures_util::Stream<Item = Result<Vec<u8>>> + Unpin,
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
 {
     loop {
         let mut cursor = Cursor::new(buf.buffered());
@@ -833,9 +834,12 @@ where
 /// Read the next entry package from `buf`, pulling more chunks from
 /// the underlying stream until the package parses or the stream ends.
 /// See [`ParseOutcome`] for the four cases.
-async fn parse_next_package<S>(buf: &mut StreamBuffer<S>, num_entries: u64) -> Result<ParseOutcome>
+async fn parse_next_package<S>(
+    buf: &mut StreamBuffer<S>,
+    num_entries: u64,
+) -> ApiResult<ParseOutcome>
 where
-    S: futures_util::Stream<Item = Result<Vec<u8>>> + Unpin,
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
 {
     // EOF with an empty buffer: clean truncation between packages.
     if buf.is_eof() && buf.len() == 0 {
