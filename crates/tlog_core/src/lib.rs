@@ -1589,16 +1589,26 @@ mod tests {
             let min_level = u8::try_from(n.next_power_of_two().trailing_zeros()).unwrap();
             for level in [min_level, 10, 30] {
                 let layer = cache_layer(&subtree, level, &storage).unwrap();
-                assert_eq!(layer.len(), 1, "n={n} level={level}: layer not a single node");
+                assert_eq!(
+                    layer.len(),
+                    1,
+                    "n={n} level={level}: layer not a single node"
+                );
                 assert_eq!(layer[0], root, "n={n} level={level}: cached node != root");
                 for leaf in 0..n {
                     let want = subtree_inclusion_proof(&subtree, leaf, &storage).unwrap();
                     let prefix = inclusion_proof_prefix(&subtree, level, leaf, &storage).unwrap();
                     // The prefix is the whole proof; the cache contributes nothing.
-                    assert_eq!(prefix, want, "n={n} level={level} leaf={leaf}: prefix != full");
-                    let got =
-                        reconstruct_inclusion_proof(&layer, &subtree, level, leaf, &prefix).unwrap();
-                    assert_eq!(got, prefix, "n={n} level={level} leaf={leaf}: suffix not empty");
+                    assert_eq!(
+                        prefix, want,
+                        "n={n} level={level} leaf={leaf}: prefix != full"
+                    );
+                    let got = reconstruct_inclusion_proof(&layer, &subtree, level, leaf, &prefix)
+                        .unwrap();
+                    assert_eq!(
+                        got, prefix,
+                        "n={n} level={level} leaf={leaf}: suffix not empty"
+                    );
                     verify_subtree_inclusion_proof(&got, &subtree, root, leaf, leaves[us(leaf)])
                         .unwrap();
                 }
