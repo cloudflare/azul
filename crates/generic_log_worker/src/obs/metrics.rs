@@ -275,6 +275,25 @@ pub fn registry() -> Registry {
     .expect("only panic when prefix is an empty string")
 }
 
+/// Like [`registry`], but adds a constant `log` label to every metric
+/// registered on the returned [`Registry`]. Use this for Durable Object
+/// metrics where the log name is known and fixed for the lifetime of the DO.
+#[must_use]
+#[allow(clippy::missing_panics_doc)] // can never panic
+pub fn registry_with_log(log: &str) -> Registry {
+    Registry::new_custom(
+        None,
+        Some(
+            [
+                ("env".to_owned(), env!("DEPLOY_ENV").to_owned()),
+                ("log".to_owned(), log.to_owned()),
+            ]
+            .into(),
+        ),
+    )
+    .expect("only panic when prefix is an empty string")
+}
+
 impl super::WshimData for &Registry {
     fn endpoint() -> &'static str {
         "prometheus"
