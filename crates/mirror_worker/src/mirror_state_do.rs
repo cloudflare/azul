@@ -75,8 +75,9 @@ pub struct CommittedCheckpoint {
     /// Root hash. All-zero if `size` is 0.
     #[serde(with = "hash_hex")]
     pub hash: Hash,
-    /// Full signed-note bytes as the log signed them, empty if `size` is
-    /// 0. Served with the mirror's cosignature lines appended.
+    /// The served checkpoint bytes: the log's signed note with the
+    /// mirror's cosignature line(s) appended, exactly as written to R2.
+    /// Empty if `size` is 0.
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
 }
