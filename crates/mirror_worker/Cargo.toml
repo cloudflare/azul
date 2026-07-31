@@ -57,6 +57,7 @@ tlog_cosignature.workspace = true
 tlog_mirror.workspace = true
 tlog_tiles.workspace = true
 tlog_witness.workspace = true
+tokio.workspace = true
 tower-service.workspace = true
 worker = { workspace = true, features = ["http", "axum"] }
 

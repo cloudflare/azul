@@ -28,10 +28,11 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64 as Base64As, serde_as};
 use tlog_core::{Hash, verify_consistency_proof};
+use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-use crate::MIRROR_STATE_BINDING;
+use crate::{MIRROR_STATE_BINDING, commit, storage::load_origin_bucket};
 
 const PENDING_KEY: &str = "pending";
 const COMMITTED_KEY: &str = "committed";
@@ -169,6 +170,16 @@ pub struct UpdatePendingRequest {
 #[durable_object(fetch)]
 struct MirrorState {
     state: State,
+    /// Held to resolve the origin's R2 bucket when the DO writes the
+    /// served checkpoint on `/commit`.
+    env: Env,
+    /// Serializes `/commit` so the durable-storage advance and the R2
+    /// served-checkpoint write happen atomically with respect to
+    /// concurrent commits, even across the external R2 write's await.
+    /// Without it a slower commit could overwrite the served checkpoint
+    /// with an older one after a concurrent commit already advanced it.
+    /// Mirrors the sequencer's `init_mux` (see `generic_log_worker`).
+    commit_mux: Mutex<()>,
 }
 
 // SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
@@ -179,7 +190,11 @@ impl std::panic::RefUnwindSafe for MirrorState {}
 impl DurableObject for MirrorState {
     fn new(state: State, env: Env) -> Self {
         crate::init_sentry(&env);
-        Self { state }
+        Self {
+            state,
+            env,
+            commit_mux: Mutex::new(()),
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -200,42 +215,8 @@ impl MirrorState {
                 Response::from_json(&snapshot)
             }
             (Method::Post, "/commit") => {
-                // Compare-and-swap advance of the mirror checkpoint:
-                //   * size > next_entry.size: commit beyond the
-                //     persisted-entry frontier, i.e. cosigning entries
-                //     that have not been durably written yet; 400. This
-                //     preserves `committed.size <= next_entry.size`. Since
-                //     `next_entry.size <= pending.size`, it also rejects
-                //     commits beyond the accepted pending checkpoint.
-                //   * size < committed.size: a concurrent add-entries
-                //     already advanced past us. Spec forbids rolling
-                //     back, so no-op and return the current state.
-                //   * otherwise: advance committed.
                 let body: CommitRequest = req.json().await?;
-                let snapshot = self.read_snapshot().await?;
-                if body.size > snapshot.next_entry.size {
-                    return Response::error(
-                        format!(
-                            "commit beyond persisted-entry frontier: requested size {} > next_entry size {}",
-                            body.size, snapshot.next_entry.size
-                        ),
-                        400,
-                    );
-                }
-                if body.size < snapshot.committed.size {
-                    // Already ahead; no-op success.
-                    return Response::from_json(&snapshot.committed);
-                }
-                let new_committed = CommittedCheckpoint {
-                    size: body.size,
-                    hash: body.hash,
-                    signed_note_bytes: body.signed_note_bytes,
-                };
-                self.state
-                    .storage()
-                    .put(COMMITTED_KEY, &new_committed)
-                    .await?;
-                Response::from_json(&new_committed)
+                self.commit(body).await
             }
             (Method::Post, "/advance-next-entry") => {
                 let body: AdvanceNextEntryRequest = req.json().await?;
@@ -308,6 +289,73 @@ impl MirrorState {
 }
 
 impl MirrorState {
+    /// Handle `/commit`: monotonically advance the mirror checkpoint and
+    /// write the served checkpoint object to R2.
+    ///
+    /// `commit_mux` serializes the whole read-check-advance-write
+    /// sequence, including the external R2 write, so concurrent commits
+    /// cannot interleave and rewind the served checkpoint. Compare-and-swap
+    /// semantics:
+    ///   * `size > next_entry.size`: commit beyond the persisted-entry
+    ///     frontier (cosigning entries not yet durably written); 400. This
+    ///     preserves `committed.size <= next_entry.size`, and since
+    ///     `next_entry.size <= pending.size` it also rejects commits beyond
+    ///     the accepted pending checkpoint.
+    ///   * `size < committed.size`: a concurrent add-entries already
+    ///     advanced past us. The spec forbids rolling back, so no-op and
+    ///     return the current committed checkpoint (whose served object the
+    ///     concurrent commit already wrote).
+    ///   * otherwise: advance committed in durable storage, then write the
+    ///     served checkpoint to R2.
+    ///
+    /// Durable storage is advanced before the R2 write so the served
+    /// checkpoint is never ahead of committed; a failed R2 write leaves R2
+    /// lagging and is rewritten by the next commit.
+    async fn commit(&self, body: CommitRequest) -> Result<Response> {
+        let _guard = self.commit_mux.lock().await;
+
+        let snapshot = self.read_snapshot().await?;
+        if body.size > snapshot.next_entry.size {
+            return Response::error(
+                format!(
+                    "commit beyond persisted-entry frontier: requested size {} > next_entry size {}",
+                    body.size, snapshot.next_entry.size
+                ),
+                400,
+            );
+        }
+        if body.size < snapshot.committed.size {
+            // Already ahead; no-op success. The concurrent commit that
+            // advanced past us already wrote the newer served checkpoint.
+            return Response::from_json(&snapshot.committed);
+        }
+
+        let new_committed = CommittedCheckpoint {
+            size: body.size,
+            hash: body.hash,
+            signed_note_bytes: body.signed_note_bytes,
+        };
+        self.state
+            .storage()
+            .put(COMMITTED_KEY, &new_committed)
+            .await?;
+
+        // Write the served checkpoint (the log's signed note plus the
+        // mirror's cosignature) to R2 at
+        // <monitoring>/<origin hash>/checkpoint. The DO owns this write so
+        // it stays serialized with the durable advance above; the origin is
+        // the DO's own name.
+        let origin = self
+            .state
+            .id()
+            .name()
+            .ok_or_else(|| Error::from("mirror state DO missing origin name"))?;
+        let bucket = load_origin_bucket(&self.env, &origin)?;
+        commit::write_checkpoint(&bucket, new_committed.signed_note_bytes.clone()).await?;
+
+        Response::from_json(&new_committed)
+    }
+
     /// Handle `/advance-next-entry`: monotonically advance the
     /// persisted-entry frontier. Compare-and-swap, like `/commit`:
     ///

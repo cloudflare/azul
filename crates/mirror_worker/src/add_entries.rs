@@ -43,7 +43,7 @@ use tlog_mirror::{
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-use generic_log_worker::{ObjectBackend, util::now_millis};
+use generic_log_worker::util::now_millis;
 
 use crate::{
     body, commit,
@@ -333,7 +333,7 @@ async fn verify_and_persist(
         ));
     }
 
-    cosign_and_serve(env, header, target, &bucket).await
+    cosign_and_serve(env, header, target).await
 }
 
 /// The spec's `excess_entries = min(upload_end, next_entry) -
@@ -371,22 +371,26 @@ fn read_package(cursor: &mut Cursor<&[u8]>, num_entries: u64) -> PackageOutcome 
     }
 }
 
-/// Cosign the target checkpoint with the mirror key, persist the served
-/// checkpoint object, advance the durable mirror checkpoint via the DO,
-/// and return the 200 response carrying the mirror cosignature line(s).
+/// Cosign the target checkpoint with the mirror key, advance the durable
+/// mirror checkpoint via the DO, and return the 200 response carrying the
+/// mirror cosignature line(s).
 ///
 /// Called only once the whole upload is durably committed (spec: the
 /// mirror MUST NOT sign until all entries are committed).
 ///
+/// The DO's `/commit` both advances the durable checkpoint and writes the
+/// served checkpoint object to R2, serialized under its commit lock, so
+/// concurrent commits cannot rewind the served checkpoint. The frontend
+/// therefore does not write R2 itself.
+///
 /// # Errors
 ///
 /// Returns an error if the target note/checkpoint fails to parse, signing
-/// fails, or a storage/DO write fails.
-async fn cosign_and_serve<O: ObjectBackend>(
+/// fails, or the DO commit fails.
+async fn cosign_and_serve(
     env: &Env,
     header: &AddEntriesRequestHeader,
     target: &PendingCheckpoint,
-    bucket: &O,
 ) -> ApiResult<axum::response::Response> {
     // The checkpoint text comes from the log-signed pending note; the
     // response is the bare cosignature line(s), identical to a witness's
@@ -402,13 +406,11 @@ async fn cosign_and_serve<O: ObjectBackend>(
     let cosig_body =
         tlog_witness::serialize_add_checkpoint_response(std::slice::from_ref(&note_sig));
 
-    // Persist the served checkpoint (log note + mirror cosignature) before
-    // advancing the durable mirror checkpoint, so a monitor can never
-    // observe an advanced size without the matching checkpoint object.
+    // The served checkpoint is the log's signed note with the mirror's
+    // cosignature appended. The DO writes it to R2 while advancing the
+    // durable checkpoint under its commit lock.
     let mut checkpoint_obj = target.signed_note_bytes.clone();
     checkpoint_obj.extend_from_slice(&cosig_body);
-    commit::write_checkpoint(bucket, checkpoint_obj.clone()).await?;
-
     dispatch_commit(
         env,
         &header.log_origin,
