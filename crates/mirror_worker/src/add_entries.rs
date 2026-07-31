@@ -449,17 +449,21 @@ where
         }
         packages_received += 1;
 
-        // Buffer only the not-yet-persisted tail of this package.
+        // Buffer only the not-yet-persisted tail of this package. Packages
+        // wholly below the request-start frontier are already persisted, so
+        // they contribute no entries and don't count toward a chunk flush;
+        // `chunk_pkgs` therefore tracks only packages that added buffered
+        // entries.
         if pkg_end > initial_next {
             let skip = usize::try_from(initial_next.saturating_sub(pkg_start))
                 .map_err(|_| Error::from("skip count overflows usize"))?;
             chunk.extend(pkg.entries.into_iter().skip(skip));
             chunk_end = pkg_end;
-        }
-        chunk_pkgs += 1;
+            chunk_pkgs += 1;
 
-        if chunk_pkgs == commit_packages {
-            if !chunk.is_empty() {
+            // `commit_packages >= 1` (config), so a full chunk always holds
+            // at least one package's entries: no empty-flush guard needed.
+            if chunk_pkgs == commit_packages {
                 (frontier_size, frontier_hash) = flush_chunk(
                     bucket,
                     env,
@@ -470,8 +474,8 @@ where
                     &mut chunk,
                 )
                 .await?;
+                chunk_pkgs = 0;
             }
-            chunk_pkgs = 0;
         }
     }
 
@@ -789,8 +793,9 @@ enum ParseOutcome {
 
 /// Read the `add-entries` request header from `buf`, pulling more
 /// chunks from the underlying stream until the header parses or the
-/// stream errors. Returns `Ok(Ok(header))` on success or `Ok(Err(resp))`
-/// where `resp` is a fully-formed 400 response on malformed input.
+/// stream errors. Returns the parsed header, or
+/// [`AppError::BadRequest`] (400) if the input is malformed or truncated
+/// before the header is complete.
 ///
 /// The header has a bounded maximum size (u16 origin + u64s + u16
 /// ticket + hash + u8 proof-size + 63 hashes <= ~131 KB), so the
@@ -855,6 +860,11 @@ where
             }
             Err(ParseError::Io(ref e)) if e.kind() == ErrorKind::UnexpectedEof => {
                 if !buf.pull_one().await? {
+                    // Stream ended mid-parse. An empty buffer means the
+                    // previous package consumed exactly all buffered bytes
+                    // and this call started a fresh (never-arriving)
+                    // package: a clean between-package truncation. A
+                    // non-empty buffer holds a partial package.
                     if buf.len() == 0 {
                         return Ok(ParseOutcome::CleanEof);
                     }

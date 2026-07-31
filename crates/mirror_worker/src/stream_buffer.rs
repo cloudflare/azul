@@ -35,9 +35,9 @@ pub(crate) struct StreamBuffer<S> {
     /// are reclaimed on the next [`Self::pull_one`]. The live buffer is
     /// `buf[start..]`.
     start: usize,
-    /// Set when the underlying stream has signalled end-of-stream.
-    /// Subsequent [`Self::pull_one`] calls return `Ok(false)`
-    /// without polling the (already-finished) stream.
+    /// Set when the underlying stream has signalled end-of-stream or
+    /// yielded an error. Subsequent [`Self::pull_one`] calls return
+    /// `Ok(false)` without polling the (already-finished) stream.
     eof: bool,
 }
 
@@ -60,11 +60,13 @@ where
     /// Pull one chunk from the underlying stream and append to the
     /// internal buffer. Returns `Ok(true)` if a chunk was appended,
     /// `Ok(false)` if the stream ended (clean EOF). Once the stream has
-    /// ended, all subsequent calls return `Ok(false)` without polling
-    /// the stream again.
+    /// ended or errored, all subsequent calls return `Ok(false)` without
+    /// polling the stream again.
     ///
     /// # Errors
-    /// Propagates any error from the underlying stream.
+    /// Propagates any error from the underlying stream. An error is
+    /// terminal: [`Self::is_eof`] is set so a caller that recovers from
+    /// the error does not re-poll the already-failed stream.
     pub async fn pull_one(&mut self) -> std::result::Result<bool, E> {
         if self.eof {
             return Ok(false);
@@ -80,7 +82,10 @@ where
                 self.buf.extend_from_slice(&chunk);
                 Ok(true)
             }
-            Some(Err(e)) => Err(e),
+            Some(Err(e)) => {
+                self.eof = true;
+                Err(e)
+            }
             None => {
                 self.eof = true;
                 Ok(false)
@@ -191,5 +196,9 @@ mod tests {
         assert!(buf.pull_one().await.unwrap());
         let err = buf.pull_one().await.unwrap_err();
         assert_eq!(err.to_string(), "boom");
+        // An error is terminal: eof is set and further pulls are no-ops
+        // rather than re-polling the already-failed stream.
+        assert!(buf.is_eof());
+        assert!(!buf.pull_one().await.unwrap());
     }
 }
