@@ -11,6 +11,11 @@
 //!   with one spec-mandated exception: the mirror MUST NOT cosign in
 //!   this process. Successful responses have an empty body and HTTP
 //!   status 200.
+//! - `POST /sign-subtree`: [c2sp.org/tlog-witness#sign-subtree][signsub].
+//!   Countersigns a subtree of a checkpoint this mirror has previously
+//!   cosigned. OPTIONAL in the spec but always available here, since the
+//!   mirror's cosigner is ML-DSA-44 / `subtree/v1`. Success returns the
+//!   `subtree/v1` cosignature line(s) as `text/plain`.
 //! - `GET /metadata`: mirror identity, ML-DSA-44 SPKI,
 //!   `mirror_algorithm`, prefixes, and the per-log configuration.
 //! - `GET /`: root status string.
@@ -19,6 +24,7 @@
 //! Durable Object; see [`crate::mirror_state_do`] for details.
 //!
 //! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
+//! [signsub]: https://c2sp.org/tlog-witness#sign-subtree
 //! [`MirrorState`]: crate::mirror_state_do
 
 use crate::{
