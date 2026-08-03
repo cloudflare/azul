@@ -50,8 +50,8 @@ use crate::{
     frontend_worker::{ApiResult, AppError},
     load_mirror_signer, load_ticket_sealer, log_verifiers,
     mirror_state_do::{
-        AdvanceNextEntryRequest, CommitRequest, MirrorStateSnapshot, NextEntry, PendingCheckpoint,
-        state_stub,
+        AdvanceNextEntryRequest, CommitRequest, CommittedCheckpoint, MirrorStateSnapshot,
+        NextEntry, PendingCheckpoint, state_stub,
     },
     storage::load_origin_bucket,
 };
@@ -337,7 +337,7 @@ async fn verify_and_persist(
         ));
     }
 
-    cosign_and_serve(env, header, target).await
+    cosign_and_serve(env, header, target, snapshot).await
 }
 
 /// The spec's `excess_entries = min(upload_end, next_entry) -
@@ -387,6 +387,13 @@ fn read_package(cursor: &mut Cursor<&[u8]>, num_entries: u64) -> PackageOutcome 
 /// concurrent commits cannot rewind the served checkpoint. The frontend
 /// therefore does not write R2 itself.
 ///
+/// If the DO reports a committed size ahead of `upload_end`, a concurrent
+/// `add-entries` already advanced the mirror checkpoint past this upload.
+/// Per the spec's final step ("If `upload_end` was too small, the mirror
+/// MUST respond with a 409 Conflict") this returns a 409 with mirror-info
+/// so the client resyncs, rather than a 200 that would falsely claim the
+/// client's smaller checkpoint is being served.
+///
 /// # Errors
 ///
 /// Returns an error if the target note/checkpoint fails to parse, signing
@@ -395,6 +402,7 @@ async fn cosign_and_serve(
     env: &Env,
     header: &AddEntriesRequestHeader,
     target: &PendingCheckpoint,
+    snapshot: &MirrorStateSnapshot,
 ) -> ApiResult<axum::response::Response> {
     // The checkpoint text comes from the log-signed pending note; the
     // response is the bare cosignature line(s), identical to a witness's
@@ -415,7 +423,7 @@ async fn cosign_and_serve(
     // durable checkpoint under its commit lock.
     let mut checkpoint_obj = target.signed_note_bytes.clone();
     checkpoint_obj.extend_from_slice(&cosig_body);
-    dispatch_commit(
+    let committed = dispatch_commit(
         env,
         &header.log_origin,
         &CommitRequest {
@@ -425,6 +433,18 @@ async fn cosign_and_serve(
         },
     )
     .await?;
+
+    if committed.size != header.upload_end {
+        // The DO refused to rewind: a concurrent commit already advanced
+        // the mirror checkpoint past upload_end, so ours was skipped.
+        log::info!(
+            "add-entries: commit skipped, mirror checkpoint {} already past upload_end {}; \
+             returning 409",
+            committed.size,
+            header.upload_end,
+        );
+        return Ok(mirror_info_409(env, snapshot, &header.log_origin));
+    }
 
     Ok((
         StatusCode::OK,
@@ -473,10 +493,18 @@ async fn first_package_prefix(
 }
 
 /// POST the [`CommitRequest`] to the per-origin DO, advancing the mirror
-/// checkpoint. A non-200 status (or a `/commit` beyond pending) is a
-/// frontend/mirror bug, so it is surfaced as a transport error that the
-/// handler maps to 500.
-async fn dispatch_commit(env: &Env, origin: &str, commit_req: &CommitRequest) -> Result<()> {
+/// checkpoint, and return the DO's resulting [`CommittedCheckpoint`].
+///
+/// The returned checkpoint may be ahead of `commit_req` when a concurrent
+/// `add-entries` already advanced past it (the DO refuses to rewind); the
+/// caller compares sizes to detect that skip. A non-200 status (a
+/// `/commit` beyond the persisted frontier) is a frontend/mirror bug,
+/// surfaced as a transport error that the handler maps to 500.
+async fn dispatch_commit(
+    env: &Env,
+    origin: &str,
+    commit_req: &CommitRequest,
+) -> Result<CommittedCheckpoint> {
     let stub = state_stub(env, origin)?;
     let mut resp = stub
         .fetch_with_request(Request::new_with_init(
@@ -494,7 +522,7 @@ async fn dispatch_commit(env: &Env, origin: &str, commit_req: &CommitRequest) ->
         )?)
         .await?;
     match resp.status_code() {
-        200 => Ok(()),
+        200 => Ok(resp.json().await?),
         status => {
             let msg = resp.text().await.unwrap_or_default();
             log::error!("add-entries: DO /commit returned {status}: {msg}");
