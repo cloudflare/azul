@@ -313,14 +313,12 @@ async fn verify_and_persist(
         ));
     }
 
-    // Complete upload: no trailing bytes may remain after the last package.
-    let pos = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
-    if pos < cursor.get_ref().len() {
-        log::warn!("add-entries: trailing data after the last entry package");
-        return Err(AppError::BadRequest(
-            "trailing data after the last entry package".to_owned(),
-        ));
-    }
+    // Every canonical package was received. Any bytes past the last one
+    // are discarded, not rejected: the spec says "the mirror discards any
+    // partial bytes after the last successfully authenticated entry
+    // package", and the only defined 400 is when no package authenticated
+    // at all (handled above). Rejecting here would also be dishonest, since
+    // the entries were already persisted and the frontier advanced.
 
     // When we persisted new entries, the recomputed tree MUST match the
     // pending checkpoint the packages were proven against. A mismatch means
