@@ -418,6 +418,22 @@ async fn cosign_and_serve(
     let cosig_body =
         tlog_witness::serialize_add_checkpoint_response(std::slice::from_ref(&note_sig));
 
+    // When the upload only reaches the mirror checkpoint's current size,
+    // the checkpoint at that size is already committed and served. There
+    // is nothing to advance, and re-committing would redundantly rewrite
+    // R2 and append a duplicate cosignature line to the served note, so
+    // return a fresh cosignature without dispatching `/commit`. (Committed
+    // is monotonic, so a stale-low snapshot only skips this optimization,
+    // never the other way.)
+    if header.upload_end <= snapshot.committed.size {
+        return Ok((
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+            cosig_body,
+        )
+            .into_response());
+    }
+
     // The served checkpoint is the log's signed note with the mirror's
     // cosignature appended. The DO writes it to R2 while advancing the
     // durable checkpoint under its commit lock.
@@ -590,15 +606,18 @@ async fn fetch_snapshot(env: &Env, origin: &str) -> Result<MirrorStateSnapshot> 
 }
 
 /// Resolve the target pending checkpoint that this `add-entries`
-/// request is uploading toward. Either:
+/// request is uploading toward. Any of:
 ///
 ///  * `upload_end == snapshot.pending.size`: use the current pending.
+///  * `upload_end == snapshot.committed.size`: use the mirror
+///    checkpoint, which the spec requires the mirror to accept as a
+///    valid `upload_end` independent of any ticket.
 ///  * The ticket round-trips and yields a past pending whose
 ///    embedded checkpoint has size `upload_end` and verifies against
 ///    the trusted log keys: use that.
 ///
 /// Returns `Err(reason)` (a static `&str` describing why) when
-/// neither path produces a target. The frontend turns the error into
+/// none of these produce a target. The frontend turns the error into
 /// a 409 with `text/x.tlog.mirror-info`.
 fn resolve_target_pending(
     env: &Env,
@@ -615,6 +634,19 @@ fn resolve_target_pending(
             return Err("upload_end below committed checkpoint");
         }
         return Ok(snapshot.pending.clone());
+    }
+
+    // Spec: the mirror MUST also accept `upload_end` equal to the mirror
+    // checkpoint's tree size, whatever the ticket says. Everything up to
+    // it is already committed and served, so the committed checkpoint is
+    // the target and nothing new is persisted; `cosign_and_serve` returns
+    // a fresh cosignature without re-advancing.
+    if snapshot.committed.size > 0 && header.upload_end == snapshot.committed.size {
+        return Ok(PendingCheckpoint {
+            size: snapshot.committed.size,
+            hash: snapshot.committed.hash,
+            signed_note_bytes: snapshot.committed.signed_note_bytes.clone(),
+        });
     }
 
     // Try the ticket. An empty ticket can't carry a past pending, so
