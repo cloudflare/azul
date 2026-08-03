@@ -35,7 +35,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -64,6 +64,22 @@ fn start() {
     };
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(level);
+}
+
+/// Middleware that adds `Accept-Encoding: gzip` to every response.
+///
+/// [c2sp.org/tlog-mirror][spec] says mirrors SHOULD advertise supported
+/// compression algorithms in responses so clients can compress future
+/// `add-entries` request bodies.
+///
+/// [spec]: https://c2sp.org/tlog-mirror#add-entries
+async fn add_accept_encoding(
+    mut response: axum::http::Response<axum::body::Body>,
+) -> axum::http::Response<axum::body::Body> {
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    response
 }
 
 /// Top-level `#[event(fetch)]` handler. Delegates to the axum router;
@@ -96,6 +112,7 @@ async fn fetch(
             )
             .route("/metadata", get(metadata))
             .route("/", get(root))
+            .layer(axum::middleware::map_response(add_accept_encoding))
             .with_state(env)
             .call(req)
             .await
@@ -564,4 +581,20 @@ fn tlog_size_conflict(current: &PendingCheckpoint) -> axum::response::Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_accept_encoding;
+    use axum::http::header::ACCEPT_ENCODING;
+
+    #[tokio::test]
+    async fn accept_encoding_middleware_adds_gzip() {
+        let response = axum::http::Response::new(axum::body::Body::empty());
+        let response = add_accept_encoding(response).await;
+        assert_eq!(
+            response.headers().get(ACCEPT_ENCODING).unwrap().as_bytes(),
+            b"gzip"
+        );
+    }
 }

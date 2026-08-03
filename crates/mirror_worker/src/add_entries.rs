@@ -68,6 +68,16 @@ pub(crate) async fn add_entries(
     State(env): State<Env>,
     req: axum::extract::Request,
 ) -> ApiResult<axum::response::Response> {
+    // Spec: the add-entries request body MUST have Content-Type
+    // application/octet-stream. Reject anything else up front (before
+    // spending time reading or decoding the body).
+    let (parts, body) = req.into_parts();
+    if !content_type_is_octet_stream(&parts.headers) {
+        return Err(AppError::UnsupportedMediaType(
+            "add-entries requires Content-Type: application/octet-stream".to_owned(),
+        ));
+    }
+
     // No DefaultBodyLimit: Cloudflare enforces a request-body cap at the
     // edge (100 MB, higher on paid plans) and 413s oversized bodies there.
     // Clients on body-limited platforms truncate at a package boundary and
@@ -78,7 +88,6 @@ pub(crate) async fn add_entries(
     //
     // The whole (decoded) body is buffered before processing; a follow-up
     // commit streams it instead of buffering it all.
-    let (parts, body) = req.into_parts();
     let raw = body::read_decoded_body(&parts.headers, body).await?;
     let mut cursor = Cursor::new(raw.as_slice());
 
@@ -180,6 +189,20 @@ pub(crate) async fn add_entries(
         &first_prefix,
     )
     .await
+}
+
+/// Return true iff the request's `Content-Type` is
+/// `application/octet-stream`, ignoring any parameters (e.g. charset).
+fn content_type_is_octet_stream(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        == "application/octet-stream"
 }
 
 /// Read, verify, and persist the entry packages for `[upload_start,
@@ -453,13 +476,25 @@ async fn cosign_and_serve(
     if committed.size != header.upload_end {
         // The DO refused to rewind: a concurrent commit already advanced
         // the mirror checkpoint past upload_end, so ours was skipped.
+        // Fetch the latest state so the 409 mirror-info body advertises
+        // the current pending size and next entry, not the stale snapshot
+        // from the start of this request.
         log::info!(
             "add-entries: commit skipped, mirror checkpoint {} already past upload_end {}; \
              returning 409",
             committed.size,
             header.upload_end,
         );
-        return Ok(mirror_info_409(env, snapshot, &header.log_origin));
+        let fresh_snapshot = match fetch_snapshot(env, &header.log_origin).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "add-entries: failed to fetch fresh snapshot for 409; using stale: {e:?}"
+                );
+                snapshot.clone()
+            }
+        };
+        return Ok(mirror_info_409(env, &fresh_snapshot, &header.log_origin));
     }
 
     Ok((
@@ -892,7 +927,9 @@ impl HashReader for MapReader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MapReader, excess_entries, verify_package};
+    use super::{
+        CONTENT_TYPE, MapReader, content_type_is_octet_stream, excess_entries, verify_package,
+    };
     use crate::mirror_state_do::PendingCheckpoint;
     use std::collections::HashMap;
     use tlog_core::{Hash, Subtree, stored_hash_index, stored_hashes, tree_hash};
@@ -1042,5 +1079,35 @@ mod tests {
         // upload_start past the frontier (rejected separately) must not
         // underflow.
         assert_eq!(excess_entries(5_000, 6_000, 4_000), 0);
+    }
+
+    #[test]
+    fn content_type_octet_stream_accepted() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+        assert!(content_type_is_octet_stream(&headers));
+    }
+
+    #[test]
+    fn content_type_octet_stream_with_params_accepted() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            "application/octet-stream; charset=binary".parse().unwrap(),
+        );
+        assert!(content_type_is_octet_stream(&headers));
+    }
+
+    #[test]
+    fn content_type_missing_rejected() {
+        let headers = axum::http::HeaderMap::new();
+        assert!(!content_type_is_octet_stream(&headers));
+    }
+
+    #[test]
+    fn content_type_non_octet_stream_rejected() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+        assert!(!content_type_is_octet_stream(&headers));
     }
 }
