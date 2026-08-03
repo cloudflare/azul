@@ -35,9 +35,9 @@ use generic_log_worker::{
 };
 use length_prefixed::{ReadLengthPrefixedBytesExt as _, WriteLengthPrefixedBytesExt as _};
 use tlog_core::{
-    Hash, HashReader as _, record_hash, stored_hash_index, stored_hashes_for_record_hash,
+    Hash, HashReader as _, TlogError, record_hash, stored_hash_index, stored_hashes_for_record_hash,
 };
-use tlog_tiles::{PathElem, TlogTile};
+use tlog_tiles::{PathElem, PreloadedTlogTileReader, TileHashReader, TlogTile, TlogTileRecorder};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -63,16 +63,25 @@ pub(crate) const CHECKPOINT_KEY: &str = "checkpoint";
 /// upload_start)` are already in the log and therefore absent from the
 /// uploaded package.
 ///
+/// The reloaded bytes are untrusted storage output, so each decoded entry
+/// is authenticated against the hash tiles committed at the persisted
+/// frontier (`persisted_hash` is the frontier root, used to authenticate
+/// the edge tiles via [`read_edge_tiles`]). Without this a corrupted or
+/// stale bundle would flow into package verification and surface as a
+/// client "422 Unprocessable Entity" for what is actually a mirror
+/// storage fault.
+///
 /// # Errors
 ///
-/// Returns an error if the bundle is missing from storage or is shorter
-/// than `count` entries (i.e. the requested leaves were not actually
-/// persisted).
+/// Returns an error if the bundle is missing from storage, is shorter than
+/// `count` entries, or a decoded entry does not match its authenticated
+/// leaf hash.
 pub(crate) async fn read_persisted_leaves(
     object: &impl ObjectBackend,
     start: u64,
     count: u64,
     persisted_size: u64,
+    persisted_hash: Hash,
 ) -> Result<Vec<Vec<u8>>> {
     debug_assert!(
         start.is_multiple_of(TILE_WIDTH),
@@ -93,18 +102,79 @@ pub(crate) async fn read_persisted_leaves(
         .await?
         .ok_or_else(|| Error::from(format!("persisted entry bundle missing: {}", tile.path())))?;
 
+    // Authenticate the decoded leaves against the frontier hash tiles.
+    // Leaves below the frontier's edge tile are not covered by
+    // `read_edge_tiles`, and the `excess_entries` bound lets a resume land
+    // in the tile just before the edge, so authenticate against the tree
+    // root via the full tile-hash reader instead.
+    let indexes: Vec<u64> = (start..start + count)
+        .map(|leaf| stored_hash_index(0, leaf))
+        .collect();
+    let want = authenticated_leaf_hashes(object, persisted_size, persisted_hash, &indexes).await?;
+
     let mut cur: &[u8] = &bytes;
     let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
     for i in 0..count {
-        let entry = cur.read_length_prefixed(2).map_err(|e| {
-            Error::from(format!(
-                "persisted bundle leaf {} truncated: {e}",
-                start + i
-            ))
-        })?;
+        let leaf = start + i;
+        let entry = cur
+            .read_length_prefixed(2)
+            .map_err(|e| Error::from(format!("persisted bundle leaf {leaf} truncated: {e}")))?;
+        let idx = usize::try_from(i).unwrap_or(usize::MAX);
+        if record_hash(&entry) != want[idx] {
+            return Err(Error::from(format!(
+                "persisted bundle leaf {leaf} does not match its authenticated hash"
+            )));
+        }
         out.push(entry);
     }
     Ok(out)
+}
+
+/// Fetch and authenticate the record hashes for `indexes` (level-0 leaf
+/// stored-hash indexes) against the frontier `(tree_size, tree_hash)`.
+///
+/// Runs the standard tlog-tiles two-pass [`TileHashReader`] protocol: a
+/// recording pass discovers the hash tiles needed to prove the requested
+/// leaves, they are fetched from storage, then a verifying pass
+/// authenticates them against `tree_hash`. A storage fault (missing,
+/// stale, or tampered tile) therefore surfaces as an error here rather
+/// than as a spurious client rejection downstream.
+///
+/// # Errors
+///
+/// Returns an error if a required hash tile is missing from storage or the
+/// fetched tiles do not authenticate against `tree_hash`.
+async fn authenticated_leaf_hashes(
+    object: &impl ObjectBackend,
+    tree_size: u64,
+    tree_hash: Hash,
+    indexes: &[u64],
+) -> Result<Vec<Hash>> {
+    // Recording pass: `TlogTileRecorder` short-circuits `read_hashes` with
+    // `RecordedTilesOnly` after collecting the tiles it would need.
+    let recorder = TlogTileRecorder::default();
+    match TileHashReader::new(tree_size, Hash::default(), &recorder).read_hashes(indexes) {
+        Err(TlogError::RecordedTilesOnly) => {}
+        other => {
+            return Err(Error::from(format!(
+                "expected RecordedTilesOnly while recording hash tiles, got {other:?}"
+            )));
+        }
+    }
+
+    let mut tiles: HashMap<TlogTile, Vec<u8>> = HashMap::new();
+    for tile in recorder.0.into_inner() {
+        let bytes = object
+            .fetch(tile.path())
+            .await?
+            .ok_or_else(|| Error::from(format!("persisted hash tile missing: {}", tile.path())))?;
+        tiles.insert(tile, bytes);
+    }
+
+    let reader = PreloadedTlogTileReader(tiles);
+    TileHashReader::new(tree_size, tree_hash, &reader)
+        .read_hashes(indexes)
+        .map_err(|e| Error::from(format!("authenticate persisted leaf hashes: {e:?}")))
 }
 
 /// Authenticate a reloaded partial entry bundle before it is extended and
@@ -536,29 +606,65 @@ mod tests {
     async fn read_persisted_leaves_from_full_and_partial_bundles() {
         let obj = MemBackend::default();
         // 300 leaves: one full bundle [0,256) + a partial bundle [256,300).
-        persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
+        let root = persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
             .await
             .unwrap();
 
         // Prefix within the full bundle (persisted_size 300 -> stored
         // width 256 for tile 0).
-        let got = read_persisted_leaves(&obj, 0, 44, 300).await.unwrap();
+        let got = read_persisted_leaves(&obj, 0, 44, 300, root).await.unwrap();
         assert_eq!(got, leaves(0..44));
 
         // Whole full bundle.
-        let got = read_persisted_leaves(&obj, 0, 256, 300).await.unwrap();
+        let got = read_persisted_leaves(&obj, 0, 256, 300, root)
+            .await
+            .unwrap();
         assert_eq!(got, leaves(0..256));
 
         // Prefix within the trailing partial bundle (tile 1, stored width
         // 300 - 256 = 44).
-        let got = read_persisted_leaves(&obj, 256, 20, 300).await.unwrap();
+        let got = read_persisted_leaves(&obj, 256, 20, 300, root)
+            .await
+            .unwrap();
         assert_eq!(got, leaves(256..276));
     }
 
     #[tokio::test]
     async fn read_persisted_leaves_missing_bundle_errors() {
         let obj = MemBackend::default();
-        assert!(read_persisted_leaves(&obj, 0, 10, 300).await.is_err());
+        assert!(
+            read_persisted_leaves(&obj, 0, 10, 300, EMPTY_HASH)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_persisted_leaves_rejects_tampered_bundle() {
+        let obj = MemBackend::default();
+        let root = persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
+            .await
+            .unwrap();
+
+        // Corrupt a byte inside the full bundle [0,256) while keeping the
+        // length framing valid, so it still decodes but no longer matches
+        // its authenticated leaf hash.
+        let key = TlogTile::from_index(stored_hash_index(0, 255))
+            .with_data_path(PathElem::Entries)
+            .path();
+        let mut bytes = obj.fetch(&key).await.unwrap().expect("full bundle stored");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        obj.upload(&key, bytes, &immutable_tile_opts())
+            .await
+            .unwrap();
+
+        assert!(
+            read_persisted_leaves(&obj, 0, 256, 300, root)
+                .await
+                .is_err(),
+            "tampered persisted bundle must be rejected"
+        );
     }
 
     #[tokio::test]

@@ -163,7 +163,13 @@ pub(crate) async fn add_entries(
         return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
     }
 
-    let first_prefix = first_package_prefix(&env, &header, snapshot.next_entry.size).await?;
+    let first_prefix = first_package_prefix(
+        &env,
+        &header,
+        snapshot.next_entry.size,
+        snapshot.next_entry.hash,
+    )
+    .await?;
 
     verify_and_persist(
         &env,
@@ -439,14 +445,19 @@ async fn cosign_and_serve(
 /// next_entry.size` is enforced upstream, the requested leaves are always
 /// present in storage.
 ///
+/// The prefix is authenticated against the frontier hash tiles inside
+/// [`commit::read_persisted_leaves`]; `persisted_hash` is the frontier
+/// root at `persisted_size`.
+///
 /// # Errors
 ///
 /// Returns an error if opening the origin bucket or reading the persisted
-/// entry bundle fails.
+/// entry bundle fails, or the reloaded leaves fail authentication.
 async fn first_package_prefix(
     env: &Env,
     header: &AddEntriesRequestHeader,
     persisted_size: u64,
+    persisted_hash: Hash,
 ) -> Result<Vec<Vec<u8>>> {
     let subtree_start = (header.upload_start / PACKAGE_ALIGNMENT) * PACKAGE_ALIGNMENT;
     if header.upload_start == subtree_start {
@@ -458,6 +469,7 @@ async fn first_package_prefix(
         subtree_start,
         header.upload_start - subtree_start,
         persisted_size,
+        persisted_hash,
     )
     .await
 }
