@@ -441,6 +441,11 @@ async fn cosign_and_serve(
     let cosig_body =
         tlog_witness::serialize_add_checkpoint_response(std::slice::from_ref(&note_sig));
 
+    // The served checkpoint is the log's signed note with the mirror's
+    // cosignature appended. Build it once so both the early-return and the
+    // `/commit` paths use the same bytes.
+    let checkpoint_obj = [target.signed_note_bytes.as_slice(), &cosig_body].concat();
+
     // When the upload only reaches the mirror checkpoint's current size,
     // the checkpoint at that size is already committed and served. There
     // is nothing to advance, and re-committing would redundantly rewrite
@@ -448,6 +453,11 @@ async fn cosign_and_serve(
     // return a fresh cosignature without dispatching `/commit`. (Committed
     // is monotonic, so a stale-low snapshot only skips this optimization,
     // never the other way.)
+    //
+    // Note: this also means a previously-failed R2 checkpoint write won't
+    // self-heal at the same size; it heals on the next larger commit. That
+    // is acceptable because the durable committed state advanced before the
+    // R2 write, and duplicate cosignatures are worse than a lagging object.
     if header.upload_end <= snapshot.committed.size {
         return Ok((
             StatusCode::OK,
@@ -457,21 +467,23 @@ async fn cosign_and_serve(
             .into_response());
     }
 
-    // The served checkpoint is the log's signed note with the mirror's
-    // cosignature appended. The DO writes it to R2 while advancing the
+    // The DO writes the cosigned checkpoint to R2 while advancing the
     // durable checkpoint under its commit lock.
-    let mut checkpoint_obj = target.signed_note_bytes.clone();
-    checkpoint_obj.extend_from_slice(&cosig_body);
     let committed = dispatch_commit(
         env,
         &header.log_origin,
         &CommitRequest {
             size: header.upload_end,
             hash: target.hash,
-            signed_note_bytes: checkpoint_obj,
+            signed_note_bytes: checkpoint_obj.clone(),
         },
     )
     .await?;
+
+    debug_assert_eq!(
+        committed.signed_note_bytes, checkpoint_obj,
+        "DO returned checkpoint bytes that do not match the cosigned note we sent"
+    );
 
     if committed.size != header.upload_end {
         // The DO refused to rewind: a concurrent commit already advanced

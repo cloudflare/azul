@@ -29,6 +29,10 @@
 
 use std::collections::HashMap;
 
+use futures_util::{
+    future::try_join_all,
+    stream::{StreamExt as _, TryStreamExt as _, iter as stream_iter},
+};
 use generic_log_worker::{
     ObjectBackend,
     log_ops::{HashReaderWithOverlay, TileWithBytes, UploadOptions, read_edge_tiles},
@@ -43,6 +47,14 @@ use worker::*;
 
 /// tlog-tiles fixes a tile height of 8, i.e. 256 entries per full tile.
 const TILE_WIDTH: u64 = TlogTile::FULL_WIDTH as u64;
+
+/// Max in-flight R2 uploads per commit. A single `add-entries` request is
+/// bounded only by the request-body size, so uploading every entry bundle
+/// and hash tile at once could open thousands of connections and hold all
+/// their bytes in memory. Workers allows only six connections to be waiting
+/// on response headers at a time, so a small bound captures the concurrency
+/// win without the unbounded fan-out.
+const UPLOAD_CONCURRENCY: usize = 6;
 
 /// Object key for the (cosigned) checkpoint the mirror serves at
 /// `<monitoring>/<origin hash>/checkpoint`. Matches
@@ -162,14 +174,17 @@ async fn authenticated_leaf_hashes(
         }
     }
 
-    let mut tiles: HashMap<TlogTile, Vec<u8>> = HashMap::new();
-    for tile in recorder.0.into_inner() {
-        let bytes = object
-            .fetch(tile.path())
-            .await?
-            .ok_or_else(|| Error::from(format!("persisted hash tile missing: {}", tile.path())))?;
-        tiles.insert(tile, bytes);
-    }
+    let tile_futures = recorder.0.into_inner().into_iter().map(|tile| {
+        let path = tile.path();
+        async move {
+            let bytes = object
+                .fetch(path.clone())
+                .await?
+                .ok_or_else(|| Error::from(format!("persisted hash tile missing: {path}")))?;
+            Ok::<(TlogTile, Vec<u8>), Error>((tile, bytes))
+        }
+    });
+    let tiles: HashMap<TlogTile, Vec<u8>> = try_join_all(tile_futures).await?.into_iter().collect();
 
     let reader = PreloadedTlogTileReader(tiles);
     TileHashReader::new(tree_size, tree_hash, &reader)
@@ -317,9 +332,12 @@ pub(crate) async fn persist_entries(
         verify_partial_bundle(&data_tile, subtree_start, persisted_size, &edge_tiles)?;
     }
 
-    // Replay leaves, flushing entry bundles at 256-entry boundaries.
+    // Replay leaves, buffering entry-bundle uploads until the end so they
+    // can be issued with bounded concurrency. Bundles are immutable and
+    // idempotent, so overlapping them is safe.
     let mut overlay: HashMap<u64, Hash> = HashMap::new();
     let mut n = persisted_size;
+    let mut bundle_uploads = Vec::new();
     for entry in entries {
         push_tile_leaf(&mut data_tile, entry)?;
         let hashes = stored_hashes_for_record_hash(
@@ -336,16 +354,31 @@ pub(crate) async fn persist_entries(
         }
         n += 1;
         if n.is_multiple_of(TILE_WIDTH) {
-            upload_entry_bundle(object, n, std::mem::take(&mut data_tile)).await?;
+            bundle_uploads.push(upload_entry_bundle(
+                object,
+                n,
+                std::mem::take(&mut data_tile),
+            ));
         }
     }
     debug_assert_eq!(n, target_size);
     // Trailing partial entry bundle.
     if !target_size.is_multiple_of(TILE_WIDTH) {
-        upload_entry_bundle(object, target_size, std::mem::take(&mut data_tile)).await?;
+        bundle_uploads.push(upload_entry_bundle(
+            object,
+            target_size,
+            std::mem::take(&mut data_tile),
+        ));
     }
+    stream_iter(bundle_uploads)
+        .buffer_unordered(UPLOAD_CONCURRENCY)
+        .try_collect::<()>()
+        .await?;
 
-    // (Re)compute and upload hash tiles.
+    // (Re)compute hash tiles, then upload them with bounded concurrency
+    // while keeping edge_tiles current for the final root hash.
+    let tile_opts = immutable_tile_opts();
+    let mut hash_uploads = Vec::new();
     for tile in TlogTile::new_tiles(persisted_size, target_size) {
         let bytes = tile
             .read_data(&HashReaderWithOverlay {
@@ -353,13 +386,19 @@ pub(crate) async fn persist_entries(
                 overlay: &overlay,
             })
             .map_err(|e| Error::from(format!("couldn't build hash tile {tile:?}: {e}")))?;
-        object
-            .upload(tile.path(), bytes.clone(), &immutable_tile_opts())
-            .await?;
-        // Keep edge_tiles current so read_data of a higher/next tile can
-        // still resolve persisted hashes it depends on.
-        edge_tiles.insert(tile.level(), TileWithBytes { tile, b: bytes });
+        edge_tiles.insert(
+            tile.level(),
+            TileWithBytes {
+                tile,
+                b: bytes.clone(),
+            },
+        );
+        hash_uploads.push(object.upload(tile.path(), bytes, &tile_opts));
     }
+    stream_iter(hash_uploads)
+        .buffer_unordered(UPLOAD_CONCURRENCY)
+        .try_collect::<()>()
+        .await?;
 
     // Recompute the root hash from the frontier we just built.
     tlog_core::tree_hash(
