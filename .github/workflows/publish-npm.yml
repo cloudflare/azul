@@ -1,0 +1,42 @@
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # trusted publishing requires npm >= 11.5.1
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      - run: rustup update stable && rustup default stable
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack@0.13.1 --locked
+
+      - run: wasm-pack build crates/signed_note_wasm --target web --scope cloudflare
+      - run: wasm-pack build crates/tlog_tiles_wasm --target web --scope cloudflare
+
+      - name: Rename packages to kebab-case
+        run: |
+          npm pkg set name=@cloudflare/signed-note-wasm --prefix crates/signed_note_wasm/pkg
+          npm pkg set name=@cloudflare/tlog-tiles-wasm --prefix crates/tlog_tiles_wasm/pkg
+
+      - run: npm publish --access public
+        working-directory: crates/signed_note_wasm/pkg
+
+      - run: npm publish --access public
+        working-directory: crates/tlog_tiles_wasm/pkg
