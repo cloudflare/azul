@@ -118,10 +118,9 @@ pub fn verify_consistency_proof(
         )));
     }
 
-    let proof: Vec<tlog_core::Hash> = proof_hashes
-        .chunks_exact(32)
-        .map(|chunk| tlog_core::Hash(chunk.try_into().unwrap()))
-        .collect();
+    // Length is validated as a multiple of 32 above, so the remainder is empty.
+    let (chunks, _) = proof_hashes.as_chunks::<32>();
+    let proof: Vec<tlog_core::Hash> = chunks.iter().copied().map(tlog_core::Hash).collect();
 
     // Underlying API: (proof, n=new_size, root_hash=new_root, m=old_size, m_hash=old_root)
     tlog_core::verify_consistency_proof(
