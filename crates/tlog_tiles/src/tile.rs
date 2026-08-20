@@ -1031,9 +1031,9 @@ mod tests {
                 let max_hi = if lo == 0 {
                     u64::MAX
                 } else {
-                    // If `lo` is non-zero, find the maximum power of 2 that divides `lo`.
-                    // This is a bitwise trick that isolates the lowest set bit.
-                    let max_size = lo & lo.wrapping_neg();
+                    // If `lo` is non-zero, find the maximum power of 2 that divides `lo`:
+                    // the lowest set bit.
+                    let max_size = lo.isolate_lowest_one();
                     lo + max_size
                 };
                 for hi in lo + 1..=i.min(max_hi) {

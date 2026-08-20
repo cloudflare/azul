@@ -1407,6 +1407,10 @@ pub async fn upload_issuers(
 
 #[cfg(test)]
 mod tests {
+    // Test backends implement the async storage traits without awaiting; the
+    // trait signatures are `async fn`, so the impls must stay `async` to match.
+    #![allow(clippy::unused_async_trait_impl)]
+
     use super::*;
     use crate::{empty_checkpoint_callback, util};
     use tlog_core::LeafIndex;
