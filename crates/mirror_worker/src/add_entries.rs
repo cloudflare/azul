@@ -233,6 +233,7 @@ fn content_type_is_octet_stream(headers: &axum::http::HeaderMap) -> bool {
 /// checkpoint.
 ///
 /// [proc]: https://c2sp.org/tlog-mirror#processing
+#[allow(clippy::too_many_lines)]
 async fn verify_and_persist(
     env: &Env,
     header: &AddEntriesRequestHeader,
@@ -265,6 +266,19 @@ async fn verify_and_persist(
                 break;
             }
             PackageOutcome::Err(e) => {
+                // Spec: once at least one package has been authenticated
+                // and saved the mirror MUST respond 202, not 400. Treat a
+                // malformed later package like truncation so the verified
+                // prefix is kept and the client resumes from the advanced
+                // frontier; a malformed *first* package still 400s below.
+                if packages_received > 0 {
+                    log::info!(
+                        "add-entries: malformed package [{pkg_start}, {pkg_end}) after \
+                         {packages_received} authenticated; treating as truncation: {e:?}"
+                    );
+                    truncated = true;
+                    break;
+                }
                 log::warn!("add-entries: malformed package [{pkg_start}, {pkg_end}): {e:?}");
                 return Err(AppError::BadRequest(e.to_string()));
             }
@@ -336,6 +350,29 @@ async fn verify_and_persist(
         ));
     }
 
+    // Spec: the mirror updates its checkpoint to `upload_end` only once
+    // "the next entry will be greater or equal to `upload_end`", i.e. all
+    // entries up to `upload_end` are durably persisted. A request that
+    // persists nothing (e.g. an empty body, or one whose packages are all
+    // already-persisted) must not let us cosign past our frontier: without
+    // this guard `upload_end` above `next_entry` would sign a checkpoint at
+    // a size we never wrote tiles for. When the frontier has not reached
+    // `upload_end`, treat it like a truncated upload and 202 so the client
+    // resumes from the advertised next entry.
+    if frontier_size < header.upload_end {
+        log::info!(
+            "add-entries: frontier {frontier_size} below upload_end {}; nothing to persist \
+             this request, returning 202 to resume",
+            header.upload_end,
+        );
+        return Ok(mirror_info_202(
+            env,
+            snapshot,
+            &header.log_origin,
+            frontier_size,
+        ));
+    }
+
     // Every canonical package was received. Any bytes past the last one
     // are discarded, not rejected: the spec says "the mirror discards any
     // partial bytes after the last successfully authenticated entry
@@ -348,7 +385,10 @@ async fn verify_and_persist(
     // proof verification and tile computation disagree: an internal error,
     // never a client fault. When nothing new was persisted (a re-upload of
     // an already-persisted range), the log-signed target is trusted
-    // directly.
+    // directly: pending checkpoints are consistency-chained on the
+    // add-checkpoint path and tickets only revive our own past pendings, so
+    // the target is on the same branch as the persisted tree by
+    // construction.
     if persisted_new && (frontier_size != header.upload_end || frontier_hash != target.hash) {
         log::error!(
             "add-entries: recomputed frontier ({frontier_size}, {frontier_hash}) != target ({}, {})",
