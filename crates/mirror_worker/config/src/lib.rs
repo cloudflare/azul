@@ -69,6 +69,16 @@ pub struct AppConfig {
     /// (see [`Self::commit_packages`]). Consumed by
     /// [`mirror_worker`](../mirror_worker/)'s `add_entries`.
     pub commit_packages: Option<u64>,
+    /// Byte ceiling on the entries buffered between flushes. `add-entries`
+    /// flushes early once the buffered entry bytes reach this many, even if
+    /// fewer than `commit_packages` packages have accumulated. This bounds
+    /// peak memory independent of package sizes: `commit_packages` alone
+    /// caps only the package *count*, and a single package can hold up to
+    /// 256 entries of 65535 bytes (~16 MiB), so a count-only bound can
+    /// exceed the isolate's memory ceiling. `None` falls back to a default
+    /// (see [`Self::max_chunk_bytes`]). Consumed by
+    /// [`mirror_worker`](../mirror_worker/)'s `add_entries`.
+    pub max_chunk_bytes: Option<u64>,
     /// CAs this mirror mirrors, keyed by `log_key_name`: the CA
     /// cosigner's note-signature name (the CA ID) carried by the
     /// checkpoints it ingests.
@@ -134,6 +144,18 @@ impl AppConfig {
     #[must_use]
     pub fn commit_packages(&self) -> u64 {
         self.commit_packages.unwrap_or(32)
+    }
+
+    /// Byte ceiling on buffered entries before `add-entries` flushes early,
+    /// falling back to 16 MiB when `max_chunk_bytes` is unset. This bounds
+    /// peak in-memory buffering regardless of how large individual packages
+    /// are, complementing the `commit_packages` count cap. 16 MiB matches
+    /// the worst-case size of a single spec-maximal package (256 entries *
+    /// 65535 bytes), so the default never flushes mid-package for a
+    /// compliant upload yet still caps a pathological one.
+    #[must_use]
+    pub fn max_chunk_bytes(&self) -> u64 {
+        self.max_chunk_bytes.unwrap_or(16 * 1024 * 1024)
     }
 
     /// Validate the configuration beyond what `serde` and the JSON schema
@@ -359,6 +381,7 @@ mod tests {
             monitoring_prefix: None,
             clean_interval_secs: None,
             commit_packages: None,
+            max_chunk_bytes: None,
             logs: HashMap::from([(
                 "example.com/log1".to_owned(),
                 LogParams {
@@ -492,6 +515,14 @@ mod tests {
     }
 
     #[test]
+    fn max_chunk_bytes_defaults_to_16_mib() {
+        let mut cfg = good_app_config();
+        assert_eq!(cfg.max_chunk_bytes(), 16 * 1024 * 1024);
+        cfg.max_chunk_bytes = Some(1024);
+        assert_eq!(cfg.max_chunk_bytes(), 1024);
+    }
+
+    #[test]
     fn validate_rejects_inverted_window() {
         let cfg = with_log(|log| {
             log.min_log_number = 45;
@@ -560,6 +591,7 @@ mod tests {
             monitoring_prefix: None,
             clean_interval_secs: None,
             commit_packages: None,
+            max_chunk_bytes: None,
             logs: HashMap::from([(
                 "a".repeat(250),
                 LogParams {

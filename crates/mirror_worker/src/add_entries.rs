@@ -386,6 +386,11 @@ where
     // config.schema.json caps commit_packages (max 1024), enforced by the
     // build script, so this always fits usize; the fallback is unreachable.
     let commit_packages = usize::try_from(crate::CONFIG.commit_packages()).unwrap_or(usize::MAX);
+    // Byte ceiling on buffered entries; flush early when reached so peak
+    // memory is bounded regardless of package sizes. Saturating to
+    // usize::MAX on a 32-bit target just means "never trip the byte cap",
+    // leaving the package-count cap in force.
+    let max_chunk_bytes = usize::try_from(crate::CONFIG.max_chunk_bytes()).unwrap_or(usize::MAX);
 
     // Entries below the request-start frontier are already persisted; new
     // persistence begins at this fixed boundary.
@@ -400,6 +405,7 @@ where
     let mut chunk: Vec<Vec<u8>> = Vec::new();
     let mut chunk_end = frontier_size;
     let mut chunk_pkgs = 0usize;
+    let mut chunk_bytes = 0usize;
     let mut packages_received: u64 = 0;
     let mut truncated = false;
 
@@ -457,13 +463,21 @@ where
         if pkg_end > initial_next {
             let skip = usize::try_from(initial_next.saturating_sub(pkg_start))
                 .map_err(|_| Error::from("skip count overflows usize"))?;
-            chunk.extend(pkg.entries.into_iter().skip(skip));
+            let tail = pkg.entries.into_iter().skip(skip);
+            for entry in tail {
+                chunk_bytes = chunk_bytes.saturating_add(entry.len());
+                chunk.push(entry);
+            }
             chunk_end = pkg_end;
             chunk_pkgs += 1;
 
-            // `commit_packages >= 1` (config), so a full chunk always holds
-            // at least one package's entries: no empty-flush guard needed.
-            if chunk_pkgs == commit_packages {
+            // Flush when either cap trips: `commit_packages` bounds the
+            // package count, `max_chunk_bytes` bounds peak memory when
+            // individual packages are large. `commit_packages >= 1`
+            // (config), so a full chunk always holds at least one package's
+            // entries; the byte cap only fires after entries were buffered,
+            // so neither branch can flush an empty chunk.
+            if chunk_pkgs == commit_packages || chunk_bytes >= max_chunk_bytes {
                 (frontier_size, frontier_hash) = flush_chunk(
                     bucket,
                     env,
@@ -475,6 +489,7 @@ where
                 )
                 .await?;
                 chunk_pkgs = 0;
+                chunk_bytes = 0;
             }
         }
     }

@@ -37,6 +37,12 @@
             "default": 32,
             "description": "How many entry packages add-entries verifies before flushing them to storage and advancing the persisted-entry frontier. Bounds in-memory buffering and gives durable mid-request progress on large uploads. Defaults to 32 (the recommended per-request package budget) when omitted; capped at 1024 to bound worst-case buffering."
         },
+        "max_chunk_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 16777216,
+            "description": "Byte ceiling on the entries buffered between flushes. add-entries flushes early once buffered entry bytes reach this many, even if fewer than commit_packages packages have accumulated. Bounds peak memory independent of package sizes, since a single package can hold up to ~16 MiB. Defaults to 16777216 (16 MiB) when omitted."
+        },
         "logs": {
             "type": "object",
             "description": "CAs this mirror mirrors, keyed by log_key_name: the CA cosigner's note-signature name (the CA ID) on the checkpoints it ingests. Used as a signed-note key name at runtime, so per c2sp.org/signed-note it MUST NOT contain '+', whitespace, or control characters.",
