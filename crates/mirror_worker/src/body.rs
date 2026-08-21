@@ -97,6 +97,15 @@ pub(crate) fn decoded_stream(
     Ok(stream)
 }
 
+/// Largest compressed slice fed to the decoder per step, and the point at
+/// which accumulated plaintext is drained. DEFLATE can inflate a small
+/// input by a large factor (a hostile "zip bomb" reaches ~1000x), so a
+/// single unbounded `write_all` of a whole chunk could balloon the sink
+/// `Vec` far past the isolate's memory ceiling. Feeding the decoder in
+/// bounded slices and draining between them keeps the plaintext held at
+/// once proportional to this window, not to the compression ratio.
+const INFLATE_STEP: usize = 64 * 1024;
+
 /// Incremental gzip inflater: feed compressed bytes with [`Self::push`]
 /// and drain the plaintext produced so far; call [`Self::finish`] once the
 /// compressed input ends to validate the gzip trailer (CRC-32 + ISIZE).
@@ -105,6 +114,11 @@ pub(crate) fn decoded_stream(
 /// compiles to and runs under WASM. `flate2::write::GzDecoder` handles all
 /// gzip framing: the 10-byte header, optional FNAME/FEXTRA/etc. fields
 /// (buffered across `push` calls if split across chunks), and the trailer.
+///
+/// [`Self::push`] feeds the decoder at most [`INFLATE_STEP`] compressed
+/// bytes at a time and drains after each step, so the sink never holds
+/// more than one step's worth of inflated output regardless of how large
+/// or compressible the caller's chunk is.
 struct GzipInflater {
     decoder: GzDecoder<Vec<u8>>,
 }
@@ -116,14 +130,28 @@ impl GzipInflater {
         }
     }
 
-    /// Feed one compressed chunk and return the plaintext bytes produced.
-    /// May return an empty `Vec` if `input` only completed part of the
-    /// gzip header or a DEFLATE block that hasn't emitted output yet.
-    fn push(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        self.decoder
-            .write_all(input)
-            .map_err(|e| Error::from(format!("gzip decode failed: {e}")))?;
-        Ok(std::mem::take(self.decoder.get_mut()))
+    /// Feed one compressed chunk, invoking `emit` with each bounded
+    /// plaintext run produced. `emit` may be called zero times (the input
+    /// only advanced the gzip header or a not-yet-emitting DEFLATE block),
+    /// once, or many times for a highly compressible chunk.
+    ///
+    /// Input is written to the decoder one [`INFLATE_STEP`] slice at a
+    /// time, draining the sink after each, and every drained run is further
+    /// split into at most [`INFLATE_STEP`]-byte emissions. So no single
+    /// emitted run (what flows downstream) exceeds one step regardless of
+    /// the (attacker-controlled) compression ratio, and the sink is drained
+    /// per input step instead of accumulating the whole chunk's output.
+    fn push(&mut self, input: &[u8], mut emit: impl FnMut(Vec<u8>)) -> Result<()> {
+        for slice in input.chunks(INFLATE_STEP) {
+            self.decoder
+                .write_all(slice)
+                .map_err(|e| Error::from(format!("gzip decode failed: {e}")))?;
+            let produced = std::mem::take(self.decoder.get_mut());
+            for run in produced.chunks(INFLATE_STEP) {
+                emit(run.to_vec());
+            }
+        }
+        Ok(())
     }
 
     /// Finish decompression, returning any trailing plaintext. Errors if
@@ -140,10 +168,13 @@ impl GzipInflater {
 /// gunzipped plaintext chunks.
 ///
 /// The returned stream inflates lazily: each poll pulls compressed chunks
-/// from `inner` until it can emit at least one plaintext byte, so memory
+/// from `inner` until it can emit at least one plaintext run, so memory
 /// use stays bounded by the chunk size rather than the whole body. A
-/// decode error (malformed gzip) or a truncated stream surfaces as a
-/// terminal `Err` item, after which the stream ends.
+/// single compressed chunk that inflates a lot is emitted as several
+/// [`INFLATE_STEP`]-bounded runs, drained from `pending` across polls, so
+/// a hostile compression ratio cannot force one giant allocation. A decode
+/// error (malformed gzip) or a truncated stream surfaces as a terminal
+/// `Err` item, after which the stream ends.
 pub(crate) fn gunzip<S>(inner: S) -> BodyStream
 where
     S: Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin + 'static,
@@ -151,6 +182,9 @@ where
     struct DecodeState<S> {
         inner: S,
         inflater: Option<GzipInflater>,
+        /// Plaintext runs decoded from the last compressed chunk but not
+        /// yet emitted, drained one per poll (front to back).
+        pending: std::collections::VecDeque<Vec<u8>>,
         done: bool,
     }
 
@@ -158,30 +192,34 @@ where
         DecodeState {
             inner,
             inflater: Some(GzipInflater::new()),
+            pending: std::collections::VecDeque::new(),
             done: false,
         },
         |mut st| async move {
+            if let Some(run) = st.pending.pop_front() {
+                return Some((Ok(run), st));
+            }
             if st.done {
                 return None;
             }
             loop {
                 match st.inner.next().await {
                     Some(Ok(chunk)) => {
-                        let out = match st.inflater.as_mut().expect("inflater present").push(&chunk)
-                        {
-                            Ok(out) => out,
-                            Err(e) => {
-                                st.done = true;
-                                return Some((Err(BodyError::Decode(e.to_string())), st));
-                            }
-                        };
+                        let inflater = st.inflater.as_mut().expect("inflater present");
+                        let mut runs = std::collections::VecDeque::new();
+                        if let Err(e) = inflater.push(&chunk, |run| runs.push_back(run)) {
+                            st.done = true;
+                            return Some((Err(BodyError::Decode(e.to_string())), st));
+                        }
                         // A chunk may not yet yield any plaintext (partial
                         // header / block); pull more instead of emitting an
-                        // empty item.
-                        if out.is_empty() {
+                        // empty item. Otherwise emit the first run now and
+                        // queue the rest for subsequent polls.
+                        let Some(first) = runs.pop_front() else {
                             continue;
-                        }
-                        return Some((Ok(out), st));
+                        };
+                        st.pending = runs;
+                        return Some((Ok(first), st));
                     }
                     Some(Err(e)) => {
                         st.done = true;
@@ -288,6 +326,39 @@ mod tests {
         assert!(
             matches!(err, Err(BodyError::Decode(_))),
             "corrupt gzip must surface a client decode error"
+        );
+    }
+
+    // A highly compressible payload whose plaintext far exceeds
+    // INFLATE_STEP, delivered as a single compressed chunk, must inflate
+    // to the exact original but be emitted as several bounded runs so no
+    // single allocation exceeds the step. This is the zip-bomb guard.
+    #[tokio::test]
+    async fn large_ratio_chunk_emits_bounded_runs() {
+        let plain = vec![0u8; INFLATE_STEP * 10 + 123];
+        let compressed = gzip(&plain);
+        assert!(
+            compressed.len() < INFLATE_STEP,
+            "test payload should compress to well under one step"
+        );
+        // Feed the whole compressed body as one chunk.
+        let mut s = gunzip(stream::iter(vec![Ok::<_, BodyError>(compressed)]));
+        let mut total = 0usize;
+        let mut runs = 0usize;
+        while let Some(item) = s.next().await {
+            let run = item.unwrap();
+            assert!(
+                run.len() <= INFLATE_STEP,
+                "run of {} bytes exceeds INFLATE_STEP {INFLATE_STEP}",
+                run.len()
+            );
+            total += run.len();
+            runs += 1;
+        }
+        assert_eq!(total, plain.len());
+        assert!(
+            runs > 1,
+            "a >step payload must span multiple runs, got {runs}"
         );
     }
 
