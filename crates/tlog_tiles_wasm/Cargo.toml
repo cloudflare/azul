@@ -3,6 +3,8 @@ name = "tlog_tiles_wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "wasm-bindgen wrapper for the tlog_tiles crate (c2sp.org/tlog-tiles, c2sp.org/tlog-checkpoint)"
 publish = false
 
