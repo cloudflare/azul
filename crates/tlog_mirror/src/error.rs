@@ -12,14 +12,6 @@ pub enum ParseError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// The `log_origin_size` u16 prefix advertised more bytes than were
-    /// available in the input.
-    #[error("log_origin truncated: advertised {advertised} bytes")]
-    LogOriginTruncated {
-        /// Size advertised by the wire `log_origin_size` u16.
-        advertised: u16,
-    },
-
     /// The `log_origin` bytes were not valid UTF-8.
     #[error("log_origin is not valid UTF-8")]
     LogOriginNotUtf8,

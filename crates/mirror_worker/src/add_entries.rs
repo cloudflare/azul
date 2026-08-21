@@ -812,11 +812,9 @@ where
                 buf.consume(consumed);
                 return Ok(header);
             }
+            // Short read: the whole header is not buffered yet. Pull more
+            // and retry; a real EOF here means a truncated header.
             Err(ParseError::Io(ref e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                // Need more bytes to parse the header. Pull another
-                // chunk; if the stream is already at EOF, the header
-                // is fundamentally malformed (truncated before being
-                // complete).
                 if !buf.pull_one().await? {
                     log::warn!(
                         "add-entries: stream ended before header was complete \
@@ -1189,13 +1187,16 @@ impl HashReader for MapReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTENT_TYPE, MapReader, content_type_is_octet_stream, excess_entries, verify_package,
+        CONTENT_TYPE, MapReader, content_type_is_octet_stream, excess_entries, parse_header,
+        verify_package,
     };
+    use crate::body::BodyError;
     use crate::mirror_state_do::PendingCheckpoint;
+    use crate::stream_buffer::StreamBuffer;
     use std::collections::HashMap;
     use tlog_core::{Hash, Subtree, stored_hash_index, stored_hashes, tree_hash};
     use tlog_mirror::EntryPackage;
-    use tlog_mirror::PACKAGE_ALIGNMENT;
+    use tlog_mirror::{AddEntriesRequestHeader, PACKAGE_ALIGNMENT};
 
     /// Deterministic distinct entry bytes for leaf `i`.
     fn entry(i: u64) -> Vec<u8> {
@@ -1381,5 +1382,65 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         assert!(!content_type_is_octet_stream(&headers));
+    }
+
+    fn header_bytes() -> Vec<u8> {
+        let header = AddEntriesRequestHeader {
+            log_origin: "rome.ct.example.com/2026h1".to_owned(),
+            upload_start: 256,
+            upload_end: 512,
+            ticket: b"opaque-ticket".to_vec(),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).unwrap();
+        buf
+    }
+
+    fn stream_buffer(
+        chunks: Vec<Vec<u8>>,
+    ) -> StreamBuffer<impl futures_util::Stream<Item = Result<Vec<u8>, BodyError>> + Unpin> {
+        StreamBuffer::new(futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<_, BodyError>),
+        ))
+    }
+
+    // A header delivered as single-byte chunks must reassemble.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_header_reassembles_byte_by_byte() {
+        let bytes = header_bytes();
+        let chunks: Vec<Vec<u8>> = bytes.iter().map(|b| vec![*b]).collect();
+        let mut buf = stream_buffer(chunks);
+        let Ok(header) = parse_header(&mut buf).await else {
+            panic!("header reassembles");
+        };
+        assert_eq!(header.log_origin, "rome.ct.example.com/2026h1");
+        assert_eq!(header.upload_start, 256);
+        assert_eq!(header.upload_end, 512);
+        assert_eq!(header.ticket, b"opaque-ticket");
+    }
+
+    // A header split partway through log_origin must reassemble.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_header_split_inside_log_origin() {
+        let bytes = header_bytes();
+        let (first, rest) = bytes.split_at(3);
+        let mut buf = stream_buffer(vec![first.to_vec(), rest.to_vec()]);
+        let Ok(header) = parse_header(&mut buf).await else {
+            panic!("header reassembles");
+        };
+        assert_eq!(header.log_origin, "rome.ct.example.com/2026h1");
+    }
+
+    // A stream that ends partway through log_origin is genuinely truncated
+    // and must be a 400, not an endless pull loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_header_truncated_in_log_origin_is_bad_request() {
+        let bytes = header_bytes();
+        let truncated = bytes[..5].to_vec();
+        let mut buf = stream_buffer(vec![truncated]);
+        assert!(matches!(
+            parse_header(&mut buf).await,
+            Err(super::AppError::BadRequest(_))
+        ));
     }
 }
