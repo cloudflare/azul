@@ -849,9 +849,53 @@ where
     }
 }
 
-/// Read the next entry package from `buf`, pulling more chunks from
-/// the underlying stream until the package parses or the stream ends.
-/// See [`ParseOutcome`] for the four cases.
+/// Pull chunks until at least `n` bytes are buffered. Returns `Ok(true)`
+/// once `n` bytes are available, or `Ok(false)` if the stream ended first.
+/// Nothing is consumed; the caller parses the now-buffered bytes.
+async fn fill_at_least<S>(buf: &mut StreamBuffer<S>, n: usize) -> ApiResult<bool>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
+    while buf.len() < n {
+        if !buf.pull_one().await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Read one length-prefixed entry (`u16 len || len bytes`) from the front
+/// of `buf`, consuming exactly the bytes read. Returns `Ok(None)` if the
+/// stream ends before a complete entry is buffered (truncation). Unlike a
+/// whole-package reparse, each call consumes what it reads, so pulling more
+/// bytes for a later entry never re-copies the entries already taken.
+async fn read_one_entry<S>(buf: &mut StreamBuffer<S>) -> ApiResult<Option<Vec<u8>>>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
+    if !fill_at_least(buf, 2).await? {
+        return Ok(None);
+    }
+    let bytes = buf.buffered();
+    let len = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+    let total = 2 + len;
+    if !fill_at_least(buf, total).await? {
+        return Ok(None);
+    }
+    let entry = buf.buffered()[2..total].to_vec();
+    buf.consume(total);
+    Ok(Some(entry))
+}
+
+/// Read the next entry package from `buf`, pulling more chunks from the
+/// underlying stream until the package parses or the stream ends. See
+/// [`ParseOutcome`] for the four cases.
+///
+/// The package is parsed incrementally, consuming each entry and the proof
+/// from `buf` as soon as it is fully buffered. A short read pulls one more
+/// chunk and resumes from the next unread unit, so a large package
+/// arriving in small chunks is parsed and copied once, not re-parsed from
+/// byte zero on every chunk.
 async fn parse_next_package<S>(
     buf: &mut StreamBuffer<S>,
     num_entries: u64,
@@ -859,33 +903,61 @@ async fn parse_next_package<S>(
 where
     S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
 {
+    // Reject oversized counts before allocating, matching
+    // EntryPackage::read_from so the two parse paths agree on limits.
+    if num_entries > PACKAGE_ALIGNMENT {
+        return Ok(ParseOutcome::Err(ParseError::TooManyEntries(num_entries)));
+    }
     // EOF with an empty buffer: clean truncation between packages.
     if buf.is_eof() && buf.len() == 0 {
         return Ok(ParseOutcome::CleanEof);
     }
-    loop {
-        let mut cursor = Cursor::new(buf.buffered());
-        match EntryPackage::read_from(&mut cursor, num_entries) {
-            Ok(pkg) => {
-                let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
-                buf.consume(consumed);
-                return Ok(ParseOutcome::Ok(pkg));
+
+    let num_entries = usize::try_from(num_entries).unwrap_or(usize::MAX);
+    let mut entries = Vec::with_capacity(num_entries);
+    for _ in 0..num_entries {
+        match read_one_entry(buf).await? {
+            Some(entry) => entries.push(entry),
+            None => {
+                // Stream ended before this entry completed. Nothing buffered
+                // and no partial bytes means a clean between-package
+                // truncation; otherwise a partial package was left behind.
+                return Ok(package_eof(entries.is_empty(), buf.len() > 0));
             }
-            Err(ParseError::Io(ref e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                if !buf.pull_one().await? {
-                    // Stream ended mid-parse. An empty buffer means the
-                    // previous package consumed exactly all buffered bytes
-                    // and this call started a fresh (never-arriving)
-                    // package: a clean between-package truncation. A
-                    // non-empty buffer holds a partial package.
-                    if buf.len() == 0 {
-                        return Ok(ParseOutcome::CleanEof);
-                    }
-                    return Ok(ParseOutcome::MidPackageEof);
-                }
-            }
-            Err(e) => return Ok(ParseOutcome::Err(e)),
         }
+    }
+
+    // Proof: `u8 num_hashes || num_hashes * HASH_SIZE bytes`.
+    if !fill_at_least(buf, 1).await? {
+        return Ok(package_eof(entries.is_empty(), buf.len() > 0));
+    }
+    let num_hashes = buf.buffered()[0];
+    if num_hashes > tlog_mirror::MAX_HASHES_PER_PROOF {
+        return Ok(ParseOutcome::Err(ParseError::TooManyHashes(num_hashes)));
+    }
+    let proof_bytes = 1 + usize::from(num_hashes) * tlog_core::HASH_SIZE;
+    if !fill_at_least(buf, proof_bytes).await? {
+        return Ok(package_eof(entries.is_empty(), buf.len() > 0));
+    }
+    let mut proof = Vec::with_capacity(usize::from(num_hashes));
+    for i in 0..usize::from(num_hashes) {
+        let off = 1 + i * tlog_core::HASH_SIZE;
+        let mut hash = [0u8; tlog_core::HASH_SIZE];
+        hash.copy_from_slice(&buf.buffered()[off..off + tlog_core::HASH_SIZE]);
+        proof.push(Hash(hash));
+    }
+    buf.consume(proof_bytes);
+    Ok(ParseOutcome::Ok(EntryPackage { entries, proof }))
+}
+
+/// Classify a stream end reached partway through [`parse_next_package`]:
+/// a clean between-package truncation when nothing of this package had
+/// been read, otherwise a mid-package truncation.
+fn package_eof(no_entries_yet: bool, saw_partial: bool) -> ParseOutcome {
+    if no_entries_yet && !saw_partial {
+        ParseOutcome::CleanEof
+    } else {
+        ParseOutcome::MidPackageEof
     }
 }
 
@@ -1202,8 +1274,8 @@ impl HashReader for MapReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTENT_TYPE, MapReader, content_type_is_octet_stream, excess_entries, parse_header,
-        verify_package,
+        CONTENT_TYPE, MapReader, ParseOutcome, content_type_is_octet_stream, excess_entries,
+        parse_header, parse_next_package, verify_package,
     };
     use crate::body::BodyError;
     use crate::mirror_state_do::PendingCheckpoint;
@@ -1456,6 +1528,122 @@ mod tests {
         assert!(matches!(
             parse_header(&mut buf).await,
             Err(super::AppError::BadRequest(_))
+        ));
+    }
+
+    fn sample_package() -> EntryPackage {
+        EntryPackage {
+            entries: vec![
+                b"first-entry".to_vec(),
+                Vec::new(),
+                b"a-much-longer-third-entry-with-more-bytes".to_vec(),
+                vec![0xab; 300],
+            ],
+            proof: vec![
+                Hash([0x11; tlog_core::HASH_SIZE]),
+                Hash([0x22; tlog_core::HASH_SIZE]),
+            ],
+        }
+    }
+
+    fn package_bytes(pkg: &EntryPackage) -> Vec<u8> {
+        let mut buf = Vec::new();
+        pkg.write_to(&mut buf).unwrap();
+        buf
+    }
+
+    // parse_next_package returns ApiResult, whose Err (AppError) is not
+    // Debug, so unwrap the transport layer by hand for the tests.
+    fn ok_outcome(res: super::ApiResult<ParseOutcome>) -> ParseOutcome {
+        let Ok(outcome) = res else {
+            panic!("unexpected transport error from parse_next_package");
+        };
+        outcome
+    }
+
+    // The incremental parser must reconstruct a package identical to a
+    // one-shot read regardless of how the wire bytes are chunked, including
+    // single-byte chunks that split every length prefix, entry, and proof
+    // hash. This is the regression for re-parsing from byte zero.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_reassembles_across_chunk_sizes() {
+        let pkg = sample_package();
+        let bytes = package_bytes(&pkg);
+        let num_entries = pkg.entries.len() as u64;
+        for size in [1usize, 2, 3, 7, 33, bytes.len()] {
+            let chunks: Vec<Vec<u8>> = bytes.chunks(size).map(<[u8]>::to_vec).collect();
+            let mut buf = stream_buffer(chunks);
+            let ParseOutcome::Ok(parsed) =
+                ok_outcome(parse_next_package(&mut buf, num_entries).await)
+            else {
+                panic!("chunk size {size} should parse Ok");
+            };
+            assert_eq!(parsed.entries, pkg.entries, "chunk size {size} entries");
+            assert_eq!(parsed.proof, pkg.proof, "chunk size {size} proof");
+        }
+    }
+
+    // Two packages back to back: the first parse must consume exactly its
+    // bytes, leaving the second intact for the next call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_leaves_following_package_intact() {
+        let pkg = sample_package();
+        let mut bytes = package_bytes(&pkg);
+        bytes.extend(package_bytes(&pkg));
+        let num_entries = pkg.entries.len() as u64;
+        // 5-byte chunks so package boundaries fall mid-chunk.
+        let chunks: Vec<Vec<u8>> = bytes.chunks(5).map(<[u8]>::to_vec).collect();
+        let mut buf = stream_buffer(chunks);
+        for which in ["first", "second"] {
+            let ParseOutcome::Ok(parsed) =
+                ok_outcome(parse_next_package(&mut buf, num_entries).await)
+            else {
+                panic!("{which} package should parse Ok");
+            };
+            assert_eq!(parsed.entries, pkg.entries, "{which} entries");
+            assert_eq!(parsed.proof, pkg.proof, "{which} proof");
+        }
+    }
+
+    // Stream ending exactly on a package boundary is a clean truncation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_clean_eof_between_packages() {
+        let pkg = sample_package();
+        let mut buf = stream_buffer(vec![package_bytes(&pkg)]);
+        let num_entries = pkg.entries.len() as u64;
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, num_entries).await),
+            ParseOutcome::Ok(_)
+        ));
+        // Buffer now empty and stream ended: next call is a clean EOF.
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, num_entries).await),
+            ParseOutcome::CleanEof
+        ));
+    }
+
+    // Stream ending partway through a package is a mid-package truncation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_mid_package_eof() {
+        let pkg = sample_package();
+        let bytes = package_bytes(&pkg);
+        let mut buf = stream_buffer(vec![bytes[..10].to_vec()]);
+        let num_entries = pkg.entries.len() as u64;
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, num_entries).await),
+            ParseOutcome::MidPackageEof
+        ));
+    }
+
+    // An oversized num_hashes must be an Err, matching read_from's limit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_rejects_too_many_hashes() {
+        // One zero-length entry, then num_hashes = 64 (> spec max 63).
+        let bytes = vec![0x00, 0x00, 64];
+        let mut buf = stream_buffer(vec![bytes]);
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, 1).await),
+            ParseOutcome::Err(super::ParseError::TooManyHashes(64))
         ));
     }
 }
