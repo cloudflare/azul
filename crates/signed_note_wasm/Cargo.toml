@@ -3,6 +3,8 @@ name = "signed_note_wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "wasm-bindgen wrapper for the signed_note crate (c2sp.org/signed-note)"
 publish = false
 
