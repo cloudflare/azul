@@ -460,8 +460,8 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
         ));
     }
 
-    // Sign the subtree. Per the spec the timestamp on a subtree
-    // cosignature MUST be zero; we use zero uniformly.
+    // Timestamp must be zero for a non-zero-start subtree; allowed for
+    // start = 0 but we use zero uniformly.
     let note_sig = subtree_signer.sign_subtree(0, origin, &subtree, &subtree_hash);
     Ok((
         StatusCode::OK,
