@@ -446,6 +446,11 @@ async fn upload_entry_bundle(object: &impl ObjectBackend, n: u64, bytes: Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    // The in-memory test backend implements the async ObjectBackend trait
+    // without awaiting; the trait signature is `async fn`, so the impl must
+    // stay `async` to match.
+    #![allow(clippy::unused_async_trait_impl)]
+
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
