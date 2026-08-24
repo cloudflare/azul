@@ -5,8 +5,9 @@
 //! Cloudflare Workers, specialized for MTC issuance logs.
 //!
 //! This worker handles the [`add-checkpoint`][add-cp] submission endpoint,
-//! which updates the pending checkpoint for a log origin, and publishes
-//! the mirror's identity and per-log configuration at `/metadata`.
+//! which updates the pending checkpoint for a log origin, and the OPTIONAL
+//! [`sign-subtree`][signsub] endpoint, and publishes the mirror's identity
+//! and per-log configuration at `/metadata`.
 //!
 //! Per-origin persistent state lives in a `MirrorState` Durable Object,
 //! one per log origin. Its single-threaded execution model provides the
@@ -15,6 +16,7 @@
 //!
 //! [mirror]: https://c2sp.org/tlog-mirror
 //! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
+//! [signsub]: https://c2sp.org/tlog-witness#sign-subtree
 
 use config::AppConfig;
 use ml_dsa::pkcs8::{DecodePrivateKey as _, EncodePublicKey as _};
@@ -23,7 +25,7 @@ use pkcs8::{PrivateKeyInfoRef, SecretDocument, der::oid::db::fips204::ID_ML_DSA_
 use signed_note::{KeyName, NoteVerifier, VerifierList};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
-use tlog_cosignature::SubtreeV1NoteVerifier;
+use tlog_cosignature::{SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
@@ -124,12 +126,15 @@ pub(crate) fn log_verifiers(origin: &str) -> Option<VerifierList> {
 ///
 /// The mirror is an MTC cosigner, which per [c2sp.org/mtc-tlog][mtc] MUST
 /// use an ML-DSA-44 key and produce [`subtree/v1`][cosig] messages, so
-/// this worker supports only that algorithm. Holds the DER-encoded
-/// `SubjectPublicKeyInfo` computed once at load and served by `/metadata`.
+/// this worker supports only that algorithm. Holds the signer plus the
+/// DER-encoded `SubjectPublicKeyInfo` computed once at load and served by
+/// `/metadata`. The signer is boxed because the expanded ML-DSA-44 key is
+/// large (~64 KiB).
 ///
 /// [mtc]: https://c2sp.org/mtc-tlog
 /// [cosig]: https://c2sp.org/tlog-cosignature
 pub(crate) struct MirrorSigner {
+    signer: Box<SubtreeV1CheckpointSigner>,
     public_key_der: Vec<u8>,
 }
 
@@ -146,6 +151,16 @@ impl MirrorSigner {
     #[allow(clippy::unused_self)]
     pub(crate) fn algorithm(&self) -> &'static str {
         "subtree/v1"
+    }
+
+    /// The concrete [`SubtreeV1CheckpointSigner`], used by `sign-subtree`,
+    /// which needs [`SubtreeV1CheckpointSigner::sign_subtree`] and the
+    /// matching verifier, neither reachable through the algorithm-agnostic
+    /// [`CheckpointSigner`] trait object.
+    ///
+    /// [`CheckpointSigner`]: tlog_checkpoint::CheckpointSigner
+    pub(crate) fn as_subtree_signer(&self) -> &SubtreeV1CheckpointSigner {
+        &self.signer
     }
 }
 
@@ -178,6 +193,8 @@ pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static MirrorSigner> {
 /// any other algorithm is rejected (the mirror's cosigner must be an MTC
 /// cosigner, see [`MirrorSigner`]).
 fn build_mirror_signer(pem: &str) -> Result<MirrorSigner> {
+    let name = KeyName::new(CONFIG.mirror_name.clone())
+        .map_err(|e| Error::from(format!("invalid mirror_name: {e:?}")))?;
     let (_label, doc) =
         SecretDocument::from_pem(pem).map_err(|e| Error::from(format!("PEM parse: {e}")))?;
     let pk_info = PrivateKeyInfoRef::try_from(doc.as_bytes())
@@ -193,7 +210,10 @@ fn build_mirror_signer(pem: &str) -> Result<MirrorSigner> {
                 .to_public_key_der()
                 .map_err(|e| Error::from(format!("ML-DSA-44 SPKI encode: {e}")))?
                 .to_vec();
-            Ok(MirrorSigner { public_key_der })
+            Ok(MirrorSigner {
+                signer: Box::new(SubtreeV1CheckpointSigner::new(name, expanded)),
+                public_key_der,
+            })
         }
         oid => Err(Error::from(format!(
             "unsupported MIRROR_SIGNING_KEY algorithm OID {oid}: expected id-ml-dsa-44 \
