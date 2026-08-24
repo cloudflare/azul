@@ -39,7 +39,8 @@ use generic_log_worker::{
 };
 use length_prefixed::{ReadLengthPrefixedBytesExt as _, WriteLengthPrefixedBytesExt as _};
 use tlog_core::{
-    Hash, HashReader as _, TlogError, record_hash, stored_hash_index, stored_hashes_for_record_hash,
+    HASH_SIZE, Hash, HashReader, TlogError, record_hash, stored_hash_index,
+    stored_hashes_for_record_hash,
 };
 use tlog_tiles::{PathElem, PreloadedTlogTileReader, TileHashReader, TlogTile, TlogTileRecorder};
 #[allow(clippy::wildcard_imports)]
@@ -162,6 +163,26 @@ async fn authenticated_leaf_hashes(
     tree_hash: Hash,
     indexes: &[u64],
 ) -> Result<Vec<Hash>> {
+    let tiles = fetch_authenticated_tiles(object, tree_size, indexes).await?;
+    let reader = PreloadedTlogTileReader(tiles);
+    TileHashReader::new(tree_size, tree_hash, &reader)
+        .read_hashes(indexes)
+        .map_err(|e| Error::from(format!("authenticate persisted leaf hashes: {e:?}")))
+}
+
+/// Fetch (from storage) the hash tiles needed to prove `indexes` against
+/// `(tree_size, tree_hash)`. The returned map feeds a [`TileHashReader`] whose
+/// verifying pass authenticates them; a missing or stale tile surfaces as an
+/// error rather than a downstream client rejection.
+///
+/// # Errors
+///
+/// Returns an error if a required hash tile is missing from storage.
+async fn fetch_authenticated_tiles(
+    object: &impl ObjectBackend,
+    tree_size: u64,
+    indexes: &[u64],
+) -> Result<HashMap<TlogTile, Vec<u8>>> {
     // Recording pass: `TlogTileRecorder` short-circuits `read_hashes` with
     // `RecordedTilesOnly` after collecting the tiles it would need.
     let recorder = TlogTileRecorder::default();
@@ -184,12 +205,7 @@ async fn authenticated_leaf_hashes(
             Ok::<(TlogTile, Vec<u8>), Error>((tile, bytes))
         }
     });
-    let tiles: HashMap<TlogTile, Vec<u8>> = try_join_all(tile_futures).await?.into_iter().collect();
-
-    let reader = PreloadedTlogTileReader(tiles);
-    TileHashReader::new(tree_size, tree_hash, &reader)
-        .read_hashes(indexes)
-        .map_err(|e| Error::from(format!("authenticate persisted leaf hashes: {e:?}")))
+    Ok(try_join_all(tile_futures).await?.into_iter().collect())
 }
 
 /// Authenticate a reloaded partial entry bundle before it is extended and
@@ -433,6 +449,105 @@ pub(crate) async fn write_checkpoint(object: &impl ObjectBackend, bytes: Vec<u8>
             },
         )
         .await
+}
+
+/// Ensure the partial "cut" tiles for a tree of size `cut_size` exist, so a
+/// checkpoint at `cut_size` is servable per [tlog-tiles][tiles].
+///
+/// Needed when the persisted frontier advanced past `cut_size` (a prior
+/// upload, or a racing client): the frontier wrote wider partial tiles, so the
+/// narrower ones `cut_size` requires (the level-0 data bundle when mid-tile,
+/// and the partial hash tile at every level) may be missing.
+///
+/// A hash tile stores fixed-size hashes of complete subtrees, so its contents
+/// do not depend on the tree size and the narrow tile is a byte prefix of the
+/// wider stored one. Each level is therefore produced by truncating the widest
+/// stored tile, located with [`TlogTile::parent`] at `frontier_size` (the
+/// upper bound on everything persisted). The data bundle holds variable-length
+/// entries instead, so it is reframed from the authenticated leaves.
+///
+/// The wide hash tiles are authenticated against `frontier_hash` before being
+/// truncated, so a corrupted tile is not propagated into a cut a cosignature
+/// then vouches for. Re-uploads are idempotent, so racing a concurrent commit
+/// is safe.
+///
+/// # Errors
+///
+/// Returns an error on a storage fault, if a tile the cut needs has no stored
+/// counterpart, or if the stored tiles fail authentication.
+pub(crate) async fn ensure_cut_tiles(
+    object: &impl ObjectBackend,
+    cut_size: u64,
+    frontier_size: u64,
+    frontier_hash: Hash,
+) -> Result<()> {
+    if cut_size == 0 || cut_size >= frontier_size {
+        return Ok(());
+    }
+    let last_leaf = stored_hash_index(0, cut_size - 1);
+
+    // Authenticate the stored tiles along the cut's right edge against the
+    // frontier root. These are the same (level, index) pairs the cut needs,
+    // just at the frontier's wider widths.
+    let wide = fetch_authenticated_tiles(object, frontier_size, &[last_leaf]).await?;
+    let reader = PreloadedTlogTileReader(wide.clone());
+    TileHashReader::new(frontier_size, frontier_hash, &reader)
+        .read_hashes(&[last_leaf])
+        .map_err(|e| Error::from(format!("authenticate frontier tiles for cut: {e:?}")))?;
+
+    let leaf_tile = TlogTile::from_index(last_leaf);
+    let opts = immutable_tile_opts();
+    let mut uploads: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for level in 0.. {
+        let Some(need) = leaf_tile.parent(level, cut_size) else {
+            break;
+        };
+        let have = leaf_tile.parent(level, frontier_size).ok_or_else(|| {
+            Error::from(format!(
+                "no stored tile at level {level} for frontier {frontier_size}"
+            ))
+        })?;
+        // Same width at both sizes: the tile the cut needs is the stored one.
+        if need.path() == have.path() {
+            continue;
+        }
+        let bytes = wide.get(&have).ok_or_else(|| {
+            Error::from(format!("frontier tile missing for cut: {}", have.path()))
+        })?;
+        let want = need.width() as usize * HASH_SIZE;
+        if bytes.len() < want {
+            return Err(Error::from(format!(
+                "stored tile {} is {} bytes, need {want} to cut",
+                have.path(),
+                bytes.len()
+            )));
+        }
+        uploads.push((need.path(), bytes[..want].to_vec()));
+
+        // The level-0 data bundle is not fixed-stride, so reframe it from the
+        // leaves rather than truncating bytes.
+        if level == 0 {
+            let base = (cut_size - 1) / TILE_WIDTH * TILE_WIDTH;
+            let leaves =
+                read_persisted_leaves(object, base, cut_size - base, frontier_size, frontier_hash)
+                    .await?;
+            let mut bundle = Vec::new();
+            for entry in &leaves {
+                push_tile_leaf(&mut bundle, entry)?;
+            }
+            uploads.push((need.with_data_path(PathElem::Entries).path(), bundle));
+        }
+    }
+
+    stream_iter(
+        uploads
+            .into_iter()
+            .map(|(path, bytes)| object.upload(path, bytes, &opts)),
+    )
+    .buffer_unordered(UPLOAD_CONCURRENCY)
+    .try_collect::<()>()
+    .await
 }
 
 /// Upload one entry bundle (data tile). `n` is the tree size after the
@@ -708,6 +823,146 @@ mod tests {
                 .await
                 .is_err(),
             "tampered persisted bundle must be rejected"
+        );
+    }
+
+    /// Assert a checkpoint at `size` is servable: the stored tiles
+    /// authenticate the last leaf against `reference_root(size)`, and the cut
+    /// data bundle decodes to the expected leaves.
+    async fn assert_servable_at(obj: &MemBackend, size: u64) {
+        use length_prefixed::ReadLengthPrefixedBytesExt as _;
+        let root = reference_root(size);
+
+        let idx = [stored_hash_index(0, size - 1)];
+        let tiles = fetch_authenticated_tiles(obj, size, &idx).await.unwrap();
+        let reader = PreloadedTlogTileReader(tiles);
+        let got = TileHashReader::new(size, root, &reader)
+            .read_hashes(&idx)
+            .expect("tiles authenticate against root");
+        assert_eq!(got[0], record_hash(&entry(size - 1)));
+
+        // For a mid-tile size, the cut data bundle must decode to exactly the
+        // trailing leaves [subtree_start, size).
+        if !size.is_multiple_of(TILE_WIDTH) {
+            let subtree_start = (size / TILE_WIDTH) * TILE_WIDTH;
+            let data_key = TlogTile::from_index(stored_hash_index(0, size - 1))
+                .with_data_path(PathElem::Entries)
+                .path();
+            let bytes = obj
+                .fetch(&data_key)
+                .await
+                .unwrap()
+                .expect("cut data bundle stored");
+            let mut cur: &[u8] = &bytes;
+            for i in subtree_start..size {
+                let got = cur.read_length_prefixed(2).unwrap();
+                assert_eq!(got, entry(i), "leaf {i} mismatch in cut bundle");
+            }
+            assert!(cur.is_empty(), "cut bundle has trailing bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_first_block() {
+        let obj = MemBackend::default();
+        // Frontier at 300; a checkpoint at 100 (mid-tile, first block) needs
+        // its width-100 data bundle synthesized. The frontier only wrote the
+        // width-300 partial (a full width-256 tile 0 + width-44 tile 1).
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 100, 300, frontier).await.unwrap();
+        assert_servable_at(&obj, 100).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_aligned_below_frontier() {
+        let obj = MemBackend::default();
+        // Frontier at 768; a checkpoint at a tile-aligned 256 still needs the
+        // upper-level partial hash tile (tile/1/000.p/1) synthesized: the
+        // frontier wrote tile/1/000.p/3, never the .p/1 a tree of 256 needs.
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 768, &leaves(0..768))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 256, 768, frontier).await.unwrap();
+        assert_servable_at(&obj, 256).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_later_block() {
+        let obj = MemBackend::default();
+        // Frontier at 1024, a checkpoint at 900. The level-1 width differs
+        // (4 vs 3), so the cut needs tile/1/000.p/3, which the frontier
+        // never wrote. A frontier of 1000 would share width 3 and pass
+        // without exercising the upper level at all.
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 1024, &leaves(0..1024))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 900, 1024, frontier).await.unwrap();
+        assert_servable_at(&obj, 900).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_frontier_far_ahead() {
+        let obj = MemBackend::default();
+        // One commit 0 -> 2000 writes only the widest partial at each level
+        // (level-1 width 7). Cutting at 900 needs width 3, six blocks back.
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 2000, &leaves(0..2000))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 900, 2000, frontier).await.unwrap();
+        assert_servable_at(&obj, 900).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_aligned_cut_far_below_frontier() {
+        let obj = MemBackend::default();
+        // A 256-aligned cut needs no data bundle, but still needs the
+        // level-1 partial at width 2 against a frontier of width 7.
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 2000, &leaves(0..2000))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 512, 2000, frontier).await.unwrap();
+        assert_servable_at(&obj, 512).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_spans_three_levels() {
+        let obj = MemBackend::default();
+        // Past 65536 the cut also needs a level-2 tile, so the truncation
+        // walks every level rather than stopping at level 1.
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 70000, &leaves(0..70000))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 66000, 70000, frontier)
+            .await
+            .unwrap();
+        assert_servable_at(&obj, 66000).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_is_idempotent() {
+        let obj = MemBackend::default();
+        let frontier = persist_entries(&obj, 0, EMPTY_HASH, 2000, &leaves(0..2000))
+            .await
+            .unwrap();
+        ensure_cut_tiles(&obj, 900, 2000, frontier).await.unwrap();
+        ensure_cut_tiles(&obj, 900, 2000, frontier).await.unwrap();
+        assert_servable_at(&obj, 900).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_cut_tiles_rejects_wrong_frontier_hash() {
+        let obj = MemBackend::default();
+        persist_entries(&obj, 0, EMPTY_HASH, 300, &leaves(0..300))
+            .await
+            .unwrap();
+        // A frontier hash that doesn't match storage must fail authentication
+        // rather than write mismatched tiles.
+        assert!(
+            ensure_cut_tiles(&obj, 100, 300, Hash([0xab; tlog_core::HASH_SIZE]))
+                .await
+                .is_err()
         );
     }
 

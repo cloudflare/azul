@@ -350,19 +350,13 @@ async fn verify_and_persist(
         ));
     }
 
-    // Spec: the mirror updates its checkpoint to `upload_end` only once
-    // "the next entry will be greater or equal to `upload_end`", i.e. all
-    // entries up to `upload_end` are durably persisted. A request that
-    // persists nothing (e.g. an empty body, or one whose packages are all
-    // already-persisted) must not let us cosign past our frontier: without
-    // this guard `upload_end` above `next_entry` would sign a checkpoint at
-    // a size we never wrote tiles for. When the frontier has not reached
-    // `upload_end`, treat it like a truncated upload and 202 so the client
-    // resumes from the advertised next entry.
+    // Frontier below `upload_end`: not every entry up to `upload_end` is
+    // persisted yet (a truncated body, or an already-persisted request that
+    // stops short). This is the spec's "not yet received all packages" case,
+    // so 202 with the advanced frontier for the client to resume from.
     if frontier_size < header.upload_end {
         log::info!(
-            "add-entries: frontier {frontier_size} below upload_end {}; nothing to persist \
-             this request, returning 202 to resume",
+            "add-entries: frontier {frontier_size} below upload_end {}; returning 202 to resume",
             header.upload_end,
         );
         return Ok(mirror_info_202(
@@ -398,6 +392,17 @@ async fn verify_and_persist(
         return Err(AppError::InternalServerError(
             "recomputed root mismatch".to_owned(),
         ));
+    }
+
+    // Frontier ahead of `upload_end` (a prior upload persisted past it, or a
+    // racing client): the edge tiles were written at the larger frontier, so
+    // the narrower "cut" tiles a tree of size `upload_end` needs may be
+    // missing and a cosignature at `upload_end` would be unverifiable against
+    // our own tiles. Spec requires the tree at `upload_end` be servable before
+    // we cosign, so synthesize those cut tiles first.
+    if frontier_size > header.upload_end {
+        let bucket = load_origin_bucket(env, &header.log_origin)?;
+        commit::ensure_cut_tiles(&bucket, header.upload_end, frontier_size, frontier_hash).await?;
     }
 
     cosign_and_serve(env, header, target, snapshot).await
