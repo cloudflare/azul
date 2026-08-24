@@ -97,28 +97,33 @@ pub(crate) fn decoded_stream(
     Ok(stream)
 }
 
-/// Largest compressed slice fed to the decoder per step, and the point at
-/// which accumulated plaintext is drained. DEFLATE can inflate a small
-/// input by a large factor (a hostile "zip bomb" reaches ~1000x), so a
-/// single unbounded `write_all` of a whole chunk could balloon the sink
-/// `Vec` far past the isolate's memory ceiling. Feeding the decoder in
-/// bounded slices and draining between them keeps the plaintext held at
-/// once proportional to this window, not to the compression ratio.
-const INFLATE_STEP: usize = 64 * 1024;
+/// Compressed bytes fed to the decoder per [`GzipInflater::step`] call.
+/// `write_all` inflates its whole slice into the decoder's sink before
+/// returning, and DEFLATE reaches ~1032x, so a step holds up to
+/// `INFLATE_INPUT_STEP * 1032` bytes of plaintext transiently (~4 MiB
+/// here). A small input step keeps that under the isolate's ~128 MB
+/// ceiling even for a zip bomb; a larger chunk or the whole body is never
+/// handed to `write_all` at once.
+const INFLATE_INPUT_STEP: usize = 4 * 1024;
 
-/// Incremental gzip inflater: feed compressed bytes with [`Self::push`]
-/// and drain the plaintext produced so far; call [`Self::finish`] once the
-/// compressed input ends to validate the gzip trailer (CRC-32 + ISIZE).
+/// Largest plaintext run emitted downstream. The plaintext drained after a
+/// step is split into runs no larger than this.
+const EMIT_STEP: usize = 64 * 1024;
+
+/// Incremental gzip inflater: feed a bounded compressed slice with
+/// [`Self::step`], draining the plaintext it produced; call
+/// [`Self::finish`] once the compressed input ends to validate the gzip
+/// trailer (CRC-32 + ISIZE).
 ///
 /// Backed by [`flate2`]'s pure-Rust `rust_backend` (`miniz_oxide`), so it
 /// compiles to and runs under WASM. `flate2::write::GzDecoder` handles all
 /// gzip framing: the 10-byte header, optional FNAME/FEXTRA/etc. fields
-/// (buffered across `push` calls if split across chunks), and the trailer.
+/// (buffered across calls if split across steps), and the trailer.
 ///
-/// [`Self::push`] feeds the decoder at most [`INFLATE_STEP`] compressed
-/// bytes at a time and drains after each step, so the sink never holds
-/// more than one step's worth of inflated output regardless of how large
-/// or compressible the caller's chunk is.
+/// The caller (see [`gunzip`]) feeds at most [`INFLATE_INPUT_STEP`] bytes
+/// per [`Self::step`] and stops once a step yields plaintext, leaving the
+/// rest of the compressed chunk unfed. At most one step is inflated ahead
+/// of what has been emitted.
 struct GzipInflater {
     decoder: GzDecoder<Vec<u8>>,
 }
@@ -130,26 +135,24 @@ impl GzipInflater {
         }
     }
 
-    /// Feed one compressed chunk, invoking `emit` with each bounded
-    /// plaintext run produced. `emit` may be called zero times (the input
-    /// only advanced the gzip header or a not-yet-emitting DEFLATE block),
-    /// once, or many times for a highly compressible chunk.
+    /// Feed one compressed slice (at most [`INFLATE_INPUT_STEP`] bytes),
+    /// invoking `emit` with each [`EMIT_STEP`]-bounded plaintext run the
+    /// step produced. `emit` may be called zero times (the slice only
+    /// advanced the gzip header or a not-yet-emitting DEFLATE block), once,
+    /// or several times for a highly compressible slice.
     ///
-    /// Input is written to the decoder one [`INFLATE_STEP`] slice at a
-    /// time, draining the sink after each, and every drained run is further
-    /// split into at most [`INFLATE_STEP`]-byte emissions. So no single
-    /// emitted run (what flows downstream) exceeds one step regardless of
-    /// the (attacker-controlled) compression ratio, and the sink is drained
-    /// per input step instead of accumulating the whole chunk's output.
-    fn push(&mut self, input: &[u8], mut emit: impl FnMut(Vec<u8>)) -> Result<()> {
-        for slice in input.chunks(INFLATE_STEP) {
-            self.decoder
-                .write_all(slice)
-                .map_err(|e| Error::from(format!("gzip decode failed: {e}")))?;
-            let produced = std::mem::take(self.decoder.get_mut());
-            for run in produced.chunks(INFLATE_STEP) {
-                emit(run.to_vec());
-            }
+    /// # Panics
+    ///
+    /// Debug-asserts `slice.len() <= INFLATE_INPUT_STEP`; a larger slice
+    /// breaks the transient-plaintext bound.
+    fn step(&mut self, slice: &[u8], mut emit: impl FnMut(Vec<u8>)) -> Result<()> {
+        debug_assert!(slice.len() <= INFLATE_INPUT_STEP, "input slice too large");
+        self.decoder
+            .write_all(slice)
+            .map_err(|e| Error::from(format!("gzip decode failed: {e}")))?;
+        let produced = std::mem::take(self.decoder.get_mut());
+        for run in produced.chunks(EMIT_STEP) {
+            emit(run.to_vec());
         }
         Ok(())
     }
@@ -167,14 +170,15 @@ impl GzipInflater {
 /// Wrap a compressed body `Stream` in a decoding stream that yields the
 /// gunzipped plaintext chunks.
 ///
-/// The returned stream inflates lazily: each poll pulls compressed chunks
-/// from `inner` until it can emit at least one plaintext run, so memory
-/// use stays bounded by the chunk size rather than the whole body. A
-/// single compressed chunk that inflates a lot is emitted as several
-/// [`INFLATE_STEP`]-bounded runs, drained from `pending` across polls, so
-/// a hostile compression ratio cannot force one giant allocation. A decode
-/// error (malformed gzip) or a truncated stream surfaces as a terminal
-/// `Err` item, after which the stream ends.
+/// Each poll feeds the decoder at most [`INFLATE_INPUT_STEP`] compressed
+/// bytes and stops once a step yields plaintext, leaving the rest of the
+/// current chunk unfed until the next poll (tracked by `current`/`pos`).
+/// At most one input step is inflated ahead of what has been emitted, so
+/// the transient plaintext is bounded by `INFLATE_INPUT_STEP * ratio`
+/// rather than the whole chunk's inflation. A step that produces more than
+/// [`EMIT_STEP`] of plaintext yields several bounded runs drained from
+/// `pending`. A decode error (malformed gzip) or a truncated stream
+/// surfaces as a terminal `Err` item, after which the stream ends.
 pub(crate) fn gunzip<S>(inner: S) -> BodyStream
 where
     S: Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin + 'static,
@@ -182,8 +186,13 @@ where
     struct DecodeState<S> {
         inner: S,
         inflater: Option<GzipInflater>,
-        /// Plaintext runs decoded from the last compressed chunk but not
-        /// yet emitted, drained one per poll (front to back).
+        /// Compressed chunk currently being fed, and the offset of the
+        /// next unfed byte. Bytes at `pos..` are not fed until the current
+        /// runs drain, capping how far ahead the decoder inflates.
+        current: Vec<u8>,
+        pos: usize,
+        /// Plaintext runs from the last step not yet emitted, drained one
+        /// per poll (front to back).
         pending: std::collections::VecDeque<Vec<u8>>,
         done: bool,
     }
@@ -192,6 +201,8 @@ where
         DecodeState {
             inner,
             inflater: Some(GzipInflater::new()),
+            current: Vec::new(),
+            pos: 0,
             pending: std::collections::VecDeque::new(),
             done: false,
         },
@@ -203,23 +214,29 @@ where
                 return None;
             }
             loop {
-                match st.inner.next().await {
-                    Some(Ok(chunk)) => {
-                        let inflater = st.inflater.as_mut().expect("inflater present");
-                        let mut runs = std::collections::VecDeque::new();
-                        if let Err(e) = inflater.push(&chunk, |run| runs.push_back(run)) {
-                            st.done = true;
-                            return Some((Err(BodyError::Decode(e.to_string())), st));
-                        }
-                        // A chunk may not yet yield any plaintext (partial
-                        // header / block); pull more instead of emitting an
-                        // empty item. Otherwise emit the first run now and
-                        // queue the rest for subsequent polls.
-                        let Some(first) = runs.pop_front() else {
-                            continue;
-                        };
+                // Feed the unfed tail of the current chunk one bounded
+                // step at a time, stopping as soon as a step emits.
+                while st.pos < st.current.len() {
+                    let end = (st.pos + INFLATE_INPUT_STEP).min(st.current.len());
+                    let slice = st.current[st.pos..end].to_vec();
+                    st.pos = end;
+                    let inflater = st.inflater.as_mut().expect("inflater present");
+                    let mut runs = std::collections::VecDeque::new();
+                    if let Err(e) = inflater.step(&slice, |run| runs.push_back(run)) {
+                        st.done = true;
+                        return Some((Err(BodyError::Decode(e.to_string())), st));
+                    }
+                    if let Some(first) = runs.pop_front() {
                         st.pending = runs;
                         return Some((Ok(first), st));
+                    }
+                }
+
+                // Current chunk fully fed; pull the next compressed chunk.
+                match st.inner.next().await {
+                    Some(Ok(chunk)) => {
+                        st.current = chunk;
+                        st.pos = 0;
                     }
                     Some(Err(e)) => {
                         st.done = true;
@@ -329,17 +346,16 @@ mod tests {
         );
     }
 
-    // A highly compressible payload whose plaintext far exceeds
-    // INFLATE_STEP, delivered as a single compressed chunk, must inflate
-    // to the exact original but be emitted as several bounded runs so no
-    // single allocation exceeds the step. This is the zip-bomb guard.
+    // A compressible payload whose plaintext exceeds EMIT_STEP, delivered
+    // as one compressed chunk, reconstructs and is emitted as
+    // EMIT_STEP-bounded runs rather than a single unbounded one.
     #[tokio::test]
     async fn large_ratio_chunk_emits_bounded_runs() {
-        let plain = vec![0u8; INFLATE_STEP * 10 + 123];
+        let plain = vec![0u8; EMIT_STEP * 10 + 123];
         let compressed = gzip(&plain);
         assert!(
-            compressed.len() < INFLATE_STEP,
-            "test payload should compress to well under one step"
+            compressed.len() < EMIT_STEP,
+            "test payload should compress to well under one emit step"
         );
         // Feed the whole compressed body as one chunk.
         let mut s = gunzip(stream::iter(vec![Ok::<_, BodyError>(compressed)]));
@@ -348,8 +364,8 @@ mod tests {
         while let Some(item) = s.next().await {
             let run = item.unwrap();
             assert!(
-                run.len() <= INFLATE_STEP,
-                "run of {} bytes exceeds INFLATE_STEP {INFLATE_STEP}",
+                run.len() <= EMIT_STEP,
+                "run of {} bytes exceeds EMIT_STEP {EMIT_STEP}",
                 run.len()
             );
             total += run.len();
@@ -360,6 +376,59 @@ mod tests {
             runs > 1,
             "a >step payload must span multiple runs, got {runs}"
         );
+    }
+
+    // Feeding INFLATE_INPUT_STEP-bounded slices (as gunzip does) round-trips
+    // a body whose compressed form spans several steps.
+    #[test]
+    fn inflater_step_bounds_input() {
+        // A poorly-compressible body whose compressed form spans several
+        // input steps.
+        let mut plain = Vec::new();
+        for i in 0u32..0x1_0000 {
+            plain.extend_from_slice(&i.wrapping_mul(2_654_435_761).to_le_bytes());
+        }
+        let compressed = gzip(&plain);
+        assert!(
+            compressed.len() > INFLATE_INPUT_STEP,
+            "test needs a body spanning multiple input steps"
+        );
+
+        let mut inflater = GzipInflater::new();
+        let mut total = 0usize;
+        // Feed as gunzip does: INFLATE_INPUT_STEP-bounded slices.
+        for slice in compressed.chunks(INFLATE_INPUT_STEP) {
+            inflater
+                .step(slice, |run| {
+                    assert!(run.len() <= EMIT_STEP, "run exceeds EMIT_STEP");
+                    total += run.len();
+                })
+                .unwrap();
+        }
+        total += inflater.finish().unwrap().len();
+        assert_eq!(total, plain.len());
+    }
+
+    // One compressed chunk whose inflation exceeds a step: the first poll
+    // returns an EMIT_STEP-bounded run, leaving the rest unfed, and the
+    // full stream reconstructs the original.
+    #[tokio::test]
+    async fn large_ratio_chunk_emits_before_full_feed() {
+        let plain = vec![0u8; EMIT_STEP * 8];
+        let compressed = gzip(&plain);
+        let mut s = gunzip(stream::iter(vec![Ok::<_, BodyError>(compressed)]));
+        let first = s.next().await.expect("a run").expect("no error");
+        assert!(
+            first.len() <= EMIT_STEP,
+            "first emitted run must be bounded, got {}",
+            first.len()
+        );
+        // The remaining runs complete the original.
+        let mut total = first.len();
+        while let Some(item) = s.next().await {
+            total += item.unwrap().len();
+        }
+        assert_eq!(total, plain.len());
     }
 
     #[tokio::test]
