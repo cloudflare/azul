@@ -598,8 +598,12 @@ fn build_validity(
     max_lifetime_secs: u64,
 ) -> std::result::Result<Validity, String> {
     let now = Duration::from_millis(now_millis);
+    // notAfter is inclusive, so the endpoint span is one second less than the lifetime.
+    let validity_span_secs = max_lifetime_secs
+        .checked_sub(1)
+        .ok_or_else(|| "maximum certificate lifetime must be at least one second".to_string())?;
     let not_before = UtcTime::from_unix_duration(now).map_err(|e| e.to_string())?;
-    let not_after = UtcTime::from_unix_duration(now + Duration::from_secs(max_lifetime_secs))
+    let not_after = UtcTime::from_unix_duration(now + Duration::from_secs(validity_span_secs))
         .map_err(|e| e.to_string())?;
 
     Ok(Validity::new(
@@ -704,20 +708,21 @@ mod tests {
     }
 
     #[test]
-    fn test_build_validity() {
-        let now_ms = 1_700_000_000_000_u64; // Nov 2023
-        let lifetime_secs = 86400_u64; // 1 day
+    fn test_build_validity_respects_inclusive_lifetime() {
+        let now_ms = 1_700_000_000_500_u64;
+        let lifetime_secs = 7 * 24 * 60 * 60;
 
         let validity = build_validity(now_ms, lifetime_secs).unwrap();
+        let not_before = validity.not_before.to_unix_duration().as_secs();
+        let not_after = validity.not_after.to_unix_duration().as_secs();
 
-        assert_eq!(
-            validity.not_before.to_unix_duration().as_secs(),
-            now_ms / 1000
-        );
-        assert_eq!(
-            validity.not_after.to_unix_duration().as_secs(),
-            now_ms / 1000 + lifetime_secs
-        );
+        assert_eq!(not_before, now_ms / 1000);
+        assert_eq!(not_after - not_before + 1, lifetime_secs);
+    }
+
+    #[test]
+    fn test_build_validity_rejects_zero_lifetime() {
+        assert!(build_validity(1_700_000_000_000, 0).is_err());
     }
 
     #[test]
