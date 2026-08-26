@@ -255,6 +255,14 @@ where
 
     let persisted_new = result.frontier_size > snapshot.next_entry.size;
 
+    // Kick the per-origin partial-tile cleaner to (re)start its alarm loop
+    // whenever new entries were persisted. Best-effort: cleaning runs on the
+    // alarm and must never fail this response, so `kick` logs and swallows
+    // any error.
+    if persisted_new {
+        crate::cleaner_do::kick(env, &header.log_origin).await;
+    }
+
     if result.truncated {
         log::info!(
             "add-entries: client-truncated after {} complete packages; persisted through {}",
