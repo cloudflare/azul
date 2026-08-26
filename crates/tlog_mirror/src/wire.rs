@@ -61,15 +61,7 @@ impl AddEntriesRequestHeader {
     pub fn read_from<R: Read>(mut reader: R) -> Result<Self, ParseError> {
         let log_origin_size = reader.read_u16::<BigEndian>()?;
         let mut log_origin_bytes = vec![0u8; usize::from(log_origin_size)];
-        reader.read_exact(&mut log_origin_bytes).map_err(|e| {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                ParseError::LogOriginTruncated {
-                    advertised: log_origin_size,
-                }
-            } else {
-                ParseError::Io(e)
-            }
-        })?;
+        reader.read_exact(&mut log_origin_bytes)?;
         let log_origin =
             String::from_utf8(log_origin_bytes).map_err(|_| ParseError::LogOriginNotUtf8)?;
 
@@ -481,7 +473,7 @@ mod tests {
         let err = AddEntriesRequestHeader::read_from(Cursor::new(&buf)).unwrap_err();
         assert!(matches!(
             err,
-            ParseError::LogOriginTruncated { advertised: 5 }
+            ParseError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof
         ));
     }
 

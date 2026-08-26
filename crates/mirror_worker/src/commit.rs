@@ -725,6 +725,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chunked_commit_matches_single_commit() {
+        // Streaming add-entries flushes in frontier-advancing chunks. Each
+        // chunk must write the same entry bundles and hash tiles a single
+        // commit would, so the persisted objects and the final root are
+        // identical (the chunked run may additionally leave orphaned
+        // partial tiles behind for the cleaner).
+        let chunked = MemBackend::default();
+        let mut size = 0u64;
+        let mut hash = EMPTY_HASH;
+        for end in [256u64, 512, 768, 900] {
+            hash = persist_entries(&chunked, size, hash, end, &leaves(size..end))
+                .await
+                .unwrap();
+            size = end;
+        }
+        assert_eq!(hash, reference_root(900));
+
+        let oneshot = MemBackend::default();
+        let root = persist_entries(&oneshot, 0, EMPTY_HASH, 900, &leaves(0..900))
+            .await
+            .unwrap();
+        assert_eq!(root, hash);
+
+        // Every object a single commit writes is present, byte-for-byte,
+        // after the chunked commit.
+        let chunked = chunked.store.borrow();
+        for (key, bytes) in oneshot.store.borrow().iter() {
+            assert_eq!(
+                chunked.get(key),
+                Some(bytes),
+                "chunked commit missing or differing object {key}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn entry_bundles_roundtrip() {
         use length_prefixed::ReadLengthPrefixedBytesExt as _;
         let obj = MemBackend::default();

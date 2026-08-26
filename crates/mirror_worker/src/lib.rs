@@ -41,6 +41,7 @@ mod commit;
 mod frontend_worker;
 mod mirror_state_do;
 mod storage;
+mod stream_buffer;
 
 /// The binding name used in `wrangler.jsonc` for the `MirrorState` DO.
 pub(crate) const MIRROR_STATE_BINDING: &str = "MIRROR_STATE";

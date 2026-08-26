@@ -4,19 +4,21 @@
 //! `POST /add-entries` handler.
 //!
 //! Implements the [c2sp.org/tlog-mirror `add-entries`][add-e] endpoint:
-//! read the (optionally gzip) request body, verify each [`EntryPackage`]
+//! stream the (optionally gzip) request body, verify each [`EntryPackage`]
 //! against the target pending checkpoint with a subtree consistency proof,
-//! persist the verified entries as bundles and hash tiles (see
-//! [`crate::commit`]), and advance the persisted-entry frontier.
+//! and incrementally persist the verified entries as bundles and hash
+//! tiles (see [`crate::commit`]), advancing the persisted-entry frontier.
 //!
-//! The whole body is buffered, then all its packages are committed in a
-//! single pass; the mirror checkpoint is cosigned only once the upload is
-//! durably committed. A follow-up commit adds incremental streaming so a
-//! large upload does not have to buffer the entire body in memory.
+//! Packages are committed in chunks of `commit_packages` (config,
+//! default 32) rather than buffering the whole body: every
+//! `commit_packages` verified packages are flushed to storage and the
+//! frontier is advanced, bounding in-memory buffering and giving durable
+//! mid-request progress, per the tlog-mirror streaming model. The mirror
+//! checkpoint is cosigned only once the whole upload is durably committed.
 //!
 //! A complete upload writes the cosigned checkpoint and returns 200 with
 //! the mirror's [cosignature][cosig] line(s); a client-truncated upload
-//! keeps the persisted prefix and returns 202 with the advanced next entry
+//! keeps the flushed prefix and returns 202 with the advanced next entry
 //! so the client can resume (see [Processing][proc]).
 //!
 //! [add-e]: https://c2sp.org/tlog-mirror#add-entries
@@ -43,10 +45,11 @@ use tlog_mirror::{
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-use generic_log_worker::util::now_millis;
+use generic_log_worker::{ObjectBackend, util::now_millis};
 
 use crate::{
-    body, commit,
+    body::{self, BodyError},
+    commit,
     frontend_worker::{ApiResult, AppError},
     load_mirror_signer, load_ticket_sealer, log_verifiers,
     mirror_state_do::{
@@ -54,15 +57,16 @@ use crate::{
         NextEntry, PendingCheckpoint, state_stub,
     },
     storage::load_origin_bucket,
+    stream_buffer::StreamBuffer,
 };
 
 /// Handle `POST /add-entries`.
 ///
-/// See the module-level comment for the full flow: read and verify entry
-/// packages from the request body, persist the verified entries and
-/// advance the persisted-entry frontier, and either cosign the mirror
-/// checkpoint (200) or, for a truncated upload, persist the verified
-/// prefix and return 202.
+/// See the module-level comment for the full flow: parse and verify entry
+/// packages over a streamed (optionally gzip) request body, persist the
+/// verified entries and advance the persisted-entry frontier, and either
+/// cosign the mirror checkpoint (200) or, for a truncated upload, persist
+/// the verified prefix and return 202.
 #[worker::send]
 pub(crate) async fn add_entries(
     State(env): State<Env>,
@@ -85,19 +89,12 @@ pub(crate) async fn add_entries(
     // Considerations"). The Workers runtime does not decompress request
     // bodies, so gzip-encoded bodies are gunzipped here; unknown encodings
     // are 415'd (see `crate::body`).
-    //
-    // The whole (decoded) body is buffered before processing; a follow-up
-    // commit streams it instead of buffering it all.
-    let raw = body::read_decoded_body(&parts.headers, body).await?;
-    let mut cursor = Cursor::new(raw.as_slice());
+    let stream = body::decoded_stream(&parts.headers, body)?;
+    let mut buf = StreamBuffer::new(stream);
 
-    let header = match AddEntriesRequestHeader::read_from(&mut cursor) {
-        Ok(header) => header,
-        Err(e) => {
-            log::warn!("add-entries: malformed header: {e:?}");
-            return Err(AppError::BadRequest(e.to_string()));
-        }
-    };
+    // Pull chunks until the header parses, retrying on UnexpectedEof. The
+    // header size is bounded (~131 KB max), so the loop terminates.
+    let header = parse_header(&mut buf).await?;
 
     let Some(verifiers) = log_verifiers(&header.log_origin) else {
         return Err(AppError::UnknownLogOrigin);
@@ -180,15 +177,7 @@ pub(crate) async fn add_entries(
     )
     .await?;
 
-    verify_and_persist(
-        &env,
-        &header,
-        &snapshot,
-        &target,
-        &mut cursor,
-        &first_prefix,
-    )
-    .await
+    stream_and_commit(&env, &header, &snapshot, &target, &mut buf, &first_prefix).await
 }
 
 /// Return true iff the request's `Content-Type` is
@@ -205,67 +194,232 @@ fn content_type_is_octet_stream(headers: &axum::http::HeaderMap) -> bool {
         == "application/octet-stream"
 }
 
-/// Read, verify, and persist the entry packages for `[upload_start,
-/// upload_end)`, then produce the HTTP response.
+/// Stream, verify, and incrementally persist the entry packages for
+/// `[upload_start, upload_end)`, then produce the HTTP response.
 ///
-/// Packages are read and verified in canonical order from the buffered
-/// body. Entries below the frontier at request start are already
-/// persisted, so they are verified but not re-saved (spec: "skip saving
-/// already-written entries"); the remaining entries are committed in a
-/// single [`commit::persist_entries`] call and the persisted-entry
-/// frontier is advanced once in the DO. A follow-up commit flushes
-/// incrementally instead of once at the end.
+/// Packages are read and verified in canonical order and buffered until
+/// `commit_packages` (config, default 32) have accumulated, then flushed
+/// as entry bundles + hash tiles with the persisted-entry frontier
+/// advanced in the DO (see [`flush_chunk`]). This bounds in-memory
+/// buffering and gives durable mid-request progress rather than deferring
+/// every write to the end of the body. Entries below the frontier at
+/// request start are already persisted, so they are verified but not
+/// re-saved (spec: "skip saving already-written entries").
+///
+/// The running frontier `(size, hash)` is threaded locally across flushes
+/// from each [`commit::persist_entries`] result, so the DO is not
+/// re-queried between chunks. Because tiles are immutable and
+/// content-addressed and the DO advance is a monotone compare-and-swap, a
+/// repeated or concurrent flush of the same range is harmless.
 ///
 /// Response cases (see [Processing][proc]):
 ///
 ///   * every package received and the recomputed tree matches the target:
 ///     cosign the mirror checkpoint, advance it, and return 200 with the
 ///     cosignature line(s).
-///   * client truncation after at least one complete package: persist the
-///     verified prefix and return 202 with the advanced next entry.
+///   * client truncation after at least one complete package: return 202
+///     with the advanced next entry so the client resumes.
 ///   * truncation before the first complete package, or a malformed body:
 ///     400. A package that fails subtree-consistency verification: 422.
 ///
 /// # Errors
 ///
-/// Returns an error on a storage failure while persisting, or (500) if the
-/// recomputed root of a complete upload disagrees with the target
-/// checkpoint.
+/// Returns an error on a transport failure reading the body stream, a
+/// storage failure while flushing, or (500) if the recomputed root of a
+/// complete upload disagrees with the target checkpoint.
 ///
 /// [proc]: https://c2sp.org/tlog-mirror#processing
-#[allow(clippy::too_many_lines)]
-async fn verify_and_persist(
+async fn stream_and_commit<S>(
     env: &Env,
     header: &AddEntriesRequestHeader,
     snapshot: &MirrorStateSnapshot,
     target: &PendingCheckpoint,
-    cursor: &mut Cursor<&[u8]>,
+    buf: &mut StreamBuffer<S>,
     first_prefix: &[Vec<u8>],
-) -> ApiResult<axum::response::Response> {
+) -> ApiResult<axum::response::Response>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
     let bucket = load_origin_bucket(env, &header.log_origin)?;
+
+    let result = persist_packages(
+        env,
+        header,
+        target,
+        buf,
+        first_prefix,
+        &bucket,
+        &snapshot.next_entry,
+    )
+    .await?;
+
+    let persisted_new = result.frontier_size > snapshot.next_entry.size;
+
+    if result.truncated {
+        log::info!(
+            "add-entries: client-truncated after {} complete packages; persisted through {}",
+            result.packages_received,
+            result.frontier_size,
+        );
+        return Ok(mirror_info_202(
+            env,
+            snapshot,
+            &header.log_origin,
+            result.frontier_size,
+        ));
+    }
+
+    // Spec: the mirror updates its checkpoint to `upload_end` only once
+    // "the next entry will be greater or equal to `upload_end`", i.e. all
+    // entries up to `upload_end` are durably persisted. A request that
+    // persists nothing (e.g. an empty body, or one whose packages are all
+    // already-persisted) must not let us cosign past our frontier: without
+    // this guard `upload_end` above `next_entry` would sign a checkpoint at
+    // a size we never wrote tiles for. When the frontier has not reached
+    // `upload_end`, treat it like a truncated upload and 202 so the client
+    // resumes from the advertised next entry.
+    if result.frontier_size < header.upload_end {
+        log::info!(
+            "add-entries: frontier {} below upload_end {}; nothing to persist this request, \
+             returning 202 to resume",
+            result.frontier_size,
+            header.upload_end,
+        );
+        return Ok(mirror_info_202(
+            env,
+            snapshot,
+            &header.log_origin,
+            result.frontier_size,
+        ));
+    }
+
+    // Every canonical package was received. Any bytes still in the stream
+    // are discarded, not rejected: the spec says "the mirror discards any
+    // partial bytes after the last successfully authenticated entry
+    // package", and the only defined 400 is when no package authenticated
+    // at all (handled in persist_packages). Rejecting here would also be
+    // dishonest, since the entries were already persisted and the frontier
+    // advanced.
+
+    // When we persisted new entries, the recomputed tree MUST match the
+    // pending checkpoint the packages were proven against. A mismatch
+    // means proof verification and tile computation disagree: an internal
+    // error, never a client fault. When nothing new was persisted (a
+    // re-upload of an already-persisted range), the log-signed target is
+    // trusted directly: pending checkpoints are consistency-chained on the
+    // add-checkpoint path and tickets only revive our own past pendings, so
+    // the target is on the same branch as the persisted tree by
+    // construction.
+    if persisted_new
+        && (result.frontier_size != header.upload_end || result.frontier_hash != target.hash)
+    {
+        log::error!(
+            "add-entries: recomputed frontier ({}, {}) != target ({}, {})",
+            result.frontier_size,
+            result.frontier_hash,
+            target.size,
+            target.hash,
+        );
+        return Err(AppError::InternalServerError(
+            "recomputed root mismatch".to_owned(),
+        ));
+    }
+
+    // Frontier ahead of `upload_end` (a prior upload persisted past it, or a
+    // racing client): the edge tiles were written at the larger frontier, so
+    // the narrower "cut" tiles a tree of size `upload_end` needs may be
+    // missing and a cosignature at `upload_end` would be unverifiable against
+    // our own tiles. Spec requires the tree at `upload_end` be servable before
+    // cosigning, so synthesize those cut tiles first.
+    if result.frontier_size > header.upload_end {
+        commit::ensure_cut_tiles(
+            &bucket,
+            header.upload_end,
+            result.frontier_size,
+            result.frontier_hash,
+        )
+        .await?;
+    }
+
+    cosign_and_serve(env, header, target, snapshot).await
+}
+
+/// The persisted-entry frontier reached by [`persist_packages`], plus
+/// whether the client truncated the stream and how many complete packages
+/// were verified.
+struct StreamResult {
+    frontier_size: u64,
+    frontier_hash: Hash,
+    packages_received: u64,
+    truncated: bool,
+}
+
+/// Read, verify, and incrementally flush the entry packages for
+/// `[upload_start, upload_end)`, resuming from the frontier `start`.
+///
+/// Verified entries are buffered until `commit_packages` (config, default
+/// 32) packages have accumulated, then flushed to storage with the
+/// frontier advanced in the DO (see [`flush_chunk`]); the trailing partial
+/// chunk is flushed before returning. Entries below `start.size` are
+/// already persisted and skipped (spec: "skip saving already-written
+/// entries"). The frontier `(size, hash)` is threaded locally across
+/// flushes, so the DO is not re-queried between chunks.
+///
+/// # Errors
+///
+/// 400 if the body is malformed or truncates before the first complete
+/// package, 422 if a package fails subtree-consistency verification, or a
+/// transport/storage error from reading the body or flushing a chunk.
+async fn persist_packages<S, O>(
+    env: &Env,
+    header: &AddEntriesRequestHeader,
+    target: &PendingCheckpoint,
+    buf: &mut StreamBuffer<S>,
+    first_prefix: &[Vec<u8>],
+    bucket: &O,
+    start: &NextEntry,
+) -> ApiResult<StreamResult>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+    O: ObjectBackend,
+{
+    // config.schema.json caps commit_packages (max 1024), enforced by the
+    // build script, so this always fits usize; the fallback is unreachable.
+    let commit_packages = usize::try_from(crate::CONFIG.commit_packages()).unwrap_or(usize::MAX);
+    // Byte ceiling on buffered entries; flush early when reached so peak
+    // memory is bounded regardless of package sizes. Saturating to
+    // usize::MAX on a 32-bit target just means "never trip the byte cap",
+    // leaving the package-count cap in force.
+    let max_chunk_bytes = usize::try_from(crate::CONFIG.max_chunk_bytes()).unwrap_or(usize::MAX);
 
     // Entries below the request-start frontier are already persisted; new
     // persistence begins at this fixed boundary.
-    let initial_next = snapshot.next_entry.size;
+    let initial_next = start.size;
 
-    // Newly-received entries collected across all packages for a single
-    // commit, and the leaf index one past the last collected entry.
-    let mut entries: Vec<Vec<u8>> = Vec::new();
-    let mut collected_end = initial_next;
+    // Running persisted-entry frontier, threaded locally across flushes.
+    let mut frontier_size = start.size;
+    let mut frontier_hash = start.hash;
+
+    // Entries buffered for the next flush, the leaf index one past the last
+    // buffered entry (the flush target), and how many packages are buffered.
+    let mut chunk: Vec<Vec<u8>> = Vec::new();
+    let mut chunk_end = frontier_size;
+    let mut chunk_pkgs = 0usize;
+    let mut chunk_bytes = 0usize;
     let mut packages_received: u64 = 0;
     let mut truncated = false;
 
     for (pkg_start, pkg_end) in package_ranges(header.upload_start, header.upload_end) {
         let num_entries = pkg_end - pkg_start;
-        let pkg = match read_package(cursor, num_entries) {
-            PackageOutcome::Ok(pkg) => pkg,
-            // The body ended between or partway through a package: client
-            // truncation. Keep whatever complete packages were verified.
-            PackageOutcome::Eof => {
+        let pkg = match parse_next_package(buf, num_entries).await? {
+            ParseOutcome::Ok(pkg) => pkg,
+            // Clean and mid-package EOF are both client truncation: keep
+            // whatever complete packages were already flushed/buffered.
+            ParseOutcome::CleanEof | ParseOutcome::MidPackageEof => {
                 truncated = true;
                 break;
             }
-            PackageOutcome::Err(e) => {
+            ParseOutcome::Err(e) => {
                 // Spec: once at least one package has been authenticated
                 // and saved the mirror MUST respond 202, not 400. Treat a
                 // malformed later package like truncation so the verified
@@ -301,111 +455,73 @@ async fn verify_and_persist(
         }
         packages_received += 1;
 
-        // Collect only the not-yet-persisted tail of this package.
+        // Buffer only the not-yet-persisted tail of this package. Packages
+        // wholly below the request-start frontier are already persisted, so
+        // they contribute no entries and don't count toward a chunk flush;
+        // `chunk_pkgs` therefore tracks only packages that added buffered
+        // entries.
         if pkg_end > initial_next {
             let skip = usize::try_from(initial_next.saturating_sub(pkg_start))
                 .map_err(|_| Error::from("skip count overflows usize"))?;
-            entries.extend(pkg.entries.into_iter().skip(skip));
-            collected_end = pkg_end;
+            let tail = pkg.entries.into_iter().skip(skip);
+            for entry in tail {
+                chunk_bytes = chunk_bytes.saturating_add(entry.len());
+                chunk.push(entry);
+            }
+            chunk_end = pkg_end;
+            chunk_pkgs += 1;
+
+            // Flush when either cap trips: `commit_packages` bounds the
+            // package count, `max_chunk_bytes` bounds peak memory when
+            // individual packages are large. `commit_packages >= 1`
+            // (config), so a full chunk always holds at least one package's
+            // entries; the byte cap only fires after entries were buffered,
+            // so neither branch can flush an empty chunk.
+            if chunk_pkgs == commit_packages || chunk_bytes >= max_chunk_bytes {
+                (frontier_size, frontier_hash) = flush_chunk(
+                    bucket,
+                    env,
+                    &header.log_origin,
+                    frontier_size,
+                    frontier_hash,
+                    chunk_end,
+                    &mut chunk,
+                )
+                .await?;
+                chunk_pkgs = 0;
+                chunk_bytes = 0;
+            }
         }
     }
 
     // Truncation before the first complete package is a hard 400.
     if truncated && packages_received == 0 {
-        log::warn!("add-entries: body truncated before the first complete package");
+        log::warn!("add-entries: stream truncated before the first complete package");
         return Err(AppError::BadRequest(
             "no complete entry package received".to_owned(),
         ));
     }
 
-    // Persist all newly-received entries in a single commit, advancing the
-    // persisted-entry frontier once.
-    let mut frontier_size = initial_next;
-    let mut frontier_hash = snapshot.next_entry.hash;
-    if !entries.is_empty() {
-        let root = commit::persist_entries(
-            &bucket,
+    // Flush the trailing partial chunk.
+    if !chunk.is_empty() {
+        (frontier_size, frontier_hash) = flush_chunk(
+            bucket,
+            env,
+            &header.log_origin,
             frontier_size,
             frontier_hash,
-            collected_end,
-            &entries,
+            chunk_end,
+            &mut chunk,
         )
         .await?;
-        advance_next_entry(env, &header.log_origin, collected_end, root).await?;
-        frontier_size = collected_end;
-        frontier_hash = root;
-    }
-    let persisted_new = frontier_size > initial_next;
-
-    if truncated {
-        log::info!(
-            "add-entries: client-truncated after {packages_received} complete packages; \
-             persisted through {frontier_size}",
-        );
-        return Ok(mirror_info_202(
-            env,
-            snapshot,
-            &header.log_origin,
-            frontier_size,
-        ));
     }
 
-    // Frontier below `upload_end`: not every entry up to `upload_end` is
-    // persisted yet (a truncated body, or an already-persisted request that
-    // stops short). This is the spec's "not yet received all packages" case,
-    // so 202 with the advanced frontier for the client to resume from.
-    if frontier_size < header.upload_end {
-        log::info!(
-            "add-entries: frontier {frontier_size} below upload_end {}; returning 202 to resume",
-            header.upload_end,
-        );
-        return Ok(mirror_info_202(
-            env,
-            snapshot,
-            &header.log_origin,
-            frontier_size,
-        ));
-    }
-
-    // Every canonical package was received. Any bytes past the last one
-    // are discarded, not rejected: the spec says "the mirror discards any
-    // partial bytes after the last successfully authenticated entry
-    // package", and the only defined 400 is when no package authenticated
-    // at all (handled above). Rejecting here would also be dishonest, since
-    // the entries were already persisted and the frontier advanced.
-
-    // When we persisted new entries, the recomputed tree MUST match the
-    // pending checkpoint the packages were proven against. A mismatch means
-    // proof verification and tile computation disagree: an internal error,
-    // never a client fault. When nothing new was persisted (a re-upload of
-    // an already-persisted range), the log-signed target is trusted
-    // directly: pending checkpoints are consistency-chained on the
-    // add-checkpoint path and tickets only revive our own past pendings, so
-    // the target is on the same branch as the persisted tree by
-    // construction.
-    if persisted_new && (frontier_size != header.upload_end || frontier_hash != target.hash) {
-        log::error!(
-            "add-entries: recomputed frontier ({frontier_size}, {frontier_hash}) != target ({}, {})",
-            target.size,
-            target.hash,
-        );
-        return Err(AppError::InternalServerError(
-            "recomputed root mismatch".to_owned(),
-        ));
-    }
-
-    // Frontier ahead of `upload_end` (a prior upload persisted past it, or a
-    // racing client): the edge tiles were written at the larger frontier, so
-    // the narrower "cut" tiles a tree of size `upload_end` needs may be
-    // missing and a cosignature at `upload_end` would be unverifiable against
-    // our own tiles. Spec requires the tree at `upload_end` be servable before
-    // we cosign, so synthesize those cut tiles first.
-    if frontier_size > header.upload_end {
-        let bucket = load_origin_bucket(env, &header.log_origin)?;
-        commit::ensure_cut_tiles(&bucket, header.upload_end, frontier_size, frontier_hash).await?;
-    }
-
-    cosign_and_serve(env, header, target, snapshot).await
+    Ok(StreamResult {
+        frontier_size,
+        frontier_hash,
+        packages_received,
+        truncated,
+    })
 }
 
 /// The spec's `excess_entries = min(upload_end, next_entry) -
@@ -416,31 +532,6 @@ async fn verify_and_persist(
 /// separately) can't underflow.
 fn excess_entries(upload_start: u64, upload_end: u64, next_entry: u64) -> u64 {
     next_entry.min(upload_end).saturating_sub(upload_start)
-}
-
-/// Outcome of reading the next entry package from the buffered body.
-enum PackageOutcome {
-    Ok(EntryPackage),
-    /// The body ended between packages or partway through one: a client
-    /// truncation. Complete packages already read are persisted (partial
-    /// progress); truncation before the first complete package is a 400.
-    Eof,
-    Err(ParseError),
-}
-
-/// Read the next entry package from `cursor`, returning
-/// [`PackageOutcome::Eof`] when the buffered body is exhausted (cleanly
-/// between packages or mid-package) so the caller treats it as a client
-/// truncation.
-fn read_package(cursor: &mut Cursor<&[u8]>, num_entries: u64) -> PackageOutcome {
-    if usize::try_from(cursor.position()).unwrap_or(usize::MAX) >= cursor.get_ref().len() {
-        return PackageOutcome::Eof;
-    }
-    match EntryPackage::read_from(cursor, num_entries) {
-        Ok(pkg) => PackageOutcome::Ok(pkg),
-        Err(ParseError::Io(ref e)) if e.kind() == ErrorKind::UnexpectedEof => PackageOutcome::Eof,
-        Err(e) => PackageOutcome::Err(e),
-    }
 }
 
 /// Cosign the target checkpoint with the mirror key, advance the durable
@@ -562,6 +653,34 @@ async fn cosign_and_serve(
         .into_response())
 }
 
+/// Persist the buffered `chunk` (the entries `[frontier_size, chunk_end)`)
+/// as entry bundles + hash tiles resuming from the current frontier,
+/// advance the persisted-entry frontier in the DO, and return the new
+/// frontier `(chunk_end, root)`. Clears `chunk`.
+///
+/// [`commit::persist_entries`] writes immutable, content-addressed tiles
+/// and the DO advance is a monotone compare-and-swap, so a repeated or
+/// concurrent flush of the same range is a harmless no-op.
+///
+/// # Errors
+///
+/// Returns an error on a storage failure or if the DO advance RPC fails.
+async fn flush_chunk<O: ObjectBackend>(
+    bucket: &O,
+    env: &Env,
+    origin: &str,
+    frontier_size: u64,
+    frontier_hash: Hash,
+    chunk_end: u64,
+    chunk: &mut Vec<Vec<u8>>,
+) -> Result<(u64, Hash)> {
+    let root =
+        commit::persist_entries(bucket, frontier_size, frontier_hash, chunk_end, chunk).await?;
+    advance_next_entry(env, origin, chunk_end, root).await?;
+    chunk.clear();
+    Ok((chunk_end, root))
+}
+
 /// Read the persisted-leaf prefix required to verify a non-256-aligned
 /// first package: the leaves `[subtree_start, upload_start)` where
 /// `subtree_start` is `upload_start` rounded down to a 256 boundary.
@@ -669,6 +788,176 @@ async fn advance_next_entry(env: &Env, origin: &str, size: u64, hash: Hash) -> R
             log::error!("add-entries: DO /advance-next-entry returned {status}: {msg}");
             Err(Error::from(format!("advance-next-entry failed ({status})")))
         }
+    }
+}
+
+/// Outcome of attempting to read the next entry package from the stream
+/// buffer.
+///
+/// `CleanEof` (stream ended cleanly between packages) and `MidPackageEof`
+/// (stream ended partway through a package) are kept distinct for
+/// diagnostics, though the handler treats both as a client truncation:
+/// complete packages already received are persisted (partial progress),
+/// and a truncation before the first complete package is a 400.
+enum ParseOutcome {
+    Ok(EntryPackage),
+    CleanEof,
+    MidPackageEof,
+    Err(ParseError),
+}
+
+/// Read the `add-entries` request header from `buf`, pulling more
+/// chunks from the underlying stream until the header parses or the
+/// stream errors. Returns the parsed header, or
+/// [`AppError::BadRequest`] (400) if the input is malformed or truncated
+/// before the header is complete.
+///
+/// The header has a bounded maximum size (u16 origin + u64s + u16
+/// ticket + hash + u8 proof-size + 63 hashes <= ~131 KB), so the
+/// retry-on-`UnexpectedEof` loop terminates.
+async fn parse_header<S>(buf: &mut StreamBuffer<S>) -> ApiResult<AddEntriesRequestHeader>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
+    loop {
+        let mut cursor = Cursor::new(buf.buffered());
+        match AddEntriesRequestHeader::read_from(&mut cursor) {
+            Ok(header) => {
+                let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+                buf.consume(consumed);
+                return Ok(header);
+            }
+            // Short read: the whole header is not buffered yet. Pull more
+            // and retry; a real EOF here means a truncated header.
+            Err(ParseError::Io(ref e)) if e.kind() == ErrorKind::UnexpectedEof => {
+                if !buf.pull_one().await? {
+                    log::warn!(
+                        "add-entries: stream ended before header was complete \
+                         ({} bytes buffered)",
+                        buf.len()
+                    );
+                    return Err(AppError::BadRequest(
+                        "malformed (truncated header)".to_owned(),
+                    ));
+                }
+            }
+            Err(e) => {
+                log::warn!("add-entries: malformed header: {e:?}");
+                return Err(AppError::BadRequest(e.to_string()));
+            }
+        }
+    }
+}
+
+/// Pull chunks until at least `n` bytes are buffered. Returns `Ok(true)`
+/// once `n` bytes are available, or `Ok(false)` if the stream ended first.
+/// Nothing is consumed; the caller parses the now-buffered bytes.
+async fn fill_at_least<S>(buf: &mut StreamBuffer<S>, n: usize) -> ApiResult<bool>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
+    while buf.len() < n {
+        if !buf.pull_one().await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Read one length-prefixed entry (`u16 len || len bytes`) from the front
+/// of `buf`, consuming exactly the bytes read. Returns `Ok(None)` if the
+/// stream ends before a complete entry is buffered (truncation). Unlike a
+/// whole-package reparse, each call consumes what it reads, so pulling more
+/// bytes for a later entry never re-copies the entries already taken.
+async fn read_one_entry<S>(buf: &mut StreamBuffer<S>) -> ApiResult<Option<Vec<u8>>>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
+    if !fill_at_least(buf, 2).await? {
+        return Ok(None);
+    }
+    let bytes = buf.buffered();
+    let len = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+    let total = 2 + len;
+    if !fill_at_least(buf, total).await? {
+        return Ok(None);
+    }
+    let entry = buf.buffered()[2..total].to_vec();
+    buf.consume(total);
+    Ok(Some(entry))
+}
+
+/// Read the next entry package from `buf`, pulling more chunks from the
+/// underlying stream until the package parses or the stream ends. See
+/// [`ParseOutcome`] for the four cases.
+///
+/// The package is parsed incrementally, consuming each entry and the proof
+/// from `buf` as soon as it is fully buffered. A short read pulls one more
+/// chunk and resumes from the next unread unit, so a large package
+/// arriving in small chunks is parsed and copied once, not re-parsed from
+/// byte zero on every chunk.
+async fn parse_next_package<S>(
+    buf: &mut StreamBuffer<S>,
+    num_entries: u64,
+) -> ApiResult<ParseOutcome>
+where
+    S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
+{
+    // Reject oversized counts before allocating, matching
+    // EntryPackage::read_from so the two parse paths agree on limits.
+    if num_entries > PACKAGE_ALIGNMENT {
+        return Ok(ParseOutcome::Err(ParseError::TooManyEntries(num_entries)));
+    }
+    // EOF with an empty buffer: clean truncation between packages.
+    if buf.is_eof() && buf.len() == 0 {
+        return Ok(ParseOutcome::CleanEof);
+    }
+
+    let num_entries = usize::try_from(num_entries).unwrap_or(usize::MAX);
+    let mut entries = Vec::with_capacity(num_entries);
+    for _ in 0..num_entries {
+        match read_one_entry(buf).await? {
+            Some(entry) => entries.push(entry),
+            None => {
+                // Stream ended before this entry completed. Nothing buffered
+                // and no partial bytes means a clean between-package
+                // truncation; otherwise a partial package was left behind.
+                return Ok(package_eof(entries.is_empty(), buf.len() > 0));
+            }
+        }
+    }
+
+    // Proof: `u8 num_hashes || num_hashes * HASH_SIZE bytes`.
+    if !fill_at_least(buf, 1).await? {
+        return Ok(package_eof(entries.is_empty(), buf.len() > 0));
+    }
+    let num_hashes = buf.buffered()[0];
+    if num_hashes > tlog_mirror::MAX_HASHES_PER_PROOF {
+        return Ok(ParseOutcome::Err(ParseError::TooManyHashes(num_hashes)));
+    }
+    let proof_bytes = 1 + usize::from(num_hashes) * tlog_core::HASH_SIZE;
+    if !fill_at_least(buf, proof_bytes).await? {
+        return Ok(package_eof(entries.is_empty(), buf.len() > 0));
+    }
+    let mut proof = Vec::with_capacity(usize::from(num_hashes));
+    for i in 0..usize::from(num_hashes) {
+        let off = 1 + i * tlog_core::HASH_SIZE;
+        let mut hash = [0u8; tlog_core::HASH_SIZE];
+        hash.copy_from_slice(&buf.buffered()[off..off + tlog_core::HASH_SIZE]);
+        proof.push(Hash(hash));
+    }
+    buf.consume(proof_bytes);
+    Ok(ParseOutcome::Ok(EntryPackage { entries, proof }))
+}
+
+/// Classify a stream end reached partway through [`parse_next_package`]:
+/// a clean between-package truncation when nothing of this package had
+/// been read, otherwise a mid-package truncation.
+fn package_eof(no_entries_yet: bool, saw_partial: bool) -> ParseOutcome {
+    if no_entries_yet && !saw_partial {
+        ParseOutcome::CleanEof
+    } else {
+        ParseOutcome::MidPackageEof
     }
 }
 
@@ -985,13 +1274,16 @@ impl HashReader for MapReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTENT_TYPE, MapReader, content_type_is_octet_stream, excess_entries, verify_package,
+        CONTENT_TYPE, MapReader, ParseOutcome, content_type_is_octet_stream, excess_entries,
+        parse_header, parse_next_package, verify_package,
     };
+    use crate::body::BodyError;
     use crate::mirror_state_do::PendingCheckpoint;
+    use crate::stream_buffer::StreamBuffer;
     use std::collections::HashMap;
     use tlog_core::{Hash, Subtree, stored_hash_index, stored_hashes, tree_hash};
     use tlog_mirror::EntryPackage;
-    use tlog_mirror::PACKAGE_ALIGNMENT;
+    use tlog_mirror::{AddEntriesRequestHeader, PACKAGE_ALIGNMENT};
 
     /// Deterministic distinct entry bytes for leaf `i`.
     fn entry(i: u64) -> Vec<u8> {
@@ -1054,6 +1346,17 @@ mod tests {
         let (prefix, pkg, cp) = fixture(1000, 256, 300, 512);
         assert_eq!(prefix.len(), 44);
         verify_package(&prefix, &pkg, 256, 512, &cp).expect("non-aligned package verifies");
+    }
+
+    #[test]
+    fn verify_nonaligned_first_package_max_prefix_ok() {
+        // Largest prefix a non-aligned first package can carry: upload_start
+        // = 511 leaves persisted [256, 511) as a 255-leaf prefix, with a
+        // single uploaded entry [511, 512) closing the subtree.
+        let (prefix, pkg, cp) = fixture(1000, 256, 511, 512);
+        assert_eq!(prefix.len(), 255);
+        assert_eq!(pkg.entries.len(), 1);
+        verify_package(&prefix, &pkg, 256, 512, &cp).expect("max-prefix package verifies");
     }
 
     #[test]
@@ -1166,5 +1469,181 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         assert!(!content_type_is_octet_stream(&headers));
+    }
+
+    fn header_bytes() -> Vec<u8> {
+        let header = AddEntriesRequestHeader {
+            log_origin: "rome.ct.example.com/2026h1".to_owned(),
+            upload_start: 256,
+            upload_end: 512,
+            ticket: b"opaque-ticket".to_vec(),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).unwrap();
+        buf
+    }
+
+    fn stream_buffer(
+        chunks: Vec<Vec<u8>>,
+    ) -> StreamBuffer<impl futures_util::Stream<Item = Result<Vec<u8>, BodyError>> + Unpin> {
+        StreamBuffer::new(futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<_, BodyError>),
+        ))
+    }
+
+    // A header delivered as single-byte chunks must reassemble.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_header_reassembles_byte_by_byte() {
+        let bytes = header_bytes();
+        let chunks: Vec<Vec<u8>> = bytes.iter().map(|b| vec![*b]).collect();
+        let mut buf = stream_buffer(chunks);
+        let Ok(header) = parse_header(&mut buf).await else {
+            panic!("header reassembles");
+        };
+        assert_eq!(header.log_origin, "rome.ct.example.com/2026h1");
+        assert_eq!(header.upload_start, 256);
+        assert_eq!(header.upload_end, 512);
+        assert_eq!(header.ticket, b"opaque-ticket");
+    }
+
+    // A header split partway through log_origin must reassemble.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_header_split_inside_log_origin() {
+        let bytes = header_bytes();
+        let (first, rest) = bytes.split_at(3);
+        let mut buf = stream_buffer(vec![first.to_vec(), rest.to_vec()]);
+        let Ok(header) = parse_header(&mut buf).await else {
+            panic!("header reassembles");
+        };
+        assert_eq!(header.log_origin, "rome.ct.example.com/2026h1");
+    }
+
+    // A stream that ends partway through log_origin is genuinely truncated
+    // and must be a 400, not an endless pull loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_header_truncated_in_log_origin_is_bad_request() {
+        let bytes = header_bytes();
+        let truncated = bytes[..5].to_vec();
+        let mut buf = stream_buffer(vec![truncated]);
+        assert!(matches!(
+            parse_header(&mut buf).await,
+            Err(super::AppError::BadRequest(_))
+        ));
+    }
+
+    fn sample_package() -> EntryPackage {
+        EntryPackage {
+            entries: vec![
+                b"first-entry".to_vec(),
+                Vec::new(),
+                b"a-much-longer-third-entry-with-more-bytes".to_vec(),
+                vec![0xab; 300],
+            ],
+            proof: vec![
+                Hash([0x11; tlog_core::HASH_SIZE]),
+                Hash([0x22; tlog_core::HASH_SIZE]),
+            ],
+        }
+    }
+
+    fn package_bytes(pkg: &EntryPackage) -> Vec<u8> {
+        let mut buf = Vec::new();
+        pkg.write_to(&mut buf).unwrap();
+        buf
+    }
+
+    // parse_next_package returns ApiResult, whose Err (AppError) is not
+    // Debug, so unwrap the transport layer by hand for the tests.
+    fn ok_outcome(res: super::ApiResult<ParseOutcome>) -> ParseOutcome {
+        let Ok(outcome) = res else {
+            panic!("unexpected transport error from parse_next_package");
+        };
+        outcome
+    }
+
+    // The incremental parser must reconstruct a package identical to a
+    // one-shot read regardless of how the wire bytes are chunked, including
+    // single-byte chunks that split every length prefix, entry, and proof
+    // hash. This is the regression for re-parsing from byte zero.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_reassembles_across_chunk_sizes() {
+        let pkg = sample_package();
+        let bytes = package_bytes(&pkg);
+        let num_entries = pkg.entries.len() as u64;
+        for size in [1usize, 2, 3, 7, 33, bytes.len()] {
+            let chunks: Vec<Vec<u8>> = bytes.chunks(size).map(<[u8]>::to_vec).collect();
+            let mut buf = stream_buffer(chunks);
+            let ParseOutcome::Ok(parsed) =
+                ok_outcome(parse_next_package(&mut buf, num_entries).await)
+            else {
+                panic!("chunk size {size} should parse Ok");
+            };
+            assert_eq!(parsed.entries, pkg.entries, "chunk size {size} entries");
+            assert_eq!(parsed.proof, pkg.proof, "chunk size {size} proof");
+        }
+    }
+
+    // Two packages back to back: the first parse must consume exactly its
+    // bytes, leaving the second intact for the next call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_leaves_following_package_intact() {
+        let pkg = sample_package();
+        let mut bytes = package_bytes(&pkg);
+        bytes.extend(package_bytes(&pkg));
+        let num_entries = pkg.entries.len() as u64;
+        // 5-byte chunks so package boundaries fall mid-chunk.
+        let chunks: Vec<Vec<u8>> = bytes.chunks(5).map(<[u8]>::to_vec).collect();
+        let mut buf = stream_buffer(chunks);
+        for which in ["first", "second"] {
+            let ParseOutcome::Ok(parsed) =
+                ok_outcome(parse_next_package(&mut buf, num_entries).await)
+            else {
+                panic!("{which} package should parse Ok");
+            };
+            assert_eq!(parsed.entries, pkg.entries, "{which} entries");
+            assert_eq!(parsed.proof, pkg.proof, "{which} proof");
+        }
+    }
+
+    // Stream ending exactly on a package boundary is a clean truncation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_clean_eof_between_packages() {
+        let pkg = sample_package();
+        let mut buf = stream_buffer(vec![package_bytes(&pkg)]);
+        let num_entries = pkg.entries.len() as u64;
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, num_entries).await),
+            ParseOutcome::Ok(_)
+        ));
+        // Buffer now empty and stream ended: next call is a clean EOF.
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, num_entries).await),
+            ParseOutcome::CleanEof
+        ));
+    }
+
+    // Stream ending partway through a package is a mid-package truncation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_mid_package_eof() {
+        let pkg = sample_package();
+        let bytes = package_bytes(&pkg);
+        let mut buf = stream_buffer(vec![bytes[..10].to_vec()]);
+        let num_entries = pkg.entries.len() as u64;
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, num_entries).await),
+            ParseOutcome::MidPackageEof
+        ));
+    }
+
+    // An oversized num_hashes must be an Err, matching read_from's limit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_next_package_rejects_too_many_hashes() {
+        // One zero-length entry, then num_hashes = 64 (> spec max 63).
+        let bytes = vec![0x00, 0x00, 64];
+        let mut buf = stream_buffer(vec![bytes]);
+        assert!(matches!(
+            ok_outcome(parse_next_package(&mut buf, 1).await),
+            ParseOutcome::Err(super::ParseError::TooManyHashes(64))
+        ));
     }
 }
