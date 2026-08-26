@@ -35,7 +35,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -66,6 +66,22 @@ fn start() {
     let _ = console_log::init_with_level(level);
 }
 
+/// Middleware that adds `Accept-Encoding: gzip` to every response.
+///
+/// [c2sp.org/tlog-mirror][spec] says mirrors SHOULD advertise supported
+/// compression algorithms in responses so clients can compress future
+/// `add-entries` request bodies.
+///
+/// [spec]: https://c2sp.org/tlog-mirror#add-entries
+async fn add_accept_encoding(
+    mut response: axum::http::Response<axum::body::Body>,
+) -> axum::http::Response<axum::body::Body> {
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    response
+}
+
 /// Top-level `#[event(fetch)]` handler. Delegates to the axum router;
 /// unmatched routes return 404.
 #[event(fetch, respond_with_errors)]
@@ -79,18 +95,24 @@ async fn fetch(
     // handler is captured and shipped before the WASM isolate is torn
     // down. `Router`'s `Service::Error` is `Infallible`; the `?` below
     // performs the trivial conversion into `worker::Error`.
+    //
+    // `/add-entries` streams a potentially large (optionally gzip) body,
+    // so it uses the raw `Request` extractor with no `DefaultBodyLimit`;
+    // the buffered endpoints cap their bodies via the layer.
     let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
         Router::new()
             .route(
                 "/add-checkpoint",
                 post(add_checkpoint).layer(DefaultBodyLimit::max(MAX_ADD_CHECKPOINT_BODY_SIZE)),
             )
+            .route("/add-entries", post(crate::add_entries::add_entries))
             .route(
                 "/sign-subtree",
                 post(sign_subtree).layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_SIZE)),
             )
             .route("/metadata", get(metadata))
             .route("/", get(root))
+            .layer(axum::middleware::map_response(add_accept_encoding))
             .with_state(env)
             .call(req)
             .await
@@ -111,10 +133,13 @@ async fn root() -> impl IntoResponse {
 }
 
 /// Error type for the mirror's axum handlers, mapped to an HTTP status by
-/// [`IntoResponse`].
-enum AppError {
+/// [`IntoResponse`]. Success and special-body responses (the 200
+/// cosignature, the 409/202 `text/x.tlog.mirror-info` and `text/x.tlog.size`
+/// bodies) are built as axum responses directly, not via this enum.
+pub(crate) enum AppError {
     InternalServerError(String),
     BadRequest(String),
+    UnsupportedMediaType(String),
     UnprocessableEntity(String),
     UnknownLogOrigin,
     NoValidSignatures,
@@ -122,7 +147,7 @@ enum AppError {
 }
 
 /// Result type for the mirror's axum handlers.
-type ApiResult<T> = std::result::Result<T, AppError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, AppError>;
 
 impl From<worker::Error> for AppError {
     fn from(err: worker::Error) -> Self {
@@ -139,6 +164,9 @@ impl IntoResponse for AppError {
             }
             AppError::BadRequest(e) => {
                 (StatusCode::BAD_REQUEST, format!("Bad request: {e}")).into_response()
+            }
+            AppError::UnsupportedMediaType(e) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, e).into_response()
             }
             AppError::UnprocessableEntity(e) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -553,4 +581,20 @@ fn tlog_size_conflict(current: &PendingCheckpoint) -> axum::response::Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_accept_encoding;
+    use axum::http::header::ACCEPT_ENCODING;
+
+    #[tokio::test]
+    async fn accept_encoding_middleware_adds_gzip() {
+        let response = axum::http::Response::new(axum::body::Body::empty());
+        let response = add_accept_encoding(response).await;
+        assert_eq!(
+            response.headers().get(ACCEPT_ENCODING).unwrap().as_bytes(),
+            b"gzip"
+        );
+    }
 }

@@ -141,6 +141,10 @@ impl AppConfig {
     ///    signed-note key name length cap, since each origin is itself
     ///    used as a checkpoint origin.
     ///
+    /// Simple single-field bounds (e.g. the log-number ranges) are
+    /// expressed in `config.schema.json` and enforced by the build
+    /// script, so they are not re-checked here.
+    ///
     /// `log_key_name` uniqueness across log entries is not checked here;
     /// it is enforced earlier, during deserialization (see
     /// [`deserialize_logs`]). A plain `serde_json` object silently keeps
