@@ -37,6 +37,7 @@ use worker::*;
 
 mod add_entries;
 mod body;
+mod cleaner_do;
 mod commit;
 mod frontend_worker;
 mod mirror_state_do;
@@ -45,6 +46,9 @@ mod stream_buffer;
 
 /// The binding name used in `wrangler.jsonc` for the `MirrorState` DO.
 pub(crate) const MIRROR_STATE_BINDING: &str = "MIRROR_STATE";
+
+/// The binding name used in `wrangler.jsonc` for the `MirrorCleaner` DO.
+pub(crate) const MIRROR_CLEANER_BINDING: &str = "MIRROR_CLEANER";
 
 /// The compile-time-embedded worker configuration.
 ///
@@ -111,6 +115,15 @@ fn parse_log_keys(log_key_name: &str, log: &config::LogParams) -> Vec<LogKey> {
             }
         })
         .collect()
+}
+
+/// Every concrete origin this mirror serves, as `'static` string slices.
+///
+/// This is the set of Durable Object names for the per-origin
+/// `MirrorState`/`MirrorCleaner` instances; the DOs recover their own
+/// origin by matching the runtime-provided DO name against this set.
+pub(crate) fn log_origins() -> impl Iterator<Item = &'static str> {
+    LOG_KEYS.keys().map(String::as_str)
 }
 
 /// Build a [`VerifierList`] for a given origin from the cached keys, or

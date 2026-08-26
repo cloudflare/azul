@@ -16,7 +16,7 @@
                 // wasmparser accepts the module (modern exnref opcodes from
                 // nightly >=2026-05-09 are not yet supported).
                 // --panic-unwind: build with panic=unwind so the sentry
-                // catch-unwind guards in the fetch/DO handlers can report
+                // catch-unwind guards in the fetch/alarm handlers can report
                 // panics before the isolate is torn down.
                 "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
@@ -26,6 +26,14 @@
                     {
                         "name": "MIRROR_STATE",
                         "class_name": "MirrorState"
+                    },
+                    // Per-origin partial-tile cleaner. Deletes a tile's
+                    // partials from the public bucket once the full tile
+                    // exists, on a periodic alarm; see
+                    // `src/cleaner_do.rs`.
+                    {
+                        "name": "MIRROR_CLEANER",
+                        "class_name": "MirrorCleaner"
                     }
                 ]
             },
@@ -43,7 +51,7 @@
             "migrations": [
                 {
                     "tag": "v1",
-                    "new_sqlite_classes": ["MirrorState"]
+                    "new_sqlite_classes": ["MirrorState", "MirrorCleaner"]
                 }
             ]
         }
