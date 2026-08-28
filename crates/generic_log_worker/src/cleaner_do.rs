@@ -5,7 +5,7 @@
 
 use futures_util::future::try_join_all;
 use signed_note::{KeyName, VerifierList};
-use std::{cell::RefCell, mem, time::Duration};
+use std::{cell::RefCell, time::Duration};
 use tlog_tiles::{PathElem, TlogTile};
 use worker::{Bucket, Env, Error as WorkerError, Object, Request, Response, State, Storage};
 
@@ -240,7 +240,10 @@ impl GenericCleaner {
             if batch.len() == MAX_DELETE_BATCH {
                 // Delete full batch.
                 self.checked_add_subrequests(1)?;
-                self.bucket.delete_multiple(mem::take(batch)).await?;
+                self.bucket
+                    .delete_multiple(batch.iter().map(String::as_str).collect::<Vec<_>>())
+                    .await?;
+                batch.clear();
 
                 // Save progress.
                 *self.cleaned_size.borrow_mut() = pending_cleaned_size;
@@ -255,17 +258,24 @@ impl GenericCleaner {
 
     // List files with the specified prefix.
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, WorkerError> {
-        self.checked_add_subrequests(1)?;
-        Ok(self
-            .bucket
-            .list()
-            .prefix(prefix)
-            .execute()
-            .await?
-            .objects()
-            .iter()
-            .map(Object::key)
-            .collect::<Vec<_>>())
+        let mut keys = Vec::new();
+        let mut cursor = None;
+        loop {
+            self.checked_add_subrequests(1)?;
+            let mut list = self.bucket.list().prefix(prefix);
+            if let Some(cursor) = cursor {
+                list = list.cursor(cursor);
+            }
+            let page = list.execute().await?;
+            keys.extend(page.objects().iter().map(Object::key));
+            if !page.truncated() {
+                return Ok(keys);
+            }
+            cursor = Some(
+                page.cursor()
+                    .ok_or("truncated R2 listing did not include a cursor")?,
+            );
+        }
     }
 
     // Get the latest log size by retrieving the checkpoint from object storage.
