@@ -11,6 +11,7 @@ description.workspace = true
 
 [dependencies]
 const-oid.workspace = true
+ed25519-dalek.workspace = true
 der.workspace = true
 digest.workspace = true
 p256.workspace = true

@@ -4345,6 +4345,7 @@ dependencies = [
  "const-oid",
  "der",
  "digest",
+ "ed25519-dalek",
  "p256",
  "p384",
  "p521",

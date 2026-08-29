@@ -549,7 +549,8 @@ fn check_well_formedness(cert: &Certificate) -> Result<(), ValidationError> {
 /// ```
 /// Verify that `issuer` signed `child` by dispatching on the signature algorithm OID.
 ///
-/// Supported algorithms: ECDSA P-256, ECDSA P-384, ECDSA P-521, RSA PKCS#1 v1.5 (SHA-1/256/384/512).
+/// Supported algorithms: ECDSA P-256, ECDSA P-384, ECDSA P-521, RSA PKCS#1 v1.5 (SHA-1/256/384/512),
+/// Ed25519 (RFC 8410).
 fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
     // Note: chain links are discovered by comparing
     //   child.tbs_certificate().issuer().to_string()
@@ -566,6 +567,7 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
         ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ECDSA_WITH_SHA_512, SHA_1_WITH_RSA_ENCRYPTION,
         SHA_256_WITH_RSA_ENCRYPTION, SHA_384_WITH_RSA_ENCRYPTION, SHA_512_WITH_RSA_ENCRYPTION,
     };
+    use const_oid::db::rfc8410::ID_ED_25519;
 
     let Ok(tbs_der) = child.tbs_certificate().to_der() else {
         return false;
@@ -589,8 +591,22 @@ fn is_link_valid(child: &Certificate, issuer: &Certificate) -> bool {
         SHA_256_WITH_RSA_ENCRYPTION => verify_rsa::<sha2::Sha256>(spki, &tbs_der, sig_bytes),
         SHA_384_WITH_RSA_ENCRYPTION => verify_rsa::<sha2::Sha384>(spki, &tbs_der, sig_bytes),
         SHA_512_WITH_RSA_ENCRYPTION => verify_rsa::<sha2::Sha512>(spki, &tbs_der, sig_bytes),
+        ID_ED_25519 => verify_ed25519(spki, &tbs_der, sig_bytes),
         _ => false,
     }
+}
+
+/// Verify an Ed25519 (`PureEdDSA`, RFC 8410) signature over `tbs_der` using the key in `spki`.
+fn verify_ed25519(
+    spki: spki::SubjectPublicKeyInfoRef<'_>,
+    tbs_der: &[u8],
+    sig_bytes: &[u8],
+) -> bool {
+    let Ok(vk) = ed25519_dalek::VerifyingKey::try_from(spki) else {
+        return false;
+    };
+    ed25519_dalek::Signature::from_slice(sig_bytes)
+        .is_ok_and(|sig| vk.verify_strict(tbs_der, &sig).is_ok())
 }
 
 /// Verify a P-256 ECDSA signature over `tbs_der` using the key in `spki`.
@@ -889,6 +905,18 @@ mod tests {
         "../../static_ct_api/tests/p521-ecdsa-root-ca-cert.pem";
         "../../static_ct_api/tests/p521-ecdsa-leaf-cert.pem",
         "../../static_ct_api/tests/p521-ecdsa-intermediate-cert.pem";
+        None; None; false; 2; false
+    );
+
+    // Ed25519 chain (RFC 8410): root and intermediate both sign with id-Ed25519
+    // (PureEdDSA, no digest parameter). Fixtures generated with openssl and
+    // verified by `openssl verify -CAfile root -untrusted int leaf`.
+    // Chain fingerprints: [intermediate, inferred-root] = 2.
+    test_validate_chain!(
+        ed25519_chain_success;
+        "../../static_ct_api/tests/ed25519-root-ca-cert.pem";
+        "../../static_ct_api/tests/ed25519-leaf-cert.pem",
+        "../../static_ct_api/tests/ed25519-intermediate-cert.pem";
         None; None; false; 2; false
     );
 
