@@ -10,8 +10,10 @@
 //! # Running
 //!
 //! ```text
+//! npm install --global wrangler@4.80.0
+//!
 //! # From crates/ct_worker/:
-//! npx wrangler -e=dev dev &
+//! wrangler -e=dev dev --persist-to .wrangler/state &
 //!
 //! # From workspace root:
 //! cargo test -p integration_tests --test static_ct_api
@@ -22,30 +24,18 @@
 //! BASE_URL=http://localhost:8787 LOG_NAME=dev2026h1a cargo test -p integration_tests --test static_ct_api
 //! ```
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use integration_tests::{
     assertions::{
         assert_leaf_in_checkpoint, assert_sct_signature, assert_sct_structure,
         fetch_and_verify_checkpoint, fetch_checkpoint_until_size, leaf_index_from_sct,
     },
-    client::CtClient,
+    client::{CtClient, base_url},
     fixtures::{empty_chain, garbage_chain, make_chains},
+    local_r2,
 };
 use tokio::sync::OnceCell;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-        .try_into()
-        .unwrap()
-}
 
 // ---------------------------------------------------------------------------
 // Initialization guard
@@ -96,13 +86,7 @@ async fn ensure_initialized() {
                         // covers our warmup entry before releasing the gate.
                         let leaf_index =
                             leaf_index_from_sct(&sct).expect("leaf_index from warmup SCT");
-                        let _ = fetch_checkpoint_until_size(
-                            &client,
-                            &meta,
-                            leaf_index + 1,
-                            now_millis(),
-                        )
-                        .await;
+                        let _ = fetch_checkpoint_until_size(&client, &meta, leaf_index + 1).await;
                         return;
                     }
                     Ok((status, _)) => {
@@ -168,6 +152,9 @@ async fn log_v3_json_returns_valid_metadata() {
         !meta.submission_url.is_empty(),
         "submission_url must be set"
     );
+    if local_r2::is_loopback_base_url(&base_url()) {
+        assert!(meta.monitoring_url.is_none());
+    }
 
     // Key must be a valid P-256 SPKI.
     p256::ecdsa::VerifyingKey::from_public_key_der(&meta.key)
@@ -193,6 +180,14 @@ async fn unknown_log_returns_400() {
         .await
         .expect("GET request");
     assert_eq!(status, 400, "expected 400 for unknown log");
+}
+
+/// Persisted log objects are not exposed by the submission Worker.
+#[tokio::test]
+async fn checkpoint_is_not_served_by_frontend() {
+    ensure_initialized().await;
+    let client = CtClient::default_log();
+    assert_eq!(client.get_status("checkpoint").await.unwrap(), 404);
 }
 
 /// `POST` with a JSON body that is not a valid DER certificate returns 400.
@@ -307,7 +302,7 @@ async fn add_chain_sct_appears_in_checkpoint() {
     let leaf_index = leaf_index_from_sct(&sct).expect("extracting leaf_index");
     let min_size = leaf_index + 1;
 
-    let checkpoint = fetch_checkpoint_until_size(&client, &meta, min_size, now_millis())
+    let checkpoint = fetch_checkpoint_until_size(&client, &meta, min_size)
         .await
         .expect("waiting for checkpoint");
 
@@ -337,7 +332,7 @@ async fn add_chain_leaf_verifiable_in_tree() {
 
     let leaf_index = leaf_index_from_sct(&sct).expect("extracting leaf_index");
 
-    let checkpoint = fetch_checkpoint_until_size(&client, &meta, leaf_index + 1, now_millis())
+    let checkpoint = fetch_checkpoint_until_size(&client, &meta, leaf_index + 1)
         .await
         .expect("waiting for checkpoint");
 
@@ -364,7 +359,7 @@ async fn add_pre_chain_leaf_verifiable_in_tree() {
 
     let leaf_index = leaf_index_from_sct(&sct).expect("extracting leaf_index");
 
-    let checkpoint = fetch_checkpoint_until_size(&client, &meta, leaf_index + 1, now_millis())
+    let checkpoint = fetch_checkpoint_until_size(&client, &meta, leaf_index + 1)
         .await
         .expect("waiting for checkpoint");
 
@@ -383,7 +378,7 @@ async fn checkpoint_signature_is_valid() {
     let client = CtClient::default_log();
     let meta = client.get_log_v3_json().await.expect("log.v3.json");
 
-    fetch_and_verify_checkpoint(&client, &meta, None, now_millis())
+    fetch_and_verify_checkpoint(&client, &meta, None)
         .await
         .expect("checkpoint signature verification");
 }

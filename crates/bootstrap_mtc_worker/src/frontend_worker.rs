@@ -23,7 +23,7 @@ use generic_log_worker::{
     log_ops::{CHECKPOINT_KEY, ProofError, prove_subtree_inclusion, read_leaf},
     obs::{Wshim, metrics},
     serialize,
-    util::{WorkerByteStream, now_millis},
+    util::now_millis,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
@@ -39,7 +39,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     middleware,
     response::{AppendHeaders, IntoResponse},
     routing::{get, post},
@@ -61,7 +61,8 @@ struct MetadataResponse<'a> {
     #[serde_as(as = "Base64")]
     cosigner_public_key: &'a [u8],
     submission_url: &'a str,
-    monitoring_url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    monitoring_url: Option<&'a str>,
 }
 
 // POST body structure for the `/get-certificate` endpoint
@@ -112,7 +113,6 @@ async fn main(
             .route("/logs/{log}/get-landmark-bundle", get(get_landmark_bundle))
             .route("/logs/{log}/metadata", get(metadata))
             .route("/logs/{log}/sequencer_id", get(sequencer_id))
-            .route("/logs/{log}/{*key}", get(get_object))
             .layer(middleware::from_fn_with_state(
                 (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
                 request_metrics,
@@ -137,28 +137,18 @@ async fn main(
 }
 
 #[derive(serde::Deserialize)]
-struct PathParams<Rest> {
+struct PathParams {
     log: String,
-    #[serde(flatten)]
-    rest: Rest,
 }
 
-#[derive(serde::Deserialize)]
-struct Key {
-    key: String,
-}
-
-impl<T> axum::extract::FromRequestParts<Env> for PathParams<T>
-where
-    T: serde::de::DeserializeOwned + Send,
-{
+impl axum::extract::FromRequestParts<Env> for PathParams {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &Env,
     ) -> Result<Self, Self::Rejection> {
-        let Path(params) = Path::<PathParams<T>>::from_request_parts(parts, state)
+        let Path(params) = Path::<PathParams>::from_request_parts(parts, state)
             .await
             .map_err(|_| {
                 AppError::InternalServerError("path param does not have log field".into())
@@ -178,14 +168,12 @@ type ApiResult<T> = std::result::Result<T, AppError>;
 
 enum AppError {
     InternalServerError(String),
-    NotFound,
     BadRequest(String),
     UnknownLog,
     FailedToSerializeSignaturelessCert(bootstrap_mtc_api::MtcError),
     SubtreeInclusionProofFailed(tlog_core::TlogError),
     LeafIndexBeforeFirstActiveLandmark,
     LeafIndexNotInLog,
-    RedirectToMonitorApi(&'static str),
     LeafIndexPendingLandmark { retry_after: u64 },
 }
 
@@ -206,7 +194,6 @@ impl IntoResponse for AppError {
                 )
                     .into_response()
             }
-            AppError::NotFound => (StatusCode::NOT_FOUND, "Not Found").into_response(),
             Self::BadRequest(e) => (
                 StatusCode::BAD_REQUEST,
                 format!("Bad request{}{e}", if e.is_empty() { "" } else { ": " }),
@@ -237,11 +224,6 @@ impl IntoResponse for AppError {
                 "Leaf index will be covered by next landmark",
             )
                 .into_response(),
-            Self::RedirectToMonitorApi(url) => (
-                StatusCode::NOT_FOUND,
-                format!("Use {url} for monitoring API"),
-            )
-                .into_response(),
         }
     }
 }
@@ -250,7 +232,7 @@ impl IntoResponse for AppError {
 #[worker::send]
 async fn get_roots(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     Ok((
         StatusCode::OK,
@@ -264,7 +246,7 @@ async fn get_roots(
 #[worker::send]
 async fn add_entry(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
     let params = &CONFIG.logs[&log];
@@ -402,7 +384,7 @@ async fn add_entry(
 #[worker::send]
 async fn get_certificate(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
     let params = &CONFIG.logs[&log];
@@ -484,7 +466,7 @@ async fn get_certificate(
 #[worker::send]
 async fn get_landmark_bundle(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     let object_backend = ObjectBucket::new(load_public_bucket(&env, &log)?);
 
@@ -506,7 +488,7 @@ async fn get_landmark_bundle(
 #[worker::send]
 async fn metadata(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     let params = &CONFIG.logs[&log];
     let cosigner = load_checkpoint_cosigner(&env, &log);
@@ -519,11 +501,8 @@ async fn metadata(
             cosigner_id: cosigner.cosigner_id().to_string(),
             cosigner_public_key: cosigner.verifying_key(),
             submission_url: &params.submission_url,
-            monitoring_url: if params.monitoring_url.is_empty() {
-                &params.submission_url
-            } else {
-                &params.monitoring_url
-            },
+            monitoring_url: (!params.monitoring_url.is_empty())
+                .then_some(params.monitoring_url.as_str()),
         })
         .unwrap(),
     ))
@@ -533,48 +512,13 @@ async fn metadata(
 #[worker::send]
 async fn sequencer_id(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     // Print out the Durable Object ID of the sequencer to allow looking it up
     // in internal Cloudflare dashboards. This value does not need to be secret.
     let namespace = env.durable_object("SEQUENCER")?;
     let object_id = namespace.id_from_name(&log)?;
     Ok((StatusCode::OK, object_id.to_string()))
-}
-
-/// `GET /logs/{log}/{*key}` — direct read-through to the public R2 bucket when
-/// the log's `monitoring_url` is unspecified.
-#[worker::send]
-async fn get_object(
-    State(env): State<Env>,
-    PathParams {
-        log,
-        rest: Key { key },
-    }: PathParams<Key>,
-) -> ApiResult<impl IntoResponse> {
-    // Enable direct access to the bucket via the Worker if monitoring_url is
-    // unspecified.
-    if CONFIG.logs[&log].monitoring_url.is_empty() {
-        let bucket = load_public_bucket(&env, &log)?;
-        if let Some(obj) = bucket.get(key).execute().await? {
-            let body = obj
-                .body()
-                .ok_or_else(|| AppError::InternalServerError("R2 object missing body".into()))?
-                .stream()?;
-            Ok((
-                StatusCode::OK,
-                headers_from_http_metadata(obj.http_metadata()),
-                axum::body::Body::from_stream(WorkerByteStream::new(body)),
-            ))
-        } else {
-            Err(AppError::NotFound)
-        }
-    } else {
-        // TODO: should this be an HTTP redirect instead of a 404?
-        Err(AppError::RedirectToMonitorApi(
-            &CONFIG.logs[&log].monitoring_url,
-        ))
-    }
 }
 
 /// Builds the issuer RDN with the trust anchor ID.
@@ -674,20 +618,6 @@ async fn get_landmark_sequence(
             .map_err(|e| e.to_string())?;
 
     Ok(landmark_sequence)
-}
-
-fn headers_from_http_metadata(meta: HttpMetadata) -> HeaderMap {
-    let mut h = HeaderMap::new();
-    if let Some(hdr) = meta.cache_control {
-        h.append("Cache-Control", hdr.try_into().unwrap());
-    }
-    if let Some(hdr) = meta.content_encoding {
-        h.append("Content-Encoding", hdr.try_into().unwrap());
-    }
-    if let Some(hdr) = meta.content_type {
-        h.append("Content-Type", hdr.try_into().unwrap());
-    }
-    h
 }
 
 #[cfg(test)]

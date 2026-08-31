@@ -11,7 +11,6 @@ use generic_log_worker::{
     get_cached_metadata, get_durable_object_stub, init_logging, load_cache_kv, load_public_bucket,
     obs::{Wshim, metrics},
     put_cache_entry_metadata, serialize,
-    util::WorkerByteStream,
 };
 use p256::pkcs8::EncodePublicKey;
 use serde::Serialize;
@@ -26,7 +25,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{get, post},
@@ -54,7 +53,8 @@ struct LogV3JsonResponse<'a> {
     key: &'a [u8],
     mmd: usize,
     submission_url: &'a str,
-    monitoring_url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    monitoring_url: Option<&'a str>,
     temporal_interval: &'a TemporalInterval,
 }
 
@@ -86,7 +86,6 @@ async fn main(
             .route("/logs/{log}/ct/v1/add-pre-chain", post(add_pre_chain))
             .route("/logs/{log}/log.v3.json", get(log_v3_json))
             .route("/logs/{log}/sequencer_id", get(sequencer_id))
-            .route("/logs/{log}/{*key}", get(get_object))
             .layer(middleware::from_fn_with_state(
                 (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
                 request_metrics,
@@ -111,28 +110,18 @@ async fn main(
 }
 
 #[derive(serde::Deserialize)]
-struct PathParams<Rest> {
+struct PathParams {
     log: String,
-    #[serde(flatten)]
-    rest: Rest,
 }
 
-#[derive(serde::Deserialize)]
-struct Key {
-    key: String,
-}
-
-impl<T> axum::extract::FromRequestParts<Env> for PathParams<T>
-where
-    T: serde::de::DeserializeOwned + Send,
-{
+impl axum::extract::FromRequestParts<Env> for PathParams {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &Env,
     ) -> Result<Self, Self::Rejection> {
-        let Path(params) = Path::<PathParams<T>>::from_request_parts(parts, state)
+        let Path(params) = Path::<PathParams>::from_request_parts(parts, state)
             .await
             .map_err(|_| {
                 AppError::InternalServerError("path param does not have log field".into())
@@ -152,11 +141,9 @@ type ApiResult<T> = std::result::Result<T, AppError>;
 
 enum AppError {
     InternalServerError(String),
-    NotFound,
     BadRequest(String),
     UnknownLog,
     ReadonlyLog,
-    RedirectToMonitorApi(&'static str),
 }
 
 impl From<Error> for AppError {
@@ -188,7 +175,6 @@ impl IntoResponse for AppError {
                 )
                     .into_response()
             }
-            AppError::NotFound => (StatusCode::NOT_FOUND, "Not Found").into_response(),
             Self::BadRequest(e) => {
                 (
                     StatusCode::BAD_REQUEST,
@@ -205,11 +191,6 @@ impl IntoResponse for AppError {
                     "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes."
                 ).into_response()
             }
-            Self::RedirectToMonitorApi(url) => (
-                StatusCode::NOT_FOUND,
-                format!("Use {url} for monitoring API"),
-            )
-                .into_response(),
         }
     }
 }
@@ -218,7 +199,7 @@ impl IntoResponse for AppError {
 #[worker::send]
 async fn get_roots(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     Ok((
         StatusCode::OK,
@@ -232,7 +213,7 @@ async fn get_roots(
 #[worker::send]
 async fn add_chain(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
     add_chain_or_pre_chain(body, &env, &log, false).await
@@ -242,7 +223,7 @@ async fn add_chain(
 #[worker::send]
 async fn add_pre_chain(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
     body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
     add_chain_or_pre_chain(body, &env, &log, true).await
@@ -252,7 +233,7 @@ async fn add_pre_chain(
 #[worker::send]
 async fn log_v3_json(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     let params = &CONFIG.logs[&log];
     let verifying_key = load_signing_key(&env, &log)?.verifying_key();
@@ -269,11 +250,8 @@ async fn log_v3_json(
             log_id,
             key: key.as_bytes(),
             submission_url: &params.submission_url,
-            monitoring_url: if params.monitoring_url.is_empty() {
-                &params.submission_url
-            } else {
-                &params.monitoring_url
-            },
+            monitoring_url: (!params.monitoring_url.is_empty())
+                .then_some(params.monitoring_url.as_str()),
             mmd: MAX_MERGE_DELAY_SECS,
             temporal_interval: &params.temporal_interval,
         })
@@ -286,48 +264,13 @@ async fn log_v3_json(
 #[worker::send]
 async fn sequencer_id(
     State(env): State<Env>,
-    PathParams { log, .. }: PathParams<()>,
+    PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     // Print out the Durable Object ID of the sequencer to allow looking it up
     // in internal Cloudflare dashboards. This value does not need to be secret.
     let namespace = env.durable_object("SEQUENCER")?;
     let object_id = namespace.id_from_name(&log)?;
     Ok((StatusCode::OK, object_id.to_string()))
-}
-
-/// `GET /logs/{log}/{*key}` — direct read-through to the public R2 bucket when
-/// the log's `monitoring_url` is unspecified.
-#[worker::send]
-async fn get_object(
-    State(env): State<Env>,
-    PathParams {
-        log,
-        rest: Key { key },
-    }: PathParams<Key>,
-) -> ApiResult<impl IntoResponse> {
-    // Enable direct access to the bucket via the Worker if monitoring_url is
-    // unspecified.
-    if CONFIG.logs[&log].monitoring_url.is_empty() {
-        let bucket = load_public_bucket(&env, &log)?;
-        if let Some(obj) = bucket.get(key).execute().await? {
-            let body = obj
-                .body()
-                .ok_or_else(|| AppError::InternalServerError("R2 object missing body".into()))?
-                .stream()?;
-            Ok((
-                StatusCode::OK,
-                headers_from_http_metadata(obj.http_metadata()),
-                axum::body::Body::from_stream(WorkerByteStream::new(body)),
-            ))
-        } else {
-            Err(AppError::NotFound)
-        }
-    } else {
-        // TODO: should this be an HTTP redirect instead of a 404?
-        Err(AppError::RedirectToMonitorApi(
-            &CONFIG.logs[&log].monitoring_url,
-        ))
-    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -468,18 +411,4 @@ async fn add_chain_or_pre_chain(
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
     Ok((StatusCode::OK, Json(sct)).into_response())
-}
-
-fn headers_from_http_metadata(meta: HttpMetadata) -> HeaderMap {
-    let mut h = HeaderMap::new();
-    if let Some(hdr) = meta.cache_control {
-        h.append("Cache-Control", hdr.try_into().unwrap());
-    }
-    if let Some(hdr) = meta.content_encoding {
-        h.append("Content-Encoding", hdr.try_into().unwrap());
-    }
-    if let Some(hdr) = meta.content_type {
-        h.append("Content-Type", hdr.try_into().unwrap());
-    }
-    h
 }

@@ -31,7 +31,6 @@ use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest as _, Sha256};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Duration;
 use tlog_checkpoint::{CheckpointSigner, TreeWithTimestamp};
 use tlog_core::{
@@ -209,46 +208,15 @@ fn http_client() -> reqwest::Client {
         .expect("build HTTP client")
 }
 
-fn mirror_worker_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../mirror_worker")
-}
-
 fn r2_key(path: &str) -> String {
     let origin_hash = hex::encode(Sha256::digest(LOG_ORIGIN.as_bytes()));
-    format!("{R2_BUCKET}/{origin_hash}/{path}")
+    format!("{origin_hash}/{path}")
 }
 
 async fn local_r2_object(path: &str) -> Option<Vec<u8>> {
-    let url = base_url();
-    assert!(
-        url.starts_with("http://localhost:") || url.starts_with("http://127.0.0.1:"),
-        "local R2 inspection requires a loopback BASE_URL",
-    );
-    let command = tokio::process::Command::new("wrangler")
-        .current_dir(mirror_worker_dir())
-        .args([
-            "r2",
-            "object",
-            "get",
-            &r2_key(path),
-            "--local",
-            "--persist-to",
-            ".wrangler/state",
-            "--pipe",
-        ])
-        .output();
-    let output = tokio::time::timeout(Duration::from_secs(30), command)
+    integration_tests::local_r2::get("mirror_worker", R2_BUCKET, &r2_key(path))
         .await
-        .expect("wrangler r2 object get timed out")
-        .expect("run wrangler r2 object get");
-    if output.status.success() {
-        return Some(output.stdout);
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("specified key does not exist") {
-        return None;
-    }
-    panic!("wrangler r2 object get failed for {path}: {stderr}");
+        .unwrap_or_else(|e| panic!("local R2 read failed for {path}: {e}"))
 }
 
 async fn require_local_r2_object(path: &str) -> Vec<u8> {

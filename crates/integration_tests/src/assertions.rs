@@ -203,12 +203,18 @@ pub async fn fetch_and_verify_checkpoint(
     client: &CtClient,
     log_meta: &LogV3JsonResponse,
     witness_key_der: Option<&[u8]>,
-    now_millis: u64,
 ) -> Result<VerifiedCheckpoint> {
     let checkpoint_bytes = client
         .get_checkpoint()
         .await
         .context("fetching checkpoint")?;
+
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system time is before Unix epoch")?
+        .as_millis()
+        .try_into()
+        .context("system time does not fit in u64 milliseconds")?;
 
     verify_checkpoint_bytes(
         &checkpoint_bytes,
@@ -436,14 +442,13 @@ pub async fn fetch_checkpoint_until_size(
     client: &CtClient,
     log_meta: &LogV3JsonResponse,
     min_size: u64,
-    now_millis: u64,
 ) -> Result<VerifiedCheckpoint> {
     const MAX_RETRIES: u32 = 12;
     const RETRY_DELAY_MS: u64 = 500;
 
     let mut last_err = None;
     for attempt in 0..MAX_RETRIES {
-        match fetch_and_verify_checkpoint(client, log_meta, None, now_millis).await {
+        match fetch_and_verify_checkpoint(client, log_meta, None).await {
             Ok(cp) if cp.text.size() >= min_size => return Ok(cp),
             Ok(cp) => {
                 last_err = Some(anyhow::anyhow!(
