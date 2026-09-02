@@ -11,6 +11,8 @@ use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 
+use crate::local_r2;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ pub struct LogV3JsonResponse {
     pub key: Vec<u8>,
     pub mmd: u64,
     pub submission_url: String,
-    pub monitoring_url: String,
+    pub monitoring_url: Option<String>,
     pub temporal_interval: TemporalInterval,
 }
 
@@ -192,22 +194,16 @@ impl CtClient {
         self.get_raw("checkpoint").await
     }
 
-    /// `GET /logs/:log/{path}` — raw bytes (tiles, checkpoint, etc.)
+    /// Reads raw log data (tiles, checkpoint, etc.).
     pub async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
-        let resp = self
-            .client
-            .get(self.url(path))
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            bail!("GET {path} returned {status}");
+        if local_r2::is_loopback_base_url(&base_url()) {
+            return local_r2::get("ct_worker", &format!("static-ct-public-{}", self.log), path)
+                .await?
+                .with_context(|| format!("R2 object missing: {path}"));
         }
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .with_context(|| format!("reading body for {path}"))
+
+        let metadata = self.get_log_v3_json().await?;
+        get_raw_http(&self.client, metadata.monitoring_url.as_deref(), path).await
     }
 
     /// `GET /logs/:log/{path}` — returns the HTTP status code (does not fail on 4xx/5xx).
@@ -243,7 +239,7 @@ pub struct BootstrapMtcMetadataResponse {
     #[serde_as(as = "Base64")]
     pub cosigner_public_key: Vec<u8>,
     pub submission_url: String,
-    pub monitoring_url: String,
+    pub monitoring_url: Option<String>,
 }
 
 /// Response body from `POST /logs/:log/add-entry`.
@@ -378,27 +374,25 @@ impl BootstrapMtcClient {
         }
     }
 
-    /// `GET /logs/:log/checkpoint` — raw bytes.
+    /// Reads the checkpoint from local R2 state.
     pub async fn get_checkpoint(&self) -> Result<Vec<u8>> {
         self.get_raw("checkpoint").await
     }
 
-    /// `GET /logs/:log/{path}` — raw bytes.
+    /// Reads raw log data.
     pub async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
-        let resp = self
-            .client
-            .get(self.url(path))
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            bail!("GET {path} returned {status}");
+        if local_r2::is_loopback_base_url(&base_url()) {
+            return local_r2::get(
+                "bootstrap_mtc_worker",
+                &format!("mtc-public-{}", self.log),
+                path,
+            )
+            .await?
+            .with_context(|| format!("R2 object missing: {path}"));
         }
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .with_context(|| format!("reading body for {path}"))
+
+        let metadata = self.get_metadata().await?;
+        get_raw_http(&self.client, metadata.monitoring_url.as_deref(), path).await
     }
 
     /// `GET /logs/:log/{path}` — returns the HTTP status code without failing on 4xx/5xx.
@@ -411,6 +405,28 @@ impl BootstrapMtcClient {
             .with_context(|| format!("GET {path} (status probe)"))?;
         Ok(resp.status().as_u16())
     }
+}
+
+async fn get_raw_http(
+    client: &reqwest::Client,
+    monitoring_url: Option<&str>,
+    path: &str,
+) -> Result<Vec<u8>> {
+    let monitoring_url = monitoring_url.context("log does not advertise a monitoring URL")?;
+    let url = format!("{}/{path}", monitoring_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        bail!("GET {url} returned {status}");
+    }
+    resp.bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .with_context(|| format!("reading body for {url}"))
 }
 
 // ---------------------------------------------------------------------------

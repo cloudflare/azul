@@ -51,8 +51,7 @@
                         },
                         "monitoring_url": {
                             "type": "string",
-                            "default": "<submission_url>",
-                            "description": "URL for log monitoring. If unspecified, use the submission URL and the Worker will proxy requests to the R2 bucket."
+                            "description": "URL for log monitoring. Omit when no monitoring service is configured."
                         },
                         "location_hint": {
                             "type": "string",

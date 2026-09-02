@@ -14,8 +14,10 @@
 //! # Running
 //!
 //! ```text
+//! npm install --global wrangler@4.80.0
+//!
 //! # From crates/bootstrap_mtc_worker/:
-//! npx wrangler -e=dev dev &
+//! wrangler -e=dev dev --persist-to .wrangler/state &
 //!
 //! # From workspace root:
 //! cargo test -p integration_tests --test bootstrap_mtc_api
@@ -24,8 +26,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use integration_tests::{
-    client::BootstrapMtcClient,
+    client::{BootstrapMtcClient, base_url},
     fixtures::{garbage_chain, make_bootstrap_mtc_chain},
+    local_r2,
 };
 use tokio::sync::OnceCell;
 use x509_cert::{Certificate, der::Decode};
@@ -168,6 +171,9 @@ async fn metadata_returns_valid_fields() {
         !meta.submission_url.is_empty(),
         "submission_url must be non-empty"
     );
+    if local_r2::is_loopback_base_url(&base_url()) {
+        assert!(meta.monitoring_url.is_none());
+    }
 }
 
 /// `POST /logs/:log/add-entry` with a valid bootstrap chain returns 200 with
@@ -219,6 +225,14 @@ async fn unknown_log_returns_400() {
     let client = BootstrapMtcClient::new("this-log-does-not-exist");
     let status = client.get_status("get-roots").await.expect("GET request");
     assert_eq!(status, 400, "expected 400 for unknown log");
+}
+
+/// Persisted log objects are not exposed by the submission Worker.
+#[tokio::test]
+async fn checkpoint_is_not_served_by_frontend() {
+    ensure_initialized().await;
+    let client = BootstrapMtcClient::default_log();
+    assert_eq!(client.get_status("checkpoint").await.unwrap(), 404);
 }
 
 /// After `add-entry`, the checkpoint tree size covers the returned `leaf_index`.

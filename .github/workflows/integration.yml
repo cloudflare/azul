@@ -21,6 +21,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.80.0
+
       - name: Install wasm-pack
         run: cargo install wasm-pack@0.13.1 --locked
 
@@ -39,7 +42,7 @@ jobs:
       # committed to the repository.
       - name: Start wrangler dev
         working-directory: crates/ct_worker
-        run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
+        run: wrangler -e=dev dev --port 8787 --persist-to .wrangler/state &
 
       - name: Wait for wrangler dev to be ready
         run: |
@@ -72,6 +75,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.80.0
+
       - name: Install wasm-pack
         run: cargo install wasm-pack@0.13.1 --locked
 
@@ -89,7 +95,7 @@ jobs:
       # committed to the repository.
       - name: Start wrangler dev
         working-directory: crates/bootstrap_mtc_worker
-        run: npx wrangler@4.80.0 -e=dev dev --port 8787 --persist-to .wrangler/state &
+        run: wrangler -e=dev dev --port 8787 --persist-to .wrangler/state &
 
       - name: Wait for wrangler dev to be ready
         run: |
