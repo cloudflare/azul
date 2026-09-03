@@ -49,3 +49,45 @@ pub async fn get(worker: &str, bucket: &str, key: &str) -> Result<Option<Vec<u8>
     }
     bail!("wrangler r2 object get failed for {key}: {stderr}");
 }
+
+/// Deletes an object from a Worker's persisted local R2 state.
+///
+/// # Errors
+///
+/// Returns an error for non-loopback test URLs or if Wrangler fails.
+pub async fn delete(worker: &str, bucket: &str, key: &str) -> Result<()> {
+    let base_url =
+        std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8787".to_string());
+    if !is_loopback_base_url(&base_url) {
+        bail!("local R2 inspection requires a loopback BASE_URL");
+    }
+
+    let worker_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../{worker}"));
+    let object = format!("{bucket}/{key}");
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new("wrangler")
+            .current_dir(worker_dir)
+            .args([
+                "r2",
+                "object",
+                "delete",
+                &object,
+                "--local",
+                "--persist-to",
+                ".wrangler/state",
+                "--force",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("wrangler r2 object delete timed out")?
+    .context("running wrangler r2 object delete")?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!("wrangler r2 object delete failed for {key}: {stderr}");
+}

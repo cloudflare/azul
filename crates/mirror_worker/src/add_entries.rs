@@ -548,17 +548,15 @@ fn excess_entries(upload_start: u64, upload_end: u64, next_entry: u64) -> u64 {
     next_entry.min(upload_end).saturating_sub(upload_start)
 }
 
-/// Cosign the target checkpoint with the mirror key, advance the durable
-/// mirror checkpoint via the DO, and return the 200 response carrying the
-/// mirror cosignature line(s).
+/// Cosign the target checkpoint, ask the DO to publish it without
+/// rewinding the mirror checkpoint, and return the mirror cosignature.
 ///
 /// Called only once the whole upload is durably committed (spec: the
 /// mirror MUST NOT sign until all entries are committed).
 ///
-/// The DO's `/commit` both advances the durable checkpoint and writes the
-/// served checkpoint object to R2, serialized under its commit lock, so
-/// concurrent commits cannot rewind the served checkpoint. The frontend
-/// therefore does not write R2 itself.
+/// The DO serializes publication, republishes same-size checkpoints, and
+/// prevents older concurrent commits from rewinding R2. The frontend does
+/// not write R2 itself.
 ///
 /// If the DO reports a committed size ahead of `upload_end`, a concurrent
 /// `add-entries` already advanced the mirror checkpoint past this upload.
@@ -594,25 +592,14 @@ async fn cosign_and_serve(
     // The served object includes the mirror cosignature returned below.
     let checkpoint_obj = [target.signed_note_bytes.as_slice(), &cosig_body].concat();
 
-    if snapshot
-        .committed
-        .as_ref()
-        .is_some_and(|committed| header.upload_end <= committed.size)
-    {
-        return Ok((
-            StatusCode::OK,
-            [(CONTENT_TYPE, "text/plain; charset=utf-8")],
-            cosig_body,
-        )
-            .into_response());
-    }
-
+    // Same-size commits rewrite R2 so retries repair an absent object.
     let committed = dispatch_commit(
         env,
         &header.log_origin,
         &CommitRequest {
             size: header.upload_end,
             hash: target.hash,
+            checkpoint_note_bytes: target.signed_note_bytes.clone(),
             signed_note_bytes: checkpoint_obj.clone(),
         },
     )
@@ -1027,8 +1014,8 @@ fn resolve_target_pending(
     }
 
     // Spec: the mirror MUST also accept `upload_end` equal to the mirror
-    // checkpoint's tree size, whatever the ticket says. Everything up to
-    // it is already committed and served, so nothing new is persisted.
+    // checkpoint's tree size, whatever the ticket says. The source note is
+    // retained separately from the served cosigned note for this retry.
     if let Some(committed) = snapshot
         .committed
         .as_ref()
@@ -1037,7 +1024,7 @@ fn resolve_target_pending(
         return Ok(PendingCheckpoint {
             size: committed.size,
             hash: committed.hash,
-            signed_note_bytes: committed.signed_note_bytes.clone(),
+            signed_note_bytes: committed_checkpoint_note(committed, verifiers)?,
             witness_published: true,
             witness_response_bytes: Vec::new(),
             update_request_hash: Hash::default(),
@@ -1106,6 +1093,24 @@ fn resolve_target_pending(
         witness_response_bytes: Vec::new(),
         update_request_hash: Hash::default(),
     })
+}
+
+fn committed_checkpoint_note(
+    committed: &CommittedCheckpoint,
+    verifiers: &signed_note::VerifierList,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    if !committed.checkpoint_note_bytes.is_empty() {
+        return Ok(committed.checkpoint_note_bytes.clone());
+    }
+
+    let note = Note::from_bytes(&committed.signed_note_bytes)
+        .map_err(|_| "committed checkpoint is not a valid signed note")?;
+    let (log_signatures, _) = note
+        .verify(verifiers)
+        .map_err(|_| "committed checkpoint has no valid trusted log signature")?;
+    Note::new(note.text(), &log_signatures)
+        .map(|note| note.to_bytes())
+        .map_err(|_| "committed checkpoint note reconstruction failed")
 }
 
 /// Verify a single [`EntryPackage`] against the target pending

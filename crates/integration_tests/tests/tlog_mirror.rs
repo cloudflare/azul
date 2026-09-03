@@ -237,6 +237,12 @@ async fn require_local_r2_object(path: &str) -> Vec<u8> {
         .unwrap_or_else(|| panic!("R2 object missing: {path}"))
 }
 
+async fn delete_local_r2_object(path: &str) {
+    integration_tests::local_r2::delete("mirror_worker", R2_BUCKET, &r2_key(path))
+        .await
+        .unwrap_or_else(|e| panic!("local R2 delete failed for {path}: {e}"));
+}
+
 async fn wait_for_local_r2_absence(paths: &[&str]) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -647,6 +653,13 @@ async fn tlog_mirror_end_to_end() {
         let checkpoint = CheckpointText::from_bytes(served.text()).unwrap();
         assert_eq!(checkpoint.size(), 0);
         assert_eq!(*checkpoint.hash(), tlog_core::EMPTY_HASH);
+
+        // Same-size retries republish the object before returning success.
+        delete_local_r2_object("checkpoint").await;
+        assert!(local_r2_object("checkpoint").await.is_none());
+        let r = post_add_entries(&body).await;
+        assert_eq!(r.status, 200, "empty checkpoint retry");
+        assert!(local_r2_object("checkpoint").await.is_some());
     }
 
     // A configured origin needs a pending checkpoint before accepting
