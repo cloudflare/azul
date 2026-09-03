@@ -27,8 +27,7 @@ crate-type = ["cdylib"]
 
 [build-dependencies]
 config = { path = "./config", package = "mirror_worker_config" }
-jsonschema.workspace = true
-serde_json.workspace = true
+worker_build_config.workspace = true
 
 [dependencies]
 axum.workspace = true
