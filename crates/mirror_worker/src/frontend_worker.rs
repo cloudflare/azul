@@ -1,34 +1,10 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! HTTP entry point + handlers for the mirror worker.
-//!
-//! Routes:
-//!
-//! - `POST /add-checkpoint`: [c2sp.org/tlog-mirror#add-checkpoint][add-cp].
-//!   Updates the pending checkpoint for an origin. Wire format and
-//!   response semantics are identical to the witness's `add-checkpoint`,
-//!   with one spec-mandated exception: the mirror MUST NOT cosign in
-//!   this process. Successful responses have an empty body and HTTP
-//!   status 200.
-//! - `POST /sign-subtree`: [c2sp.org/tlog-witness#sign-subtree][signsub].
-//!   Countersigns a subtree of a checkpoint this mirror has previously
-//!   cosigned. OPTIONAL in the spec but always available here, since the
-//!   mirror's cosigner is ML-DSA-44 / `subtree/v1`. Success returns the
-//!   `subtree/v1` cosignature line(s) as `text/plain`.
-//! - `GET /metadata`: mirror identity, ML-DSA-44 SPKI,
-//!   `mirror_algorithm`, prefixes, and the per-log configuration.
-//! - `GET /`: root status string.
-//!
-//! The mirror's per-origin persistent state lives in a [`MirrorState`]
-//! Durable Object; see [`crate::mirror_state_do`] for details.
-//!
-//! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
-//! [signsub]: https://c2sp.org/tlog-witness#sign-subtree
-//! [`MirrorState`]: crate::mirror_state_do
+//! HTTP entry point and protocol handlers.
 
 use crate::{
-    CONFIG, load_mirror_public_key_der, load_mirror_signer, log_verifiers,
+    CONFIG, IdentitySigner, enabled_roles, load_mirror_signer, load_witness_signer, log_verifiers,
     mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, state_stub},
 };
 use axum::{
@@ -39,103 +15,103 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use generic_log_worker::{
+    frontend::request_metrics,
+    init_logging,
+    obs::{Wshim, metrics},
+    util::now_millis,
+};
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};
-use signed_note::{NoteError, NoteVerifier, VerifierList};
-use tlog_checkpoint::{CheckpointSigner as _, CheckpointText};
-use tlog_core::{Subtree, verify_subtree_consistency_proof};
+use signed_note::{NoteSignature, VerifierList};
+use tlog_checkpoint::CheckpointSigner as _;
 use tlog_witness::{
-    AddCheckpointRequest, CONTENT_TYPE_TLOG_SIZE, MAX_REQUEST_BODY_SIZE, SignSubtreeRequest,
-    parse_add_checkpoint_request, parse_sign_subtree_request, serialize_sign_subtree_response,
+    CONTENT_TYPE_TLOG_SIZE, MAX_REQUEST_BODY_SIZE, TrustedSignatureError,
+    serialize_add_checkpoint_response, serialize_sign_subtree_response,
+    validate_add_checkpoint_request, validate_sign_subtree_proof, validate_sign_subtree_request,
+    verify_trusted_checkpoint_signature,
 };
 use tower_service::Service as _;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-/// Entry point: initialize logging.
+const MAX_ADD_CHECKPOINT_BODY_SIZE: usize = 1_024 * 1_024 + 16 * 1_024;
+
 #[event(start)]
 fn start() {
-    let level = match CONFIG.logging_level.as_deref().unwrap_or("info") {
-        "trace" => log::Level::Trace,
-        "debug" => log::Level::Debug,
-        "warn" => log::Level::Warn,
-        "error" => log::Level::Error,
-        _ => log::Level::Info,
-    };
-    console_error_panic_hook::set_once();
-    let _ = console_log::init_with_level(level);
+    init_logging(CONFIG.logging_level.as_deref());
 }
 
-/// Middleware that adds `Accept-Encoding: gzip` to every response.
-///
-/// [c2sp.org/tlog-mirror][spec] says mirrors SHOULD advertise supported
-/// compression algorithms in responses so clients can compress future
-/// `add-entries` request bodies.
-///
-/// [spec]: https://c2sp.org/tlog-mirror#add-entries
 async fn add_accept_encoding(
     mut response: axum::http::Response<axum::body::Body>,
 ) -> axum::http::Response<axum::body::Body> {
-    response
-        .headers_mut()
-        .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    if enabled_roles(CONFIG.mode).mirror() {
+        response
+            .headers_mut()
+            .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    }
     response
 }
 
-/// Top-level `#[event(fetch)]` handler. Delegates to the axum router;
-/// unmatched routes return 404.
 #[event(fetch, respond_with_errors)]
 async fn fetch(
     req: HttpRequest,
     env: Env,
-    _ctx: Context,
+    ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     crate::init_sentry(&env);
-    // Wrap the router in the sentry catch/flush guard so a panic in any
-    // handler is captured and shipped before the WASM isolate is torn
-    // down. `Router`'s `Service::Error` is `Infallible`; the `?` below
-    // performs the trivial conversion into `worker::Error`.
-    //
-    // `/add-entries` streams a potentially large (optionally gzip) body,
-    // so it uses the raw `Request` extractor with no `DefaultBodyLimit`;
-    // the buffered endpoints cap their bodies via the layer.
+    crate::validate_identity_keys(&env)?;
+    let wshim = Wshim::from_env(&env);
+    let registry = metrics::registry();
     let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
-        Router::new()
+        let mut router = Router::new()
             .route(
                 "/add-checkpoint",
                 post(add_checkpoint).layer(DefaultBodyLimit::max(MAX_ADD_CHECKPOINT_BODY_SIZE)),
             )
-            .route("/add-entries", post(crate::add_entries::add_entries))
             .route(
                 "/sign-subtree",
                 post(sign_subtree).layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_SIZE)),
             )
             .route("/metadata", get(metadata))
-            .route("/", get(root))
+            .route("/", get(root));
+        if enabled_roles(CONFIG.mode).mirror() {
+            router = router.route("/add-entries", post(crate::add_entries::add_entries));
+        }
+        router
             .layer(axum::middleware::map_response(add_accept_encoding))
+            .layer(axum::middleware::from_fn_with_state(
+                (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
+                request_metrics,
+            ))
             .with_state(env)
             .call(req)
             .await
     })
     .await?;
     generic_log_worker::obs::sentry::flush().await;
+    if let Ok(wshim) = wshim {
+        ctx.wait_until(async move {
+            wshim.flush(&generic_log_worker::obs::logs::LOGGER).await;
+            wshim.flush(&registry).await;
+        });
+    }
     Ok(response)
 }
 
-/// `GET /` -- mirror identity string. Convenience only; not part of the
-/// spec.
 async fn root() -> impl IntoResponse {
+    let roles = match CONFIG.mode {
+        config::Mode::Witness => "witness",
+        config::Mode::Mirror => "mirror",
+        config::Mode::WitnessAndMirror => "witness and mirror",
+    };
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        format!("{} - c2sp.org/tlog-mirror mirror\n", CONFIG.mirror_name),
+        format!("mirror worker: {roles}\n"),
     )
 }
 
-/// Error type for the mirror's axum handlers, mapped to an HTTP status by
-/// [`IntoResponse`]. Success and special-body responses (the 200
-/// cosignature, the 409/202 `text/x.tlog.mirror-info` and `text/x.tlog.size`
-/// bodies) are built as axum responses directly, not via this enum.
 pub(crate) enum AppError {
     InternalServerError(String),
     BadRequest(String),
@@ -143,10 +119,9 @@ pub(crate) enum AppError {
     UnprocessableEntity(String),
     UnknownLogOrigin,
     NoValidSignatures,
-    ReferenceCheckpointNotCosignedByThisMirror,
+    ReferenceCheckpointNotCosigned,
 }
 
-/// Result type for the mirror's axum handlers.
 pub(crate) type ApiResult<T> = std::result::Result<T, AppError>;
 
 impl From<worker::Error> for AppError {
@@ -158,9 +133,10 @@ impl From<worker::Error> for AppError {
 impl From<crate::body::BodyError> for AppError {
     fn from(err: crate::body::BodyError) -> Self {
         match err {
-            // Malformed/truncated gzip is a client fault.
             crate::body::BodyError::Decode(msg) => Self::BadRequest(msg),
-            crate::body::BodyError::Transport(e) => Self::InternalServerError(e.to_string()),
+            crate::body::BodyError::Transport(error) => {
+                Self::InternalServerError(error.to_string())
+            }
         }
     }
 }
@@ -168,394 +144,308 @@ impl From<crate::body::BodyError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         match self {
-            AppError::InternalServerError(error) => {
+            Self::InternalServerError(error) => {
                 log::error!("unhandled error: {error}");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
-            AppError::BadRequest(e) => {
-                (StatusCode::BAD_REQUEST, format!("Bad request: {e}")).into_response()
+            Self::BadRequest(error) => {
+                (StatusCode::BAD_REQUEST, format!("Bad request: {error}")).into_response()
             }
-            AppError::UnsupportedMediaType(e) => {
-                (StatusCode::UNSUPPORTED_MEDIA_TYPE, e).into_response()
+            Self::UnsupportedMediaType(error) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, error).into_response()
             }
-            AppError::UnprocessableEntity(e) => (
+            Self::UnprocessableEntity(error) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Unprocessable Entity: {e}"),
+                format!("Unprocessable Entity: {error}"),
             )
                 .into_response(),
-            AppError::UnknownLogOrigin => {
-                (StatusCode::NOT_FOUND, "Unknown log origin").into_response()
-            }
-            AppError::NoValidSignatures => (
+            Self::UnknownLogOrigin => (StatusCode::NOT_FOUND, "Unknown log origin").into_response(),
+            Self::NoValidSignatures => (
                 StatusCode::FORBIDDEN,
                 "No valid signatures from trusted log keys",
             )
                 .into_response(),
-            AppError::ReferenceCheckpointNotCosignedByThisMirror => (
+            Self::ReferenceCheckpointNotCosigned => (
                 StatusCode::FORBIDDEN,
-                "Reference checkpoint not cosigned by this mirror",
+                "Reference checkpoint not cosigned by an enabled identity",
             )
                 .into_response(),
         }
     }
 }
 
-/// Response body for the `/metadata` endpoint: the mirror's identity,
-/// URL prefixes, and per-log configuration. The `mirror_algorithm` field
-/// tells clients whether to expect `cosignature/v1` or `subtree/v1`
-/// cosignatures.
 #[serde_as]
 #[derive(Serialize)]
 struct MetadataResponse<'a> {
-    mirror_name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    /// DER-encoded `SubjectPublicKeyInfo` for the mirror's verifying
-    /// key. Algorithm is identified by `mirror_algorithm`.
-    #[serde_as(as = "Base64As")]
-    mirror_public_key: &'a [u8],
-    /// Always `"subtree/v1"` (ML-DSA-44); the mirror's cosigner is an MTC
-    /// cosigner. See
-    /// [c2sp.org/tlog-cosignature](https://c2sp.org/tlog-cosignature).
-    mirror_algorithm: &'a str,
+    mode: &'a str,
     submission_prefix: &'a str,
     monitoring_prefix: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness: Option<IdentityMetadata<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mirror: Option<IdentityMetadata<'a>>,
     logs: Vec<LogMetadata<'a>>,
 }
 
 #[serde_as]
 #[derive(Serialize)]
+struct IdentityMetadata<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    #[serde_as(as = "Base64As")]
+    public_key: &'a [u8],
+    algorithm: &'a str,
+    supports_sign_subtree: bool,
+}
+
+#[derive(Serialize)]
 struct LogMetadata<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
-    /// The note-signature name the log's trusted checkpoints carry (for
-    /// MTC, the CA cosigner ID). The concrete origins served for this
-    /// key are `<log_key_name>.0.<N>` for each `N` in
-    /// `[min_log_number, max_log_number]`, each addressable at
-    /// `<monitoring_prefix>/<SHA-256(origin), hex>/`.
-    log_key_name: &'a str,
-    /// Lowest MTC log number served for this key (inclusive). For a plain
-    /// (non-MTC) log this equals `max_log_number`.
-    min_log_number: u64,
-    /// Highest MTC log number served for this key (inclusive).
-    max_log_number: u64,
-    /// DER-encoded `SubjectPublicKeyInfo` blobs for the log's trusted
-    /// keys.
-    #[serde_as(as = "Vec<Base64As>")]
-    log_public_keys: Vec<&'a [u8]>,
+    origin: &'a str,
+    checkpoint_signers: Vec<CheckpointSignerMetadata<'a>>,
 }
 
-/// Build the per-log metadata entries, one per configured key, sorted by
-/// `log_key_name` so the response is deterministic regardless of
-/// `HashMap` iteration order (it may be diffed or hashed by monitors).
-///
-/// MTC log-number windows are published as `[min_log_number,
-/// max_log_number]` bounds; a client derives the concrete origins as
-/// `<log_key_name>.0.<N>`.
-fn metadata_logs(
-    logs: &std::collections::HashMap<String, config::LogParams>,
-) -> Vec<LogMetadata<'_>> {
-    let mut out: Vec<LogMetadata> = logs
+#[serde_as]
+#[derive(Serialize)]
+struct CheckpointSignerMetadata<'a> {
+    name: &'a str,
+    algorithm: &'a str,
+    #[serde_as(as = "Base64As")]
+    public_key: &'a [u8],
+}
+
+fn metadata_logs() -> Vec<LogMetadata<'static>> {
+    let mut logs = CONFIG
+        .logs
         .iter()
-        .map(|(log_key_name, p)| LogMetadata {
-            description: p.description.as_deref(),
-            log_key_name,
-            min_log_number: p.min_log_number,
-            max_log_number: p.max_log_number,
-            log_public_keys: p.log_public_keys.iter().map(Vec::as_slice).collect(),
+        .map(|(origin, log)| LogMetadata {
+            description: log.description.as_deref(),
+            origin,
+            checkpoint_signers: log
+                .checkpoint_signers
+                .iter()
+                .map(|signer| CheckpointSignerMetadata {
+                    name: &signer.name,
+                    algorithm: signer.algorithm.as_str(),
+                    public_key: &signer.public_key,
+                })
+                .collect(),
         })
-        .collect();
-    out.sort_by(|a, b| a.log_key_name.cmp(b.log_key_name));
-    out
+        .collect::<Vec<_>>();
+    logs.sort_by(|a, b| a.origin.cmp(b.origin));
+    logs
 }
 
-/// `GET /metadata` handler.
 #[worker::send]
 async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
-    let mirror_public_key = load_mirror_public_key_der(&env)?;
-    let mirror_algorithm = load_mirror_signer(&env)?.algorithm();
-    let logs = metadata_logs(&CONFIG.logs);
-    let body = MetadataResponse {
-        mirror_name: &CONFIG.mirror_name,
-        description: CONFIG.description.as_deref(),
-        mirror_public_key,
-        mirror_algorithm,
-        submission_prefix: &CONFIG.submission_prefix,
-        monitoring_prefix: CONFIG
-            .monitoring_prefix
-            .as_deref()
-            .unwrap_or(&CONFIG.submission_prefix),
-        logs,
+    let roles = enabled_roles(CONFIG.mode);
+    let witness = if roles.witness() {
+        let identity = CONFIG
+            .witness
+            .as_ref()
+            .expect("validated witness mode has witness config");
+        let signer = load_witness_signer(&env)?;
+        Some(identity_metadata(identity, signer))
+    } else {
+        None
     };
-    Ok((StatusCode::OK, Json(body)))
+    let mirror = if roles.mirror() {
+        let identity = CONFIG
+            .mirror
+            .as_ref()
+            .expect("validated mirror mode has mirror config");
+        let signer = load_mirror_signer(&env)?;
+        Some(IdentityMetadata {
+            name: &identity.name,
+            description: identity.description.as_deref(),
+            public_key: signer.public_key_der(),
+            algorithm: signer.algorithm(),
+            supports_sign_subtree: signer.supports_sign_subtree(),
+        })
+    } else {
+        None
+    };
+    Ok((
+        StatusCode::OK,
+        Json(MetadataResponse {
+            mode: CONFIG.mode.as_str(),
+            submission_prefix: &CONFIG.submission_prefix,
+            monitoring_prefix: CONFIG
+                .monitoring_prefix
+                .as_deref()
+                .unwrap_or(&CONFIG.submission_prefix),
+            witness,
+            mirror,
+            logs: metadata_logs(),
+        }),
+    ))
 }
 
-/// Handle `POST /add-checkpoint`, updating the pending checkpoint for a
-/// log. Handled like a witness's `add-checkpoint`, but the mirror does
-/// not cosign and returns an empty body ([spec][add-cp]).
-///
-/// After validating the request (parse, log lookup, signature, and size
-/// range), the check-proof-and-update against persisted pending state is
-/// delegated to the per-origin [`MirrorState`] DO so it happens
-/// atomically; see [`dispatch_update_pending`] for the status-code
-/// mapping.
-///
-/// [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
-/// [`MirrorState`]: crate::mirror_state_do
+fn identity_metadata<'a>(
+    identity: &'a config::IdentityConfig,
+    signer: &'a IdentitySigner,
+) -> IdentityMetadata<'a> {
+    IdentityMetadata {
+        name: &identity.name,
+        description: identity.description.as_deref(),
+        public_key: signer.public_key_der(),
+        algorithm: signer.algorithm(),
+        supports_sign_subtree: signer.supports_sign_subtree(),
+    }
+}
+
 #[worker::send]
 async fn add_checkpoint(
     State(env): State<Env>,
     body: Bytes,
 ) -> ApiResult<axum::response::Response> {
-    // The body size is capped by the `DefaultBodyLimit` layer on this
-    // route, which rejects oversized payloads (413) before they are fully
-    // buffered, so by here `body` is already within bounds.
-    let AddCheckpointRequest {
-        old_size,
-        consistency_proof,
-        checkpoint,
-    } = match parse_add_checkpoint_request(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("add-checkpoint: malformed request: {e}");
-            return Err(AppError::BadRequest(e.to_string()));
-        }
-    };
-
-    // Parse the checkpoint and look up the log by its origin. Using the
-    // validated `CheckpointText` origin (not a looser re-parse) keeps the
-    // lookup consistent with the size/hash used below.
-    let cp_text = match CheckpointText::from_bytes(checkpoint.text()) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("add-checkpoint: malformed checkpoint text: {e:?}");
-            return Err(AppError::BadRequest(e.to_string()));
-        }
-    };
-    let origin = cp_text.origin();
+    let validated = validate_add_checkpoint_request(&body).map_err(|error| {
+        log::warn!("add-checkpoint: malformed request: {error}");
+        AppError::BadRequest(error.to_string())
+    })?;
+    let (old_size, consistency_proof, checkpoint, checkpoint_text) = validated.into_parts();
+    let origin = checkpoint_text.origin();
     let Some(verifiers) = log_verifiers(origin) else {
         return Err(AppError::UnknownLogOrigin);
     };
+    verify_source_checkpoint(&checkpoint, &verifiers, "add-checkpoint")?;
 
-    // Accept the checkpoint if at least one trusted log key signed it;
-    // unknown-key signatures are ignored (witness semantics). No valid
-    // trusted signature -> 403; a malformed signature line -> 400.
-    if let Err(e) = checkpoint.verify(&verifiers) {
-        match e {
-            NoteError::UnverifiedNote | NoteError::InvalidSignature { .. } => {
-                log::info!("add-checkpoint: rejecting note: {e:?}");
-                return Err(AppError::NoValidSignatures);
-            }
-            _ => {
-                log::warn!("add-checkpoint: verify failed: {e:?}");
-                return Err(AppError::BadRequest(e.to_string()));
-            }
-        }
-    }
+    let witness_signature = if enabled_roles(CONFIG.mode).witness() {
+        Some(
+            load_witness_signer(&env)?
+                .as_checkpoint_signer()
+                .sign(now_millis(), &checkpoint_text)
+                .map_err(|error| Error::from(format!("witness signing: {error:?}")))?,
+        )
+    } else {
+        None
+    };
 
-    if old_size > cp_text.size() {
-        return Err(AppError::BadRequest(format!(
-            "old_size {old_size} > checkpoint size {}",
-            cp_text.size()
-        )));
-    }
-
-    // Atomic check-proof-and-update in the per-origin DO. Pass the whole
-    // signed note (via `to_bytes()`) so the DO retains the log's
-    // signature alongside size+hash, per spec.
     let update = UpdatePendingRequest {
         old_size,
-        new_size: cp_text.size(),
-        new_hash: *cp_text.hash(),
+        new_size: checkpoint_text.size(),
+        new_hash: *checkpoint_text.hash(),
         proof: consistency_proof,
         signed_note_bytes: checkpoint.to_bytes(),
     };
-    if let Some(resp) = dispatch_update_pending(&env, origin, &update).await? {
-        return Ok(resp);
+    if let Some(response) = dispatch_update_pending(&env, origin, &update).await? {
+        return Ok(response);
     }
 
-    // Empty body; the mirror cosigner MUST NOT sign here.
-    Ok(StatusCode::OK.into_response())
-}
-
-/// `POST /sign-subtree` handler.
-///
-/// OPTIONAL endpoint per [c2sp.org/tlog-witness#sign-subtree][spec], which
-/// the mirror inherits (the same cosigner emitted by `add-entries` signs
-/// the subtree). The mirror's cosigner is always ML-DSA-44 / `subtree/v1`,
-/// so this endpoint is always available.
-///
-/// Verification of the reference checkpoint is stateless: the submitted
-/// checkpoint MUST carry one of the mirror's own past `subtree/v1`
-/// cosignatures (the whole-tree cosignature it emits on a successful
-/// `add-entries`). This is safe for the same reason as in the witness: the
-/// mirror only cosigns a checkpoint after fully ingesting and verifying
-/// every entry up to that size, so a checkpoint bearing the mirror's
-/// cosignature proves the mirror holds that tree. `/sign-subtree` therefore
-/// inherits the trust window of `/add-entries`.
-///
-/// [spec]: https://c2sp.org/tlog-witness#sign-subtree
-#[allow(clippy::too_many_lines)]
-#[worker::send]
-async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::response::Response> {
-    let subtree_signer = load_mirror_signer(&env)?.as_subtree_signer();
-
-    let SignSubtreeRequest {
-        subtree_start,
-        subtree_end,
-        subtree_hash,
-        subtree_cosignatures: _,
-        consistency_proof,
-        checkpoint,
-    } = match parse_sign_subtree_request(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("sign-subtree: malformed request: {e}");
-            return Err(AppError::BadRequest(e.to_string()));
-        }
+    let Some(signature) = witness_signature else {
+        return Ok(StatusCode::OK.into_response());
     };
-
-    // Parse the reference checkpoint and bound-check the subtree.
-    // `Subtree::new` enforces `start < end` and the power-of-two
-    // alignment; `subtree_end <= size` is checked explicitly. Empty
-    // subtrees (`start == end`) are rejected for now; MTC draft-06 will
-    // permit them, at which point the mirror should cosign them too.
-    let cp_text = match CheckpointText::from_bytes(checkpoint.text()) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("sign-subtree: malformed checkpoint text: {e:?}");
-            return Err(AppError::BadRequest(e.to_string()));
-        }
-    };
-    if subtree_end > cp_text.size() {
-        log::info!(
-            "sign-subtree: subtree end {subtree_end} exceeds checkpoint size {}",
-            cp_text.size()
-        );
-        return Err(AppError::BadRequest(format!(
-            "subtree end {subtree_end} > checkpoint size {}",
-            cp_text.size()
-        )));
-    }
-    let subtree = match Subtree::new(subtree_start, subtree_end) {
-        Ok(s) => s,
-        Err(e) => {
-            log::info!("sign-subtree: invalid subtree [{subtree_start}, {subtree_end}): {e:?}");
-            return Err(AppError::BadRequest(format!("invalid subtree: {e:?}")));
-        }
-    };
-
-    // Look up the log by its origin. Subtree DoS-protection cosignatures
-    // in the request are ignored: this implementation applies no
-    // pre-screening policy, as the spec leaves their use to the operator.
-    let origin = cp_text.origin();
-    if log_verifiers(origin).is_none() {
-        log::info!("sign-subtree: unknown log origin {origin:?}");
-        return Err(AppError::UnknownLogOrigin);
-    }
-
-    // Stateless verification: the checkpoint MUST carry one of this
-    // mirror's own past `subtree/v1` cosignatures. The verifier
-    // reconstructs the cosigned message from the checkpoint's
-    // origin/size/hash with start = 0, end = size and rejects anything
-    // else.
-    let mirror_verifier: Box<dyn NoteVerifier> = subtree_signer.verifier();
-    if let Err(e) = checkpoint.verify(&VerifierList::new(vec![mirror_verifier])) {
-        match e {
-            NoteError::UnverifiedNote | NoteError::InvalidSignature { .. } => {
-                log::info!("sign-subtree: reference checkpoint not cosigned by this mirror: {e:?}");
-                return Err(AppError::ReferenceCheckpointNotCosignedByThisMirror);
-            }
-            // `MismatchedVerifier`/`AmbiguousKey` mean the verifier list
-            // we built is malformed, not that the client sent a bad
-            // request; over a one-element list they are unreachable
-            // today. Surface them as 500 rather than blaming the client.
-            _ => {
-                log::error!("sign-subtree: checkpoint verify failed unexpectedly: {e:?}");
-                return Err(AppError::InternalServerError(e.to_string()));
-            }
-        }
-    }
-
-    // Verify the subtree consistency proof against the reference
-    // checkpoint root.
-    if verify_subtree_consistency_proof(
-        &consistency_proof,
-        cp_text.size(),
-        *cp_text.hash(),
-        &subtree,
-        subtree_hash,
-    )
-    .is_err()
-    {
-        log::info!(
-            "sign-subtree: consistency proof failed for subtree [{subtree_start}, {subtree_end}) \
-             against checkpoint size {}",
-            cp_text.size()
-        );
-        return Err(AppError::UnprocessableEntity(
-            "subtree consistency proof failed".to_owned(),
-        ));
-    }
-
-    // Timestamp must be zero for a non-zero-start subtree; allowed for
-    // start = 0 but we use zero uniformly.
-    let note_sig = subtree_signer.sign_subtree(0, origin, &subtree, &subtree_hash);
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        serialize_sign_subtree_response(std::slice::from_ref(&note_sig)),
+        serialize_add_checkpoint_response(std::slice::from_ref(&signature)),
     )
         .into_response())
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+fn verify_source_checkpoint(
+    checkpoint: &signed_note::Note,
+    verifiers: &VerifierList,
+    handler: &str,
+) -> ApiResult<()> {
+    verify_trusted_checkpoint_signature(checkpoint, verifiers).map_err(|error| match error {
+        TrustedSignatureError::NoValidSignature(error) => {
+            log::info!("{handler}: rejecting note: {error:?}");
+            AppError::NoValidSignatures
+        }
+        TrustedSignatureError::VerifierInvariant(error) => {
+            AppError::InternalServerError(format!("{handler} verifier invariant: {error:?}"))
+        }
+    })
+}
 
-/// Maximum `add-checkpoint` request body, enforced by the route's
-/// [`DefaultBodyLimit`] layer. A well-formed request is an `old <N>`
-/// line, up to 63 base64 hash lines, and a checkpoint note of up to
-/// `signed_note::MAX_NOTE_SIZE` (1 MiB); 1 MiB plus 16 KiB of headroom
-/// covers that.
-const MAX_ADD_CHECKPOINT_BODY_SIZE: usize = 1_024 * 1_024 + 16 * 1_024;
+#[worker::send]
+async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::response::Response> {
+    let mut signers = Vec::with_capacity(2);
+    let roles = enabled_roles(CONFIG.mode);
+    if roles.witness()
+        && let Some(signer) = load_witness_signer(&env)?.as_subtree_signer()
+    {
+        signers.push(signer);
+    }
+    if roles.mirror()
+        && let Some(signer) = load_mirror_signer(&env)?.as_subtree_signer()
+    {
+        signers.push(signer);
+    }
+    if signers.is_empty() {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    }
 
-/// POST the [`UpdatePendingRequest`] to the per-origin DO, translating
-/// the DO's status code into either:
-///
-///   * `Ok(None)`: success (200); the caller should return an empty
-///     `Response`.
-///   * `Ok(Some(resp))`: the DO responded with a non-200 status that
-///     maps directly to the `add-checkpoint` HTTP response (409 with
-///     `text/x.tlog.size` body, 422, or a forwarded 400).
-///   * `Err(_)`: transport-level failure.
+    let validated = validate_sign_subtree_request(&body).map_err(|error| {
+        log::warn!("sign-subtree: malformed request: {error}");
+        AppError::BadRequest(error.to_string())
+    })?;
+    let origin = validated.checkpoint_text().origin();
+    if log_verifiers(origin).is_none() {
+        return Err(AppError::UnknownLogOrigin);
+    }
+    validate_sign_subtree_proof(&validated).map_err(|_| {
+        AppError::UnprocessableEntity("subtree consistency proof failed".to_owned())
+    })?;
+
+    let mut signatures: Vec<NoteSignature> = Vec::with_capacity(signers.len());
+    for signer in signers {
+        let verifiers = VerifierList::new(vec![signer.verifier()]);
+        match verify_trusted_checkpoint_signature(validated.checkpoint(), &verifiers) {
+            Ok(()) => signatures.push(signer.sign_subtree(
+                0,
+                origin,
+                validated.subtree(),
+                validated.subtree_hash(),
+            )),
+            Err(TrustedSignatureError::NoValidSignature(_)) => {}
+            Err(TrustedSignatureError::VerifierInvariant(error)) => {
+                return Err(AppError::InternalServerError(format!(
+                    "sign-subtree verifier invariant: {error:?}"
+                )));
+            }
+        }
+    }
+    if signatures.is_empty() {
+        return Err(AppError::ReferenceCheckpointNotCosigned);
+    }
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        serialize_sign_subtree_response(&signatures),
+    )
+        .into_response())
+}
+
 async fn dispatch_update_pending(
     env: &Env,
     origin: &str,
     update: &UpdatePendingRequest,
 ) -> Result<Option<axum::response::Response>> {
     let stub = state_stub(env, origin)?;
-    let mut resp = stub
+    let mut response = stub
         .fetch_with_request(Request::new_with_init(
             "http://do/update-pending",
             &RequestInit {
                 method: Method::Post,
                 body: Some(serde_json::to_string(update)?.into()),
                 headers: {
-                    let h = Headers::new();
-                    h.set("content-type", "application/json")?;
-                    h
+                    let headers = Headers::new();
+                    headers.set("content-type", "application/json")?;
+                    headers
                 },
                 ..Default::default()
             },
         )?)
         .await?;
-    match resp.status_code() {
-        // Drop `resp`; its destructor releases the body (no explicit read).
+    match response.status_code() {
         200 => Ok(None),
         409 => {
-            let current: PendingCheckpoint = resp.json().await?;
-            Ok(Some(tlog_size_conflict(&current)))
+            let current: PendingCheckpoint = response.json().await?;
+            Ok(Some(tlog_size_conflict(current.size)))
         }
         422 => Ok(Some(
             (
@@ -565,10 +455,11 @@ async fn dispatch_update_pending(
                 .into_response(),
         )),
         400 => {
-            // Forward the DO's message verbatim; it already describes the
-            // specific violation (e.g. non-empty proof for a first pending).
-            let msg = resp.text().await.unwrap_or_else(|_| "Bad request".into());
-            Ok(Some((StatusCode::BAD_REQUEST, msg).into_response()))
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Bad request".into());
+            Ok(Some((StatusCode::BAD_REQUEST, message).into_response()))
         }
         status => Ok(Some(
             (
@@ -580,15 +471,11 @@ async fn dispatch_update_pending(
     }
 }
 
-/// Build the 409 response body per the witness/mirror spec:
-/// `text/x.tlog.size` content type, decimal latest size followed by a
-/// newline.
-fn tlog_size_conflict(current: &PendingCheckpoint) -> axum::response::Response {
-    let body = format!("{}\n", current.size);
+fn tlog_size_conflict(size: u64) -> axum::response::Response {
     (
         StatusCode::CONFLICT,
         [(header::CONTENT_TYPE, CONTENT_TYPE_TLOG_SIZE)],
-        body,
+        format!("{size}\n"),
     )
         .into_response()
 }
@@ -599,12 +486,9 @@ mod tests {
     use axum::http::header::ACCEPT_ENCODING;
 
     #[tokio::test]
-    async fn accept_encoding_middleware_adds_gzip() {
+    async fn combined_mode_advertises_gzip() {
         let response = axum::http::Response::new(axum::body::Body::empty());
         let response = add_accept_encoding(response).await;
-        assert_eq!(
-            response.headers().get(ACCEPT_ENCODING).unwrap().as_bytes(),
-            b"gzip"
-        );
+        assert_eq!(response.headers()[ACCEPT_ENCODING], "gzip");
     }
 }

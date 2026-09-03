@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Build script to include per-environment mirror configuration.
+//! Build script to include per-environment mirror worker configuration.
 
 use config::AppConfig;
 

@@ -108,7 +108,7 @@ pub(crate) async fn add_entries(
     // add-checkpoint (tlog-mirror "Processing"). Empty pending signed-note bytes
     // reliably mean pristine state; once accepted, the DO retains the
     // latest pending forever.
-    if snapshot.pending.signed_note_bytes.is_empty() {
+    if snapshot.pending.is_none() {
         log::info!(
             "add-entries: no pending checkpoint for origin {:?}; returning 422",
             header.log_origin,
@@ -126,8 +126,11 @@ pub(crate) async fn add_entries(
                  (origin={origin:?}, upload_end={ue}, pending_size={ps}, committed_size={cs})",
                 origin = header.log_origin,
                 ue = header.upload_end,
-                ps = snapshot.pending.size,
-                cs = snapshot.committed.size,
+                ps = snapshot.pending.as_ref().map_or(0, |pending| pending.size),
+                cs = snapshot
+                    .committed
+                    .as_ref()
+                    .map_or(0, |committed| committed.size),
             );
             return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
         }
@@ -393,12 +396,14 @@ where
 {
     // config.schema.json caps commit_packages (max 1024), enforced by the
     // build script, so this always fits usize; the fallback is unreachable.
-    let commit_packages = usize::try_from(crate::CONFIG.commit_packages()).unwrap_or(usize::MAX);
+    let commit_packages =
+        usize::try_from(crate::CONFIG.mirror_config().commit_packages()).unwrap_or(usize::MAX);
     // Byte ceiling on buffered entries; flush early when reached so peak
     // memory is bounded regardless of package sizes. Saturating to
     // usize::MAX on a 32-bit target just means "never trip the byte cap",
     // leaving the package-count cap in force.
-    let max_chunk_bytes = usize::try_from(crate::CONFIG.max_chunk_bytes()).unwrap_or(usize::MAX);
+    let max_chunk_bytes =
+        usize::try_from(crate::CONFIG.mirror_config().max_chunk_bytes()).unwrap_or(usize::MAX);
 
     // Entries below the request-start frontier are already persisted; new
     // persistence begins at this fixed boundary.
@@ -585,24 +590,14 @@ async fn cosign_and_serve(
     let cosig_body =
         tlog_witness::serialize_add_checkpoint_response(std::slice::from_ref(&note_sig));
 
-    // The served checkpoint is the log's signed note with the mirror's
-    // cosignature appended. Build it once so both the early-return and the
-    // `/commit` paths use the same bytes.
+    // The served object includes the mirror cosignature returned below.
     let checkpoint_obj = [target.signed_note_bytes.as_slice(), &cosig_body].concat();
 
-    // When the upload only reaches the mirror checkpoint's current size,
-    // the checkpoint at that size is already committed and served. There
-    // is nothing to advance, and re-committing would redundantly rewrite
-    // R2 and append a duplicate cosignature line to the served note, so
-    // return a fresh cosignature without dispatching `/commit`. (Committed
-    // is monotonic, so a stale-low snapshot only skips this optimization,
-    // never the other way.)
-    //
-    // Note: this also means a previously-failed R2 checkpoint write won't
-    // self-heal at the same size; it heals on the next larger commit. That
-    // is acceptable because the durable committed state advanced before the
-    // R2 write, and duplicate cosignatures are worse than a lagging object.
-    if header.upload_end <= snapshot.committed.size {
+    if snapshot
+        .committed
+        .as_ref()
+        .is_some_and(|committed| header.upload_end <= committed.size)
+    {
         return Ok((
             StatusCode::OK,
             [(CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -611,8 +606,6 @@ async fn cosign_and_serve(
             .into_response());
     }
 
-    // The DO writes the cosigned checkpoint to R2 while advancing the
-    // durable checkpoint under its commit lock.
     let committed = dispatch_commit(
         env,
         &header.log_origin,
@@ -623,11 +616,6 @@ async fn cosign_and_serve(
         },
     )
     .await?;
-
-    debug_assert_eq!(
-        committed.signed_note_bytes, checkpoint_obj,
-        "DO returned checkpoint bytes that do not match the cosigned note we sent"
-    );
 
     if committed.size != header.upload_end {
         // The DO refused to rewind: a concurrent commit already advanced
@@ -652,6 +640,11 @@ async fn cosign_and_serve(
         };
         return Ok(mirror_info_409(env, &fresh_snapshot, &header.log_origin));
     }
+
+    debug_assert_eq!(
+        committed.signed_note_bytes, checkpoint_obj,
+        "DO returned different bytes for the requested checkpoint"
+    );
 
     Ok((
         StatusCode::OK,
@@ -1014,27 +1007,36 @@ fn resolve_target_pending(
     snapshot: &MirrorStateSnapshot,
     verifiers: &signed_note::VerifierList,
 ) -> std::result::Result<PendingCheckpoint, &'static str> {
-    if header.upload_end == snapshot.pending.size {
+    let Some(pending) = snapshot.pending.as_ref() else {
+        return Err("no pending checkpoint");
+    };
+    if header.upload_end == pending.size {
         // Per spec: `upload_end` must be at-or-above the mirror's
         // committed checkpoint. The DO state guarantees pending >=
         // committed (the `/commit` RPC enforces it on the write
         // side), so checking against pending is sufficient.
-        if header.upload_end < snapshot.committed.size {
+        if snapshot
+            .committed
+            .as_ref()
+            .is_some_and(|committed| header.upload_end < committed.size)
+        {
             return Err("upload_end below committed checkpoint");
         }
-        return Ok(snapshot.pending.clone());
+        return Ok(pending.clone());
     }
 
     // Spec: the mirror MUST also accept `upload_end` equal to the mirror
     // checkpoint's tree size, whatever the ticket says. Everything up to
-    // it is already committed and served, so the committed checkpoint is
-    // the target and nothing new is persisted; `cosign_and_serve` returns
-    // a fresh cosignature without re-advancing.
-    if snapshot.committed.size > 0 && header.upload_end == snapshot.committed.size {
+    // it is already committed and served, so nothing new is persisted.
+    if let Some(committed) = snapshot
+        .committed
+        .as_ref()
+        .filter(|committed| header.upload_end == committed.size)
+    {
         return Ok(PendingCheckpoint {
-            size: snapshot.committed.size,
-            hash: snapshot.committed.hash,
-            signed_note_bytes: snapshot.committed.signed_note_bytes.clone(),
+            size: committed.size,
+            hash: committed.hash,
+            signed_note_bytes: committed.signed_note_bytes.clone(),
         });
     }
 
@@ -1085,7 +1087,11 @@ fn resolve_target_pending(
     if cp_text.size() != header.upload_end {
         return Err("ticket-bound checkpoint size != upload_end");
     }
-    if cp_text.size() < snapshot.committed.size {
+    if snapshot
+        .committed
+        .as_ref()
+        .is_some_and(|committed| cp_text.size() < committed.size)
+    {
         return Err("ticket-bound checkpoint size < committed checkpoint size");
     }
     Ok(PendingCheckpoint {
@@ -1204,21 +1210,21 @@ fn mirror_info_response(
     status: StatusCode,
     next_entry: u64,
 ) -> axum::response::Response {
-    let ticket = if snapshot.pending.signed_note_bytes.is_empty() {
-        Vec::new()
-    } else {
+    let ticket = if let Some(pending) = &snapshot.pending {
         match load_ticket_sealer(env) {
             // Bind the log origin as associated data so the ticket can
             // only be reopened for the same log.
-            Ok(m) => m.seal(&snapshot.pending.signed_note_bytes, origin.as_bytes()),
+            Ok(m) => m.seal(&pending.signed_note_bytes, origin.as_bytes()),
             Err(e) => {
                 log::error!("add-entries: cannot seal ticket: {e:?}");
                 Vec::new()
             }
         }
+    } else {
+        Vec::new()
     };
     let info = MirrorInfo {
-        tree_size: snapshot.pending.size,
+        tree_size: snapshot.pending.as_ref().map_or(0, |pending| pending.size),
         next_entry,
         ticket,
     };

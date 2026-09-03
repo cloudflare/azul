@@ -1,97 +1,92 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Configuration for [`mirror_worker`](../mirror_worker/).
-//!
-//! This mirror implements [`c2sp.org/tlog-mirror`][mirror] specialized for
-//! [Merkle Tree Certificate][mtc] issuance logs: it mirrors the tiled logs
-//! a CA publishes under a single CA cosigner key. It is configured with
-//! the CAs it mirrors, keyed by `log_key_name`: the CA cosigner's
-//! note-signature name, which is the CA ID (e.g. `oid/1.3.6.1.4.1.32473.2`)
-//! and appears on every checkpoint the mirror ingests via
-//! [`add-checkpoint`][add-cp]. Each entry gives one or more ML-DSA-44 SPKI
-//! public keys the mirror accepts `subtree/v1` checkpoint signatures from.
-//!
-//! A CA cosigner name is distinct from the log origin: one CA cosigner key
-//! covers a whole series of issuance logs, so each entry carries a required
-//! `min_log_number`/`max_log_number` window. The mirror serves each log
-//! number `N` in that window as its own origin `<log_key_name>.0.<N>` (per
-//! [mtc-tlog][mtc], the `.0.` arc is fixed), all verified with this entry's
-//! key(s).
-//!
-//! [mtc]: https://c2sp.org/mtc-tlog
-//!
-//! The mirror's own ML-DSA-44 signing key (used to produce its `subtree/v1`
-//! mirror cosignature) is supplied out-of-band as a secret named
-//! `MIRROR_SIGNING_KEY` (see the worker's `.dev.vars` in dev mode; use
-//! `wrangler secret put MIRROR_SIGNING_KEY` for real deployments).
-//!
-//! [mirror]: https://c2sp.org/tlog-mirror
-//! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
+//! Configuration for the configurable transparency-log worker.
 
-use ml_dsa::pkcs8::DecodePublicKey as _;
+use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ml_dsa::{MlDsa44, VerifyingKey as MlDsaVerifyingKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
-use signed_note::{KeyName, NoteVerifier};
+use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier};
 use std::collections::{BTreeSet, HashMap};
 use tlog_cosignature::SubtreeV1NoteVerifier;
 
-/// Top-level worker configuration, deserialized from `config.<env>.json`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mode {
+    Witness,
+    Mirror,
+    WitnessAndMirror,
+}
+
+impl Mode {
+    #[must_use]
+    pub const fn witness_enabled(self) -> bool {
+        matches!(self, Self::Witness | Self::WitnessAndMirror)
+    }
+
+    #[must_use]
+    pub const fn mirror_enabled(self) -> bool {
+        matches!(self, Self::Mirror | Self::WitnessAndMirror)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Witness => "witness",
+            Self::Mirror => "mirror",
+            Self::WitnessAndMirror => "witness-and-mirror",
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
+    pub mode: Mode,
     pub logging_level: Option<String>,
-    /// The mirror's own identity. The name appears in every cosignature
-    /// line the mirror produces (and, on `/metadata`, the published
-    /// mirror identity).
-    pub mirror_name: String,
-    /// Human-readable description for operator dashboards.
-    pub description: Option<String>,
-    /// URL prefix for write APIs (`add-checkpoint`, `add-entries`).
-    /// Published in the `/metadata` response so clients know where to
-    /// send requests.
     pub submission_prefix: String,
-    /// URL prefix for read APIs (the [tlog-tiles][tiles] read interface
-    /// served at `<monitoring_prefix>/<encoded origin>/...`). `None`
-    /// means "same as `submission_prefix`".
-    ///
-    /// [tiles]: https://c2sp.org/tlog-tiles
     pub monitoring_prefix: Option<String>,
-    /// How often (in seconds) the per-origin partial-tile cleaner wakes
-    /// to clean orphaned partial tiles from object storage. `None` falls
-    /// back to a one-hour default (see [`Self::clean_interval_secs`]).
-    /// Consumed by [`mirror_worker`](../mirror_worker/)'s `cleaner_do`.
-    pub clean_interval_secs: Option<u64>,
-    /// How many entry packages the `add-entries` handler verifies before
-    /// flushing them to storage and advancing the persisted-entry
-    /// frontier. Bounds in-memory buffering and gives durable mid-request
-    /// progress on large uploads. `None` falls back to a default of 32
-    /// (see [`Self::commit_packages`]). Consumed by
-    /// [`mirror_worker`](../mirror_worker/)'s `add_entries`.
-    pub commit_packages: Option<u64>,
-    /// Byte ceiling on the entries buffered between flushes. `add-entries`
-    /// flushes early once the buffered entry bytes reach this many, even if
-    /// fewer than `commit_packages` packages have accumulated. This bounds
-    /// peak memory independent of package sizes: `commit_packages` alone
-    /// caps only the package *count*, and a single package can hold up to
-    /// 256 entries of 65535 bytes (~16 MiB), so a count-only bound can
-    /// exceed the isolate's memory ceiling. `None` falls back to a default
-    /// (see [`Self::max_chunk_bytes`]). Consumed by
-    /// [`mirror_worker`](../mirror_worker/)'s `add_entries`.
-    pub max_chunk_bytes: Option<u64>,
-    /// CAs this mirror mirrors, keyed by `log_key_name`: the CA
-    /// cosigner's note-signature name (the CA ID) carried by the
-    /// checkpoints it ingests.
+    pub witness: Option<IdentityConfig>,
+    pub mirror: Option<MirrorConfig>,
     #[serde(deserialize_with = "deserialize_logs")]
     pub logs: HashMap<String, LogParams>,
 }
 
-/// Deserialize [`AppConfig::logs`], rejecting duplicate `log_key_name`
-/// keys. `serde_json` collapses a repeated object key onto one entry,
-/// silently keeping the last value; for this config that would drop a
-/// trusted CA (its keys and log-number window) without any error, so we
-/// fail closed. The config is expected to be machine-generated, where a
-/// generator or merge bug is a plausible source of duplicates.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityConfig {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorConfig {
+    pub name: String,
+    pub description: Option<String>,
+    pub clean_interval_secs: Option<u64>,
+    pub commit_packages: Option<u64>,
+    pub max_chunk_bytes: Option<u64>,
+}
+
+impl MirrorConfig {
+    #[must_use]
+    pub fn clean_interval_secs(&self) -> u64 {
+        self.clean_interval_secs.unwrap_or(3600)
+    }
+
+    #[must_use]
+    pub fn commit_packages(&self) -> u64 {
+        self.commit_packages.unwrap_or(32)
+    }
+
+    #[must_use]
+    pub fn max_chunk_bytes(&self) -> u64 {
+        self.max_chunk_bytes.unwrap_or(16 * 1024 * 1024)
+    }
+}
+
 fn deserialize_logs<'de, D>(deserializer: D) -> Result<HashMap<String, LogParams>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -102,7 +97,7 @@ where
         type Value = HashMap<String, LogParams>;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a map of log_key_name to log parameters")
+            f.write_str("a map of checkpoint origin to log parameters")
         }
 
         fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
@@ -110,13 +105,13 @@ where
             A: serde::de::MapAccess<'de>,
         {
             let mut logs = HashMap::with_capacity(access.size_hint().unwrap_or(0));
-            while let Some((name, params)) = access.next_entry::<String, LogParams>()? {
-                if logs.contains_key(&name) {
+            while let Some((origin, params)) = access.next_entry::<String, LogParams>()? {
+                if logs.contains_key(&origin) {
                     return Err(serde::de::Error::custom(format!(
-                        "duplicate log_key_name {name:?} in logs"
+                        "duplicate checkpoint origin {origin:?} in logs"
                     )));
                 }
-                logs.insert(name, params);
+                logs.insert(origin, params);
             }
             Ok(logs)
         }
@@ -126,236 +121,146 @@ where
 }
 
 impl AppConfig {
-    /// The partial-tile cleaner's wake interval, in seconds, falling back
-    /// to a one-hour default when the `clean_interval_secs` field is
-    /// unset. An hour bounds how long an orphaned partial tile lingers
-    /// without making the cleaner's periodic R2 listing a meaningful cost.
     #[must_use]
-    pub fn clean_interval_secs(&self) -> u64 {
-        self.clean_interval_secs.unwrap_or(3600)
+    pub const fn witness_enabled(&self) -> bool {
+        self.mode.witness_enabled()
     }
 
-    /// How many entry packages `add-entries` commits per flush, falling
-    /// back to 32 when `commit_packages` is unset. 32 matches the
-    /// per-request package budget clients are recommended to stay within
-    /// (tlog-mirror "Implementation Considerations"), so a compliant
-    /// single-request upload still commits once, while larger uploads
-    /// flush every 32 packages instead of buffering the whole body.
     #[must_use]
-    pub fn commit_packages(&self) -> u64 {
-        self.commit_packages.unwrap_or(32)
+    pub const fn mirror_enabled(&self) -> bool {
+        self.mode.mirror_enabled()
     }
 
-    /// Byte ceiling on buffered entries before `add-entries` flushes early,
-    /// falling back to 16 MiB when `max_chunk_bytes` is unset. This bounds
-    /// peak in-memory buffering regardless of how large individual packages
-    /// are, complementing the `commit_packages` count cap. 16 MiB matches
-    /// the worst-case size of a single spec-maximal package (256 entries *
-    /// 65535 bytes), so the default never flushes mid-package for a
-    /// compliant upload yet still caps a pathological one.
     #[must_use]
-    pub fn max_chunk_bytes(&self) -> u64 {
-        self.max_chunk_bytes.unwrap_or(16 * 1024 * 1024)
+    /// Return the mirror settings for a validated mirror-enabled config.
+    ///
+    /// # Panics
+    ///
+    /// Panics if mirror configuration is absent.
+    pub fn mirror_config(&self) -> &MirrorConfig {
+        self.mirror
+            .as_ref()
+            .expect("validated mirror mode must have mirror config")
     }
 
-    /// Validate the configuration beyond what `serde` and the JSON schema
-    /// can express.
-    ///
-    /// Specifically, this checks:
-    ///
-    /// 1. `mirror_name` is a valid signed-note key name (per
-    ///    [c2sp.org/signed-note][note]: non-empty, no whitespace, no `+`).
-    /// 2. Every `log_key_name` (i.e. every key in [`Self::logs`]) is a
-    ///    valid signed-note key name.
-    /// 3. Every entry in `log_public_keys` is a parseable ML-DSA-44 SPKI.
-    /// 4. Within a single log entry, no two `log_public_keys` collide on
-    ///    `(name, key_id)`. A `key_id` is a 32-bit hash, so a collision is
-    ///    cosmically unlikely, but if one occurred the mirror could not
-    ///    disambiguate signatures and every checkpoint for that log would
-    ///    fail to verify.
-    /// 5. `min_log_number` and `max_log_number` both lie in
-    ///    `1..=`[`MAX_MTC_LOG_NUMBER`], `max_log_number >= min_log_number`,
-    ///    and the window spans at most [`MAX_LOG_NUMBER_WINDOW`] log
-    ///    numbers.
-    /// 6. The longest origin from [`LogParams::origins`] still fits the
-    ///    signed-note key name length cap, since each origin is itself
-    ///    used as a checkpoint origin.
-    ///
-    /// Simple single-field bounds (e.g. `commit_packages` and the
-    /// log-number ranges) are expressed in `config.schema.json` and
-    /// enforced by the build script, so they are not re-checked here.
-    ///
-    /// `log_key_name` uniqueness across log entries is not checked here;
-    /// it is enforced earlier, during deserialization (see
-    /// [`deserialize_logs`]). A plain `serde_json` object silently keeps
-    /// only the last value for a repeated key, so without that check a
-    /// duplicate `log_key_name` would drop a trusted CA (its keys and
-    /// log-number window) with no error.
+    /// Validate mode-specific identities, signed-note names, algorithms, and keys.
     ///
     /// # Errors
     ///
-    /// Returns a human-readable error string identifying the failing
-    /// field and reason. The error is intended for operator consumption
-    /// (build-script panic messages, deployment-time logging) and is not
-    /// machine-parseable.
-    ///
-    /// [note]: https://c2sp.org/signed-note
+    /// Returns an operator-readable description of the invalid field.
     pub fn validate(&self) -> Result<(), String> {
-        KeyName::new(self.mirror_name.clone()).map_err(|e| {
-            format!(
-                "mirror_name {:?} is not a valid signed-note key name: {e:?}",
-                self.mirror_name,
-            )
-        })?;
-
-        for (log_key_name, log) in &self.logs {
-            log.validate(log_key_name)?;
+        if self.witness_enabled() != self.witness.is_some() {
+            return Err(format!(
+                "mode {} requires witness configuration iff witness is enabled",
+                self.mode.as_str()
+            ));
         }
-
+        if self.mirror_enabled() != self.mirror.is_some() {
+            return Err(format!(
+                "mode {} requires mirror configuration iff mirror is enabled",
+                self.mode.as_str()
+            ));
+        }
+        if let Some(identity) = &self.witness {
+            validate_identity_name("witness.name", &identity.name)?;
+        }
+        if let Some(identity) = &self.mirror {
+            validate_identity_name("mirror.name", &identity.name)?;
+        }
+        if let (Some(witness), Some(mirror)) = (&self.witness, &self.mirror)
+            && witness.name == mirror.name
+        {
+            return Err("witness.name and mirror.name must be distinct".to_owned());
+        }
+        for (origin, log) in &self.logs {
+            log.validate(origin)?;
+        }
         Ok(())
     }
 }
 
-/// Upper bound on the number of MTC log numbers a single `logs` entry's
-/// `[min_log_number, max_log_number]` window may span.
-///
-/// Each log number expands into its own checkpoint origin, Merkle tree,
-/// storage prefix, and Durable Object instance, so an accidentally huge
-/// window (e.g. a mistyped `max_log_number`) would balloon the origin set
-/// the worker tracks. Real deployments use a small window, so this
-/// generous cap only ever trips on operator error.
-pub const MAX_LOG_NUMBER_WINDOW: u64 = 1024;
-
-/// The largest valid MTC log number.
-///
-/// Per [Merkle Tree Certificates, Section 5.2][mtc], a CA's issuance logs
-/// are numbered consecutively from 1 to at most 65535 (2^16 - 1), so valid
-/// log numbers are `1..=MAX_MTC_LOG_NUMBER`.
-///
-/// [mtc]: https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-05.html#section-5.2
-pub const MAX_MTC_LOG_NUMBER: u64 = 65535;
-
-/// Per-CA parameters: the public keys the mirror accepts checkpoint
-/// signatures from, plus the MTC log-number window this CA cosigner
-/// covers. The `log_key_name` (the CA cosigner's note-signature name) is
-/// the key in the parent [`AppConfig::logs`] map and is not stored here.
-#[serde_as]
-#[derive(Deserialize, Debug)]
-pub struct LogParams {
-    /// Optional free-text description.
-    pub description: Option<String>,
-    /// One or more DER-encoded `SubjectPublicKeyInfo` blobs for the
-    /// ML-DSA-44 keys that may sign checkpoints for this log. The mirror
-    /// verifies incoming pending checkpoints against this list (as
-    /// `subtree/v1` cosignatures) and ignores signatures from other keys.
-    /// Typically one entry, but multiple are permitted for key rotation.
-    #[serde_as(as = "Vec<Base64>")]
-    pub log_public_keys: Vec<Vec<u8>>,
-    /// Lowest accepted MTC log number. The mirror serves a distinct log at
-    /// each origin `<log_key_name>.0.<N>` for `N` in `[min_log_number,
-    /// max_log_number]`, all verified with this entry's key(s).
-    ///
-    /// This MUST be `>= 1`; log number 0 does not exist (see
-    /// [`MAX_MTC_LOG_NUMBER`]).
-    pub min_log_number: u64,
-    /// Highest accepted MTC log number (inclusive). See
-    /// [`Self::min_log_number`]; this MUST be `>= min_log_number` and
-    /// `<= `[`MAX_MTC_LOG_NUMBER`].
-    pub max_log_number: u64,
+fn validate_identity_name(field: &str, name: &str) -> Result<(), String> {
+    KeyName::new(name.to_owned())
+        .map(|_| ())
+        .map_err(|e| format!("{field} {name:?} is not a valid signed-note key name: {e:?}"))
 }
 
-impl LogParams {
-    /// The concrete checkpoint origins this entry serves:
-    /// `<log_key_name>.0.<N>` for each log number `N` in the inclusive
-    /// `[min_log_number, max_log_number]` window.
-    ///
-    /// Assumes the entry has passed [`Self::validate`], so the window is
-    /// well-formed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CheckpointAlgorithm {
+    #[serde(rename = "ed25519")]
+    Ed25519,
+    #[serde(rename = "subtree/v1")]
+    SubtreeV1,
+}
+
+impl CheckpointAlgorithm {
     #[must_use]
-    pub fn origins(&self, log_key_name: &str) -> Vec<String> {
-        (self.min_log_number..=self.max_log_number)
-            .map(|n| format!("{log_key_name}.0.{n}"))
-            .collect()
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ed25519 => "ed25519",
+            Self::SubtreeV1 => "subtree/v1",
+        }
     }
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LogParams {
+    pub description: Option<String>,
+    pub checkpoint_signers: Vec<CheckpointSigner>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointSigner {
+    pub name: String,
+    pub algorithm: CheckpointAlgorithm,
+    #[serde_as(as = "Base64")]
+    pub public_key: Vec<u8>,
+}
+
 impl LogParams {
-    /// Validate this log's `log_key_name`, `log_public_keys`, and
-    /// log-number window. Called by [`AppConfig::validate`] for each
-    /// entry; takes the `log_key_name` (which lives in the parent map) as
-    /// an argument.
-    ///
-    /// # Errors
-    ///
-    /// Returns a human-readable error string. See [`AppConfig::validate`]
-    /// for the list of conditions checked.
-    pub fn validate(&self, log_key_name: &str) -> Result<(), String> {
-        let key_name = KeyName::new(log_key_name.to_owned()).map_err(|e| {
-            format!("log {log_key_name:?}: log_key_name is not a valid signed-note key name: {e:?}")
-        })?;
-
-        // The log-number window must be in range and ordered. MTC log
-        // numbers are numbered consecutively from 1 to MAX_MTC_LOG_NUMBER;
-        // log number 0 does not exist.
-        let (min, max) = (self.min_log_number, self.max_log_number);
-        if min < 1 {
+    fn validate(&self, origin: &str) -> Result<(), String> {
+        validate_identity_name(&format!("log {origin:?} origin"), origin)?;
+        if self.checkpoint_signers.is_empty() {
             return Err(format!(
-                "log {log_key_name:?}: min_log_number is 0, but MTC log numbers start at 1",
+                "log {origin:?}: checkpoint_signers must not be empty"
             ));
         }
-        if max > MAX_MTC_LOG_NUMBER {
-            return Err(format!(
-                "log {log_key_name:?}: max_log_number ({max}) exceeds the maximum MTC log \
-                 number ({MAX_MTC_LOG_NUMBER})",
-            ));
-        }
-        if min > max {
-            return Err(format!(
-                "log {log_key_name:?}: min_log_number ({min}) must be <= max_log_number ({max})",
-            ));
-        }
-        // `max - min` cannot overflow: `min <= max` was just checked.
-        if max - min >= MAX_LOG_NUMBER_WINDOW {
-            return Err(format!(
-                "log {log_key_name:?}: log-number window [{min}, {max}] spans more than \
-                 {MAX_LOG_NUMBER_WINDOW} log numbers; refusing to expand it into that many \
-                 origins (likely a typo)",
-            ));
-        }
-
-        // Each origin from `origins()` is itself used as a signed-note key
-        // name (the checkpoint origin), so it must fit KeyName's length
-        // cap even though log_key_name alone already passed. The longest
-        // origin appends ".0.<max_log_number>".
-        let longest_origin = format!("{log_key_name}.0.{max}");
-        if longest_origin.len() > KeyName::MAX_LEN {
-            return Err(format!(
-                "log {log_key_name:?}: its longest origin {longest_origin:?} is \
-                 {} bytes, over the {}-byte signed-note key name limit; shorten log_key_name",
-                longest_origin.len(),
-                KeyName::MAX_LEN,
-            ));
-        }
-
-        // Every log_public_keys entry must be a parseable ML-DSA-44 SPKI,
-        // and the (name, key_id) pairs derived from them must be unique
-        // within this log.
-        let mut seen_ids: BTreeSet<u32> = BTreeSet::new();
-        for (i, spki) in self.log_public_keys.iter().enumerate() {
-            let vk = MlDsaVerifyingKey::<MlDsa44>::from_public_key_der(spki).map_err(|e| {
+        let mut seen = BTreeSet::new();
+        for (i, signer) in self.checkpoint_signers.iter().enumerate() {
+            let name = KeyName::new(signer.name.clone()).map_err(|e| {
                 format!(
-                    "log {log_key_name:?}: log_public_keys[{i}] is not a valid ML-DSA-44 SPKI: {e}"
+                    "log {origin:?}: checkpoint_signers[{i}].name is not a valid signed-note key name: {e:?}"
                 )
             })?;
-            let v = SubtreeV1NoteVerifier::new(key_name.clone(), vk);
-            if !seen_ids.insert(v.key_id()) {
+            let key_id = match signer.algorithm {
+                CheckpointAlgorithm::Ed25519 => {
+                    let key = ed25519_dalek::VerifyingKey::from_public_key_der(&signer.public_key)
+                        .map_err(|e| {
+                            format!(
+                                "log {origin:?}: checkpoint_signers[{i}].public_key is not an Ed25519 SPKI: {e}"
+                            )
+                        })?;
+                    Ed25519NoteVerifier::new(name.clone(), key).key_id()
+                }
+                CheckpointAlgorithm::SubtreeV1 => {
+                    let key = MlDsaVerifyingKey::<MlDsa44>::from_public_key_der(&signer.public_key)
+                        .map_err(|e| {
+                            format!(
+                                "log {origin:?}: checkpoint_signers[{i}].public_key is not an ML-DSA-44 SPKI: {e}"
+                            )
+                        })?;
+                    SubtreeV1NoteVerifier::new(name.clone(), key).key_id()
+                }
+            };
+            if !seen.insert((name, key_id)) {
                 return Err(format!(
-                    "log {log_key_name:?}: log_public_keys[{i}] shares a (name, key_id) pair with \
-                     an earlier key; mirror would be unable to disambiguate signatures from it",
+                    "log {origin:?}: checkpoint_signers[{i}] duplicates an earlier (name, key_id)"
                 ));
             }
         }
-
         Ok(())
     }
 }
@@ -363,304 +268,172 @@ impl LogParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::pkcs8::EncodePublicKey as _;
+    use ml_dsa::{Keypair as _, SigningKey};
 
-    /// Generate a real ML-DSA-44 SPKI deterministically from a seed byte.
-    fn spki_for(seed: u8) -> Vec<u8> {
-        use ml_dsa::pkcs8::EncodePublicKey as _;
-        use ml_dsa::{Keypair as _, SigningKey};
-        let sk = SigningKey::<MlDsa44>::from_seed(&ml_dsa::B32::from([seed; 32]));
-        sk.verifying_key().to_public_key_der().unwrap().to_vec()
-    }
-
-    fn good_app_config() -> AppConfig {
+    fn config(mode: Mode, witness: bool, mirror: bool) -> AppConfig {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+            .verifying_key()
+            .to_public_key_der()
+            .unwrap()
+            .to_vec();
         AppConfig {
+            mode,
             logging_level: None,
-            mirror_name: "mirror.example/m".to_owned(),
-            description: None,
-            submission_prefix: "https://mirror.example/".to_owned(),
-            monitoring_prefix: None,
-            clean_interval_secs: None,
-            commit_packages: None,
-            max_chunk_bytes: None,
+            submission_prefix: "https://submit.example/".to_owned(),
+            monitoring_prefix: Some("https://monitor.example/".to_owned()),
+            witness: witness.then(|| IdentityConfig {
+                name: "witness.example".to_owned(),
+                description: None,
+            }),
+            mirror: mirror.then(|| MirrorConfig {
+                name: "mirror.example".to_owned(),
+                description: None,
+                clean_interval_secs: None,
+                commit_packages: None,
+                max_chunk_bytes: None,
+            }),
             logs: HashMap::from([(
-                "example.com/log1".to_owned(),
+                "log.example".to_owned(),
                 LogParams {
                     description: None,
-                    log_public_keys: vec![spki_for(1)],
-                    min_log_number: 1,
-                    max_log_number: 1,
+                    checkpoint_signers: vec![CheckpointSigner {
+                        name: "log.example".to_owned(),
+                        algorithm: CheckpointAlgorithm::Ed25519,
+                        public_key: key,
+                    }],
                 },
             )]),
         }
     }
 
-    /// Helper: construct a fresh single-log config and let the caller
-    /// mutate.
-    fn with_log<F: FnOnce(&mut LogParams)>(f: F) -> AppConfig {
-        let mut cfg = good_app_config();
-        let log = cfg.logs.values_mut().next().unwrap();
-        f(log);
-        cfg
-    }
-
     #[test]
-    fn validate_accepts_minimal_good_config() {
-        good_app_config()
+    fn accepts_all_three_modes() {
+        config(Mode::Witness, true, false).validate().unwrap();
+        config(Mode::Mirror, false, true).validate().unwrap();
+        config(Mode::WitnessAndMirror, true, true)
             .validate()
-            .expect("known-good config validates");
+            .unwrap();
     }
 
     #[test]
-    fn validate_rejects_empty_mirror_name() {
-        let mut cfg = good_app_config();
-        cfg.mirror_name = String::new();
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("mirror_name"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_mirror_name_with_plus() {
-        let mut cfg = good_app_config();
-        cfg.mirror_name = "mirror+example".to_owned();
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("mirror_name"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_mirror_name_with_ascii_whitespace() {
-        let mut cfg = good_app_config();
-        cfg.mirror_name = "mirror example".to_owned();
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("mirror_name"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_mirror_name_with_unicode_whitespace() {
-        let mut cfg = good_app_config();
-        cfg.mirror_name = "mirror\u{00a0}name".to_owned(); // U+00A0 NBSP
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("mirror_name"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_empty_log_key_name() {
-        let mut cfg = good_app_config();
-        let log = cfg.logs.drain().next().unwrap().1;
-        cfg.logs.insert(String::new(), log);
-        let err = cfg.validate().unwrap_err();
+    fn rejects_missing_or_disabled_identity_sections() {
+        assert!(config(Mode::Witness, false, false).validate().is_err());
+        assert!(config(Mode::Witness, true, true).validate().is_err());
+        assert!(config(Mode::Mirror, false, false).validate().is_err());
+        assert!(config(Mode::Mirror, true, true).validate().is_err());
         assert!(
-            err.contains("log_key_name") && err.contains("\"\""),
-            "unexpected error: {err}",
+            config(Mode::WitnessAndMirror, true, false)
+                .validate()
+                .is_err()
         );
     }
 
     #[test]
-    fn validate_rejects_log_key_name_with_plus() {
-        let mut cfg = good_app_config();
-        let log = cfg.logs.drain().next().unwrap().1;
-        cfg.logs.insert("example.com/with+plus".to_owned(), log);
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("log_key_name"), "unexpected error: {err}");
+    fn rejects_unknown_mode() {
+        let error = serde_json::from_str::<Mode>(r#""witness-mirror""#).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]
-    fn deserialize_rejects_duplicate_log_key_name() {
-        let json = r#"{
-            "mirror_name": "mirror.example/m",
-            "submission_prefix": "https://mirror.example/",
-            "logs": {
-                "example.com/log1": {"log_public_keys": [], "min_log_number": 1, "max_log_number": 1},
-                "example.com/log1": {"log_public_keys": [], "min_log_number": 2, "max_log_number": 2}
-            }
-        }"#;
-        let err = serde_json::from_str::<AppConfig>(json)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("duplicate log_key_name"),
-            "unexpected error: {err}",
-        );
-    }
-
-    #[test]
-    fn deserialize_accepts_distinct_log_key_names() {
-        let json = r#"{
-            "mirror_name": "mirror.example/m",
-            "submission_prefix": "https://mirror.example/",
-            "logs": {
-                "example.com/log1": {"log_public_keys": [], "min_log_number": 1, "max_log_number": 1},
-                "example.com/log2": {"log_public_keys": [], "min_log_number": 2, "max_log_number": 2}
-            }
-        }"#;
-        let cfg = serde_json::from_str::<AppConfig>(json).expect("distinct keys deserialize");
-        assert_eq!(cfg.logs.len(), 2);
-    }
-
-    #[test]
-    fn validate_accepts_log_number_window() {
-        let cfg = with_log(|log| {
-            log.min_log_number = 40;
-            log.max_log_number = 45;
-        });
-        cfg.validate()
-            .expect("a valid log-number window is accepted");
-    }
-
-    #[test]
-    fn commit_packages_defaults_to_32() {
-        let mut cfg = good_app_config();
-        assert_eq!(cfg.commit_packages(), 32);
-        cfg.commit_packages = Some(8);
-        assert_eq!(cfg.commit_packages(), 8);
-    }
-
-    #[test]
-    fn max_chunk_bytes_defaults_to_16_mib() {
-        let mut cfg = good_app_config();
-        assert_eq!(cfg.max_chunk_bytes(), 16 * 1024 * 1024);
-        cfg.max_chunk_bytes = Some(1024);
-        assert_eq!(cfg.max_chunk_bytes(), 1024);
-    }
-
-    #[test]
-    fn validate_rejects_inverted_window() {
-        let cfg = with_log(|log| {
-            log.min_log_number = 45;
-            log.max_log_number = 40;
-        });
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("must be <="), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_log_number_zero() {
-        // MTC log numbers start at 1; log number 0 does not exist.
-        let cfg = with_log(|log| {
-            log.min_log_number = 0;
-            log.max_log_number = 5;
-        });
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("start at 1"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_log_number_above_maximum() {
-        let cfg = with_log(|log| {
-            log.min_log_number = 1;
-            log.max_log_number = MAX_MTC_LOG_NUMBER + 1;
-        });
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("exceeds the maximum MTC log number"),
-            "unexpected error: {err}",
-        );
-    }
-
-    #[test]
-    fn validate_accepts_window_at_the_cap() {
-        // Exactly MAX_LOG_NUMBER_WINDOW log numbers ([1, CAP]) is allowed.
-        let cfg = with_log(|log| {
-            log.min_log_number = 1;
-            log.max_log_number = MAX_LOG_NUMBER_WINDOW;
-        });
-        cfg.validate()
-            .expect("a window spanning exactly the cap is accepted");
-    }
-
-    #[test]
-    fn validate_rejects_oversized_window() {
-        // One past the cap ([1, CAP+1], i.e. CAP+1 numbers) is rejected.
-        let cfg = with_log(|log| {
-            log.min_log_number = 1;
-            log.max_log_number = MAX_LOG_NUMBER_WINDOW + 1;
-        });
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("spans more than"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn validate_rejects_origin_exceeding_key_name_limit() {
-        // A log_key_name that is a valid KeyName on its own (<= 255 bytes),
-        // but whose ".0.<log number>" origin pushes past the limit. The
-        // window stays within the span cap while keeping a 5-digit max.
-        let cfg = AppConfig {
-            logging_level: None,
-            mirror_name: "mirror.example/m".to_owned(),
-            description: None,
-            submission_prefix: "https://mirror.example/".to_owned(),
-            monitoring_prefix: None,
-            clean_interval_secs: None,
-            commit_packages: None,
-            max_chunk_bytes: None,
-            logs: HashMap::from([(
-                "a".repeat(250),
-                LogParams {
-                    description: None,
-                    log_public_keys: vec![spki_for(1)],
-                    min_log_number: 64512,
-                    max_log_number: 65535,
-                },
-            )]),
-        };
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("longest origin") && err.contains("limit"),
-            "unexpected error: {err}",
-        );
-    }
-
-    #[test]
-    fn origins_with_window_expands_to_mtc_log_ids() {
-        let log = LogParams {
-            description: None,
-            log_public_keys: vec![spki_for(1)],
-            min_log_number: 40,
-            max_log_number: 42,
-        };
+    fn mode_serde_spelling_is_stable() {
         assert_eq!(
-            log.origins("oid/1.3.6.1.4.1.32473.2"),
-            vec![
-                "oid/1.3.6.1.4.1.32473.2.0.40",
-                "oid/1.3.6.1.4.1.32473.2.0.41",
-                "oid/1.3.6.1.4.1.32473.2.0.42",
-            ],
+            serde_json::to_string(&Mode::Witness).unwrap(),
+            r#""witness""#
+        );
+        assert_eq!(serde_json::to_string(&Mode::Mirror).unwrap(), r#""mirror""#);
+        assert_eq!(
+            serde_json::to_string(&Mode::WitnessAndMirror).unwrap(),
+            r#""witness-and-mirror""#
         );
     }
 
-    #[test]
-    fn validate_rejects_invalid_spki() {
-        let cfg = with_log(|log| log.log_public_keys = vec![b"not-der".to_vec()]);
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("log_public_keys[0]") && err.contains("ML-DSA-44 SPKI"),
-            "unexpected error: {err}",
-        );
+    fn ml_dsa_spki(seed: u8) -> Vec<u8> {
+        SigningKey::<MlDsa44>::from_seed(&ml_dsa::B32::from([seed; 32]))
+            .verifying_key()
+            .to_public_key_der()
+            .unwrap()
+            .to_vec()
     }
 
     #[test]
-    fn validate_accepts_multiple_distinct_keys() {
-        let cfg = with_log(|log| log.log_public_keys = vec![spki_for(1), spki_for(2)]);
-        cfg.validate()
-            .expect("two distinct ML-DSA-44 keys are valid");
+    fn accepts_ml_dsa_spki_and_mixed_algorithms() {
+        let mut config = config(Mode::Witness, true, false);
+        config
+            .logs
+            .get_mut("log.example")
+            .unwrap()
+            .checkpoint_signers
+            .push(CheckpointSigner {
+                name: "log.example/post-quantum".to_owned(),
+                algorithm: CheckpointAlgorithm::SubtreeV1,
+                public_key: ml_dsa_spki(9),
+            });
+        config.validate().unwrap();
     }
 
     #[test]
-    fn validate_rejects_duplicate_keys_within_log() {
-        let cfg = with_log(|log| log.log_public_keys = vec![spki_for(1), spki_for(1)]);
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("log_public_keys[1]") && err.contains("(name, key_id)"),
-            "unexpected error: {err}",
-        );
+    fn rejects_algorithm_key_mismatch() {
+        let mut wrong_ml = config(Mode::Witness, true, false);
+        let signer = &mut wrong_ml
+            .logs
+            .get_mut("log.example")
+            .unwrap()
+            .checkpoint_signers[0];
+        signer.algorithm = CheckpointAlgorithm::SubtreeV1;
+        assert!(wrong_ml.validate().unwrap_err().contains("ML-DSA-44 SPKI"));
+
+        let mut wrong_ed = config(Mode::Witness, true, false);
+        let signer = &mut wrong_ed
+            .logs
+            .get_mut("log.example")
+            .unwrap()
+            .checkpoint_signers[0];
+        signer.public_key = ml_dsa_spki(10);
+        assert!(wrong_ed.validate().unwrap_err().contains("Ed25519 SPKI"));
     }
 
     #[test]
-    fn validate_includes_log_key_name_in_per_log_errors() {
-        let cfg = with_log(|log| log.log_public_keys = vec![b"junk".to_vec()]);
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("example.com/log1"),
-            "error should reference the failing log_key_name: {err}",
-        );
+    fn rejects_malformed_spki() {
+        let mut config = config(Mode::Witness, true, false);
+        config
+            .logs
+            .get_mut("log.example")
+            .unwrap()
+            .checkpoint_signers[0]
+            .public_key = b"not DER".to_vec();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_signer_id() {
+        let mut config = config(Mode::Witness, true, false);
+        let log = config.logs.get_mut("log.example").unwrap();
+        log.checkpoint_signers.push(CheckpointSigner {
+            name: log.checkpoint_signers[0].name.clone(),
+            algorithm: log.checkpoint_signers[0].algorithm,
+            public_key: log.checkpoint_signers[0].public_key.clone(),
+        });
+        assert!(config.validate().unwrap_err().contains("duplicates"));
+    }
+
+    #[test]
+    fn combined_mode_requires_distinct_identity_names() {
+        let mut config = config(Mode::WitnessAndMirror, true, true);
+        config.mirror.as_mut().unwrap().name = config.witness.as_ref().unwrap().name.clone();
+        assert!(config.validate().unwrap_err().contains("must be distinct"));
+    }
+
+    #[test]
+    fn standalone_config_fixtures_validate() {
+        for fixture in [
+            include_str!("../../config.witness.json"),
+            include_str!("../../config.mirror.json"),
+        ] {
+            serde_json::from_str::<AppConfig>(fixture)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
     }
 }

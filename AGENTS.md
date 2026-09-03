@@ -9,6 +9,7 @@ Azul is a Rust workspace implementing tiled Certificate Transparency logs and Me
 ```
 crates/ct_worker/      - Static CT API Worker (deployable); wrangler.jsonc here
 crates/bootstrap_mtc_worker/     - Bootstrap MTC CA Worker (deployable); wrangler.jsonc here
+crates/mirror_worker/     - Configurable tlog mirror/witness Worker (deployable)
 crates/generic_log_worker/ - Shared Durable Object logic (Sequencer, Batcher, Cleaner)
 crates/tlog_tiles/     - C2SP tlog-tiles spec impl (published to crates.io)
 crates/static_ct_api/  - C2SP static-ct-api spec impl (published to crates.io)
@@ -56,9 +57,9 @@ npx wrangler -e=${ENV} tail
 
 - Worker crates use `crate-type = ["cdylib"]`; library crates use `rlib`
 - Worker build is handled by `worker-build`, not `cargo build` directly — wrangler.jsonc invokes it automatically
-- Config types live in separate sub-crates: `crates/ct_worker/config/`, `crates/bootstrap_mtc_worker/config/`
+- Config types live in separate sub-crates: `crates/ct_worker/config/`, `crates/bootstrap_mtc_worker/config/`, `crates/mirror_worker/config/`
 - `DEPLOY_ENV=<env>` env var must be set when invoking `worker-build` manually; wrangler.jsonc sets it per environment
-- Route HTTP with `axum::Router` (worker features `["http", "axum"]`), not the `worker::Router`. The `#[event(fetch)]` handler takes a `HttpRequest`, returns `axum::http::Response<axum::body::Body>`, and dispatches via `tower_service::Service::call`; handlers return `impl IntoResponse`. See `witness_worker`/`ct_worker` for the pattern.
+- Route HTTP with `axum::Router` (worker features `["http", "axum"]`), not the `worker::Router`. The `#[event(fetch)]` handler takes a `HttpRequest`, returns `axum::http::Response<axum::body::Body>`, and dispatches via `tower_service::Service::call`; handlers return `impl IntoResponse`. See `mirror_worker`/`ct_worker` for the pattern.
 
 
 ## Workflow
@@ -102,4 +103,3 @@ If any step fails, fix the issue in the commit it belongs to (use `git commit --
 
 ✅ **Always:** Keep Workers-specific concerns (Durable Object storage formats, KV dedup cache, Worker runtime dependencies) out of the specification-level crates (`tlog_tiles`, `static_ct_api`, `bootstrap_mtc_api`, `signed_note`). Those crates implement public specs and are published to crates.io; they should not gain types, traits, or dependencies whose only consumers are Cloudflare Workers. Wire-format types used only by the sequencer and frontend belong in `generic_log_worker` or the concrete worker crate.
 ⚠️ **Requires Approval:** Publishing crates to crates.io (`tlog_tiles`, `static_ct_api`, `signed_note`, `signed_note`) — worker crates have `publish = false`
-

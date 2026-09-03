@@ -1,10 +1,10 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! End-to-end integration tests for the `mirror_worker` implementation of
+//! End-to-end integration tests for the mirror role in `mirror_worker`.
 //! [c2sp.org/tlog-mirror][spec].
 //!
-//! These tests require a local `wrangler dev` instance of `mirror_worker`
+//! These tests require a local combined `wrangler dev` instance of `mirror_worker`
 //! on `localhost:8787` (or a loopback `BASE_URL`), backed by fresh state.
 //! Delete `crates/mirror_worker/.wrangler/state/` between runs. CI starts
 //! with fresh state.
@@ -13,16 +13,15 @@
 //! threads an in-memory [`ToyLog`] through `add-checkpoint`, `add-entries`,
 //! and `sign-subtree` in order.
 //!
-//! Per spec the mirror MUST NOT cosign on `add-checkpoint` (the success
-//! body is empty); cosignatures are emitted only by `add-entries` once
-//! entries catch up to the pending tree size.
+//! The combined worker returns its witness cosignature on `add-checkpoint`;
+//! the mirror identity signs only after `add-entries` reaches the pending size.
 //!
 //! `LOG_KEY_NAME` identifies the CA cosigner; `LOG_ORIGIN` identifies log 1.
 //! The embedded key must match the SPKI in `config.dev.json`.
 //!
 //! [spec]: https://c2sp.org/tlog-mirror
 
-use ml_dsa::pkcs8::DecodePrivateKey as _;
+use ed25519_dalek::{SigningKey as Ed25519SigningKey, pkcs8::DecodePrivateKey as _};
 use ml_dsa::{ExpandedSigningKey, MlDsa44};
 use rand::Rng as _;
 use rand::rng;
@@ -32,7 +31,9 @@ use sha2::{Digest as _, Sha256};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::collections::HashMap;
 use std::time::Duration;
-use tlog_checkpoint::{CheckpointSigner, TreeWithTimestamp};
+use tlog_checkpoint::{
+    CheckpointSigner, CheckpointText, Ed25519CheckpointSigner, TreeWithTimestamp,
+};
 use tlog_core::{
     HASH_SIZE, Hash, HashReader, Subtree, TlogError, consistency_proof, record_hash, stored_hashes,
     subtree_consistency_proof, subtree_hash, tree_hash,
@@ -43,8 +44,8 @@ use tlog_mirror::{
 };
 use tlog_tiles::{PathElem, PreloadedTlogTileReader, TileHashReader, TlogTile, TlogTileRecorder};
 use tlog_witness::{
-    CONTENT_TYPE_TLOG_SIZE, parse_sign_subtree_response, serialize_add_checkpoint_request,
-    serialize_sign_subtree_request,
+    CONTENT_TYPE_TLOG_SIZE, parse_add_checkpoint_response, parse_sign_subtree_response,
+    serialize_add_checkpoint_request, serialize_sign_subtree_request,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,8 +57,8 @@ const LOG_KEY_NAME: &str = "oid/1.3.6.1.4.1.32473.2";
 
 /// Numbered log origin accepted under [`LOG_KEY_NAME`].
 const LOG_ORIGIN: &str = "oid/1.3.6.1.4.1.32473.2.0.1";
-const OTHER_LOG_ORIGIN: &str = "oid/1.3.6.1.4.1.32473.2.0.2";
-const R2_BUCKET: &str = "tlog-mirror-public-dev";
+const OTHER_LOG_ORIGIN: &str = "example.com/log1";
+const R2_BUCKET: &str = "mirror-worker-public-dev";
 
 /// Dev-only ML-DSA-44 `subtree/v1` key matching `config.dev.json`.
 /// Do not use outside these integration tests.
@@ -66,12 +67,23 @@ const LOG_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
     ERERERER\n\
     -----END PRIVATE KEY-----\n";
 
+const ED25519_LOG_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+    MC4CAQAwBQYDK2VwBCIEIA2VCmSeCNVJTboEACcXvVahZHSHEJDxSl94aej1Q8hQ\n\
+    -----END PRIVATE KEY-----\n";
+
 fn log_signer() -> SubtreeV1CheckpointSigner {
     let sk = ExpandedSigningKey::<MlDsa44>::from_pkcs8_pem(LOG_SIGNING_KEY_PEM)
         .expect("parse dev log key");
     // The cosigner note name is the CA ID rather than the checkpoint origin.
     let name = KeyName::new(LOG_KEY_NAME.to_owned()).expect("KeyName for CA cosigner");
     SubtreeV1CheckpointSigner::new(name, sk)
+}
+
+fn ed25519_log_signer() -> Ed25519CheckpointSigner {
+    let key = Ed25519SigningKey::from_pkcs8_pem(ED25519_LOG_SIGNING_KEY_PEM)
+        .expect("parse dev Ed25519 log key");
+    let name = KeyName::new(OTHER_LOG_ORIGIN.to_owned()).expect("Ed25519 log key name");
+    Ed25519CheckpointSigner::new(name, key)
 }
 
 /// Generate a fresh ML-DSA-44 log signer with a random key, under the
@@ -470,9 +482,10 @@ async fn post_sign_subtree(body: &[u8]) -> AddCheckpointResult {
 /// configured name, used to verify `sign-subtree` responses.
 fn mirror_verifier(meta: &MetadataResponse) -> SubtreeV1NoteVerifier {
     use pkcs8::DecodePublicKey;
-    let mirror_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&meta.mirror_public_key)
+    let identity = meta.mirror.as_ref().expect("mirror metadata");
+    let mirror_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&identity.public_key)
         .expect("mirror SPKI must parse as ML-DSA-44");
-    let name = KeyName::new(meta.mirror_name.clone()).expect("KeyName for mirror");
+    let name = KeyName::new(identity.name.clone()).expect("KeyName for mirror");
     SubtreeV1NoteVerifier::new(name, mirror_vk)
 }
 
@@ -510,28 +523,38 @@ async fn advance_pending(log: &ToyLog, signer: &SubtreeV1CheckpointSigner, old_s
 #[serde_as]
 #[derive(Deserialize, Debug)]
 struct MetadataResponse {
-    mirror_name: String,
-    #[allow(dead_code)]
-    description: Option<String>,
-    #[serde_as(as = "Base64")]
-    mirror_public_key: Vec<u8>,
-    mirror_algorithm: String,
+    mode: String,
+    mirror: Option<IdentityMetadata>,
     submission_prefix: String,
-    #[allow(dead_code)]
     monitoring_prefix: String,
     logs: Vec<LogMetadata>,
 }
 
 #[serde_as]
 #[derive(Deserialize, Debug)]
+struct IdentityMetadata {
+    name: String,
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
+    algorithm: String,
+    supports_sign_subtree: bool,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
 struct LogMetadata {
-    #[allow(dead_code)]
     description: Option<String>,
-    log_key_name: String,
-    min_log_number: u64,
-    max_log_number: u64,
-    #[serde_as(as = "Vec<Base64>")]
-    log_public_keys: Vec<Vec<u8>>,
+    origin: String,
+    checkpoint_signers: Vec<CheckpointSignerMetadata>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct CheckpointSignerMetadata {
+    name: String,
+    algorithm: String,
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
 }
 
 async fn fetch_metadata() -> MetadataResponse {
@@ -569,30 +592,62 @@ async fn tlog_mirror_end_to_end() {
 
     // --- GET /metadata ---
     let meta = fetch_metadata().await;
-    assert_eq!(meta.mirror_name, "dev.mirror.example");
-    assert!(!meta.mirror_public_key.is_empty());
+    assert_eq!(meta.mode, "witness-and-mirror");
+    let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
+    assert_eq!(mirror.name, "dev.mirror.example");
+    assert!(!mirror.public_key.is_empty());
     assert_eq!(
-        meta.mirror_algorithm, "subtree/v1",
+        mirror.algorithm, "subtree/v1",
         "dev mirror loads ML-DSA-44 from .dev.vars; algorithm must surface as subtree/v1",
     );
+    assert!(mirror.supports_sign_subtree);
     assert!(meta.submission_prefix.starts_with("http"));
+    assert!(meta.monitoring_prefix.starts_with("http"));
     let log_meta = meta
         .logs
         .iter()
-        .find(|l| l.log_key_name == LOG_KEY_NAME)
-        .unwrap_or_else(|| panic!("metadata does not list the {LOG_KEY_NAME} cosigner"));
-    assert_eq!(log_meta.log_public_keys.len(), 1);
-    // LOG_ORIGIN is LOG_KEY_NAME + ".0.1"; its log number (1) must fall
-    // within the published [min_log_number, max_log_number] window.
-    assert!(
-        log_meta.min_log_number <= 1 && 1 <= log_meta.max_log_number,
-        "published window [{}, {}] must cover log number 1 ({LOG_ORIGIN})",
-        log_meta.min_log_number,
-        log_meta.max_log_number,
-    );
+        .find(|l| l.origin == LOG_ORIGIN)
+        .unwrap_or_else(|| panic!("metadata does not list {LOG_ORIGIN}"));
+    assert!(log_meta.description.is_some());
+    assert_eq!(log_meta.checkpoint_signers.len(), 1);
+    assert_eq!(log_meta.checkpoint_signers[0].name, LOG_KEY_NAME);
+    assert_eq!(log_meta.checkpoint_signers[0].algorithm, "subtree/v1");
+    assert!(!log_meta.checkpoint_signers[0].public_key.is_empty());
+    let ed_log_meta = meta
+        .logs
+        .iter()
+        .find(|l| l.origin == OTHER_LOG_ORIGIN)
+        .unwrap_or_else(|| panic!("metadata does not list {OTHER_LOG_ORIGIN}"));
+    assert_eq!(ed_log_meta.checkpoint_signers[0].name, OTHER_LOG_ORIGIN);
+    assert_eq!(ed_log_meta.checkpoint_signers[0].algorithm, "ed25519");
 
     let signer = log_signer();
     let mut log = ToyLog::new();
+
+    // A size-zero checkpoint is state, rather than the absence of state.
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(r.status, 200, "empty checkpoint submission");
+
+        let body = build_add_entries_header(0, 0, Vec::new());
+        let r = post_add_entries(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "empty checkpoint mirror: {:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+        assert_eq!(parse_add_checkpoint_response(&r.body).unwrap().len(), 1);
+
+        let served = require_local_r2_object("checkpoint").await;
+        let served = Note::from_bytes(&served).expect("served empty checkpoint note");
+        let checkpoint = CheckpointText::from_bytes(served.text()).unwrap();
+        assert_eq!(checkpoint.size(), 0);
+        assert_eq!(*checkpoint.hash(), tlog_core::EMPTY_HASH);
+    }
 
     // A configured origin needs a pending checkpoint before accepting
     // entries.
@@ -607,10 +662,18 @@ async fn tlog_mirror_end_to_end() {
         );
     }
 
+    let ed25519_signer = ed25519_log_signer();
     let mut other_log = ToyLog::new();
     other_log.push(b"other leaf 0");
     {
-        let cp = other_log.sign_checkpoint_for(OTHER_LOG_ORIGIN, &signer);
+        let tree = TreeWithTimestamp::new(
+            other_log.size(),
+            other_log.root(other_log.size()),
+            now_millis(),
+        );
+        let cp = tree
+            .sign(OTHER_LOG_ORIGIN, &[], &[&ed25519_signer], &mut rng())
+            .expect("sign Ed25519 checkpoint");
         let note = Note::from_bytes(&cp).expect("other-origin checkpoint");
         let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
         let r = post_add_checkpoint(&body).await;
@@ -635,11 +698,9 @@ async fn tlog_mirror_end_to_end() {
             "first submission: body={:?}",
             String::from_utf8_lossy(&r.body)
         );
-        // Mirror MUST NOT cosign on add-checkpoint; the response body is
-        // empty. (Spec: "responding with an empty response body".)
         assert!(
-            r.body.is_empty(),
-            "mirror response body must be empty, got: {:?}",
+            !r.body.is_empty(),
+            "combined response must contain the witness signature, got: {:?}",
             String::from_utf8_lossy(&r.body)
         );
     }
@@ -659,7 +720,10 @@ async fn tlog_mirror_end_to_end() {
             "second submission: body={:?}",
             String::from_utf8_lossy(&r.body)
         );
-        assert!(r.body.is_empty(), "200 response body must be empty");
+        assert!(
+            !r.body.is_empty(),
+            "combined response must contain a witness signature"
+        );
     }
 
     // --- Stale old_size -> 409 ---
