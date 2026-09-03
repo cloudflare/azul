@@ -7,8 +7,8 @@
 //! HTTP witness protocol used by transparency logs to obtain cosignatures.
 //! It is transport-agnostic and has no dependency on any particular HTTP
 //! runtime — deployers plug it into their server of choice and supply their
-//! own policy for verifying the log's checkpoint signature, persisting the
-//! latest cosigned state, and producing cosignatures.
+//! own configured-origin policy, persistent storage, and cosignature
+//! production.
 //!
 //! # What's in scope
 //!
@@ -28,13 +28,15 @@
 //!   shared by both endpoints, applied before any base64 decoding.
 //! - [`CONTENT_TYPE_TLOG_SIZE`]: the `text/x.tlog.size` media type used for
 //!   `add-checkpoint`'s `409 Conflict` response bodies.
+//! - Transport-neutral checkpoint, trusted-signature, subtree, and proof
+//!   validation with domain errors.
+//! - [`validate_checkpoint_transition`]: pure validation for atomic persisted
+//!   checkpoint transitions.
 //!
 //! # What's out of scope
 //!
-//! - Checkpoint-signature verification: the caller is expected to maintain a
-//!   set of trusted log public keys and use its own [`signed_note`]-based
-//!   verifier. The parsers here return the checkpoint [`Note`] with its
-//!   signatures still attached so the caller can inspect them.
+//! - Trusted-key and configured-origin policy: callers supply the verifier
+//!   list after using the shared transport-neutral validation helpers.
 //! - Cosignature production: producing a `cosignature/v1` signature is
 //!   handled by [`tlog_cosignature::CosignatureV1CheckpointSigner`];
 //!   producing a `subtree/v1` signature is handled by
@@ -56,6 +58,7 @@
 mod add_checkpoint;
 mod common;
 mod sign_subtree;
+mod validation;
 
 pub use add_checkpoint::{
     AddCheckpointRequest, parse_add_checkpoint_request, parse_add_checkpoint_response,
@@ -68,4 +71,11 @@ pub use sign_subtree::{
     MAX_CHECKPOINT_SIGNATURES, MAX_SUBTREE_COSIGNATURE_LINES, SignSubtreeRequest,
     parse_sign_subtree_request, parse_sign_subtree_response, serialize_sign_subtree_request,
     serialize_sign_subtree_response,
+};
+pub use validation::{
+    AddCheckpointValidationError, CheckpointState, CheckpointTransitionError, ProofRequirement,
+    SignSubtreeValidationError, TrustedSignatureError, ValidatedAddCheckpointRequest,
+    ValidatedSignSubtreeRequest, validate_add_checkpoint_request, validate_checkpoint_transition,
+    validate_sign_subtree_proof, validate_sign_subtree_request,
+    verify_trusted_checkpoint_signature,
 };

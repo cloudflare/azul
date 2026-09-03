@@ -12,6 +12,7 @@
 //! [`sign_subtree`]: crate::sign_subtree
 
 use base64::prelude::*;
+use signed_note::NoteSignature;
 use tlog_core::{HASH_SIZE, Hash};
 
 /// Maximum number of consistency-proof lines a client may send in either
@@ -109,4 +110,23 @@ pub(crate) fn parse_proof_line(line: &str) -> Result<Hash, TlogWitnessError> {
         ))
     })?;
     Ok(Hash(arr))
+}
+
+pub(crate) fn serialize_signature_lines(sigs: &[NoteSignature]) -> Vec<u8> {
+    sigs.iter().flat_map(NoteSignature::to_bytes).collect()
+}
+
+pub(crate) fn parse_signature_lines(body: &[u8]) -> Result<Vec<NoteSignature>, TlogWitnessError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|_| TlogWitnessError::MalformedResponse("response is not valid UTF-8".into()))?;
+    let trimmed = text.strip_suffix('\n').unwrap_or(text);
+    if trimmed.is_empty() {
+        return Err(TlogWitnessError::MalformedResponse(
+            "response must contain at least one signature line".into(),
+        ));
+    }
+    trimmed
+        .split('\n')
+        .map(|line| NoteSignature::from_bytes(line.as_bytes()).map_err(TlogWitnessError::Note))
+        .collect()
 }

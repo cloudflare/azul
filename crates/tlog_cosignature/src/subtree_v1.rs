@@ -88,9 +88,10 @@ use ml_dsa::{
     MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
     signature::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
 };
+use pkcs8::{DecodePrivateKey as _, EncodePublicKey as _};
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
 use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
-use tlog_core::{HASH_SIZE, Hash, Subtree};
+use tlog_core::{EMPTY_HASH, HASH_SIZE, Hash, Subtree};
 
 /// The fixed 12-byte label prefix domain-separating `subtree/v1` from
 /// other cosignature formats.
@@ -257,6 +258,26 @@ impl SubtreeV1CheckpointSigner {
         }
     }
 
+    /// Construct an ML-DSA-44 signer and its DER-encoded SPKI from PKCS#8 PEM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the private key cannot be decoded or its public key
+    /// cannot be encoded.
+    pub fn from_pkcs8_pem_with_public_key(
+        name: KeyName,
+        pem: &str,
+    ) -> Result<(Self, Vec<u8>), String> {
+        let key = MlDsaExpandedSigningKey::<MlDsa44>::from_pkcs8_pem(pem)
+            .map_err(|e| format!("ML-DSA-44 PKCS#8 parse: {e}"))?;
+        let public_key_der = key
+            .verifying_key()
+            .to_public_key_der()
+            .map_err(|e| format!("ML-DSA-44 SPKI encode: {e}"))?
+            .to_vec();
+        Ok((Self::new(name, key), public_key_der))
+    }
+
     /// Sign an arbitrary subtree, returning a `subtree/v1`
     /// [`NoteSignature`].
     ///
@@ -298,17 +319,33 @@ impl SubtreeV1CheckpointSigner {
         subtree: &Subtree,
         hash: &Hash,
     ) -> NoteSignature {
-        assert!(
-            !(subtree.lo() != 0 && timestamp_unix_secs != 0),
-            "timestamp must be zero when start is non-zero",
-        );
-
-        let msg = build_cosigned_message(
-            self.v.name(),
+        self.sign_range(
             timestamp_unix_secs,
             log_origin,
             subtree.lo(),
             subtree.hi(),
+            hash,
+        )
+    }
+
+    fn sign_range(
+        &self,
+        timestamp_unix_secs: u64,
+        log_origin: &str,
+        start: u64,
+        end: u64,
+        hash: &Hash,
+    ) -> NoteSignature {
+        assert!(
+            !(start != 0 && timestamp_unix_secs != 0),
+            "timestamp must be zero when start is non-zero",
+        );
+        let msg = build_cosigned_message(
+            self.v.name(),
+            timestamp_unix_secs,
+            log_origin,
+            start,
+            end,
             hash,
         );
         let sig: MlDsaSignature<MlDsa44> = self.k.sign(&msg);
@@ -331,20 +368,14 @@ impl CheckpointSigner for SubtreeV1CheckpointSigner {
         timestamp: UnixTimestampMillis,
         checkpoint: &CheckpointText,
     ) -> Result<NoteSignature, NoteError> {
-        // The checkpoint case fixes start = 0 and end = checkpoint_size.
-        // `[0, n)` for any n > 0 is always a valid subtree (`0` is a
-        // multiple of every power of 2); `Subtree::new(0, size)` only
-        // fails for `size == 0`, where there is no meaningful subtree
-        // to cosign.
-        let subtree = Subtree::new(0, checkpoint.size()).map_err(|_| NoteError::Format)?;
-        // The spec requires the witness to use a non-zero timestamp
-        // for checkpoint cosignatures; we forward the caller-supplied
-        // timestamp unchanged (in seconds), trusting them not to pass
-        // zero in this path.
-        Ok(self.sign_subtree(
+        if checkpoint.size() == 0 && checkpoint.hash() != &EMPTY_HASH {
+            return Err(NoteError::Format);
+        }
+        Ok(self.sign_range(
             timestamp / 1000,
             checkpoint.origin(),
-            &subtree,
+            0,
+            checkpoint.size(),
             checkpoint.hash(),
         ))
     }
@@ -415,24 +446,28 @@ impl SubtreeV1NoteVerifier {
         hash: &Hash,
         sig_blob: &[u8],
     ) -> bool {
+        self.verify_range(log_origin, subtree.lo(), subtree.hi(), hash, sig_blob)
+    }
+
+    fn verify_range(
+        &self,
+        log_origin: &str,
+        start: u64,
+        end: u64,
+        hash: &Hash,
+        sig_blob: &[u8],
+    ) -> bool {
         let Some(timestamp) = parse_timestamped_signature_timestamp(sig_blob) else {
             return false;
         };
         // Spec: `timestamp` MUST be zero when `start` is non-zero.
-        if subtree.lo() != 0 && timestamp != 0 {
+        if start != 0 && timestamp != 0 {
             return false;
         }
         let Some(sig) = decode_signature(&sig_blob[8..]) else {
             return false;
         };
-        let msg = build_cosigned_message(
-            &self.name,
-            timestamp,
-            log_origin,
-            subtree.lo(),
-            subtree.hi(),
-            hash,
-        );
+        let msg = build_cosigned_message(&self.name, timestamp, log_origin, start, end, hash);
         MlDsaVerifier::verify(&self.verifying_key, &msg, &sig).is_ok()
     }
 }
@@ -457,13 +492,16 @@ impl NoteVerifier for SubtreeV1NoteVerifier {
         let Ok(checkpoint) = CheckpointText::from_bytes(msg) else {
             return false;
         };
-        // `[0, n)` for n > 0 is always a valid subtree; reject empty
-        // checkpoints (size == 0) at this layer rather than panicking
-        // inside `verify_subtree`.
-        let Ok(subtree) = Subtree::new(0, checkpoint.size()) else {
+        if checkpoint.size() == 0 && checkpoint.hash() != &EMPTY_HASH {
             return false;
-        };
-        self.verify_subtree(checkpoint.origin(), &subtree, checkpoint.hash(), sig_blob)
+        }
+        self.verify_range(
+            checkpoint.origin(),
+            0,
+            checkpoint.size(),
+            checkpoint.hash(),
+            sig_blob,
+        )
     }
 
     /// Parse the timestamp prefix from a `timestamped_signature` blob
@@ -679,6 +717,24 @@ mod tests {
             .verify(&VerifierList::new(vec![signer.verifier()]))
             .unwrap();
         assert_eq!(verified.len(), 1);
+    }
+
+    #[test]
+    fn checkpoint_signer_and_verifier_support_empty_tree() {
+        use signed_note::{Note, VerifierList};
+
+        let sk = signing_key(6);
+        let signer = SubtreeV1CheckpointSigner::new(name("witness/w"), sk);
+        let checkpoint = CheckpointText::new("log/origin", 0, EMPTY_HASH, &[]).unwrap();
+        let signature = signer.sign(1_700_000_000_000, &checkpoint).unwrap();
+        let note = Note::new(&checkpoint.to_bytes(), &[signature]).unwrap();
+        assert!(
+            note.verify(&VerifierList::new(vec![signer.verifier()]))
+                .is_ok()
+        );
+
+        let invalid = CheckpointText::new("log/origin", 0, Hash([1; HASH_SIZE]), &[]).unwrap();
+        assert!(signer.sign(1_700_000_000_000, &invalid).is_err());
     }
 
     /// Pin the binary layout of the `cosigned_message` struct against
