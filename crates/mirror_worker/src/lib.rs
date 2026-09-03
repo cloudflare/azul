@@ -1,13 +1,13 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! A transparency-log mirror implementing [c2sp.org/tlog-mirror][mirror] on
-//! Cloudflare Workers, specialized for MTC issuance logs.
+//! A configurable transparency-log witness and mirror on
+//! Cloudflare Workers.
 //!
 //! This worker handles the [`add-checkpoint`][add-cp] and
 //! [`add-entries`][add-e] submission endpoints, the OPTIONAL
-//! [`sign-subtree`][signsub] endpoint, and publishes the mirror's identity
-//! and per-log configuration at `/metadata`. The [tlog-tiles][tiles] read
+//! [`sign-subtree`][signsub] endpoint, and publishes enabled identities and
+//! per-log configuration at `/metadata`. The [tlog-tiles][tiles] read
 //! interface is served directly from object storage (see the `storage`
 //! module).
 //!
@@ -23,18 +23,32 @@
 //! [tiles]: https://c2sp.org/tlog-tiles
 
 use base64::Engine as _;
-use config::AppConfig;
-use ml_dsa::pkcs8::{DecodePrivateKey as _, EncodePublicKey as _};
+use config::{AppConfig, CheckpointAlgorithm};
+use ed25519_dalek::{
+    SigningKey as Ed25519SigningKey,
+    pkcs8::{DecodePrivateKey as _, DecodePublicKey as _, EncodePublicKey as _},
+};
 use ml_dsa::{MlDsa44, VerifyingKey as MlDsaVerifyingKey};
-use pkcs8::{PrivateKeyInfoRef, SecretDocument, der::oid::db::fips204::ID_ML_DSA_44};
-use signed_note::{KeyName, NoteVerifier, VerifierList};
+use pkcs8::{
+    PrivateKeyInfoRef, SecretDocument,
+    der::oid::db::{fips204::ID_ML_DSA_44, rfc8410::ID_ED_25519},
+};
+use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier, VerifierList};
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, OnceLock};
-use tlog_cosignature::{SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier};
+use std::sync::{LazyLock, OnceLock};
+use tlog_cosignature::{
+    CosignatureV1CheckpointSigner, SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier,
+};
 use tlog_mirror::TicketSealer;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+/// Initialize Sentry from the `SENTRY_DSN` environment variable.
+///
+/// Does nothing when the variable is absent or empty, allowing
+/// deployments without Sentry support. Called at the top of the frontend
+/// `fetch` handler and in each Durable Object's `new`, so a panic anywhere
+/// in the worker is captured and flushed.
 pub(crate) use generic_log_worker::obs::sentry::init_from_env as init_sentry;
 
 mod add_entries;
@@ -46,11 +60,37 @@ mod mirror_state_do;
 mod storage;
 mod stream_buffer;
 
-/// The binding name used in `wrangler.jsonc` for the `MirrorState` DO.
 pub(crate) const MIRROR_STATE_BINDING: &str = "MIRROR_STATE";
 
 /// The binding name used in `wrangler.jsonc` for the `MirrorCleaner` DO.
 pub(crate) const MIRROR_CLEANER_BINDING: &str = "MIRROR_CLEANER";
+
+#[derive(Clone, Copy)]
+pub(crate) struct EnabledRoles {
+    witness: bool,
+    mirror: bool,
+}
+
+pub(crate) const fn enabled_roles(mode: config::Mode) -> EnabledRoles {
+    EnabledRoles {
+        witness: mode.witness_enabled(),
+        mirror: mode.mirror_enabled(),
+    }
+}
+
+impl EnabledRoles {
+    pub(crate) const fn witness(self) -> bool {
+        self.witness
+    }
+
+    pub(crate) const fn mirror(self) -> bool {
+        self.mirror
+    }
+
+    pub(crate) const fn combined(self) -> bool {
+        self.witness && self.mirror
+    }
+}
 
 /// The compile-time-embedded worker configuration.
 ///
@@ -62,64 +102,62 @@ pub(crate) static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
         .expect("config.json must be valid at build time")
 });
 
-/// Per-origin cache of the parsed trusted log keys, keyed by the
-/// concrete checkpoint origin. An MTC log-number window expands to one
-/// entry per accepted log number (origin `<log_key_name>.0.<N>`), so the
-/// map keys are the full set of origins this mirror serves.
-///
-/// All log numbers of a CA share the same key(s), and a parsed
-/// ML-DSA-44 [`LogKey`] is ~25 KiB (it precomputes the expanded NTT
-/// matrix), so the value is an [`Arc`]: every origin in a window points
-/// at one shared allocation rather than cloning the key per log number.
-///
-/// Values are [`LogKey`] pairs rather than a pre-built `VerifierList`,
+/// Per-origin cache of parsed trusted checkpoint signers.
+/// Values are parsed keys rather than a pre-built `VerifierList`,
 /// because `Box<dyn NoteVerifier>` is not `Sync` and so cannot live
-/// inside a `LazyLock`. Building the `VerifierList` per request is cheap
-/// (`SubtreeV1NoteVerifier::new` is just a key-ID hash).
-pub(crate) static LOG_KEYS: LazyLock<HashMap<String, Arc<Vec<LogKey>>>> = LazyLock::new(|| {
-    let mut map: HashMap<String, Arc<Vec<LogKey>>> = HashMap::new();
-    for (log_key_name, log) in &CONFIG.logs {
-        let keys = Arc::new(parse_log_keys(log_key_name, log));
-        for origin in log.origins(log_key_name) {
-            map.insert(origin, Arc::clone(&keys));
-        }
-    }
-    map
+/// inside a `LazyLock`.
+pub(crate) static LOG_KEYS: LazyLock<HashMap<String, Vec<LogKey>>> = LazyLock::new(|| {
+    CONFIG
+        .logs
+        .iter()
+        .map(|(origin, log)| (origin.clone(), parse_log_keys(log)))
+        .collect()
 });
 
-/// A parsed trusted log key: the note-signature `name` (the
-/// `log_key_name`, constant across an MTC CA's log-number window) and the
-/// ML-DSA-44 verifying key.
+/// A parsed trusted source checkpoint signer.
 #[derive(Clone)]
-pub(crate) struct LogKey {
-    pub name: KeyName,
-    pub verifying_key: MlDsaVerifyingKey<MlDsa44>,
+pub(crate) enum LogKey {
+    Ed25519 {
+        name: KeyName,
+        verifying_key: ed25519_dalek::VerifyingKey,
+    },
+    SubtreeV1 {
+        name: KeyName,
+        verifying_key: MlDsaVerifyingKey<MlDsa44>,
+    },
 }
 
 /// Build the parsed keys for a single configured log.
 ///
-/// `build.rs` runs [`config::AppConfig::validate`] and refuses to compile
-/// a malformed config, so the `log_key_name` and each SPKI are known to
-/// parse; the `expect`s below would only fire if `validate` drifted out
-/// of sync with this function.
-fn parse_log_keys(log_key_name: &str, log: &config::LogParams) -> Vec<LogKey> {
-    use ml_dsa::pkcs8::DecodePublicKey as _;
-    let name = KeyName::new(log_key_name.to_owned())
-        .expect("log_key_name validated as a signed-note KeyName by AppConfig::validate");
-    log.log_public_keys
+/// `build.rs` validates each signer name, algorithm, and SPKI before this
+/// function runs.
+fn parse_log_keys(log: &config::LogParams) -> Vec<LogKey> {
+    log.checkpoint_signers
         .iter()
-        .map(|spki| {
-            let verifying_key = MlDsaVerifyingKey::<MlDsa44>::from_public_key_der(spki)
-                .expect("SPKI validated as ML-DSA-44 by AppConfig::validate");
-            LogKey {
-                name: name.clone(),
-                verifying_key,
+        .map(|signer| {
+            let name = KeyName::new(signer.name.clone())
+                .expect("checkpoint signer name validated by AppConfig::validate");
+            match signer.algorithm {
+                CheckpointAlgorithm::Ed25519 => LogKey::Ed25519 {
+                    name,
+                    verifying_key: ed25519_dalek::VerifyingKey::from_public_key_der(
+                        &signer.public_key,
+                    )
+                    .expect("SPKI validated as Ed25519 by AppConfig::validate"),
+                },
+                CheckpointAlgorithm::SubtreeV1 => LogKey::SubtreeV1 {
+                    name,
+                    verifying_key: MlDsaVerifyingKey::<MlDsa44>::from_public_key_der(
+                        &signer.public_key,
+                    )
+                    .expect("SPKI validated as ML-DSA-44 by AppConfig::validate"),
+                },
             }
         })
         .collect()
 }
 
-/// Every concrete origin this mirror serves, as `'static` string slices.
+/// Every configured source-log origin, as `'static` string slices.
 ///
 /// This is the set of Durable Object names for the per-origin
 /// `MirrorState`/`MirrorCleaner` instances; the DOs recover their own
@@ -132,61 +170,68 @@ pub(crate) fn log_origins() -> impl Iterator<Item = &'static str> {
 /// `None` if no log is configured at that origin.
 pub(crate) fn log_verifiers(origin: &str) -> Option<VerifierList> {
     let keys = LOG_KEYS.get(origin)?;
+    Some(log_verifiers_for_keys(keys))
+}
+
+fn log_verifiers_for_keys(keys: &[LogKey]) -> VerifierList {
     let verifiers: Vec<Box<dyn NoteVerifier>> = keys
         .iter()
-        .map(|k| {
-            Box::new(SubtreeV1NoteVerifier::new(
-                k.name.clone(),
-                k.verifying_key.clone(),
-            )) as Box<dyn NoteVerifier>
+        .map(|key| match key {
+            LogKey::Ed25519 {
+                name,
+                verifying_key,
+            } => Box::new(Ed25519NoteVerifier::new(name.clone(), *verifying_key))
+                as Box<dyn NoteVerifier>,
+            LogKey::SubtreeV1 {
+                name,
+                verifying_key,
+            } => Box::new(SubtreeV1NoteVerifier::new(
+                name.clone(),
+                verifying_key.clone(),
+            )) as Box<dyn NoteVerifier>,
         })
         .collect();
-    Some(VerifierList::new(verifiers))
+    VerifierList::new(verifiers)
 }
 
-// ---------------------------------------------------------------------------
-// Mirror cosigner key
-// ---------------------------------------------------------------------------
-
-/// The mirror's signing material.
-///
-/// The mirror is an MTC cosigner, which per [c2sp.org/mtc-tlog][mtc] MUST
-/// use an ML-DSA-44 key and produce [`subtree/v1`][cosig] messages, so
-/// this worker supports only that algorithm. Holds the signer plus the
-/// DER-encoded `SubjectPublicKeyInfo` computed once at load and served by
-/// `/metadata`. The signer is boxed because the expanded ML-DSA-44 key is
-/// large (~64 KiB).
-///
-/// [mtc]: https://c2sp.org/mtc-tlog
-/// [cosig]: https://c2sp.org/tlog-cosignature
-pub(crate) struct MirrorSigner {
-    signer: Box<SubtreeV1CheckpointSigner>,
-    public_key_der: Vec<u8>,
+/// Identity signing material selected by the PKCS#8 algorithm OID.
+pub(crate) enum IdentitySigner {
+    CosignatureV1 {
+        signer: Box<CosignatureV1CheckpointSigner>,
+        public_key_der: Vec<u8>,
+    },
+    SubtreeV1 {
+        signer: Box<SubtreeV1CheckpointSigner>,
+        public_key_der: Vec<u8>,
+    },
 }
 
-impl MirrorSigner {
-    /// DER-encoded `SubjectPublicKeyInfo` for the mirror's ML-DSA-44
-    /// verifying key.
+impl IdentitySigner {
+    /// DER-encoded `SubjectPublicKeyInfo` for the mirror's verifying key.
     pub(crate) fn public_key_der(&self) -> &[u8] {
-        &self.public_key_der
+        match self {
+            Self::CosignatureV1 { public_key_der, .. } | Self::SubtreeV1 { public_key_der, .. } => {
+                public_key_der
+            }
+        }
     }
 
-    /// Stable string identifying the cosignature algorithm, published in
-    /// `/metadata`. Always `"subtree/v1"` (the only algorithm an MTC
-    /// mirror cosigner may use).
-    #[allow(clippy::unused_self)]
     pub(crate) fn algorithm(&self) -> &'static str {
-        "subtree/v1"
+        match self {
+            Self::CosignatureV1 { .. } => "cosignature/v1",
+            Self::SubtreeV1 { .. } => "subtree/v1",
+        }
     }
 
-    /// The concrete [`SubtreeV1CheckpointSigner`], used by `sign-subtree`,
-    /// which needs [`SubtreeV1CheckpointSigner::sign_subtree`] and the
-    /// matching verifier, neither reachable through the algorithm-agnostic
-    /// [`CheckpointSigner`] trait object.
-    ///
-    /// [`CheckpointSigner`]: tlog_checkpoint::CheckpointSigner
-    pub(crate) fn as_subtree_signer(&self) -> &SubtreeV1CheckpointSigner {
-        &self.signer
+    pub(crate) fn supports_sign_subtree(&self) -> bool {
+        matches!(self, Self::SubtreeV1 { .. })
+    }
+
+    pub(crate) fn as_subtree_signer(&self) -> Option<&SubtreeV1CheckpointSigner> {
+        match self {
+            Self::CosignatureV1 { .. } => None,
+            Self::SubtreeV1 { signer, .. } => Some(signer),
+        }
     }
 
     /// The inner [`CheckpointSigner`] trait object, used by the
@@ -195,83 +240,118 @@ impl MirrorSigner {
     ///
     /// [`CheckpointSigner`]: tlog_checkpoint::CheckpointSigner
     pub(crate) fn as_checkpoint_signer(&self) -> &dyn tlog_checkpoint::CheckpointSigner {
-        &*self.signer
+        match self {
+            Self::CosignatureV1 { signer, .. } => &**signer,
+            Self::SubtreeV1 { signer, .. } => &**signer,
+        }
     }
 }
 
 /// Cached mirror signer, so the PKCS#8 parse happens at most once per
 /// worker instance.
-static MIRROR_SIGNER: OnceLock<MirrorSigner> = OnceLock::new();
+static MIRROR_SIGNER: OnceLock<IdentitySigner> = OnceLock::new();
+static WITNESS_SIGNER: OnceLock<IdentitySigner> = OnceLock::new();
 
 /// Load (or return the already-cached) mirror signer.
 ///
-/// The `MIRROR_SIGNING_KEY` PKCS#8 PEM secret MUST carry an ML-DSA-44 key
-/// (`id-ml-dsa-44`); the mirror cosigns with `subtree/v1`.
+/// The algorithm is derived from the PKCS#8 OID.
 ///
 /// # Errors
 ///
 /// Returns an error if the `MIRROR_SIGNING_KEY` secret is missing, the PEM
-/// is malformed, or the key is not ML-DSA-44.
-pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static MirrorSigner> {
+/// is malformed, or the key is neither Ed25519 nor ML-DSA-44.
+pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static IdentitySigner> {
+    if !enabled_roles(CONFIG.mode).mirror() {
+        return Err(Error::from("mirror identity is disabled"));
+    }
     if let Some(s) = MIRROR_SIGNER.get() {
         return Ok(s);
     }
     let pem = env.secret("MIRROR_SIGNING_KEY")?.to_string();
-    let signer = build_mirror_signer(&pem)?;
+    let signer = build_identity_signer(&CONFIG.mirror_config().name, "MIRROR_SIGNING_KEY", &pem)?;
     Ok(MIRROR_SIGNER.get_or_init(|| signer))
 }
 
-/// Build a [`MirrorSigner`] from a PKCS#8 PEM string.
+/// Build identity signing material from a PKCS#8 PEM string.
 ///
 /// Split out from [`load_mirror_signer`] so unit tests can exercise the
-/// parse/validation without a `worker::Env`. The key MUST be ML-DSA-44;
-/// any other algorithm is rejected (the mirror's cosigner must be an MTC
-/// cosigner, see [`MirrorSigner`]).
-fn build_mirror_signer(pem: &str) -> Result<MirrorSigner> {
-    let name = KeyName::new(CONFIG.mirror_name.clone())
-        .map_err(|e| Error::from(format!("invalid mirror_name: {e:?}")))?;
+/// parse and algorithm dispatch without a `worker::Env`.
+fn build_identity_signer(
+    identity_name: &str,
+    secret_name: &str,
+    pem: &str,
+) -> Result<IdentitySigner> {
+    let name = KeyName::new(identity_name.to_owned())
+        .map_err(|e| Error::from(format!("invalid identity name: {e:?}")))?;
     let (_label, doc) =
         SecretDocument::from_pem(pem).map_err(|e| Error::from(format!("PEM parse: {e}")))?;
     let pk_info = PrivateKeyInfoRef::try_from(doc.as_bytes())
         .map_err(|e| Error::from(format!("PrivateKeyInfo parse: {e}")))?;
     match pk_info.algorithm.oid {
-        ID_ML_DSA_44 => {
-            // ml-dsa's PKCS#8 stores only the 32-byte seed; `from_pkcs8_der`
-            // expands it on the way in. The expanded key never leaves this
-            // worker.
-            let expanded = ml_dsa::ExpandedSigningKey::<MlDsa44>::from_pkcs8_der(doc.as_bytes())
-                .map_err(|e| Error::from(format!("ML-DSA-44 PKCS#8 parse: {e}")))?;
-            let public_key_der = expanded
+        ID_ED_25519 => {
+            let key = Ed25519SigningKey::from_pkcs8_pem(pem)
+                .map_err(|e| Error::from(format!("Ed25519 PKCS#8 parse: {e}")))?;
+            let public_key_der = key
                 .verifying_key()
                 .to_public_key_der()
-                .map_err(|e| Error::from(format!("ML-DSA-44 SPKI encode: {e}")))?
+                .map_err(|e| Error::from(format!("Ed25519 SPKI encode: {e}")))?
                 .to_vec();
-            Ok(MirrorSigner {
-                signer: Box::new(SubtreeV1CheckpointSigner::new(name, expanded)),
+            Ok(IdentitySigner::CosignatureV1 {
+                signer: Box::new(CosignatureV1CheckpointSigner::new(name, key)),
+                public_key_der,
+            })
+        }
+        ID_ML_DSA_44 => {
+            let (signer, public_key_der) =
+                SubtreeV1CheckpointSigner::from_pkcs8_pem_with_public_key(name, pem)
+                    .map_err(Error::from)?;
+            Ok(IdentitySigner::SubtreeV1 {
+                signer: Box::new(signer),
                 public_key_der,
             })
         }
         oid => Err(Error::from(format!(
-            "unsupported MIRROR_SIGNING_KEY algorithm OID {oid}: expected id-ml-dsa-44 \
-             ({ID_ML_DSA_44}). The mirror's cosigner must be an MTC cosigner (ML-DSA-44, \
-             subtree/v1)."
+            "unsupported {secret_name} algorithm OID {oid}: expected id-Ed25519 \
+             ({ID_ED_25519}) or id-ml-dsa-44 ({ID_ML_DSA_44})"
         ))),
     }
 }
 
-/// Return the DER-encoded `SubjectPublicKeyInfo` for the mirror's own
-/// verifying key. Used by the `/metadata` endpoint.
-///
-/// # Errors
-///
-/// Returns an error if the signing key is not available.
-pub(crate) fn load_mirror_public_key_der(env: &Env) -> Result<&'static [u8]> {
-    Ok(load_mirror_signer(env)?.public_key_der())
+pub(crate) fn load_witness_signer(env: &Env) -> Result<&'static IdentitySigner> {
+    if !enabled_roles(CONFIG.mode).witness() {
+        return Err(Error::from("witness identity is disabled"));
+    }
+    if let Some(signer) = WITNESS_SIGNER.get() {
+        return Ok(signer);
+    }
+    let pem = env.secret("WITNESS_SIGNING_KEY")?.to_string();
+    let identity = CONFIG
+        .witness
+        .as_ref()
+        .expect("validated witness mode must have witness config");
+    let signer = build_identity_signer(&identity.name, "WITNESS_SIGNING_KEY", &pem)?;
+    Ok(WITNESS_SIGNER.get_or_init(|| signer))
 }
 
-// ---------------------------------------------------------------------------
-// Ticket key
-// ---------------------------------------------------------------------------
+/// Load enabled identity keys and reject key reuse across roles.
+pub(crate) fn validate_identity_keys(env: &Env) -> Result<()> {
+    if !enabled_roles(CONFIG.mode).combined() {
+        return Ok(());
+    }
+    let witness = load_witness_signer(env)?;
+    let mirror = load_mirror_signer(env)?;
+    ensure_distinct_identity_keys(witness, mirror).map_err(Error::from)
+}
+
+fn ensure_distinct_identity_keys(
+    witness: &IdentitySigner,
+    mirror: &IdentitySigner,
+) -> std::result::Result<(), &'static str> {
+    if witness.public_key_der() != mirror.public_key_der() {
+        return Ok(());
+    }
+    Err("witness and mirror identities must use distinct signing keys")
+}
 
 /// Cached ticket authenticator, built lazily on first request.
 ///
@@ -313,16 +393,19 @@ pub(crate) fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSealer> {
 
 #[cfg(test)]
 mod signer_tests {
-    //! Unit tests for the mirror signer loader: only ML-DSA-44 keys are
-    //! accepted; other algorithms and malformed PEMs are rejected.
-    //! Ed25519 keys are generated only to exercise the rejection path, so
-    //! `ed25519-dalek` is a dev-dependency.
+    use super::{
+        IdentitySigner, build_identity_signer, enabled_roles, ensure_distinct_identity_keys,
+        log_verifiers_for_keys, parse_log_keys,
+    };
+    use base64::Engine as _;
+    use config::{CheckpointAlgorithm, CheckpointSigner, LogParams};
+    use ed25519_dalek::pkcs8::{EncodePrivateKey as _, EncodePublicKey as _};
+    use ml_dsa::ExpandedSigningKey;
+    use signed_note::{KeyName, Note};
+    use tlog_checkpoint::{CheckpointSigner as _, CheckpointText};
+    use tlog_core::record_hash;
+    use tlog_cosignature::SubtreeV1CheckpointSigner;
 
-    use super::build_mirror_signer;
-    use ed25519_dalek::pkcs8::EncodePrivateKey as _;
-
-    /// Generate a deterministic Ed25519 PEM from a seed byte. Used only to
-    /// check that a non-ML-DSA-44 key is rejected.
     fn ed25519_pem(seed: u8) -> String {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         sk.to_pkcs8_pem(pkcs8::LineEnding::LF)
@@ -344,32 +427,48 @@ mod signer_tests {
 
     #[test]
     fn ml_dsa_44_pem_loads_with_subtree_v1_algorithm() {
-        let signer = build_mirror_signer(&ml_dsa_44_pem(2)).expect("build ML-DSA-44 signer");
+        let signer = build_identity_signer("mirror.example", "TEST_KEY", &ml_dsa_44_pem(2))
+            .expect("build ML-DSA-44 signer");
+        assert!(matches!(signer, IdentitySigner::SubtreeV1 { .. }));
         assert_eq!(signer.algorithm(), "subtree/v1");
+        assert!(signer.supports_sign_subtree());
         assert!(
             !signer.public_key_der().is_empty(),
             "ML-DSA-44 SPKI must be non-empty",
         );
     }
 
-    /// The mirror cosigner MUST be ML-DSA-44 (an MTC cosigner). An Ed25519
-    /// key (a valid tlog cosigner key in general, but not an MTC one) is
-    /// refused, with an error naming the expected algorithm.
     #[test]
-    fn ed25519_key_is_rejected() {
-        let Err(err) = build_mirror_signer(&ed25519_pem(3)) else {
-            panic!("Ed25519 MIRROR_SIGNING_KEY must be rejected")
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported") && msg.contains("id-ml-dsa-44"),
-            "unexpected error: {msg}",
-        );
+    fn ed25519_pem_loads_with_cosignature_v1_algorithm() {
+        let signer = build_identity_signer("mirror.example", "TEST_KEY", &ed25519_pem(3))
+            .expect("build Ed25519 signer");
+        assert!(matches!(signer, IdentitySigner::CosignatureV1 { .. }));
+        assert_eq!(signer.algorithm(), "cosignature/v1");
+        assert!(!signer.supports_sign_subtree());
+        assert!(signer.as_subtree_signer().is_none());
+    }
+
+    #[test]
+    fn independently_generated_identity_keys_are_distinct() {
+        let witness = build_identity_signer("witness.example", "TEST_KEY", &ed25519_pem(3))
+            .expect("build witness signer");
+        let mirror = build_identity_signer("mirror.example", "TEST_KEY", &ed25519_pem(4))
+            .expect("build mirror signer");
+        ensure_distinct_identity_keys(&witness, &mirror).unwrap();
+    }
+
+    #[test]
+    fn reused_identity_key_is_rejected() {
+        let witness = build_identity_signer("witness.example", "TEST_KEY", &ed25519_pem(3))
+            .expect("build witness signer");
+        let mirror = build_identity_signer("mirror.example", "TEST_KEY", &ed25519_pem(3))
+            .expect("build mirror signer");
+        assert!(ensure_distinct_identity_keys(&witness, &mirror).is_err());
     }
 
     #[test]
     fn malformed_pem_is_rejected() {
-        let Err(err) = build_mirror_signer("not-a-pem") else {
+        let Err(err) = build_identity_signer("mirror.example", "TEST_KEY", "not-a-pem") else {
             panic!("malformed PEM must not parse")
         };
         let msg = err.to_string();
@@ -377,6 +476,64 @@ mod signer_tests {
             msg.contains("PEM parse") || msg.contains("PrivateKeyInfo"),
             "unexpected error: {msg}",
         );
+    }
+
+    #[test]
+    fn configured_mixed_log_verifiers_verify_both_algorithms() {
+        let ed_key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+        let ml_key = ExpandedSigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::B32::from([13; 32]));
+        let log = LogParams {
+            description: None,
+            checkpoint_signers: vec![
+                CheckpointSigner {
+                    name: "log.example/ed".to_owned(),
+                    algorithm: CheckpointAlgorithm::Ed25519,
+                    public_key: ed_key.verifying_key().to_public_key_der().unwrap().to_vec(),
+                },
+                CheckpointSigner {
+                    name: "log.example/ml".to_owned(),
+                    algorithm: CheckpointAlgorithm::SubtreeV1,
+                    public_key: ml_key.verifying_key().to_public_key_der().unwrap().to_vec(),
+                },
+            ],
+        };
+        let keys = parse_log_keys(&log);
+        let checkpoint_bytes = format!(
+            "log.example\n1\n{}\n",
+            base64::engine::general_purpose::STANDARD.encode(record_hash(b"entry").0)
+        );
+        let checkpoint = CheckpointText::from_bytes(checkpoint_bytes.as_bytes()).unwrap();
+
+        let ed_signer = tlog_checkpoint::Ed25519CheckpointSigner::new(
+            KeyName::new("log.example/ed".to_owned()).unwrap(),
+            ed_key,
+        );
+        let ed_signature = ed_signer.sign(1, &checkpoint).unwrap();
+        let ed_note = Note::new(checkpoint_bytes.as_bytes(), &[ed_signature]).unwrap();
+        ed_note.verify(&log_verifiers_for_keys(&keys)).unwrap();
+
+        let ml_signer = SubtreeV1CheckpointSigner::new(
+            KeyName::new("log.example/ml".to_owned()).unwrap(),
+            ml_key,
+        );
+        let ml_signature = ml_signer.sign(1, &checkpoint).unwrap();
+        let ml_note = Note::new(checkpoint_bytes.as_bytes(), &[ml_signature]).unwrap();
+        ml_note.verify(&log_verifiers_for_keys(&keys)).unwrap();
+    }
+
+    #[test]
+    fn standalone_role_policy_gates_routes_metadata_and_secrets() {
+        let witness = enabled_roles(config::Mode::Witness);
+        assert!(witness.witness());
+        assert!(!witness.mirror());
+
+        let mirror = enabled_roles(config::Mode::Mirror);
+        assert!(!mirror.witness());
+        assert!(mirror.mirror());
+
+        let combined = enabled_roles(config::Mode::WitnessAndMirror);
+        assert!(combined.witness());
+        assert!(combined.mirror());
     }
 }
 
@@ -388,8 +545,8 @@ mod dev_config_tests {
     //!
     //! The dev config models an MTC CA: the `logs` key is the CA cosigner
     //! ID (`oid/1.3.6.1.4.1.32473.2`) whose ML-DSA-44 keypair signs
-    //! `subtree/v1` checkpoints. The mirror's own cosigner key in
-    //! `.dev.vars` is independent and is pinned only to "parses cleanly".
+    //! `subtree/v1` checkpoints. The role identity keys in `.dev.vars` are
+    //! independent.
 
     use base64::prelude::*;
     use ml_dsa::pkcs8::{DecodePrivateKey as _, EncodePublicKey as _};
@@ -432,11 +589,10 @@ mod dev_config_tests {
         // Pull the log's first public key straight from the JSON, so the
         // test is robust to unrelated config-shape changes.
         let parsed: serde_json::Value = serde_json::from_str(DEV_CONFIG).unwrap();
-        let b64 = parsed["logs"]["oid/1.3.6.1.4.1.32473.2"]["log_public_keys"][0]
-            .as_str()
-            .expect(
-                "config.dev.json must have logs[\"oid/1.3.6.1.4.1.32473.2\"].log_public_keys[0]",
-            );
+        let b64 =
+            parsed["logs"]["oid/1.3.6.1.4.1.32473.2.0.1"]["checkpoint_signers"][0]["public_key"]
+                .as_str()
+                .expect("config.dev.json must contain the MTC checkpoint signer public key");
         let config_spki = BASE64_STANDARD.decode(b64).expect("SPKI is base64");
 
         // Derive the SPKI from the PEM and compare.
@@ -451,19 +607,40 @@ mod dev_config_tests {
         );
     }
 
-    /// `MIRROR_SIGNING_KEY` in `.dev.vars` parses cleanly through the
-    /// same `build_mirror_signer` code path that production uses. Pins
-    /// that an operator-typo in `.dev.vars` is caught at unit-test
-    /// time, not at the first request to a running `wrangler dev`.
     #[test]
     fn dev_vars_mirror_signing_key_parses() {
         let pem = dev_var("MIRROR_SIGNING_KEY");
-        let signer = super::build_mirror_signer(&pem)
-            .expect("MIRROR_SIGNING_KEY in .dev.vars must parse via build_mirror_signer");
+        let signer = super::build_identity_signer("dev.mirror.example", "MIRROR_SIGNING_KEY", &pem)
+            .expect("MIRROR_SIGNING_KEY in .dev.vars must parse");
         assert_eq!(
             signer.algorithm(),
             "subtree/v1",
             "dev MIRROR_SIGNING_KEY must load as a subtree/v1 signer",
+        );
+    }
+
+    #[test]
+    fn dev_vars_witness_signing_key_parses() {
+        let signer = super::build_identity_signer(
+            "dev.witness.example",
+            "WITNESS_SIGNING_KEY",
+            &dev_var("WITNESS_SIGNING_KEY"),
+        )
+        .expect("WITNESS_SIGNING_KEY in .dev.vars must parse");
+        assert_eq!(signer.algorithm(), "subtree/v1");
+    }
+
+    #[test]
+    fn dev_vars_witness_and_mirror_public_keys_differ() {
+        let witness = SigningKey::<MlDsa44>::from_pkcs8_pem(&dev_var("WITNESS_SIGNING_KEY"))
+            .expect("WITNESS_SIGNING_KEY in .dev.vars must parse");
+        let mirror = SigningKey::<MlDsa44>::from_pkcs8_pem(&dev_var("MIRROR_SIGNING_KEY"))
+            .expect("MIRROR_SIGNING_KEY in .dev.vars must parse");
+
+        assert_ne!(
+            witness.verifying_key().to_public_key_der().unwrap(),
+            mirror.verifying_key().to_public_key_der().unwrap(),
+            "dev witness and mirror identities must use distinct public keys",
         );
     }
 

@@ -4,8 +4,7 @@
 //! [`MirrorState`] Durable Object: per-origin atomic state for the
 //! [c2sp.org/tlog-mirror][spec] protocol.
 //!
-//! The DO holds three pieces of per-origin state, always ordered
-//! `committed.size <= next_entry.size <= pending.size`:
+//! Mirror-enabled state is ordered `committed.size <= next_entry.size <= pending.size`.
 //!
 //! - `pending`: the latest signed checkpoint accepted via
 //!   [`add-checkpoint`][add-cp], the source of truth for the consistency
@@ -27,7 +26,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64 as Base64As, serde_as};
-use tlog_core::{Hash, verify_consistency_proof};
+use tlog_core::Hash;
+use tlog_witness::{
+    CheckpointState, CheckpointTransitionError, ProofRequirement, validate_checkpoint_transition,
+};
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
@@ -38,22 +40,19 @@ const PENDING_KEY: &str = "pending";
 const COMMITTED_KEY: &str = "committed";
 const NEXT_ENTRY_KEY: &str = "next_entry";
 
-/// The persisted *pending checkpoint* for a single log origin.
+/// The persisted latest checkpoint for a single log origin.
 ///
-/// Stores the full signed-note bytes (not just size+hash) so the mirror
-/// can serve them back to `add-entries` clients and retain the log's
-/// signature per spec.
+/// This is the witness's latest checkpoint and the mirror's pending
+/// checkpoint. The signed note is retained for mirror `add-entries`.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct PendingCheckpoint {
-    /// Tree size, or zero if no pending checkpoint has been accepted for
-    /// this origin.
+    /// Tree size. Zero is a valid accepted checkpoint.
     pub size: u64,
     /// Root hash. All-zero if `size` is 0.
     #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
-    /// Full signed-note bytes, empty if `size` is 0. Base64 in the
-    /// on-disk JSON so the state stays valid UTF-8.
+    /// Full signed-note bytes, encoded as base64 in persisted JSON.
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
 }
@@ -67,17 +66,15 @@ pub struct PendingCheckpoint {
 /// checkpoint at `<monitoring>/<encoded-origin>/checkpoint` without
 /// looking up historic pending state.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommittedCheckpoint {
-    /// Tree size, or zero if no entries have been committed for this
-    /// origin.
+    /// Tree size. Zero is a valid committed empty-tree checkpoint.
     pub size: u64,
     /// Root hash. All-zero if `size` is 0.
     #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
     /// The served checkpoint bytes: the log's signed note with the
     /// mirror's cosignature line(s) appended, exactly as written to R2.
-    /// Empty if `size` is 0.
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
 }
@@ -105,12 +102,9 @@ pub struct NextEntry {
 /// 409/404/422 cases and to resume appending from the persisted frontier.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct MirrorStateSnapshot {
-    pub pending: PendingCheckpoint,
-    pub committed: CommittedCheckpoint,
-    /// The persisted-entry frontier. `#[serde(default)]` so a snapshot
-    /// serialized by an older worker (before this field existed) still
-    /// deserializes to the zero frontier during a rolling deploy.
-    #[serde(default)]
+    pub pending: Option<PendingCheckpoint>,
+    pub committed: Option<CommittedCheckpoint>,
+    /// The persisted-entry frontier.
     pub next_entry: NextEntry,
 }
 
@@ -166,20 +160,12 @@ pub struct UpdatePendingRequest {
     pub signed_note_bytes: Vec<u8>,
 }
 
-/// A Durable Object holding the latest pending and committed checkpoint
-/// state for a single log origin.
+/// Per-origin witness and mirror state.
 #[durable_object(fetch)]
 struct MirrorState {
     state: State,
-    /// Held to resolve the origin's R2 bucket when the DO writes the
-    /// served checkpoint on `/commit`.
     env: Env,
-    /// Serializes `/commit` so the durable-storage advance and the R2
-    /// served-checkpoint write happen atomically with respect to
-    /// concurrent commits, even across the external R2 write's await.
-    /// Without it a slower commit could overwrite the served checkpoint
-    /// with an older one after a concurrent commit already advanced it.
-    /// Mirrors the sequencer's `init_mux` (see `generic_log_worker`).
+    /// Invariant: checkpoint commits are serialized per origin.
     commit_mux: Mutex<()>,
 }
 
@@ -230,51 +216,47 @@ impl MirrorState {
                 // write is durable, so a following add-entries cannot race
                 // it.
                 let body: UpdatePendingRequest = req.json().await?;
-                let current: PendingCheckpoint = self
-                    .state
-                    .storage()
-                    .get(PENDING_KEY)
-                    .await?
-                    .unwrap_or_default();
-                if current.size != body.old_size {
-                    // Return the latest pending so the caller can build a
-                    // 409 body.
-                    return Response::from_json(&current).map(|r| r.with_status(409));
-                }
-                // Same size: hashes must match and the proof must be empty.
-                if body.old_size == body.new_size {
-                    if current.hash.0 != body.new_hash.0 {
-                        return Response::from_json(&current).map(|r| r.with_status(409));
-                    }
-                    if !body.proof.is_empty() {
-                        return Response::error(
-                            "consistency proof must be empty when old_size == checkpoint size",
+                let current: Option<PendingCheckpoint> =
+                    self.state.storage().get(PENDING_KEY).await?;
+                let transition = validate_checkpoint_transition(
+                    current.as_ref().map(|checkpoint| CheckpointState {
+                        size: checkpoint.size,
+                        hash: checkpoint.hash,
+                    }),
+                    body.old_size,
+                    CheckpointState {
+                        size: body.new_size,
+                        hash: body.new_hash,
+                    },
+                    &body.proof,
+                );
+                if let Err(error) = transition {
+                    return match error {
+                        CheckpointTransitionError::OldSizeMismatch
+                        | CheckpointTransitionError::HashMismatch => {
+                            Response::from_json(&current.unwrap_or_default())
+                                .map(|response| response.with_status(409))
+                        }
+                        CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::SameSize) => {
+                            Response::error(
+                                "consistency proof must be empty when old_size == checkpoint size",
+                                400,
+                            )
+                        }
+                        CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::Initial) => {
+                            Response::error(
+                                "consistency proof must be empty when old_size is 0 (first pending checkpoint for this origin)",
+                                400,
+                            )
+                        }
+                        CheckpointTransitionError::ConsistencyProofFailed => {
+                            Response::error("consistency proof failed", 422)
+                        }
+                        CheckpointTransitionError::InvalidEmptyTreeHash => Response::error(
+                            "size-zero checkpoint must use the empty-tree hash",
                             400,
-                        );
-                    }
-                } else if body.old_size == 0 {
-                    // First pending for this origin: proof must be empty.
-                    if !body.proof.is_empty() {
-                        return Response::error(
-                            "consistency proof must be empty when old_size is 0 (first pending checkpoint for this origin)",
-                            400,
-                        );
-                    }
-                } else {
-                    // 0 < old_size < new_size: proof required.
-                    // `verify_consistency_proof` takes the larger tree
-                    // first, then the smaller.
-                    if verify_consistency_proof(
-                        &body.proof,
-                        body.new_size,
-                        body.new_hash,
-                        body.old_size,
-                        current.hash,
-                    )
-                    .is_err()
-                    {
-                        return Response::error("consistency proof failed", 422);
-                    }
+                        ),
+                    };
                 }
                 let new_state = PendingCheckpoint {
                     size: body.new_size,
@@ -290,28 +272,7 @@ impl MirrorState {
 }
 
 impl MirrorState {
-    /// Handle `/commit`: monotonically advance the mirror checkpoint and
-    /// write the served checkpoint object to R2.
-    ///
-    /// `commit_mux` serializes the whole read-check-advance-write
-    /// sequence, including the external R2 write, so concurrent commits
-    /// cannot interleave and rewind the served checkpoint. Compare-and-swap
-    /// semantics:
-    ///   * `size > next_entry.size`: commit beyond the persisted-entry
-    ///     frontier (cosigning entries not yet durably written); 400. This
-    ///     preserves `committed.size <= next_entry.size`, and since
-    ///     `next_entry.size <= pending.size` it also rejects commits beyond
-    ///     the accepted pending checkpoint.
-    ///   * `size < committed.size`: a concurrent add-entries already
-    ///     advanced past us. The spec forbids rolling back, so no-op and
-    ///     return the current committed checkpoint (whose served object the
-    ///     concurrent commit already wrote).
-    ///   * otherwise: advance committed in durable storage, then write the
-    ///     served checkpoint to R2.
-    ///
-    /// Durable storage is advanced before the R2 write so the served
-    /// checkpoint is never ahead of committed; a failed R2 write leaves R2
-    /// lagging and is rewritten by the next commit.
+    /// Publish without rewinding the committed checkpoint.
     async fn commit(&self, body: CommitRequest) -> Result<Response> {
         let _guard = self.commit_mux.lock().await;
 
@@ -325,10 +286,16 @@ impl MirrorState {
                 400,
             );
         }
-        if body.size < snapshot.committed.size {
-            // Already ahead; no-op success. The concurrent commit that
-            // advanced past us already wrote the newer served checkpoint.
-            return Response::from_json(&snapshot.committed);
+        if let Some(committed) = snapshot.committed.as_ref()
+            && body.size < committed.size
+        {
+            return Response::from_json(committed);
+        }
+        if let Some(committed) = snapshot.committed.as_ref()
+            && body.size == committed.size
+            && body.hash != committed.hash
+        {
+            return Response::error("commit hash differs at the committed size", 400);
         }
 
         let new_committed = CommittedCheckpoint {
@@ -341,11 +308,6 @@ impl MirrorState {
             .put(COMMITTED_KEY, &new_committed)
             .await?;
 
-        // Write the served checkpoint (the log's signed note plus the
-        // mirror's cosignature) to R2 at
-        // <monitoring>/<origin hash>/checkpoint. The DO owns this write so
-        // it stays serialized with the durable advance above; the origin is
-        // the DO's own name.
         let origin = self
             .state
             .id()
@@ -366,11 +328,14 @@ impl MirrorState {
     ///   * otherwise: advance to `(size, hash)`.
     async fn advance_next_entry(&self, body: AdvanceNextEntryRequest) -> Result<Response> {
         let snapshot = self.read_snapshot().await?;
-        if body.size > snapshot.pending.size {
+        let Some(pending) = snapshot.pending.as_ref() else {
+            return Response::error("advance without a pending checkpoint", 400);
+        };
+        if body.size > pending.size {
             return Response::error(
                 format!(
                     "advance beyond pending: requested size {} > pending size {}",
-                    body.size, snapshot.pending.size
+                    body.size, pending.size
                 ),
                 400,
             );
@@ -387,11 +352,12 @@ impl MirrorState {
     }
 
     /// Read `pending`, `committed`, and `next_entry` from DO storage.
-    /// Missing keys default to the zero state ("no state yet").
+    /// Missing pending and committed keys remain `None`; `next_entry`
+    /// defaults to the zero frontier.
     async fn read_snapshot(&self) -> Result<MirrorStateSnapshot> {
         let storage = self.state.storage();
-        let pending: PendingCheckpoint = storage.get(PENDING_KEY).await?.unwrap_or_default();
-        let committed: CommittedCheckpoint = storage.get(COMMITTED_KEY).await?.unwrap_or_default();
+        let pending: Option<PendingCheckpoint> = storage.get(PENDING_KEY).await?;
+        let committed: Option<CommittedCheckpoint> = storage.get(COMMITTED_KEY).await?;
         let next_entry: NextEntry = storage.get(NEXT_ENTRY_KEY).await?.unwrap_or_default();
         Ok(MirrorStateSnapshot {
             pending,
@@ -416,12 +382,8 @@ mod tests {
     };
     use tlog_core::{HASH_SIZE, Hash};
 
-    /// Pin the on-disk JSON layout of `PendingCheckpoint`. Changing
-    /// this format would make already-deployed mirrors unable to read
-    /// their persisted state after a worker upgrade, so any change
-    /// here must be paired with a migration plan.
     #[test]
-    fn pending_checkpoint_json_format_unchanged() {
+    fn pending_checkpoint_json_format() {
         let mut bytes = [0u8; HASH_SIZE];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = u8::try_from(i).unwrap();
@@ -439,8 +401,6 @@ mod tests {
             r#"{"size":42,"hash":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","signed_note_bytes":"c2lnbmVkLW5vdGUtYnl0ZXM="}"#
         );
 
-        // Round-trip: an existing state blob must still parse after a
-        // rebuild.
         let decoded: PendingCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.size, 42);
         assert_eq!(decoded.hash.0, bytes);
@@ -451,7 +411,7 @@ mod tests {
     /// and the DO are in the same worker, but a format change still
     /// needs both sides updated in lockstep.
     #[test]
-    fn update_pending_request_json_format_unchanged() {
+    fn update_pending_request_json_format() {
         let req = UpdatePendingRequest {
             old_size: 10,
             new_size: 20,
@@ -492,9 +452,6 @@ mod tests {
         assert!(decoded.proof.is_empty());
     }
 
-    /// The default `PendingCheckpoint` represents "never accepted a
-    /// pending for this origin"; the frontend relies on the zero-sized
-    /// default when a DO has no stored state.
     #[test]
     fn pending_checkpoint_default_is_zero() {
         let pc = PendingCheckpoint::default();
@@ -503,11 +460,8 @@ mod tests {
         assert!(pc.signed_note_bytes.is_empty());
     }
 
-    /// Pin the on-disk JSON layout of `CommittedCheckpoint`. Same
-    /// migration considerations as `PendingCheckpoint`: deployed
-    /// mirrors must keep parsing this after a worker upgrade.
     #[test]
-    fn committed_checkpoint_json_format_unchanged() {
+    fn committed_checkpoint_json_format() {
         let mut bytes = [0u8; HASH_SIZE];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = u8::try_from(i).unwrap();
@@ -528,30 +482,20 @@ mod tests {
         assert_eq!(decoded.signed_note_bytes, b"signed-note-bytes");
     }
 
-    /// The default `CommittedCheckpoint` represents "never committed
-    /// any entries for this origin".
-    #[test]
-    fn committed_checkpoint_default_is_zero() {
-        let cc = CommittedCheckpoint::default();
-        assert_eq!(cc.size, 0);
-        assert_eq!(cc.hash.0, [0u8; HASH_SIZE]);
-        assert!(cc.signed_note_bytes.is_empty());
-    }
-
     /// Pin the wire shape of the `/get-state` response.
     #[test]
     fn mirror_state_snapshot_json_format() {
         let snap = MirrorStateSnapshot {
-            pending: PendingCheckpoint {
+            pending: Some(PendingCheckpoint {
                 size: 5,
                 hash: Hash([0xaa; HASH_SIZE]),
                 signed_note_bytes: b"p".to_vec(),
-            },
-            committed: CommittedCheckpoint {
+            }),
+            committed: Some(CommittedCheckpoint {
                 size: 3,
                 hash: Hash([0xbb; HASH_SIZE]),
                 signed_note_bytes: b"c".to_vec(),
-            },
+            }),
             next_entry: NextEntry {
                 size: 4,
                 hash: Hash([0xcc; HASH_SIZE]),
@@ -565,28 +509,53 @@ mod tests {
             "snapshot must include pending, committed, and next_entry: {json}"
         );
         let decoded: MirrorStateSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.pending.size, 5);
-        assert_eq!(decoded.committed.size, 3);
+        assert_eq!(decoded.pending.unwrap().size, 5);
+        assert_eq!(decoded.committed.unwrap().size, 3);
         assert_eq!(decoded.next_entry.size, 4);
     }
 
-    /// A snapshot serialized before `next_entry` existed must still
-    /// deserialize (to the zero frontier), so a rolling deploy that mixes
-    /// worker versions doesn't fail the `/get-state` round-trip.
     #[test]
-    fn mirror_state_snapshot_defaults_next_entry() {
-        let legacy = r#"{"pending":{"size":5,"hash":"aa","signed_note_bytes":""},"committed":{"size":3,"hash":"bb","signed_note_bytes":""}}"#
-            .replace("\"aa\"", &format!("\"{}\"", "aa".repeat(HASH_SIZE)))
-            .replace("\"bb\"", &format!("\"{}\"", "bb".repeat(HASH_SIZE)));
-        let decoded: MirrorStateSnapshot = serde_json::from_str(&legacy).unwrap();
-        assert_eq!(decoded.next_entry.size, 0);
-        assert_eq!(decoded.next_entry.hash.0, [0u8; HASH_SIZE]);
+    fn snapshot_distinguishes_no_pending_from_size_zero() {
+        let no_pending = MirrorStateSnapshot::default();
+        assert!(no_pending.pending.is_none());
+
+        let zero = MirrorStateSnapshot {
+            pending: Some(PendingCheckpoint {
+                size: 0,
+                hash: tlog_core::EMPTY_HASH,
+                signed_note_bytes: b"zero checkpoint".to_vec(),
+            }),
+            ..MirrorStateSnapshot::default()
+        };
+        let decoded: MirrorStateSnapshot =
+            serde_json::from_str(&serde_json::to_string(&zero).unwrap()).unwrap();
+        let pending = decoded.pending.unwrap();
+        assert_eq!(pending.size, 0);
+        assert_eq!(pending.hash, tlog_core::EMPTY_HASH);
+        assert!(!pending.signed_note_bytes.is_empty());
     }
 
-    /// Pin the on-disk JSON layout of `NextEntry`. Same migration
-    /// considerations as the other persisted checkpoint types.
     #[test]
-    fn next_entry_json_format_unchanged() {
+    fn snapshot_distinguishes_no_commit_from_size_zero() {
+        let no_commit = MirrorStateSnapshot::default();
+        assert!(no_commit.committed.is_none());
+
+        let zero = MirrorStateSnapshot {
+            committed: Some(CommittedCheckpoint {
+                size: 0,
+                hash: tlog_core::EMPTY_HASH,
+                signed_note_bytes: b"cosigned zero checkpoint".to_vec(),
+            }),
+            ..MirrorStateSnapshot::default()
+        };
+        let json = serde_json::to_string(&zero).unwrap();
+        assert!(json.contains(r#""committed":{"size":0"#));
+        let decoded: MirrorStateSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.committed.unwrap().size, 0);
+    }
+
+    #[test]
+    fn next_entry_json_format() {
         let ne = NextEntry {
             size: 9,
             hash: Hash([0xde; HASH_SIZE]),
@@ -603,7 +572,7 @@ mod tests {
 
     /// Pin the wire shape of the `/advance-next-entry` request body.
     #[test]
-    fn advance_next_entry_request_json_format_unchanged() {
+    fn advance_next_entry_request_json_format() {
         let req = AdvanceNextEntryRequest {
             size: 11,
             hash: Hash([0xef; HASH_SIZE]),
@@ -620,7 +589,7 @@ mod tests {
 
     /// Pin the wire shape of the `/commit` request body.
     #[test]
-    fn commit_request_json_format_unchanged() {
+    fn commit_request_json_format() {
         let req = CommitRequest {
             size: 7,
             hash: Hash([0xcc; HASH_SIZE]),

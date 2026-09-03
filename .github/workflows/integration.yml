@@ -114,7 +114,7 @@ jobs:
   integration-tlog-mirror:
     name: TLog Mirror Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -124,13 +124,18 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install Wrangler
-        run: npm install --global wrangler@4.80.0
-
       - name: Install worker-build
         run: cargo install worker-build@0.8.5 --locked
 
-      - name: Build mirror_worker (dev environment)
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.80.0
+
+      - name: Check standalone mirror worker modes
+        run: |
+          DEPLOY_ENV=witness cargo check -p mirror_worker --all-targets
+          DEPLOY_ENV=mirror cargo check -p mirror_worker --all-targets
+
+      - name: Build mirror_worker (combined dev environment)
         working-directory: crates/mirror_worker
         run: DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind
 
@@ -151,7 +156,12 @@ jobs:
           echo "wrangler dev failed to start in time"
           exit 1
 
-      - name: Run TLog Mirror integration tests
-        run: cargo test -p integration_tests --test tlog_mirror --verbose
+      - name: Run TLog integration tests
+        run: cargo test -p integration_tests --test tlog_witness --verbose
         env:
           BASE_URL: http://localhost:8787
+          RUST_TEST_THREADS: "1"
+      - run: cargo test -p integration_tests --test tlog_mirror --verbose
+        env:
+          BASE_URL: http://localhost:8787
+          RUST_TEST_THREADS: "1"

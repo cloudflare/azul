@@ -1,5 +1,5 @@
 {
-    "name": "tlog-mirror",
+    "name": "mirror-worker",
     "main": "build/worker/shim.mjs",
     "compatibility_date": "2025-09-25",
     "workers_dev": false,
@@ -44,10 +44,69 @@
             // via the c2sp.org/tlog-tiles read interface.
             "r2_buckets": [
                 {
-                    "bucket_name": "tlog-mirror-public-dev",
+                    "bucket_name": "mirror-worker-public-dev",
                     "binding": "PUBLIC_BUCKET"
                 }
             ],
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
+            "migrations": [
+                {
+                    "tag": "v1",
+                    "new_sqlite_classes": ["MirrorState", "MirrorCleaner"]
+                }
+            ]
+        },
+        "witness": {
+            "build": {
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=witness RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
+            },
+            "workers_dev": true,
+            "durable_objects": {
+                "bindings": [
+                    {
+                        "name": "MIRROR_STATE",
+                        "class_name": "MirrorState"
+                    }
+                ]
+            },
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
+            "migrations": [
+                {
+                    "tag": "v1",
+                    "new_sqlite_classes": ["MirrorState"]
+                }
+            ]
+        },
+        "mirror": {
+            "build": {
+                "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=mirror RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
+            },
+            "workers_dev": true,
+            "durable_objects": {
+                "bindings": [
+                    {
+                        "name": "MIRROR_STATE",
+                        "class_name": "MirrorState"
+                    },
+                    {
+                        "name": "MIRROR_CLEANER",
+                        "class_name": "MirrorCleaner"
+                    }
+                ]
+            },
+            "r2_buckets": [
+                {
+                    "bucket_name": "mirror-worker-public-dev",
+                    "binding": "PUBLIC_BUCKET"
+                }
+            ],
+            "version_metadata": {
+                "binding": "VERSION_METADATA"
+            },
             "migrations": [
                 {
                     "tag": "v1",

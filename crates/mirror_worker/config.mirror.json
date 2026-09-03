@@ -1,0 +1,23 @@
+{
+    "logging_level": "info",
+    "mode": "mirror",
+    "submission_prefix": "http://localhost:8789/",
+    "monitoring_prefix": "http://localhost:8789/",
+    "mirror": {
+        "name": "dev.mirror.example",
+        "description": "Standalone local-dev mirror",
+        "clean_interval_secs": 5,
+        "commit_packages": 2
+    },
+    "logs": {
+        "example.com/log1": {
+            "checkpoint_signers": [
+                {
+                    "name": "example.com/log1",
+                    "algorithm": "ed25519",
+                    "public_key": "MCowBQYDK2VwAyEAzdnT3CQc3ag2fmKnO1ntodIm0wfsymDkK89IOrHKLWc="
+                }
+            ]
+        }
+    }
+}

@@ -443,7 +443,7 @@ impl CheckpointSigner for Ed25519CheckpointSigner {
 /// one* of a set of trusted keys has signed — for example, a
 /// c2sp.org/tlog-witness witness accepting a rotated log key — should call
 /// [`Note::verify`] directly and implement the origin and timestamp
-/// checks themselves; see `witness_worker` for an example.
+/// checks themselves; see `mirror_worker` for an example.
 ///
 /// # Errors
 ///
