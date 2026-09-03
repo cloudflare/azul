@@ -4219,7 +4219,6 @@ dependencies = [
  "generic_log_worker",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
- "hex",
  "log",
  "ml-dsa",
  "p256",

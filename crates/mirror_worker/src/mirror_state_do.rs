@@ -50,7 +50,7 @@ pub struct PendingCheckpoint {
     /// this origin.
     pub size: u64,
     /// Root hash. All-zero if `size` is 0.
-    #[serde(with = "hash_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
     /// Full signed-note bytes, empty if `size` is 0. Base64 in the
     /// on-disk JSON so the state stays valid UTF-8.
@@ -73,7 +73,7 @@ pub struct CommittedCheckpoint {
     /// origin.
     pub size: u64,
     /// Root hash. All-zero if `size` is 0.
-    #[serde(with = "hash_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
     /// The served checkpoint bytes: the log's signed note with the
     /// mirror's cosignature line(s) appended, exactly as written to R2.
@@ -96,7 +96,7 @@ pub struct NextEntry {
     /// Number of entries durably persisted as bundles for this origin.
     pub size: u64,
     /// Tree root at `size`. All-zero (and unused) when `size` is 0.
-    #[serde(with = "hash_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
 }
 
@@ -122,7 +122,7 @@ pub struct CommitRequest {
     /// Proposed new committed tree size.
     pub size: u64,
     /// Proposed new committed root hash.
-    #[serde(with = "hash_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
     /// Full signed-note bytes for `(size, hash)`, served with the
     /// mirror's cosignature.
@@ -138,7 +138,7 @@ pub struct AdvanceNextEntryRequest {
     /// Proposed new persisted-entry frontier size.
     pub size: u64,
     /// Tree root at `size`.
-    #[serde(with = "hash_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
 }
 
@@ -152,12 +152,12 @@ pub struct UpdatePendingRequest {
     /// Proposed new tree size.
     pub new_size: u64,
     /// Proposed new root hash.
-    #[serde(with = "hash_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub new_hash: Hash,
     /// Consistency proof from `(old_size, stored_hash)` to
     /// `(new_size, new_hash)`, per RFC 6962 section 2.1.2. MUST be empty if
     /// `old_size == 0` or `old_size == new_size`, otherwise MUST verify.
-    #[serde(with = "hash_vec_hex")]
+    #[serde(with = "generic_log_worker::hash_serde::vec_hex")]
     pub proof: Vec<Hash>,
     /// Full signed-note bytes of the new pending checkpoint. Persisted
     /// alongside the size/hash so the mirror can serve them back to
@@ -406,69 +406,6 @@ impl MirrorState {
 pub(crate) fn state_stub(env: &Env, origin: &str) -> Result<Stub> {
     let namespace = env.durable_object(MIRROR_STATE_BINDING)?;
     namespace.id_from_name(origin)?.get_stub()
-}
-
-// ---------------------------------------------------------------------------
-// Serde helpers: emit/parse `Hash` as hex, so the DO's JSON state is
-// human-readable in wrangler's dev console.
-// ---------------------------------------------------------------------------
-mod hash_hex {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tlog_core::{HASH_SIZE, Hash};
-
-    pub fn serialize<S>(h: &Hash, ser: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        hex::encode(h.0).serialize(ser)
-    }
-
-    pub fn deserialize<'de, D>(de: D) -> std::result::Result<Hash, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(de)?;
-        from_hex(&s).map_err(serde::de::Error::custom)
-    }
-
-    /// Decode a single hex-encoded [`struct@Hash`]. Shared with the `Vec<Hash>`
-    /// helper in the sibling `hash_vec_hex` module.
-    pub(super) fn from_hex(s: &str) -> std::result::Result<Hash, String> {
-        let bytes: [u8; HASH_SIZE] = hex::decode(s)
-            .map_err(|e| e.to_string())?
-            .try_into()
-            .map_err(|v: Vec<u8>| format!("hash must be {} bytes, got {}", HASH_SIZE, v.len()))?;
-        Ok(Hash(bytes))
-    }
-}
-
-/// Serde helper for `Vec<Hash>`. Encodes as a JSON array of hex strings
-/// so the DO RPC body stays human-readable alongside the other
-/// [`hash_hex`]-encoded fields.
-mod hash_vec_hex {
-    use super::hash_hex::from_hex;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tlog_core::Hash;
-
-    pub fn serialize<S>(v: &[Hash], ser: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        v.iter()
-            .map(|h| hex::encode(h.0))
-            .collect::<Vec<_>>()
-            .serialize(ser)
-    }
-
-    pub fn deserialize<'de, D>(de: D) -> std::result::Result<Vec<Hash>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let strs = Vec::<String>::deserialize(de)?;
-        strs.iter()
-            .map(|s| from_hex(s).map_err(serde::de::Error::custom))
-            .collect()
-    }
 }
 
 #[cfg(test)]

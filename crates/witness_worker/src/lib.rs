@@ -63,6 +63,8 @@ use tlog_cosignature::{CosignatureV1CheckpointSigner, SubtreeV1CheckpointSigner}
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+pub(crate) use generic_log_worker::obs::sentry::init_from_env as init_sentry;
+
 mod frontend_worker;
 mod witness_state_do;
 
@@ -206,29 +208,6 @@ impl WitnessSigner {
 /// dispatch happens at most once per worker instance. Subsequent
 /// requests reuse the parsed key.
 static WITNESS_SIGNER: OnceLock<WitnessSigner> = OnceLock::new();
-
-/// Initialize sentry from the `SENTRY_DSN` environment variable.
-///
-/// Does nothing when the variable is absent or empty, allowing deployments
-/// without sentry support.
-pub(crate) fn init_sentry(env: &Env) {
-    if let Ok(dsn) = env.var("SENTRY_DSN") {
-        let access_id = env
-            .var("SENTRY_ACCESS_CLIENT_ID")
-            .ok()
-            .map(|v| v.to_string());
-        let access_secret = env
-            .secret("SENTRY_ACCESS_CLIENT_SECRET")
-            .ok()
-            .map(|v| v.to_string());
-        let _ = generic_log_worker::obs::sentry::init(
-            &dsn.to_string(),
-            env!("DEPLOY_ENV"),
-            access_id.as_deref(),
-            access_secret.as_deref(),
-        );
-    }
-}
 
 /// Load (or return the already-cached) witness signer.
 ///
