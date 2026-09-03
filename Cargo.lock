@@ -3393,6 +3393,7 @@ dependencies = [
  "ed25519-dalek",
  "length_prefixed",
  "ml-dsa",
+ "pkcs8",
  "rand 0.10.1",
  "signed_note",
  "tlog_checkpoint",
@@ -3452,6 +3453,7 @@ dependencies = [
  "base64",
  "signed_note",
  "thiserror 2.0.17",
+ "tlog_checkpoint",
  "tlog_core",
 ]
 

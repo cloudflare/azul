@@ -926,7 +926,7 @@ pub fn subtree_consistency_proof_indexes(
 ///
 /// Will return an error if proof verification fails.
 pub fn verify_consistency_proof(
-    proof: &Proof,
+    proof: &[Hash],
     n: u64,
     root_hash: Hash,
     m: u64,
@@ -952,7 +952,7 @@ pub fn verify_consistency_proof(
 ///
 /// Will return an error if proof verification fails.
 pub fn verify_subtree_consistency_proof(
-    proof: &Proof,
+    proof: &[Hash],
     n: u64,
     root_hash: Hash,
     m: &Subtree,
@@ -1447,15 +1447,15 @@ mod tests {
         assert_eq!(tree_hash(0, &TestHashStorage::new()).unwrap(), EMPTY_HASH);
 
         // Empty tree.
-        verify_consistency_proof(&vec![], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
-        verify_consistency_proof(&vec![], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
-        verify_consistency_proof(&vec![], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
-        verify_consistency_proof(&vec![Hash::default()], 0, Hash::default(), 1, EMPTY_HASH)
+        verify_consistency_proof(&[], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
+        verify_consistency_proof(&[], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
+        verify_consistency_proof(&[], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
+        verify_consistency_proof(&[Hash::default()], 0, Hash::default(), 1, EMPTY_HASH)
             .unwrap_err();
 
         // Tree with single leaf.
         verify_inclusion_proof(&vec![], 1, Hash::default(), 0, Hash::default()).unwrap();
-        verify_consistency_proof(&vec![], 1, Hash::default(), 1, Hash::default()).unwrap();
+        verify_consistency_proof(&[], 1, Hash::default(), 1, Hash::default()).unwrap();
     }
 
     #[test]
