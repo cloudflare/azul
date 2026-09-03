@@ -7,6 +7,7 @@ use base64::prelude::BASE64_STANDARD;
 pub mod batcher_do;
 pub mod cleaner_do;
 pub mod frontend;
+pub mod hash_serde;
 pub mod log_ops;
 pub mod obs;
 pub mod sequencer_do;

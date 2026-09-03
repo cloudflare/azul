@@ -10,22 +10,8 @@
 //! # Usage
 //!
 //! ```ignore
-//! // In your worker crate's lib.rs:
-//! static SENTRY_TRANSPORT: OnceLock<Option<Arc<WorkerTransport>>> = OnceLock::new();
-//!
-//! pub fn init_sentry(env: &Env) -> Option<&'static Arc<WorkerTransport>> {
-//!     SENTRY_TRANSPORT.get_or_init(|| {
-//!         let dsn = env.var("SENTRY_DSN").ok()?.to_string();
-//!         if dsn.is_empty() { return None; }
-//!         obs::sentry::init(&dsn, env!("DEPLOY_ENV"))
-//!     }).as_ref()
-//! }
-//!
-//! // On catastrophic error:
-//! sentry_core::capture_message("something broke", sentry_core::Level::Fatal);
-//! if let Some(transport) = init_sentry(&env) {
-//!     obs::sentry::flush(transport).await;
-//! }
+//! generic_log_worker::obs::sentry::init_from_env(&env);
+//! let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(handler()).await;
 //! ```
 
 use std::panic;
@@ -73,6 +59,30 @@ impl TransportFactory for Factory {
 /// `sentry_core::capture_event` because that calls `random_uuid()` which
 /// requires `getrandom` — unavailable during a WASM panic.
 static PANIC_HOOK_TRANSPORT: OnceLock<WorkerTransport> = OnceLock::new();
+
+/// Initialize Sentry from the standard Worker environment bindings.
+///
+/// Missing or empty `SENTRY_DSN` disables Sentry. The Cloudflare Access
+/// client bindings are optional.
+pub fn init_from_env(env: &worker::Env) {
+    let Ok(dsn) = env.var("SENTRY_DSN") else {
+        return;
+    };
+    let access_client_id = env
+        .var("SENTRY_ACCESS_CLIENT_ID")
+        .ok()
+        .map(|value| value.to_string());
+    let access_client_secret = env
+        .secret("SENTRY_ACCESS_CLIENT_SECRET")
+        .ok()
+        .map(|value| value.to_string());
+    let _ = init(
+        &dsn.to_string(),
+        env!("DEPLOY_ENV"),
+        access_client_id.as_deref(),
+        access_client_secret.as_deref(),
+    );
+}
 
 /// Initialize sentry with a custom Workers-compatible transport.
 ///
