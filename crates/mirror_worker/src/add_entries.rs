@@ -593,25 +593,14 @@ async fn cosign_and_serve(
     // The served object includes the mirror cosignature returned below.
     let checkpoint_obj = [target.signed_note_bytes.as_slice(), &cosig_body].concat();
 
-    if snapshot
-        .committed
-        .as_ref()
-        .is_some_and(|committed| header.upload_end <= committed.size)
-    {
-        return Ok((
-            StatusCode::OK,
-            [(CONTENT_TYPE, "text/plain; charset=utf-8")],
-            cosig_body,
-        )
-            .into_response());
-    }
-
+    // Same-size commits rewrite R2 so retries repair an absent object.
     let committed = dispatch_commit(
         env,
         &header.log_origin,
         &CommitRequest {
             size: header.upload_end,
             hash: target.hash,
+            checkpoint_note_bytes: target.signed_note_bytes.clone(),
             signed_note_bytes: checkpoint_obj.clone(),
         },
     )
@@ -1026,8 +1015,8 @@ fn resolve_target_pending(
     }
 
     // Spec: the mirror MUST also accept `upload_end` equal to the mirror
-    // checkpoint's tree size, whatever the ticket says. Everything up to
-    // it is already committed and served, so nothing new is persisted.
+    // checkpoint's tree size, whatever the ticket says. The source note is
+    // retained separately from the served cosigned note for this retry.
     if let Some(committed) = snapshot
         .committed
         .as_ref()
@@ -1036,7 +1025,7 @@ fn resolve_target_pending(
         return Ok(PendingCheckpoint {
             size: committed.size,
             hash: committed.hash,
-            signed_note_bytes: committed.signed_note_bytes.clone(),
+            signed_note_bytes: committed.checkpoint_note_bytes.clone(),
         });
     }
 

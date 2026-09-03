@@ -5,6 +5,8 @@
 //! [c2sp.org/tlog-mirror][spec] protocol.
 //!
 //! Mirror-enabled state is ordered `committed.size <= next_entry.size <= pending.size`.
+//! If `publishing` exists, `/commit` finishes publishing it before evaluating
+//! another request. Publication is ordered `publishing -> R2 -> committed -> clear`.
 //!
 //! - `pending`: the latest signed checkpoint accepted via
 //!   [`add-checkpoint`][add-cp], the source of truth for the consistency
@@ -24,6 +26,9 @@
 //! [spec]: https://c2sp.org/tlog-mirror
 //! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
 
+use std::future::Future;
+
+use generic_log_worker::ObjectBackend;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64 as Base64As, serde_as};
 use tlog_core::Hash;
@@ -38,6 +43,7 @@ use crate::{MIRROR_STATE_BINDING, commit, storage::load_origin_bucket};
 
 const PENDING_KEY: &str = "pending";
 const COMMITTED_KEY: &str = "committed";
+const PUBLISHING_KEY: &str = "publishing";
 const NEXT_ENTRY_KEY: &str = "next_entry";
 
 /// The persisted latest checkpoint for a single log origin.
@@ -73,11 +79,19 @@ pub struct CommittedCheckpoint {
     /// Root hash. All-zero if `size` is 0.
     #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
+    /// The source log's signed checkpoint note.
+    #[serde_as(as = "Base64As")]
+    pub checkpoint_note_bytes: Vec<u8>,
     /// The served checkpoint bytes: the log's signed note with the
     /// mirror's cosignature line(s) appended, exactly as written to R2.
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
 }
+
+/// A checkpoint whose publication must complete before another commit.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(transparent)]
+struct PublicationIntent(CommittedCheckpoint);
 
 /// The persisted *next entry* frontier for a single log origin: how far
 /// entry bundles have been durably written.
@@ -118,6 +132,9 @@ pub struct CommitRequest {
     /// Proposed new committed root hash.
     #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub hash: Hash,
+    /// The source log's signed checkpoint note.
+    #[serde_as(as = "Base64As")]
+    pub checkpoint_note_bytes: Vec<u8>,
     /// Full signed-note bytes for `(size, hash)`, served with the
     /// mirror's cosignature.
     #[serde_as(as = "Base64As")]
@@ -165,7 +182,7 @@ pub struct UpdatePendingRequest {
 struct MirrorState {
     state: State,
     env: Env,
-    /// Invariant: checkpoint commits are serialized per origin.
+    /// Invariant: publication recovery and new commits are serialized.
     commit_mux: Mutex<()>,
 }
 
@@ -272,9 +289,30 @@ impl MirrorState {
 }
 
 impl MirrorState {
-    /// Publish without rewinding the committed checkpoint.
+    /// Reconcile publication, then publish without rewinding.
     async fn commit(&self, body: CommitRequest) -> Result<Response> {
         let _guard = self.commit_mux.lock().await;
+
+        let origin = self
+            .state
+            .id()
+            .name()
+            .ok_or_else(|| Error::from("mirror state DO missing origin name"))?;
+        let bucket = load_origin_bucket(&self.env, &origin)?;
+        let storage = self.state.storage();
+
+        if let Some(intent) = storage.get::<PublicationIntent>(PUBLISHING_KEY).await? {
+            finish_publication(
+                &bucket,
+                &intent.0,
+                storage.put(COMMITTED_KEY, &intent.0),
+                async {
+                    storage.delete(PUBLISHING_KEY).await?;
+                    Ok(())
+                },
+            )
+            .await?;
+        }
 
         let snapshot = self.read_snapshot().await?;
         if body.size > snapshot.next_entry.size {
@@ -301,20 +339,22 @@ impl MirrorState {
         let new_committed = CommittedCheckpoint {
             size: body.size,
             hash: body.hash,
+            checkpoint_note_bytes: body.checkpoint_note_bytes,
             signed_note_bytes: body.signed_note_bytes,
         };
-        self.state
-            .storage()
-            .put(COMMITTED_KEY, &new_committed)
+        storage
+            .put(PUBLISHING_KEY, &PublicationIntent(new_committed.clone()))
             .await?;
-
-        let origin = self
-            .state
-            .id()
-            .name()
-            .ok_or_else(|| Error::from("mirror state DO missing origin name"))?;
-        let bucket = load_origin_bucket(&self.env, &origin)?;
-        commit::write_checkpoint(&bucket, new_committed.signed_note_bytes.clone()).await?;
+        finish_publication(
+            &bucket,
+            &new_committed,
+            storage.put(COMMITTED_KEY, &new_committed),
+            async {
+                storage.delete(PUBLISHING_KEY).await?;
+                Ok(())
+            },
+        )
+        .await?;
 
         Response::from_json(&new_committed)
     }
@@ -367,6 +407,23 @@ impl MirrorState {
     }
 }
 
+/// Complete an intent in the order required for crash recovery.
+async fn finish_publication<O, F, G>(
+    object: &O,
+    checkpoint: &CommittedCheckpoint,
+    persist: F,
+    clear: G,
+) -> Result<()>
+where
+    O: ObjectBackend,
+    F: Future<Output = Result<()>>,
+    G: Future<Output = Result<()>>,
+{
+    commit::write_checkpoint(object, checkpoint.signed_note_bytes.clone()).await?;
+    persist.await?;
+    clear.await
+}
+
 /// Lookup helper used by the frontend: get a stub for the DO serving a
 /// particular log origin.
 pub(crate) fn state_stub(env: &Env, origin: &str) -> Result<Stub> {
@@ -376,10 +433,14 @@ pub(crate) fn state_stub(env: &Env, origin: &str) -> Result<Stub> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unused_async_trait_impl)]
+
     use super::{
         AdvanceNextEntryRequest, CommitRequest, CommittedCheckpoint, MirrorStateSnapshot,
-        NextEntry, PendingCheckpoint, UpdatePendingRequest,
+        NextEntry, PendingCheckpoint, PublicationIntent, UpdatePendingRequest, finish_publication,
     };
+    use generic_log_worker::{ObjectBackend, log_ops::UploadOptions};
+    use std::{cell::RefCell, collections::HashMap};
     use tlog_core::{HASH_SIZE, Hash};
 
     #[test]
@@ -469,17 +530,37 @@ mod tests {
         let cc = CommittedCheckpoint {
             size: 42,
             hash: Hash(bytes),
+            checkpoint_note_bytes: b"source-note-bytes".to_vec(),
             signed_note_bytes: b"signed-note-bytes".to_vec(),
         };
         let json = serde_json::to_string(&cc).unwrap();
         assert_eq!(
             json,
-            r#"{"size":42,"hash":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","signed_note_bytes":"c2lnbmVkLW5vdGUtYnl0ZXM="}"#
+            r#"{"size":42,"hash":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","checkpoint_note_bytes":"c291cmNlLW5vdGUtYnl0ZXM=","signed_note_bytes":"c2lnbmVkLW5vdGUtYnl0ZXM="}"#
         );
         let decoded: CommittedCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.size, 42);
         assert_eq!(decoded.hash.0, bytes);
+        assert_eq!(decoded.checkpoint_note_bytes, b"source-note-bytes");
         assert_eq!(decoded.signed_note_bytes, b"signed-note-bytes");
+    }
+
+    #[test]
+    fn publication_intent_json_format() {
+        let intent = PublicationIntent(CommittedCheckpoint {
+            size: 42,
+            hash: Hash([0xaa; HASH_SIZE]),
+            checkpoint_note_bytes: b"source".to_vec(),
+            signed_note_bytes: b"served".to_vec(),
+        });
+        let json = serde_json::to_string(&intent).unwrap();
+        assert_eq!(
+            json,
+            r#"{"size":42,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_note_bytes":"c291cmNl","signed_note_bytes":"c2VydmVk"}"#
+        );
+        let decoded: PublicationIntent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.0.size, 42);
+        assert_eq!(decoded.0.signed_note_bytes, b"served");
     }
 
     /// Pin the wire shape of the `/get-state` response.
@@ -494,6 +575,7 @@ mod tests {
             committed: Some(CommittedCheckpoint {
                 size: 3,
                 hash: Hash([0xbb; HASH_SIZE]),
+                checkpoint_note_bytes: b"p".to_vec(),
                 signed_note_bytes: b"c".to_vec(),
             }),
             next_entry: NextEntry {
@@ -544,6 +626,7 @@ mod tests {
             committed: Some(CommittedCheckpoint {
                 size: 0,
                 hash: tlog_core::EMPTY_HASH,
+                checkpoint_note_bytes: b"zero checkpoint".to_vec(),
                 signed_note_bytes: b"cosigned zero checkpoint".to_vec(),
             }),
             ..MirrorStateSnapshot::default()
@@ -552,6 +635,169 @@ mod tests {
         assert!(json.contains(r#""committed":{"size":0"#));
         let decoded: MirrorStateSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.committed.unwrap().size, 0);
+    }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        objects: RefCell<HashMap<String, Vec<u8>>>,
+        events: RefCell<Vec<&'static str>>,
+        fail_upload: bool,
+    }
+
+    impl ObjectBackend for RecordingBackend {
+        async fn upload<S: AsRef<str>, D: Into<Vec<u8>>>(
+            &self,
+            key: S,
+            data: D,
+            _opts: &UploadOptions,
+        ) -> worker::Result<()> {
+            self.events.borrow_mut().push("r2");
+            if self.fail_upload {
+                return Err(worker::Error::from("injected R2 failure"));
+            }
+            self.objects
+                .borrow_mut()
+                .insert(key.as_ref().to_owned(), data.into());
+            Ok(())
+        }
+
+        async fn fetch<S: AsRef<str>>(&self, key: S) -> worker::Result<Option<Vec<u8>>> {
+            Ok(self.objects.borrow().get(key.as_ref()).cloned())
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_finishes_in_order() {
+        let backend = RecordingBackend::default();
+        let events = &backend.events;
+        let checkpoint = CommittedCheckpoint {
+            size: 1,
+            hash: Hash([1; HASH_SIZE]),
+            checkpoint_note_bytes: vec![],
+            signed_note_bytes: b"checkpoint".to_vec(),
+        };
+        finish_publication(
+            &backend,
+            &checkpoint,
+            async {
+                events.borrow_mut().push("committed");
+                Ok(())
+            },
+            async {
+                events.borrow_mut().push("clear");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(&*backend.events.borrow(), &["r2", "committed", "clear"]);
+    }
+
+    #[tokio::test]
+    async fn publication_r2_failure_does_not_persist_state() {
+        let backend = RecordingBackend {
+            fail_upload: true,
+            ..RecordingBackend::default()
+        };
+        let events = &backend.events;
+        let checkpoint = CommittedCheckpoint {
+            size: 1,
+            hash: Hash([1; HASH_SIZE]),
+            checkpoint_note_bytes: vec![],
+            signed_note_bytes: b"checkpoint".to_vec(),
+        };
+        assert!(
+            finish_publication(
+                &backend,
+                &checkpoint,
+                async {
+                    events.borrow_mut().push("committed");
+                    Ok(())
+                },
+                async {
+                    events.borrow_mut().push("clear");
+                    Ok(())
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(&*backend.events.borrow(), &["r2"]);
+    }
+
+    #[tokio::test]
+    async fn publication_state_failure_retains_intent() {
+        let backend = RecordingBackend::default();
+        let events = &backend.events;
+        let checkpoint = CommittedCheckpoint {
+            size: 1,
+            hash: Hash([1; HASH_SIZE]),
+            checkpoint_note_bytes: vec![],
+            signed_note_bytes: b"checkpoint".to_vec(),
+        };
+        assert!(
+            finish_publication(
+                &backend,
+                &checkpoint,
+                async {
+                    events.borrow_mut().push("committed");
+                    Err(worker::Error::from("injected state failure"))
+                },
+                async {
+                    events.borrow_mut().push("clear");
+                    Ok(())
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(&*backend.events.borrow(), &["r2", "committed"]);
+    }
+
+    #[tokio::test]
+    async fn publication_clear_failure_is_retryable() {
+        let backend = RecordingBackend::default();
+        let events = &backend.events;
+        let checkpoint = CommittedCheckpoint {
+            size: 1,
+            hash: Hash([1; HASH_SIZE]),
+            checkpoint_note_bytes: vec![],
+            signed_note_bytes: b"checkpoint".to_vec(),
+        };
+        assert!(
+            finish_publication(
+                &backend,
+                &checkpoint,
+                async {
+                    events.borrow_mut().push("committed");
+                    Ok(())
+                },
+                async {
+                    events.borrow_mut().push("clear");
+                    Err(worker::Error::from("injected clear failure"))
+                },
+            )
+            .await
+            .is_err()
+        );
+        finish_publication(
+            &backend,
+            &checkpoint,
+            async {
+                events.borrow_mut().push("committed");
+                Ok(())
+            },
+            async {
+                events.borrow_mut().push("clear");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            &*backend.events.borrow(),
+            &["r2", "committed", "clear", "r2", "committed", "clear"]
+        );
     }
 
     #[test]
@@ -593,16 +839,18 @@ mod tests {
         let req = CommitRequest {
             size: 7,
             hash: Hash([0xcc; HASH_SIZE]),
+            checkpoint_note_bytes: b"cp".to_vec(),
             signed_note_bytes: b"cm".to_vec(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(
             json,
-            r#"{"size":7,"hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","signed_note_bytes":"Y20="}"#
+            r#"{"size":7,"hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","checkpoint_note_bytes":"Y3A=","signed_note_bytes":"Y20="}"#
         );
         let decoded: CommitRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.size, 7);
         assert_eq!(decoded.hash.0, [0xcc; HASH_SIZE]);
+        assert_eq!(decoded.checkpoint_note_bytes, b"cp");
         assert_eq!(decoded.signed_note_bytes, b"cm");
     }
 }

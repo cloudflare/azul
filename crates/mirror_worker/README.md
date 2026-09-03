@@ -24,7 +24,10 @@ confined to mirror operations.
 ## Mirror State
 
 For each origin, `MirrorState` maintains
-`committed.size <= next_entry.size <= pending.size`.
+`committed.size <= next_entry.size <= pending.size`. Checkpoint publication is
+serialized and durably ordered as `publishing -> R2 -> committed -> clear`.
+Every commit reconciles an existing `publishing` record first, so interrupted
+publication is retried before an older or newer request is evaluated.
 
 ## Development
 
