@@ -23,8 +23,7 @@ crate-type = ["cdylib"]
 
 [build-dependencies]
 config = { path = "./config", package = "witness_worker_config" }
-jsonschema.workspace = true
-serde_json.workspace = true
+worker_build_config.workspace = true
 
 [dependencies]
 axum.workspace = true

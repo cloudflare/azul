@@ -12,28 +12,8 @@ use url::Url;
 use x509_cert::Certificate;
 
 fn main() {
-    let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
-    let config_file = &format!("config.{env}.json");
-    let config_contents = &fs::read_to_string(config_file).unwrap_or_else(|e| {
-        panic!("failed to read config file '{config_file}': {e}");
-    });
-
-    // Validate the config json against the schema.
-    let json = serde_json::from_str(config_contents).unwrap_or_else(|e| {
-        panic!("failed to deserialize JSON config '{config_file}': {e}");
-    });
-    let schema = serde_json::from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
-        panic!("failed to deserialize JSON schema 'config.schema.json': {e}");
-    });
-    jsonschema::validate(&schema, &json).unwrap_or_else(|e| {
-        panic!("config '{config_file}' does not match schema 'config.schema.json': {e}");
-    });
-
-    // Validate the config parameters.
-    let conf = serde_json::from_str::<AppConfig>(config_contents).unwrap_or_else(|e| {
-        panic!("failed to deserialize JSON config '{config_file}': {e}");
-    });
-    for (name, params) in &conf.logs {
+    let loaded = worker_build_config::load::<AppConfig>(include_str!("config.schema.json"));
+    for (name, params) in &loaded.config.logs {
         // r2 bucket names must begin and end with an alphanumeric character, only contain
         // lowercase letters, numbers, and hyphens, and be between 3 and 63 characters long.
         const R2_BUCKET_PREFIX_LEN: usize = "static-ct-public-".len();
@@ -76,7 +56,7 @@ fn main() {
     // 'enable_ccadb_roots' is false. If 'enable_ccadb_roots' is true, the log
     // shard will combine trusted roots from the embedded roots file and from a
     // roots file loaded from Workers KV.
-    let roots_file: &str = &format!("roots.{env}.pem");
+    let roots_file: &str = &format!("roots.{}.pem", loaded.deploy_env);
     let roots_file_exists = fs::exists(roots_file).expect("failed to check if file exists");
     if roots_file_exists {
         let roots =
@@ -86,7 +66,12 @@ fn main() {
             !roots.is_empty(),
             "roots file does not contain any certificates"
         );
-    } else if conf.logs.values().any(|params| !params.enable_ccadb_roots) {
+    } else if loaded
+        .config
+        .logs
+        .values()
+        .any(|params| !params.enable_ccadb_roots)
+    {
         // If any log shards have 'enable_ccadb_roots' set to false, require a roots file.
         panic!(
             "{roots_file} must exist and contain at least one certificate if any logs have 'enable_ccadb_roots' set to false"
@@ -95,20 +80,14 @@ fn main() {
 
     // Copy to OUT_DIR.
     let out_dir = env::var("OUT_DIR").unwrap();
-    fs::copy(config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
     if roots_file_exists {
         fs::copy(roots_file, format!("{out_dir}/roots.pem")).expect("failed to copy roots file");
     } else {
         fs::write(format!("{out_dir}/roots.pem"), "").expect("failed to write empty roots file");
     }
 
-    // Make DEPLOY_ENV available at compile time via env!()
-    println!("cargo::rustc-env=DEPLOY_ENV={env}");
-
-    println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
-    println!("cargo::rerun-if-changed=config.schema.json");
-    println!("cargo::rerun-if-changed={config_file}");
     println!("cargo::rerun-if-changed={roots_file}");
+    loaded.stage();
 }
 
 // Validate the URL prefix according to https://datatracker.ietf.org/doc/html/rfc6962#section-4.

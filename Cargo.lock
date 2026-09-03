@@ -288,7 +288,6 @@ dependencies = [
  "generic_log_worker",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
- "jsonschema",
  "log",
  "p256",
  "sct_validator",
@@ -303,6 +302,7 @@ dependencies = [
  "tower-service",
  "url",
  "worker",
+ "worker_build_config",
  "x509-cert",
  "x509_util",
 ]
@@ -683,7 +683,6 @@ dependencies = [
  "generic_log_worker",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
- "jsonschema",
  "log",
  "p256",
  "sentry-core",
@@ -698,6 +697,7 @@ dependencies = [
  "tower-service",
  "url",
  "worker",
+ "worker_build_config",
  "x509-cert",
  "x509_util",
 ]
@@ -1903,7 +1903,6 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",
  "hex",
- "jsonschema",
  "length_prefixed",
  "log",
  "mirror_worker_config",
@@ -1923,6 +1922,7 @@ dependencies = [
  "tokio",
  "tower-service",
  "worker",
+ "worker_build_config",
 ]
 
 [[package]]
@@ -4220,7 +4220,6 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",
  "hex",
- "jsonschema",
  "log",
  "ml-dsa",
  "p256",
@@ -4236,6 +4235,7 @@ dependencies = [
  "tower-service",
  "witness_worker_config",
  "worker",
+ "worker_build_config",
 ]
 
 [[package]]
@@ -4317,6 +4317,15 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "worker_build_config"
+version = "0.2.0"
+dependencies = [
+ "jsonschema",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

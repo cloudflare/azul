@@ -28,6 +28,7 @@ members = [
     "crates/tlog_witness",
     "crates/witness_worker",
     "crates/witness_worker/config",
+    "crates/worker_build_config",
     "crates/x509_util",
     "fuzz",
 ]
@@ -60,6 +61,7 @@ default-members = [
     "crates/tlog_witness",
     "crates/witness_worker",
     "crates/witness_worker/config",
+    "crates/worker_build_config",
     "crates/x509_util",
 ]
 
@@ -167,6 +169,7 @@ reqwest = { version = "0.12", features = ["json"] }
 url = "2.2"
 wasm-bindgen = "0.2"
 worker = "0.8.5"
+worker_build_config = { path = "crates/worker_build_config" }
 x509-cert = "0.3.0"
 
 x509_util = { path = "crates/x509_util" }
