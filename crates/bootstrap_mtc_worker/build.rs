@@ -7,8 +7,6 @@ use bootstrap_mtc_api::ID_RDNA_TRUSTANCHOR_ID;
 use config::AppConfig;
 use der::asn1::Utf8StringRef;
 use der::{Any, Tag};
-use std::env;
-use std::fs;
 use url::Url;
 use x509_cert::{
     attr::AttributeTypeAndValue,
@@ -16,28 +14,8 @@ use x509_cert::{
 };
 
 fn main() {
-    let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
-    let config_file = &format!("config.{env}.json");
-    let config_contents = &fs::read_to_string(config_file).unwrap_or_else(|e| {
-        panic!("failed to read config file '{config_file}': {e}");
-    });
-
-    // Validate the config json against the schema.
-    let json = serde_json::from_str(config_contents).unwrap_or_else(|e| {
-        panic!("failed to deserialize JSON config '{config_file}': {e}");
-    });
-    let schema = serde_json::from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
-        panic!("failed to deserialize JSON schema 'config.schema.json': {e}");
-    });
-    jsonschema::validate(&schema, &json).unwrap_or_else(|e| {
-        panic!("config '{config_file}' does not match schema 'config.schema.json': {e}");
-    });
-
-    // Validate the config parameters.
-    let conf = serde_json::from_str::<AppConfig>(config_contents).unwrap_or_else(|e| {
-        panic!("failed to deserialize JSON config '{config_file}': {e}");
-    });
-    for (name, params) in conf.logs {
+    let loaded = worker_build_config::load::<AppConfig>(include_str!("config.schema.json"));
+    for (name, params) in &loaded.config.logs {
         // Make sure we can create the RDN sequence for the issuer log ID.
         let _ = RdnSequence::from(vec![
             RelativeDistinguishedName::try_from(vec![AttributeTypeAndValue {
@@ -68,16 +46,7 @@ fn main() {
         }
     }
 
-    // Copy to OUT_DIR.
-    let out_dir = env::var("OUT_DIR").unwrap();
-    fs::copy(config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
-
-    // Make DEPLOY_ENV available at compile time via env!()
-    println!("cargo::rustc-env=DEPLOY_ENV={env}");
-
-    println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
-    println!("cargo::rerun-if-changed=config.schema.json");
-    println!("cargo::rerun-if-changed={config_file}");
+    loaded.stage();
 }
 
 // Validate the URL prefix according to https://datatracker.ietf.org/doc/html/rfc6962#section-4.
