@@ -41,7 +41,8 @@ use tlog_core::Hash;
 
 use crate::TlogWitnessError;
 use crate::common::{
-    MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, parse_proof_line, parse_tree_size_decimal,
+    MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, parse_proof_line, parse_signature_lines,
+    parse_tree_size_decimal, serialize_signature_lines,
 };
 
 /// Maximum number of subtree-cosignature lines a client may send in a
@@ -281,11 +282,7 @@ pub fn serialize_sign_subtree_request(
 /// callers should not pass an empty slice for a successful response.
 #[must_use]
 pub fn serialize_sign_subtree_response(sigs: &[NoteSignature]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for sig in sigs {
-        out.extend_from_slice(&sig.to_bytes());
-    }
-    out
+    serialize_signature_lines(sigs)
 }
 
 /// Parse a `sign-subtree` success response body into a list of
@@ -301,19 +298,7 @@ pub fn serialize_sign_subtree_response(sigs: &[NoteSignature]) -> Vec<u8> {
 /// or not valid UTF-8, and [`TlogWitnessError::Note`] if any line fails
 /// [`NoteSignature::from_bytes`] parsing.
 pub fn parse_sign_subtree_response(body: &[u8]) -> Result<Vec<NoteSignature>, TlogWitnessError> {
-    let text = std::str::from_utf8(body)
-        .map_err(|_| TlogWitnessError::MalformedResponse("response is not valid UTF-8".into()))?;
-    let trimmed = text.strip_suffix('\n').unwrap_or(text);
-    if trimmed.is_empty() {
-        return Err(TlogWitnessError::MalformedResponse(
-            "response must contain at least one signature line".into(),
-        ));
-    }
-    let mut sigs = Vec::new();
-    for line in trimmed.split('\n') {
-        sigs.push(NoteSignature::from_bytes(line.as_bytes()).map_err(TlogWitnessError::Note)?);
-    }
-    Ok(sigs)
+    parse_signature_lines(body)
 }
 
 // ---------------------------------------------------------------------------

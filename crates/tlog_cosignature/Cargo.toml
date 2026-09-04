@@ -19,6 +19,7 @@ byteorder.workspace = true
 ed25519-dalek.workspace = true
 length_prefixed.workspace = true
 ml-dsa.workspace = true
+pkcs8.workspace = true
 signed_note.workspace = true
 tlog_core.workspace = true
 tlog_checkpoint.workspace = true
