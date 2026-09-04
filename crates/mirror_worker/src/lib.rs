@@ -35,6 +35,8 @@ use tlog_mirror::TicketSealer;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+pub(crate) use generic_log_worker::obs::sentry::init_from_env as init_sentry;
+
 mod add_entries;
 mod body;
 mod cleaner_do;
@@ -307,31 +309,6 @@ pub(crate) fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSealer> {
         ))
     })?;
     Ok(TICKET_SEALER.get_or_init(|| TicketSealer::new(&key)))
-}
-
-/// Initialize sentry from the `SENTRY_DSN` environment variable.
-///
-/// Does nothing when the variable is absent or empty, allowing
-/// deployments without sentry support. Called at the top of the frontend
-/// `fetch` handler and in each Durable Object's `new`, so a panic anywhere
-/// in the worker is captured and flushed.
-pub(crate) fn init_sentry(env: &Env) {
-    if let Ok(dsn) = env.var("SENTRY_DSN") {
-        let access_id = env
-            .var("SENTRY_ACCESS_CLIENT_ID")
-            .ok()
-            .map(|v| v.to_string());
-        let access_secret = env
-            .secret("SENTRY_ACCESS_CLIENT_SECRET")
-            .ok()
-            .map(|v| v.to_string());
-        let _ = generic_log_worker::obs::sentry::init(
-            &dsn.to_string(),
-            env!("DEPLOY_ENV"),
-            access_id.as_deref(),
-            access_secret.as_deref(),
-        );
-    }
 }
 
 #[cfg(test)]
