@@ -1,81 +1,77 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
-    "required": ["mirror_name", "submission_prefix", "logs"],
+    "required": ["mode", "submission_prefix", "logs"],
     "additionalProperties": false,
     "properties": {
-        "logging_level": {
-            "type": "string",
-            "enum": ["trace", "debug", "info", "warn", "error"]
-        },
-        "mirror_name": {
-            "type": "string",
-            "description": "The mirror's identity, as it appears in cosignature lines and on /metadata. Per c2sp.org/signed-note, this MUST NOT contain '+', whitespace, or control characters.",
-            "pattern": "^[^+\\s]+$"
-        },
-        "description": {
-            "type": "string"
-        },
-        "submission_prefix": {
-            "type": "string",
-            "description": "URL prefix for write APIs (e.g. https://mirror.example/)."
-        },
-        "monitoring_prefix": {
-            "type": "string",
-            "description": "URL prefix for read APIs (the tlog-tiles read interface served at <monitoring_prefix>/<encoded origin>/...)."
-        },
-        "clean_interval_secs": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 3600,
-            "description": "How often (in seconds) the per-origin partial-tile cleaner wakes to clean orphaned partial tiles from object storage. Defaults to 3600 (one hour) when omitted."
-        },
-        "commit_packages": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 1024,
-            "default": 32,
-            "description": "How many entry packages add-entries verifies before flushing them to storage and advancing the persisted-entry frontier. Bounds in-memory buffering and gives durable mid-request progress on large uploads. Defaults to 32 (the recommended per-request package budget) when omitted; capped at 1024 to bound worst-case buffering."
-        },
-        "max_chunk_bytes": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 16777216,
-            "description": "Byte ceiling on the entries buffered between flushes. add-entries flushes early once buffered entry bytes reach this many, even if fewer than commit_packages packages have accumulated. Bounds peak memory independent of package sizes, since a single package can hold up to ~16 MiB. Defaults to 16777216 (16 MiB) when omitted."
-        },
+        "mode": {"type": "string", "enum": ["witness", "mirror", "witness-and-mirror"]},
+        "logging_level": {"type": "string", "enum": ["trace", "debug", "info", "warn", "error"]},
+        "submission_prefix": {"type": "string"},
+        "monitoring_prefix": {"type": "string"},
+        "witness": {"$ref": "#/definitions/identity"},
+        "mirror": {"$ref": "#/definitions/mirror"},
         "logs": {
             "type": "object",
-            "description": "CAs this mirror mirrors, keyed by log_key_name: the CA cosigner's note-signature name (the CA ID) on the checkpoints it ingests. Used as a signed-note key name at runtime, so per c2sp.org/signed-note it MUST NOT contain '+', whitespace, or control characters.",
-            "propertyNames": {
-                "pattern": "^[^+\\s]+$"
-            },
+            "description": "Source logs keyed by exact checkpoint origin.",
+            "propertyNames": {"pattern": "^[^+\\s]+$"},
             "additionalProperties": {
                 "type": "object",
-                "required": ["log_public_keys", "min_log_number", "max_log_number"],
+                "required": ["checkpoint_signers"],
                 "additionalProperties": false,
                 "properties": {
                     "description": {"type": "string"},
-                    "log_public_keys": {
+                    "checkpoint_signers": {
                         "type": "array",
                         "minItems": 1,
                         "items": {
-                            "type": "string",
-                            "description": "A DER-encoded ML-DSA-44 SubjectPublicKeyInfo, base64-encoded. The mirror accepts subtree/v1 checkpoint signatures from any of these keys and ignores signatures from others."
+                            "type": "object",
+                            "required": ["name", "algorithm", "public_key"],
+                            "additionalProperties": false,
+                            "properties": {
+                                "name": {"type": "string", "pattern": "^[^+\\s]+$"},
+                                "algorithm": {"type": "string", "enum": ["ed25519", "subtree/v1"]},
+                                "public_key": {"type": "string", "description": "Base64 DER SubjectPublicKeyInfo."}
+                            }
                         }
-                    },
-                    "min_log_number": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535,
-                        "description": "Lowest accepted MTC log number. MTC log numbers start at 1. The mirror serves a log at each origin <log_key_name>.0.<N> for N in [min_log_number, max_log_number]."
-                    },
-                    "max_log_number": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535,
-                        "description": "Highest accepted MTC log number (inclusive). Must be >= min_log_number."
                     }
                 }
+            }
+        }
+    },
+    "allOf": [
+        {
+            "if": {"properties": {"mode": {"const": "witness"}}},
+            "then": {"required": ["witness"], "not": {"required": ["mirror"]}}
+        },
+        {
+            "if": {"properties": {"mode": {"const": "mirror"}}},
+            "then": {"required": ["mirror"], "not": {"required": ["witness"]}}
+        },
+        {
+            "if": {"properties": {"mode": {"const": "witness-and-mirror"}}},
+            "then": {"required": ["witness", "mirror"]}
+        }
+    ],
+    "definitions": {
+        "identity": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+                "name": {"type": "string", "pattern": "^[^+\\s]+$"},
+                "description": {"type": "string"}
+            }
+        },
+        "mirror": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+                "name": {"type": "string", "pattern": "^[^+\\s]+$"},
+                "description": {"type": "string"},
+                "clean_interval_secs": {"type": "integer", "minimum": 1, "default": 3600},
+                "commit_packages": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 32},
+                "max_chunk_bytes": {"type": "integer", "minimum": 1, "default": 16777216}
             }
         }
     }

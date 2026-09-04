@@ -1894,8 +1894,6 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
- "console_error_panic_hook",
- "console_log",
  "ed25519-dalek",
  "flate2",
  "futures-util",
@@ -1929,6 +1927,7 @@ dependencies = [
 name = "mirror_worker_config"
 version = "0.2.0"
 dependencies = [
+ "ed25519-dalek",
  "ml-dsa",
  "serde",
  "serde_json",
@@ -4207,46 +4206,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
-]
-
-[[package]]
-name = "witness_worker"
-version = "0.2.0"
-dependencies = [
- "axum",
- "base64",
- "console_error_panic_hook",
- "console_log",
- "ed25519-dalek",
- "generic_log_worker",
- "getrandom 0.3.4",
- "getrandom 0.4.2",
- "log",
- "ml-dsa",
- "p256",
- "pkcs8",
- "serde",
- "serde_json",
- "serde_with",
- "signed_note",
- "tlog_checkpoint",
- "tlog_core",
- "tlog_cosignature",
- "tlog_witness",
- "tower-service",
- "witness_worker_config",
- "worker",
- "worker_build_config",
-]
-
-[[package]]
-name = "witness_worker_config"
-version = "0.2.0"
-dependencies = [
- "ed25519-dalek",
- "serde",
- "serde_with",
- "signed_note",
 ]
 
 [[package]]

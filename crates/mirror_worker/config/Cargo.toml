@@ -11,6 +11,7 @@ repository.workspace = true
 description = "Configuration for mirror_worker"
 
 [dependencies]
+ed25519-dalek.workspace = true
 ml-dsa.workspace = true
 serde.workspace = true
 serde_with.workspace = true
