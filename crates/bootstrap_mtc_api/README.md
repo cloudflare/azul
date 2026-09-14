@@ -6,6 +6,9 @@ from this repository.
 
 Core types and logic for the [Bootstrap MTC CA](../bootstrap_mtc_worker/README.md).
 
+This preserved crate is archived and excluded from the Cargo workspace. It is
+not built or tested with the current implementation.
+
 This crate implements the bootstrap-specific protocol layer on top of the shared
 [`tlog_tiles`](../tlog_tiles/) infrastructure:
 

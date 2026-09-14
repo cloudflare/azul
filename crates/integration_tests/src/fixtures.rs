@@ -6,8 +6,10 @@
 //! Rather than using static pre-built fixtures (which expire), chains are
 //! generated dynamically at test time using the committed CA key.
 //!
-//! The leaf's `notAfter` is set to the midpoint of the target log shard's
-//! temporal interval (read from `ct_worker/config.dev.json`).
+//! - For CT tests the leaf's `notAfter` is set to the midpoint of the target
+//!   log shard's temporal interval (read from `ct_worker/config.dev.json`).
+//!
+//! This ensures the fixtures are valid regardless of when the tests run.
 //!
 //! # Committed test CA
 //!
@@ -112,8 +114,6 @@ const CA_KEY_PEM: &str = include_str!("../tests/fixtures/ca-key.pem");
 ///
 /// Embedded from `tests/fixtures/ca-cert.pem`, which is extracted verbatim
 /// from `ct_worker/roots.dev.pem`.
-/// Using the same PEM bytes ensures the DER fingerprint matches what the
-/// root pool loads, so `CertPool::includes()` succeeds during chain validation.
 const CA_CERT_PEM: &str = include_str!("../tests/fixtures/ca-cert.pem");
 
 /// Parse and return the DER bytes of the test CA certificate.
@@ -208,18 +208,8 @@ pub fn ca_cert_der() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct MtcDevConfig {
-    logs: std::collections::HashMap<String, MtcLogParams>,
-}
-
-#[derive(Deserialize)]
-struct MtcLogParams {
-    #[serde(default = "default_max_cert_lifetime")]
-    max_certificate_lifetime_secs: u64,
-}
-
-fn default_max_cert_lifetime() -> u64 {
-    604_800 // 7 days
+struct IetfMtcDevConfig {
+    logs: std::collections::HashMap<String, serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +238,7 @@ pub fn make_ietf_mtc_csr(log_name: &str) -> Result<IetfMtcCsr> {
     use x509_cert::builder::{Builder, RequestBuilder};
 
     // Validate the log name exists in the dev config (catches misconfiguration early).
-    let config: MtcDevConfig = serde_json::from_str(IETF_MTC_DEV_CONFIG_JSON)
+    let config: IetfMtcDevConfig = serde_json::from_str(IETF_MTC_DEV_CONFIG_JSON)
         .context("parsing ietf_mtc_worker config.dev.json")?;
     config.logs.get(log_name).with_context(|| {
         format!("log '{log_name}' not found in ietf_mtc_worker config.dev.json")
@@ -291,7 +281,6 @@ fn build_cert(
     is_precert: bool,
 ) -> Result<Vec<u8>> {
     let serial = SerialNumber::from(rand::random::<u32>());
-
     let validity = Validity::new(
         Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(to_der_datetime(
             not_before,
@@ -303,11 +292,9 @@ fn build_cert(
 
     let subject = Name::from_str("CN=integration-test.example.com,O=Test,C=US")
         .context("building subject name")?;
-
     let leaf_key = SigningKey::generate_from_rng(&mut rand::rng());
     let leaf_spki = SubjectPublicKeyInfoOwned::from_key(leaf_key.verifying_key())
         .context("encoding leaf SPKI")?;
-
     let ca_cert = Certificate::from_der(&ca_cert_der_bytes()).context("parsing CA cert")?;
     let issuer = ca_cert.tbs_certificate().subject().clone();
 
