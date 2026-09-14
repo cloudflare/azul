@@ -26,13 +26,15 @@
                             "type": "string",
                             "description": "Description of the log."
                         },
-                        "log_id": {
+                        "ca_id": {
                             "type": "string",
-                            "description": "The log ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
+                            "description": "The CA ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
                         },
-                        "cosigner_id": {
-                            "type": "string",
-                            "description": "The cosigner's ID (a trust anchor ID) in dotted decimal notation (e.g., 32473.1)."
+                        "log_number": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535,
+                            "description": "The positive issuance log number used with ca_id to derive the log ID."
                         },
                         "max_certificate_lifetime_secs": {
                             "type": "integer",
@@ -51,8 +53,7 @@
                         },
                         "monitoring_url": {
                             "type": "string",
-                            "default": "<submission_url>",
-                            "description": "URL for log monitoring. If unspecified, use the submission URL and the Worker will proxy requests to the R2 bucket."
+                            "description": "URL for log monitoring. Omit when no monitoring service is configured."
                         },
                         "location_hint": {
                             "type": "string",
@@ -102,13 +103,14 @@
                         },
                         "version": {
                             "type": "string",
-                            "enum": ["draft02"],
-                            "default": "draft02",
+                            "enum": ["draft06"],
+                            "default": "draft06",
                             "description": "The version of draft-ietf-plants-merkle-tree-certs that this log implements."
                         }
                     },
                     "required": [
-                        "log_id",
+                        "ca_id",
+                        "log_number",
                         "submission_url"
                     ]
                 }

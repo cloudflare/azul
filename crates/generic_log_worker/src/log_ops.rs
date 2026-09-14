@@ -166,7 +166,7 @@ impl<E: PendingLogEntry, M: SequencerMetadata> PoolState<E, M> {
         max_sequence_skips: usize,
         sequence_skip_threshold_millis: Option<u64>,
     ) -> Option<Vec<(E, Sender<M>)>> {
-        let new_size = old_size + self.pending_entries.len() as u64;
+        let new_size = old_size.saturating_add(self.pending_entries.len() as u64);
         let publishing_full_tile =
             new_size / u64::from(TlogTile::FULL_WIDTH) > old_size / u64::from(TlogTile::FULL_WIDTH);
         let num_leftover_entries =
@@ -829,6 +829,27 @@ enum SequenceError {
     NonFatal(String),
 }
 
+fn checked_new_tree_size(
+    old_size: u64,
+    entries_len: usize,
+    max_tree_size: Option<u64>,
+) -> Result<u64, SequenceError> {
+    let entries_len = u64::try_from(entries_len).map_err(|_| {
+        SequenceError::NonFatal("batch size cannot be represented as a tree size".into())
+    })?;
+    let new_size = old_size
+        .checked_add(entries_len)
+        .ok_or_else(|| SequenceError::NonFatal("tree size overflow".into()))?;
+    if let Some(max) = max_tree_size
+        && new_size > max
+    {
+        return Err(SequenceError::NonFatal(format!(
+            "batch would exceed maximum tree size {max}"
+        )));
+    }
+    Ok(new_size)
+}
+
 /// Sequences the passed-in pool of entries.
 /// If the sequencing completes successfully, pending requests are notified.
 /// If a non-fatal sequencing error occurs, pending requests will receive an error but the log will continue as normal.
@@ -854,6 +875,7 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     let old_size = old_tree.size();
     let old_time = old_tree.time();
     let timestamp = now_millis();
+    let new_size = checked_new_tree_size(old_size, entries.len(), config.max_tree_size)?;
 
     // Load the current partial data tile, if any.
     let mut tile_uploads: Vec<UploadAction> = Vec::new();
@@ -875,7 +897,6 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
 
     let mut overlay = HashMap::new();
     let mut n = old_size;
-    let new_size = old_size + entries.len() as u64;
     let mut sequenced_metadata = Vec::with_capacity(entries.len());
     let mut cache_metadata = Vec::with_capacity(entries.len());
 
@@ -1639,6 +1660,31 @@ mod tests {
         sequence_twice(&mut log, u64::from(TlogTile::FULL_WIDTH));
         add_certs(&mut log, 1);
         sequence_twice(&mut log, u64::from(TlogTile::FULL_WIDTH) + 1);
+    }
+
+    #[test]
+    fn test_sequence_rejects_batch_past_max_tree_size() {
+        let mut log = TestLog::new();
+        log.config.max_tree_size = Some(0);
+
+        let rejected = log.add_certificate_with_seed(1);
+        log.sequence().unwrap();
+        assert!(block_on(rejected.resolve()).is_none());
+        assert_eq!(log.sequence_state.borrow().tree.size(), 0);
+
+        log.config.max_tree_size = Some(1);
+        let retried = log.add_certificate_with_seed(1);
+        log.sequence().unwrap();
+        assert_eq!(block_on(retried.resolve()).unwrap().0, 0);
+        log.check(1).unwrap();
+    }
+
+    #[test]
+    fn test_checked_new_tree_size_rejects_overflow() {
+        assert!(matches!(
+            checked_new_tree_size(u64::MAX, 1, None),
+            Err(SequenceError::NonFatal(message)) if message == "tree size overflow"
+        ));
     }
 
     #[test]
@@ -2493,6 +2539,7 @@ mod tests {
                 sequence_interval: Duration::from_secs(1),
                 max_sequence_skips: 0,
                 enable_dedup: true,
+                max_tree_size: None,
                 sequence_skip_threshold_millis: None,
                 location_hint: None,
                 checkpoint_callback: empty_checkpoint_callback(),

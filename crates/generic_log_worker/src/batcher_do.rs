@@ -47,6 +47,7 @@ pub struct BatcherConfig {
     pub max_batch_entries: usize,
     pub batch_timeout_millis: u64,
     pub enable_dedup: bool,
+    pub enable_long_term_dedup: bool,
     pub location_hint: Option<String>,
 }
 
@@ -77,7 +78,7 @@ impl<M: SequencerMetadata> GenericBatcher<M> {
     /// Panics if we can't get a handle for the sequencer or KV store.
     #[must_use]
     pub fn new(state: State, env: Env, config: BatcherConfig) -> Self {
-        let kv = if config.enable_dedup {
+        let kv = if config.enable_long_term_dedup {
             Some(load_cache_kv(&env, &config.name).unwrap())
         } else {
             None
@@ -120,8 +121,8 @@ impl<M: SequencerMetadata> GenericBatcher<M> {
 
                 // Add entry to the current pending batch if it isn't already present.
                 // Rely on the Sequencer to deduplicate entries across batches.
-                if !self.batch.borrow().by_hash.contains(&key) {
-                    self.batch.borrow_mut().by_hash.insert(key);
+                let is_new = self.batch.borrow_mut().by_hash.insert(key);
+                if !self.config.enable_dedup || is_new {
                     self.batch.borrow_mut().entries.push(entry);
                 }
 

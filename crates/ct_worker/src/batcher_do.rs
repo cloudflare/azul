@@ -18,6 +18,7 @@ impl DurableObject for Batcher {
             max_batch_entries: params.max_batch_entries,
             batch_timeout_millis: params.batch_timeout_millis,
             enable_dedup: params.enable_dedup,
+            enable_long_term_dedup: params.enable_dedup,
             location_hint: params.location_hint.clone(),
             name,
         };

@@ -54,6 +54,7 @@ pub struct SequencerConfig {
     pub max_sequence_skips: usize,
     pub sequence_skip_threshold_millis: Option<u64>,
     pub enable_dedup: bool,
+    pub max_tree_size: Option<u64>,
     pub location_hint: Option<String>,
     pub checkpoint_callback: CheckpointCallbacker,
 }

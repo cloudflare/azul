@@ -262,6 +262,39 @@ pub struct IetfMtcAddEntryResponse {
     pub certificate: Vec<u8>,
 }
 
+/// Metadata response from the IETF MTC worker.
+#[serde_as]
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcMetadataResponse {
+    pub description: Option<String>,
+    pub ca_id: String,
+    pub log_number: u16,
+    pub log_id: String,
+    pub cosigner_id: String,
+    #[serde_as(as = "Base64")]
+    pub cosigner_public_key: Vec<u8>,
+    pub submission_url: String,
+    pub monitoring_url: Option<String>,
+}
+
+/// A landmark subtree and its consistency proof against the bundle checkpoint.
+#[serde_as]
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcLandmarkSubtree {
+    #[serde_as(as = "Base64")]
+    pub hash: [u8; 32],
+    #[serde_as(as = "Vec<Base64>")]
+    pub consistency_proof: Vec<[u8; 32]>,
+}
+
+/// Response from `GET /logs/:log/get-landmark-bundle`.
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcLandmarkBundle {
+    pub checkpoint: String,
+    pub subtrees: Vec<IetfMtcLandmarkSubtree>,
+    pub landmarks: std::collections::VecDeque<u64>,
+}
+
 /// Get-certificate response from the IETF MTC worker.
 #[serde_as]
 #[derive(Deserialize, Debug)]
@@ -298,7 +331,7 @@ impl IetfMtcClient {
     }
 
     /// `GET /logs/:log/metadata`
-    pub async fn get_metadata(&self) -> Result<BootstrapMtcMetadataResponse> {
+    pub async fn get_metadata(&self) -> Result<IetfMtcMetadataResponse> {
         let resp = self
             .client
             .get(self.url("metadata"))
@@ -381,39 +414,62 @@ impl IetfMtcClient {
         self.get_raw("checkpoint").await
     }
 
-    /// Fetch a `SignedSubtree` from R2 for the subtree covering `[lo, hi)`.
-    pub async fn get_signed_subtree(
-        &self,
-        lo: u64,
-        hi: u64,
-    ) -> Result<Option<ietf_mtc_api::SignedSubtree>> {
-        let key = ietf_mtc_api::subtree_sig_key(lo, hi);
-        match self.get_raw(&key).await {
-            Ok(bytes) => {
-                let s: ietf_mtc_api::SignedSubtree =
-                    serde_json::from_slice(&bytes).context("parsing SignedSubtree")?;
-                Ok(Some(s))
-            }
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// `GET /logs/:log/{path}` — raw bytes.
-    pub async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
+    /// Fetch the current landmark bundle.
+    pub async fn get_landmark_bundle(&self) -> Result<IetfMtcLandmarkBundle> {
         let resp = self
             .client
-            .get(self.url(path))
+            .get(self.url("get-landmark-bundle"))
             .send()
             .await
-            .with_context(|| format!("GET {path}"))?;
+            .context("GET get-landmark-bundle")?;
         let status = resp.status();
         if !status.is_success() {
-            bail!("GET {path} returned {status}");
+            bail!("GET get-landmark-bundle returned {status}");
         }
-        resp.bytes()
+        resp.json()
             .await
-            .map(|b| b.to_vec())
-            .with_context(|| format!("reading body for {path}"))
+            .context("parsing get-landmark-bundle response")
+    }
+
+    /// Fetch the standard landmark text resource and its content type.
+    pub async fn get_landmark(&self) -> Result<(String, Vec<u8>)> {
+        let resp = self
+            .client
+            .get(self.url("landmark"))
+            .send()
+            .await
+            .context("GET landmark")?
+            .error_for_status()
+            .context("GET landmark status")?;
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .context("landmark Content-Type missing")?
+            .to_str()
+            .context("invalid landmark Content-Type")?
+            .to_owned();
+        let bytes = resp
+            .bytes()
+            .await
+            .context("reading landmark response")?
+            .to_vec();
+        Ok((content_type, bytes))
+    }
+
+    /// Reads raw log data from local R2 or the advertised monitoring URL.
+    pub async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
+        if local_r2::is_loopback_base_url(&base_url()) {
+            return local_r2::get(
+                "ietf_mtc_worker",
+                &format!("ietf-mtc-public-{}", self.log),
+                path,
+            )
+            .await?
+            .with_context(|| format!("R2 object missing: {path}"));
+        }
+
+        let metadata = self.get_metadata().await?;
+        get_raw_http(&self.client, metadata.monitoring_url.as_deref(), path).await
     }
 
     /// `GET /logs/:log/{path}` — returns the HTTP status code without failing on 4xx/5xx.

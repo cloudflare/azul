@@ -1,7 +1,7 @@
 //! Landmark sequence management for Merkle Tree Certificates.
 //!
 //! This module implements the landmark sequence as specified in
-//! [draft-ietf-plants-merkle-tree-certs-02, Section 6.3.1](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-02.html#section-6.3.1).
+//! [draft-ietf-plants-merkle-tree-certs-06, Section 6.4.1](https://datatracker.ietf.org/doc/html/draft-ietf-plants-merkle-tree-certs#section-6.4.1).
 //!
 //! # Key Concepts
 //!
@@ -32,9 +32,9 @@
 //!
 //! This is validated by: `num_active_landmarks <= max_active_landmarks` (not `<`).
 
-use crate::MtcError;
+use crate::{MtcError, UINT48_MAX};
 use std::{collections::VecDeque, fmt::Write};
-use tlog_tiles::Subtree;
+use tlog_core::Subtree;
 
 /// A sequence of landmarks used for constructing landmark certificates.
 ///
@@ -162,14 +162,14 @@ impl LandmarkSequence {
         if left.contains(leaf_index) {
             Some((landmark_id, left))
         } else {
-            right.map(|tree| (landmark_id, tree))
+            right.contains(leaf_index).then_some((landmark_id, right))
         }
     }
 
     /// Serialize the landmark sequence to the wire format.
     ///
     /// The format is defined in
-    /// [draft-ietf-plants-merkle-tree-certs-02, Section 6.3.1](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-02.html#section-6.3.1):
+    /// [draft-ietf-plants-merkle-tree-certs-06, Section 6.4.1](https://datatracker.ietf.org/doc/html/draft-ietf-plants-merkle-tree-certs#section-6.4.1):
     ///
     /// ```text
     /// <last_landmark> <num_active_landmarks>
@@ -190,6 +190,13 @@ impl LandmarkSequence {
     ///
     /// Will return an error if writing to the buffer fails.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MtcError> {
+        if u64::try_from(self.last_landmark).map_or(true, |value| value > UINT48_MAX)
+            || self.landmarks.iter().any(|&value| value > UINT48_MAX)
+        {
+            return Err(MtcError::Dynamic(
+                "landmark numbers and tree sizes must fit uint48".into(),
+            ));
+        }
         let mut buffer = format!("{} {}\n", self.last_landmark, self.landmarks.len() - 1);
         for landmark in self.landmarks.iter().rev() {
             writeln!(buffer, "{landmark}")?;
@@ -218,22 +225,54 @@ impl LandmarkSequence {
     /// - Validation constraints are violated
     /// - Tree sizes are not strictly monotonically decreasing
     pub fn from_bytes(data: &[u8], max_active_landmarks: usize) -> Result<Self, MtcError> {
-        // Note: `lines()` will return the same thing whether or not there's a
-        // newline after the last line, and whether or not there are carriage
-        // returns preceding each newline.
+        Self::from_bytes_with_latest_tree_size(data, max_active_landmarks, None)
+    }
+
+    /// Deserialize and optionally validate tree sizes against the latest checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the publication is malformed or a landmark exceeds
+    /// `latest_tree_size` when provided.
+    pub fn from_bytes_with_latest_tree_size(
+        data: &[u8],
+        max_active_landmarks: usize,
+        latest_tree_size: Option<u64>,
+    ) -> Result<Self, MtcError> {
+        fn parse_decimal(value: &str, field: &str) -> Result<u64, MtcError> {
+            if value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || (value.len() > 1 && value.starts_with('0'))
+            {
+                return Err(MtcError::Dynamic(format!(
+                    "{field} must use canonical decimal"
+                )));
+            }
+            let value = value.parse::<u64>()?;
+            if value > UINT48_MAX {
+                return Err(MtcError::Dynamic(format!("{field} exceeds uint48")));
+            }
+            Ok(value)
+        }
 
         // Set some upper limit on what we're willing to process.
         if data.len() > 10_000 {
             return Err(MtcError::Dynamic("too much data".into()));
         }
-        let mut iter = std::str::from_utf8(data)?.lines();
+        if !data.ends_with(b"\n") {
+            return Err(MtcError::Dynamic("missing final newline".into()));
+        }
+        let text = std::str::from_utf8(data)?;
+        let mut iter = text[..text.len() - 1].split('\n');
         let first = iter
             .next()
             .ok_or(MtcError::Dynamic("missing first line".into()))?
             .split_once(' ')
             .ok_or(MtcError::Dynamic("malformed first line".into()))?;
-        let last_landmark = first.0.parse::<usize>()?;
-        let num_active_landmarks = first.1.parse::<usize>()?;
+        let last_landmark = usize::try_from(parse_decimal(first.0, "last_landmark")?)
+            .map_err(|_| MtcError::Dynamic("last_landmark exceeds usize".into()))?;
+        let num_active_landmarks = usize::try_from(parse_decimal(first.1, "num_active_landmarks")?)
+            .map_err(|_| MtcError::Dynamic("num_active_landmarks exceeds usize".into()))?;
 
         // Note: Uses > not >= to allow num_active_landmarks == max_active_landmarks (correct per spec).
         // This means a file with max_active_landmarks=169 can have num_active_landmarks=169,
@@ -248,13 +287,23 @@ impl LandmarkSequence {
                 "num_active_landmarks must not be greater than last_landmark".into(),
             ));
         }
+        if iter.clone().count() != num_active_landmarks + 1 {
+            return Err(MtcError::Dynamic(
+                "incorrect number of landmark lines".into(),
+            ));
+        }
 
         let mut landmarks = VecDeque::with_capacity(num_active_landmarks + 1);
         for i in 0..=num_active_landmarks {
-            let landmark = iter
+            let line = iter
                 .next()
-                .ok_or(MtcError::Dynamic("malformed landmark line".into()))?
-                .parse::<u64>()?;
+                .ok_or(MtcError::Dynamic("malformed landmark line".into()))?;
+            let landmark = parse_decimal(line, "tree size")?;
+            if latest_tree_size.is_some_and(|latest| landmark > latest) {
+                return Err(MtcError::Dynamic(
+                    "landmark tree size exceeds latest tree size".into(),
+                ));
+            }
             if i > 0 && landmark >= landmarks[0] {
                 return Err(MtcError::Dynamic(
                     "landmarks must be in decreasing order".into(),
@@ -265,6 +314,11 @@ impl LandmarkSequence {
         if iter.next().is_some() {
             return Err(MtcError::Dynamic(
                 "trailing data in landmark sequence".into(),
+            ));
+        }
+        if last_landmark == num_active_landmarks && landmarks.front() != Some(&0) {
+            return Err(MtcError::Dynamic(
+                "landmark zero must have tree size zero".into(),
             ));
         }
         Ok(Self {
@@ -309,10 +363,10 @@ impl Iterator for LandmarkSubtreesIterator<'_> {
             return None;
         }
 
-        let subtree;
-        (subtree, self.next_subtree) =
+        let (subtree, next_subtree) =
             Subtree::split_interval(self.landmarks[self.index - 1], self.landmarks[self.index])
                 .unwrap();
+        self.next_subtree = Some(next_subtree);
 
         self.index += 1;
         Some(subtree)
@@ -408,6 +462,43 @@ mod tests {
             Subtree::new(48, 50).unwrap(),
         ];
         assert_eq!(got, want);
+
+        let mut single_entry = LandmarkSequence::create(1);
+        single_entry.add(1).unwrap();
+        assert_eq!(
+            single_entry.subtrees().collect::<Vec<_>>(),
+            vec![Subtree::new(0, 1).unwrap(), Subtree::new(1, 1).unwrap()]
+        );
+    }
+
+    #[test]
+    fn test_strict_landmark_publication_parser() {
+        let valid = b"2 2\n10\n5\n0\n";
+        assert!(LandmarkSequence::from_bytes(valid, 2).is_ok());
+        assert!(LandmarkSequence::from_bytes_with_latest_tree_size(valid, 2, Some(10)).is_ok());
+        assert!(LandmarkSequence::from_bytes_with_latest_tree_size(valid, 2, Some(9)).is_err());
+        assert!(LandmarkSequence::from_bytes(b"281474976710655 0\n281474976710655\n", 0).is_ok());
+
+        for invalid in [
+            b"2 2\n10\n5\n0".as_slice(),
+            b"2  2\n10\n5\n0\n",
+            b"02 2\n10\n5\n0\n",
+            b"2 02\n10\n5\n0\n",
+            b"2 2\n010\n5\n0\n",
+            b"2 2\n10\n5\n0\n\n",
+            b"2\t2\n10\n5\n0\n",
+            b"2 2\r\n10\r\n5\r\n0\r\n",
+            b"281474976710656 0\n0\n",
+            b"0 0\n281474976710656\n",
+            b"0 0\n1\n",
+            b"2 2\n10\n5\n1\n",
+        ] {
+            assert!(
+                LandmarkSequence::from_bytes(invalid, 2).is_err(),
+                "accepted {:?}",
+                String::from_utf8_lossy(invalid)
+            );
+        }
     }
 
     #[test]
@@ -415,7 +506,7 @@ mod tests {
         // This test documents and validates the CORRECT behavior per the spec:
         // The deque should contain max_active_landmarks + 1 entries at steady state.
         //
-        // From draft-ietf-plants-merkle-tree-certs-02, Section 6.3.1:
+        // From draft-ietf-plants-merkle-tree-certs-06, Section 6.4.1:
         // - "The most recent max_active_landmarks landmarks are said to be active"
         // - File format stores "num_active_landmarks + 1 lines" of tree sizes
         // - Validation: "num_active_landmarks <= max_active_landmarks"

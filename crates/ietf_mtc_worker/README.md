@@ -2,13 +2,17 @@
 
 A Rust implementation of an [IETF Merkle Tree Certificate CA](https://github.com/ietf-plants-wg/merkle-tree-certs/) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
 
-This worker implements [draft-ietf-plants-merkle-tree-certs-02](https://datatracker.ietf.org/doc/draft-ietf-plants-merkle-tree-certs/). For the older bootstrap experiment, see [`bootstrap_mtc_worker`](../bootstrap_mtc_worker/README.md).
+This worker implements [draft-ietf-plants-merkle-tree-certs-06](https://datatracker.ietf.org/doc/draft-ietf-plants-merkle-tree-certs/).
+
+> **Warning:** The `add-entry` endpoint is an unauthenticated interoperability
+> endpoint. It does not perform ACME authorization or production certificate
+> issuance validation and must not be deployed as a production CA interface.
 
 The internal log architecture (Sequencer, Batcher, Cleaner Durable Objects, tiled R2 storage) is shared with the [Static CT Log](../ct_worker/README.md).
 
 ## How it works
 
-Subscribers submit a PKCS#10 CSR (base64url-encoded, no padding) to the `add-entry` endpoint, matching the ACME `finalize` format (RFC 8555 §7.4). The CA extracts the subject, SPKI, and SANs from the CSR and logs them as a `TBSCertificateLogEntry`. The validity window is set server-side to `[now, now + max_certificate_lifetime_secs]`.
+For interoperability testing, callers submit a PKCS#10 CSR (base64url-encoded, no padding) to the unauthenticated `add-entry` endpoint, using the ACME `finalize` payload shape (RFC 8555 §7.4). The worker extracts the subject, SPKI, and SANs from the CSR and logs them as a `TBSCertificateLogEntry`. The validity window is set server-side to `[now, now + max_certificate_lifetime_secs]`.
 
 Once a landmark interval elapses, the sequencer produces a landmark subtree and the CA can issue **landmark-relative MTC certificates** — DER-encoded X.509 structures whose `signatureValue` encodes a Merkle inclusion proof into the landmark subtree rather than a traditional signature.
 

@@ -33,6 +33,7 @@ impl DurableObject for Sequencer {
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
             enable_dedup: params.enable_dedup,
+            max_tree_size: None,
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
             checkpoint_callback: empty_checkpoint_callback(),

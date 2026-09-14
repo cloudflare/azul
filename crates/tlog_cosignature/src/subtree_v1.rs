@@ -838,8 +838,8 @@ mod tests {
         assert!(Subtree::new(3, 5).is_err());
         // `[16, 100)`: 16 is not a multiple of BIT_CEIL(84) = 128.
         assert!(Subtree::new(16, 100).is_err());
-        // `[5, 5)`: empty subtree (lo >= hi).
-        assert!(Subtree::new(5, 5).is_err());
+        // Empty subtrees are valid in draft-06.
+        assert!(Subtree::new(5, 5).is_ok());
         // `[8, 16)`: 8 is a multiple of BIT_CEIL(8) = 8. ✓
         assert!(Subtree::new(8, 16).is_ok());
     }

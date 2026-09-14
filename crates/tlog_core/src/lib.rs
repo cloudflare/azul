@@ -379,6 +379,9 @@ pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
 pub fn subtree_hash<R: HashReader>(n: &Subtree, r: &R) -> Result<Hash, TlogError> {
+    if n.lo == n.hi {
+        return Ok(EMPTY_HASH);
+    }
     let indexes = n.hash_indexes();
     let mut hashes = r.read_hashes(&indexes)?;
     debug_assert_eq!(
@@ -422,7 +425,12 @@ pub fn subtree_inclusion_proof<R: HashReader>(
     leaf_index: u64,
     r: &R,
 ) -> Result<Proof, TlogError> {
-    let m = &Subtree::new(leaf_index, leaf_index + 1)?;
+    let m = &Subtree::new(
+        leaf_index,
+        leaf_index
+            .checked_add(1)
+            .ok_or_else(|| TlogError::ConditionNotMet("leaf index overflow".into()))?,
+    )?;
 
     // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
     let indexes = n.subproof_indexes(m, true)?;
@@ -468,7 +476,15 @@ pub fn subtree_inclusion_proof_indexes(
     leaf_index: u64,
 ) -> Result<Vec<u64>, TlogError> {
     // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
-    n.subproof_indexes(&Subtree::new(leaf_index, leaf_index + 1)?, true)
+    n.subproof_indexes(
+        &Subtree::new(
+            leaf_index,
+            leaf_index
+                .checked_add(1)
+                .ok_or_else(|| TlogError::ConditionNotMet("leaf index overflow".into()))?,
+        )?,
+        true,
+    )
 }
 
 /// Verify an inclusion proof that the tree of size `tree_size` with root hash
@@ -876,6 +892,14 @@ pub fn subtree_consistency_proof<R: HashReader>(
     r: &R,
 ) -> Result<Proof, TlogError> {
     let n = Subtree::new(0, tree_size)?;
+    if m.lo == m.hi {
+        if !n.contains_subtree(m) {
+            return Err(TlogError::ConditionNotMet(format!(
+                "{n} does not contain {m}"
+            )));
+        }
+        return Ok(vec![]);
+    }
     let indexes = n.subproof_indexes(m, true)?;
     if indexes.is_empty() {
         return Ok(vec![]);
@@ -915,7 +939,17 @@ pub fn subtree_consistency_proof_indexes(
     tree_size: u64,
     m: &Subtree,
 ) -> Result<Vec<u64>, TlogError> {
-    Subtree::new(0, tree_size)?.subproof_indexes(m, true)
+    let n = Subtree::new(0, tree_size)?;
+    if m.lo == m.hi {
+        return if n.contains_subtree(m) {
+            Ok(vec![])
+        } else {
+            Err(TlogError::ConditionNotMet(format!(
+                "{n} does not contain {m}"
+            )))
+        };
+    }
+    n.subproof_indexes(m, true)
 }
 
 /// Verify a consistency proof that the tree of size `n` with hash `root_hash`
@@ -932,13 +966,11 @@ pub fn verify_consistency_proof(
     m: u64,
     m_hash: Hash,
 ) -> Result<(), TlogError> {
-    // Special case for proving consistency with an empty tree.
     if m == 0 {
-        return if proof.is_empty() && m_hash == EMPTY_HASH && (n != 0 || root_hash == EMPTY_HASH) {
-            Ok(())
-        } else {
-            Err(TlogError::InvalidProof)
-        };
+        if !proof.is_empty() || m_hash != EMPTY_HASH || (n == 0 && root_hash != EMPTY_HASH) {
+            return Err(TlogError::InvalidProof);
+        }
+        return Ok(());
     }
     verify_subtree_consistency_proof(proof, n, root_hash, &Subtree::new(0, m)?, m_hash)
 }
@@ -960,9 +992,16 @@ pub fn verify_subtree_consistency_proof(
 ) -> Result<(), TlogError> {
     let Subtree { lo: start, hi: end } = *m;
 
-    // Check that `[start, end)` is a valid subtree, and that `end <= n`. If either do not hold, fail proof verification. These checks imply `0 <= start < end <= n`.
+    // Check that `[start, end)` is a valid subtree, and that `end <= n`.
     if end > n {
         return Err(TlogError::InvalidProof);
+    }
+    if start == end {
+        return if proof.is_empty() && subtree_hash == EMPTY_HASH {
+            Ok(())
+        } else {
+            Err(TlogError::InvalidProof)
+        };
     }
 
     // Set `fn` to `start`, `sn` to `end - 1`, and `tn` to `n - 1`.
@@ -1053,7 +1092,7 @@ fn lsb_set(i: u64) -> bool {
 
 /// A subtree of a Merkle Tree of size `n` is defined by two integers `lo` and
 /// `hi` such that:
-/// - 0 ≤ lo < hi ≤ n
+/// - 0 ≤ lo ≤ hi ≤ n
 /// - if `s` is the smallest power of two `≥ hi - lo`, `lo` is a multple of `s`
 ///
 /// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.1>
@@ -1076,11 +1115,21 @@ impl Subtree {
     ///
     /// Will return an error if `[lo, hi)` is not a valid subtree.
     pub fn new(lo: u64, hi: u64) -> Result<Self, TlogError> {
-        if lo >= hi {
-            return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
+        if lo > hi {
+            return Err(TlogError::ConditionNotMet("`lo <= hi`".into()));
         }
-        // `s` is the next power of 2 greater than or equal to `hi - lo`.
-        let s = (hi - lo).next_power_of_two();
+        let size = hi - lo;
+        if size > (1_u64 << 63) {
+            return if lo == 0 {
+                Ok(Self { lo, hi })
+            } else {
+                Err(TlogError::ConditionNotMet(
+                    "`lo` must be zero when the subtree size exceeds 2^63".into(),
+                ))
+            };
+        }
+        // `BIT_CEIL(0)` is one.
+        let s = size.next_power_of_two();
         if lo & (s - 1) != 0 {
             return Err(TlogError::ConditionNotMet(
                 "`lo` must be a multiple of the next power of two ≥ `hi - lo`".into(),
@@ -1105,7 +1154,7 @@ impl Subtree {
     }
     /// Return whether or not the subtree contains the given subtree.
     fn contains_subtree(&self, other: &Subtree) -> bool {
-        (self.lo..self.hi).contains(&other.lo) && (self.lo + 1..=self.hi).contains(&other.hi)
+        self.lo <= other.lo && other.hi <= self.hi
     }
     /// Return left and right children.
     fn children(&self) -> (Self, Self) {
@@ -1121,17 +1170,17 @@ impl Subtree {
             },
         )
     }
-    /// Returns a list of one or two subtrees that efficiently cover `[lo, hi)`.
+    /// Returns two subtrees that efficiently cover `[lo, hi)`.
     ///
     /// # Errors
     ///
-    /// Will return an error if `lo ≤ hi`.
-    pub fn split_interval(lo: u64, hi: u64) -> Result<(Self, Option<Self>), TlogError> {
-        if lo >= hi {
-            return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
+    /// Will return an error if `lo > hi`.
+    pub fn split_interval(lo: u64, hi: u64) -> Result<(Self, Self), TlogError> {
+        if lo > hi {
+            return Err(TlogError::ConditionNotMet("`lo <= hi`".into()));
         }
-        if hi - lo == 1 {
-            return Ok((Self { lo, hi }, None));
+        if hi - lo <= 1 {
+            return Ok((Self { lo, hi }, Self { lo: hi, hi }));
         }
         let last = hi - 1;
         // Find where `lo` and `last`'s tree paths diverge. The two subtrees
@@ -1149,7 +1198,7 @@ impl Subtree {
         };
         let left = lo & !((1 << left_split) - 1);
 
-        Ok((Self { lo: left, hi: mid }, Some(Self { lo: mid, hi })))
+        Ok((Self { lo: left, hi: mid }, Self { lo: mid, hi }))
     }
 }
 
@@ -1179,7 +1228,8 @@ impl Subtree {
     {
         let mut lo = self.lo;
         while lo < self.hi {
-            let (k, level) = maxpow2(self.hi - lo + 1);
+            let level = u8::try_from((self.hi - lo).ilog2()).unwrap();
+            let k = 1 << level;
             debug_assert!(lo & (k - 1) == 0 && lo < self.hi, "bad math in walk_hash");
             f(level, lo);
             lo += k;
@@ -1210,6 +1260,9 @@ impl Subtree {
     ///
     /// Panics if there are internal math errors.
     fn hash(&self, hashes: &mut Vec<Hash>) -> Hash {
+        if self.lo == self.hi {
+            return EMPTY_HASH;
+        }
         let mut num_hashes = 0;
         let mut get_hash = |_: u8, _: u64| {
             num_hashes += 1;
@@ -1391,11 +1444,30 @@ mod tests {
         // Valid subtrees.
         assert!(Subtree::new(0, 1).is_ok());
         assert!(Subtree::new(36, 39).is_ok());
+        assert!(Subtree::new(0, 0).is_ok());
+        assert!(Subtree::new(u64::MAX, u64::MAX).is_ok());
+        assert!(Subtree::new(0, u64::MAX).is_ok());
 
         // Invalid subtrees.
         assert!(Subtree::new(39, 36).is_err());
         assert!(Subtree::new(123, 456).is_err());
-        assert!(Subtree::new(0, 0).is_err());
+        assert!(Subtree::new(1 << 62, (1 << 63) + 1).is_err());
+
+        for (start, end) in [
+            (0, (1 << 47) + 1),
+            (0, (1 << 48) - 1),
+            (0, (1 << 63) + 1),
+            (0, u64::MAX),
+        ] {
+            assert!(Subtree::new(start, end).is_ok(), "[{start}, {end})");
+        }
+        for (start, end) in [
+            (1 << 46, (1 << 47) + 1),
+            (1 << 46, (1 << 48) - 1),
+            (1 << 62, (1 << 63) + 1),
+        ] {
+            assert!(Subtree::new(start, end).is_err(), "[{start}, {end})");
+        }
     }
 
     #[test]
@@ -1428,28 +1500,50 @@ mod tests {
         assert!(evaluate_subtree_inclusion_proof(&empty_proof, &subtree, 2, leaves[2]).is_err());
     }
 
-    /// `verify_inclusion_proof(proof, 0, …)` delegates through
-    /// `Subtree::new(0, 0)`, which fails with `ConditionNotMet`. Pin the
-    /// variant so a future "`tree_size == 0` shortcut" cannot silently flip
-    /// it back to `InvalidProof`. The outcome ("this proof is bogus") is
-    /// the same; only the variant should differ.
     #[test]
     fn test_verify_inclusion_proof_rejects_zero_tree_size() {
         let err = verify_inclusion_proof(&Vec::new(), 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap_err();
-        assert!(
-            matches!(err, TlogError::ConditionNotMet(_)),
-            "expected ConditionNotMet, got {err:?}",
-        );
+        assert!(matches!(err, TlogError::InvalidProof));
     }
 
     #[test]
     fn test_empty_tree() {
         assert_eq!(tree_hash(0, &TestHashStorage::new()).unwrap(), EMPTY_HASH);
+        let empty = Subtree::new(4, 4).unwrap();
+        assert_eq!(
+            subtree_hash(&empty, &TestHashStorage::new()).unwrap(),
+            EMPTY_HASH
+        );
+        assert!(subtree_hash_indexes(&empty).is_empty());
+        assert!(
+            subtree_consistency_proof_indexes(4, &empty)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            subtree_consistency_proof(4, &empty, &TestHashStorage::new())
+                .unwrap()
+                .is_empty()
+        );
+        verify_subtree_consistency_proof(&vec![], 4, Hash::default(), &empty, EMPTY_HASH).unwrap();
+        verify_subtree_consistency_proof(
+            &vec![Hash::default()],
+            4,
+            Hash::default(),
+            &empty,
+            EMPTY_HASH,
+        )
+        .unwrap_err();
+        verify_subtree_consistency_proof(&vec![], 4, Hash::default(), &empty, Hash::default())
+            .unwrap_err();
 
         // Empty tree.
         verify_consistency_proof(&[], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
         verify_consistency_proof(&[], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
         verify_consistency_proof(&[], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
+        verify_consistency_proof(&[], 1, Hash::default(), 0, Hash::default()).unwrap_err();
+        verify_consistency_proof(&[Hash::default()], 1, Hash::default(), 0, EMPTY_HASH)
+            .unwrap_err();
         verify_consistency_proof(&[Hash::default()], 0, Hash::default(), 1, EMPTY_HASH)
             .unwrap_err();
 
@@ -1461,26 +1555,59 @@ mod tests {
     #[test]
     fn test_subtrees_split_interval() {
         assert_eq!(
+            Subtree::split_interval(9, 9).unwrap(),
+            (Subtree::new(9, 9).unwrap(), Subtree::new(9, 9).unwrap())
+        );
+        assert_eq!(
             Subtree::split_interval(123, 124).unwrap(),
-            (Subtree::new(123, 124).unwrap(), None)
+            (
+                Subtree::new(123, 124).unwrap(),
+                Subtree::new(124, 124).unwrap()
+            )
         );
 
         assert_eq!(
             Subtree::split_interval(1200, 1300).unwrap(),
             (
                 Subtree::new(1152, 1280).unwrap(),
-                Some(Subtree::new(1280, 1300).unwrap())
+                Subtree::new(1280, 1300).unwrap()
             )
         );
 
         // Panic fixed by https://github.com/cloudflare/azul/commit/0c8b8574eaa8ab6114ebeded7b23ac40d517fa54.
         assert_eq!(
             Subtree::split_interval(64, 66).unwrap(),
-            (
-                Subtree::new(64, 65).unwrap(),
-                Some(Subtree::new(65, 66).unwrap())
-            )
+            (Subtree::new(64, 65).unwrap(), Subtree::new(65, 66).unwrap())
         );
+
+        for (start, end, left_start, left_end, right_start, right_end) in [
+            (5, 13, 4, 8, 8, 13),
+            (7, 9, 7, 8, 8, 9),
+            (
+                0,
+                0x8000_0000_0000,
+                0,
+                0x4000_0000_0000,
+                0x4000_0000_0000,
+                0x8000_0000_0000,
+            ),
+            (
+                0xffff_ffff_fffe,
+                0xffff_ffff_ffff,
+                0xffff_ffff_fffe,
+                0xffff_ffff_ffff,
+                0xffff_ffff_ffff,
+                0xffff_ffff_ffff,
+            ),
+        ] {
+            assert_eq!(
+                Subtree::split_interval(start, end).unwrap(),
+                (
+                    Subtree::new(left_start, left_end).unwrap(),
+                    Subtree::new(right_start, right_end).unwrap(),
+                )
+            );
+        }
     }
 
     /// Narrow a `u64` index to `usize` for slice access in tests.
