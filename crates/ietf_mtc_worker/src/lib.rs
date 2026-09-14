@@ -5,7 +5,7 @@
 
 use config::AppConfig;
 use ietf_mtc_api::{MtcCosigner, MtcSigningKey, MtcVerifyingKey, TrustAnchorID};
-use ml_dsa::{signature::Keypair as _, MlDsa44, SigningKey as MlDsaSigningKey};
+use ml_dsa::{ExpandedSigningKey as MlDsaSigningKey, MlDsa44};
 use pkcs8::DecodePrivateKey;
 use signed_note::KeyName;
 use std::collections::HashMap;
@@ -20,7 +20,9 @@ mod frontend_worker;
 mod sequence_metadata;
 mod sequencer_do;
 
-pub(crate) use sequence_metadata::IetfMtcSequenceMetadata;
+pub(crate) use sequence_metadata::{
+    IetfMtcSequenceMetadata, SUBTREE_SIG_KEY_PREFIX, SignedSubtree, subtree_sig_key,
+};
 
 // Algorithm OID constants.
 const OID_ED25519: der::asn1::ObjectIdentifier =
@@ -36,6 +38,25 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 
 type CachedKeys = (MtcSigningKey, MtcVerifyingKey);
 static KEY_MAP: OnceLock<HashMap<String, OnceLock<CachedKeys>>> = OnceLock::new();
+
+pub(crate) fn init_sentry(env: &Env) {
+    if let Ok(dsn) = env.var("SENTRY_DSN") {
+        let access_id = env
+            .var("SENTRY_ACCESS_CLIENT_ID")
+            .ok()
+            .map(|v| v.to_string());
+        let access_secret = env
+            .secret("SENTRY_ACCESS_CLIENT_SECRET")
+            .ok()
+            .map(|v| v.to_string());
+        let _ = generic_log_worker::obs::sentry::init(
+            &dsn.to_string(),
+            env!("DEPLOY_ENV"),
+            access_id.as_deref(),
+            access_secret.as_deref(),
+        );
+    }
+}
 
 /// Return the key pair for the given log, using a per-log cache.
 ///
@@ -81,36 +102,24 @@ fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifying
             Ok((MtcSigningKey::Ed25519(sk), MtcVerifyingKey::Ed25519(vk)))
         }
         OID_ML_DSA_44 => {
-            let kp = MlDsaSigningKey::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
-            Ok((
-                MtcSigningKey::MlDsa44(kp.signing_key().clone()),
-                MtcVerifyingKey::MlDsa44(kp.verifying_key().clone()),
-            ))
+            let sk = MlDsaSigningKey::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
+            let vk = sk.verifying_key();
+            Ok((MtcSigningKey::MlDsa44(sk), MtcVerifyingKey::MlDsa44(vk)))
         }
         oid => Err(format!("unsupported signing algorithm OID: {oid}")),
     }
 }
 
 pub(crate) fn load_checkpoint_cosigner(env: &Env, name: &str) -> MtcCosigner {
-    let log_id = TrustAnchorID::from_str(&CONFIG.logs[name].log_id).unwrap();
-    let cosigner_id = TrustAnchorID::from_str(&CONFIG.logs[name].cosigner_id).unwrap();
+    let params = &CONFIG.logs[name];
+    let ca_id = TrustAnchorID::from_str(&params.ca_id).unwrap();
     let (sk, vk) = load_key_pair(env, name).unwrap();
-    MtcCosigner::new_checkpoint(cosigner_id, log_id, sk, vk)
+    MtcCosigner::new_checkpoint(ca_id.clone(), &ca_id, params.log_number, sk, vk).unwrap()
 }
 
 pub(crate) fn load_origin(name: &str) -> KeyName {
-    // https://github.com/C2SP/C2SP/blob/main/tlog-tiles.md#parameters
-    // The origin line SHOULD be the schema-less URL prefix of the log with no
-    // trailing slashes. For example, a log with prefix
-    // https://rome.ct.example.com/tevere/ will use rome.ct.example.com/tevere
-    // as the checkpoint origin line.
-    KeyName::new(
-        CONFIG.logs[name]
-            .submission_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/')
-            .to_string(),
-    )
-    .expect("invalid origin name")
+    let params = &CONFIG.logs[name];
+    let ca_id = TrustAnchorID::from_str(&params.ca_id).expect("invalid CA ID");
+    let log_id = ca_id.log_id(params.log_number).expect("invalid log number");
+    KeyName::new(log_id.oid_name()).expect("invalid log ID origin")
 }

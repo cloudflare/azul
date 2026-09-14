@@ -14,14 +14,13 @@ pub struct AppConfig {
 #[derive(Deserialize, Debug)]
 pub struct LogParams {
     pub description: Option<String>,
-    pub log_id: String,
-    pub cosigner_id: String,
+    pub ca_id: String,
+    pub log_number: u16,
     #[serde(default = "default_usize::<604_800>")]
     pub max_certificate_lifetime_secs: usize,
     #[serde(default = "default_usize::<3600>")]
     pub landmark_interval_secs: usize,
-    #[serde(default)]
-    pub monitoring_url: String,
+    pub monitoring_url: Option<String>,
     pub submission_url: String,
     pub location_hint: Option<String>,
     #[serde(default = "default_u64::<1000>")]
@@ -31,9 +30,9 @@ pub struct LogParams {
     pub sequence_skip_threshold_millis: Option<u64>,
     #[serde(default = "default_u8::<8>")]
     pub num_batchers: u8,
-    #[serde(default = "default_u64::<1000>")]
+    #[serde(default = "default_u64::<100>")]
     pub batch_timeout_millis: u64,
-    #[serde(default = "default_usize::<100>")]
+    #[serde(default = "default_usize::<256>")]
     pub max_batch_entries: usize,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,

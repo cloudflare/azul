@@ -6,7 +6,31 @@
 
 use generic_log_worker::SequencerMetadata;
 use serde::{Deserialize, Serialize};
-use tlog_tiles::{LeafIndex, UnixTimestamp};
+use tlog_checkpoint::UnixTimestampMillis;
+use tlog_core::{LeafIndex, Subtree};
+
+pub const SUBTREE_SIG_KEY_PREFIX: &str = "subtree-sig";
+
+pub fn subtree_sig_key(lo: LeafIndex, hi: LeafIndex) -> String {
+    format!("{SUBTREE_SIG_KEY_PREFIX}/{lo:020}-{hi:020}")
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SignedSubtree {
+    pub lo: LeafIndex,
+    pub hi: LeafIndex,
+    pub hash: [u8; 32],
+    pub checkpoint_hash: [u8; 32],
+    pub checkpoint_size: u64,
+    pub signature: Vec<u8>,
+    pub cosigner_id: String,
+}
+
+impl SignedSubtree {
+    pub fn as_subtree(&self) -> Result<Subtree, tlog_core::TlogError> {
+        Subtree::new(self.lo, self.hi)
+    }
+}
 
 /// Sequencer metadata for an IETF MTC log entry.
 ///
@@ -23,9 +47,8 @@ use tlog_tiles::{LeafIndex, UnixTimestamp};
 /// whose validity is carried inside the TBS entry rather than returned
 /// separately.
 ///
-/// IETF MTC does not currently use the long-term KV dedup cache or have any
-/// deployed short-term dedup storage, so no wire-format compatibility
-/// constraints apply; the default JSON cache serialization is fine.
+/// The default JSON representation is stored in the sequencer's short-term
+/// dedup cache so retries receive the original sequencing metadata.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IetfMtcSequenceMetadata {
     /// Zero-based index of the sequenced entry.
@@ -39,7 +62,7 @@ pub struct IetfMtcSequenceMetadata {
 impl SequencerMetadata for IetfMtcSequenceMetadata {
     fn new(
         leaf_index: LeafIndex,
-        _timestamp: UnixTimestamp,
+        _timestamp: UnixTimestampMillis,
         old_tree_size: u64,
         new_tree_size: u64,
     ) -> Self {

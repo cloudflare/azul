@@ -4,16 +4,9 @@
 // Build script to include per-environment configuration and trusted roots.
 
 use config::AppConfig;
-use der::asn1::Utf8StringRef;
-use der::{Any, Tag};
-use ietf_mtc_api::ID_RDNA_TRUSTANCHOR_ID;
 use std::env;
 use std::fs;
 use url::Url;
-use x509_cert::{
-    attr::AttributeTypeAndValue,
-    name::{RdnSequence, RelativeDistinguishedName},
-};
 
 fn main() {
     let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
@@ -38,31 +31,24 @@ fn main() {
         panic!("failed to deserialize JSON config '{config_file}': {e}");
     });
     for (name, params) in conf.logs {
-        // Make sure we can create the RDN sequence for the issuer log ID.
-        let _ = RdnSequence::from(vec![RelativeDistinguishedName::try_from(vec![
-            AttributeTypeAndValue {
-                oid: ID_RDNA_TRUSTANCHOR_ID,
-                value: Any::new(
-                    Tag::Utf8String,
-                    Utf8StringRef::new(&params.log_id).unwrap().as_bytes(),
-                )
-                .unwrap(),
-            },
-        ])
-        .unwrap()]);
+        let ca_id = params.ca_id.parse::<ietf_mtc_api::TrustAnchorID>().unwrap();
+        ca_id.log_id(params.log_number).unwrap();
+        ca_id.to_rdn_sequence().unwrap();
 
         // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
         if let Some(location) = &params.location_hint {
             assert!(
-                ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",]
-                    .contains(&location.as_str()),
+                [
+                    "wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",
+                ]
+                .contains(&location.as_str()),
                 "{name} invalid location hint: {location}"
             );
         }
 
         check_url(&params.submission_url);
-        if !params.monitoring_url.is_empty() {
-            check_url(&params.monitoring_url);
+        if let Some(monitoring_url) = &params.monitoring_url {
+            check_url(monitoring_url);
         }
     }
 

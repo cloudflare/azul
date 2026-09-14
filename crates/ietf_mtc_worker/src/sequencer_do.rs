@@ -6,62 +6,74 @@
 use std::{collections::VecDeque, time::Duration};
 
 use crate::{
-    load_checkpoint_cosigner, load_key_pair, load_origin, IetfMtcSequenceMetadata, CONFIG,
+    CONFIG, IetfMtcSequenceMetadata, SignedSubtree, init_sentry, load_checkpoint_cosigner,
+    load_key_pair, load_origin, subtree_sig_key,
 };
 use generic_log_worker::{
-    get_durable_object_name, load_public_bucket,
-    log_ops::{prove_subtree_consistency, ProofError},
     CachedRoObjectBucket, CheckpointCallbacker, GenericSequencer, ObjectBucket, SequencerConfig,
-    SEQUENCER_BINDING,
+    load_public_bucket,
+    log_ops::{ProofError, prove_subtree_consistency},
 };
 use ietf_mtc_api::{
-    subtree_sig_key, IetfMtcLogEntry, LandmarkSequence, SignedSubtree, TrustAnchorID,
-    LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY,
+    IetfMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY, LandmarkSequence,
+    TrustAnchorID, UINT48_MAX,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::Note;
 use std::str::FromStr;
-use tlog_tiles::{CheckpointText, Hash, Subtree, UnixTimestamp};
+use tlog_checkpoint::{CheckpointText, UnixTimestampMillis};
+use tlog_core::{Hash, Subtree};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
 #[durable_object(alarm)]
 struct Sequencer(GenericSequencer<IetfMtcLogEntry, IetfMtcSequenceMetadata>);
 
+// SAFETY: Durable Objects are single-threaded; this is required by wasm-bindgen
+// when building with panic unwinding.
+impl std::panic::RefUnwindSafe for Sequencer {}
+
 impl DurableObject for Sequencer {
     fn new(state: State, env: Env) -> Self {
-        let name = get_durable_object_name(
-            &env,
-            &state,
-            SEQUENCER_BINDING,
-            &mut CONFIG.logs.keys().map(|name| (name.as_str(), 0)),
-        );
-        let params = &CONFIG.logs[name];
+        let name = state
+            .id()
+            .name()
+            .expect("durable object name not provided by runtime");
+        let params = &CONFIG.logs[&name];
 
         let config = SequencerConfig {
-            name: name.to_string(),
-            origin: load_origin(name),
-            checkpoint_signers: vec![Box::new(load_checkpoint_cosigner(&env, name))],
+            origin: load_origin(&name),
+            checkpoint_signers: vec![Box::new(load_checkpoint_cosigner(&env, &name))],
             checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extension for MTC
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,
-            enable_dedup: false, // deduplication is not currently supported
+            enable_dedup: true,
+            max_tree_size: Some(UINT48_MAX),
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
-            checkpoint_callback: checkpoint_callback(&env, name),
-            env_label: env!("DEPLOY_ENV").to_string(),
+            checkpoint_callback: checkpoint_callback(&env, &name),
+            name,
         };
 
+        init_sentry(&env);
         Sequencer(GenericSequencer::new(state, env, config))
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        self.0.fetch(req).await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_fetch"), ("do_type", "sequencer")],
+            self.0.fetch(req),
+        )
+        .await
     }
 
     async fn alarm(&self) -> Result<Response> {
-        self.0.alarm().await
+        generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
+            &[("handler", "do_alarm"), ("do_type", "sequencer")],
+            self.0.alarm(),
+        )
+        .await
     }
 }
 
@@ -91,11 +103,11 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
     // Capture the signing key parts so the cosigner can be reconstructed
     // on each callback invocation (MtcCosigner is not Clone).
     let (sk, vk) = load_key_pair(env, name).unwrap();
-    let log_id = TrustAnchorID::from_str(&CONFIG.logs[name].log_id).unwrap();
-    let cosigner_id_str = CONFIG.logs[name].cosigner_id.clone();
+    let ca_id = TrustAnchorID::from_str(&params.ca_id).unwrap();
+    let log_number = params.log_number;
     Box::new(
-        move |old_time: UnixTimestamp,
-              new_time: UnixTimestamp,
+        move |old_time: UnixTimestampMillis,
+              new_time: UnixTimestampMillis,
               old_tree_size: u64,
               new_tree_size: u64,
               new_checkpoint_bytes: &[u8]| {
@@ -121,8 +133,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                 let bucket_clone = bucket.clone();
                 let sk_clone = sk.clone();
                 let vk_clone = vk.clone();
-                let log_id_clone = log_id.clone();
-                let cosigner_id_clone = TrustAnchorID::from_str(&cosigner_id_str).unwrap();
+                let ca_id_clone = ca_id.clone();
                 async move {
                     if old_time > new_time {
                         return Err("condition not met: `old_time <= new_time`".into());
@@ -136,8 +147,8 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                         new_tree_size,
                         tree_size,
                         root_hash,
-                        &cosigner_id_clone,
-                        &log_id_clone,
+                        &ca_id_clone,
+                        log_number,
                         &sk_clone,
                         &vk_clone,
                         &bucket_clone,
@@ -158,13 +169,6 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     // Time to add a new landmark.
                     let max_active_landmarks = params.max_active_landmarks();
 
-                    // TODO: the put operations below should all be done as part of the same
-                    // transaction. Otherwise an error that occurs after this point might put us in
-                    // a state where the objects are not in sync with one another, e.g., the
-                    // landmark bundle and checkpoint might have the same value. We need an
-                    // all-or-nothing multi-put operation. Tracking issue here
-                    // https://github.com/cloudflare/workers-rs/issues/876
-
                     // Load current landmark sequence.
                     let mut seq =
                         if let Some(obj) = bucket_clone.get(LANDMARK_KEY).execute().await? {
@@ -175,19 +179,9 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                             LandmarkSequence::create(max_active_landmarks)
                         };
                     // Add the new landmark.
-                    if seq.add(tree_size).map_err(|e| e.to_string())? {
-                        // The landmark sequence was updated. Publish the result.
-                        bucket_clone
-                            .put(LANDMARK_KEY, seq.to_bytes().map_err(|e| e.to_string())?)
-                            .execute()
-                            .await?;
+                    if !seq.add(tree_size).map_err(|e| e.to_string())? {
+                        return Ok(());
                     }
-
-                    // Update the landmark checkpoint.
-                    bucket_clone
-                        .put(LANDMARK_CHECKPOINT_KEY, new_checkpoint_str.clone())
-                        .execute()
-                        .await?;
 
                     // Compute the landmark bundle and save it
                     let landmark_subtrees =
@@ -201,8 +195,8 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                         &seq,
                         root_hash,
                         tree_size,
-                        &cosigner_id_clone,
-                        &log_id_clone,
+                        &ca_id_clone,
+                        log_number,
                         &sk_clone,
                         &vk_clone,
                         &landmark_subtrees,
@@ -213,7 +207,7 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     let bundle = LandmarkBundle {
                         checkpoint: new_checkpoint_str,
                         subtrees: landmark_subtrees,
-                        landmarks: seq.landmarks,
+                        landmarks: seq.landmarks.clone(),
                     };
                     bucket_clone
                         // Can unwrap here because we use the autoderived Serialize impl for LandmarkBundle
@@ -221,11 +215,34 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                         .execute()
                         .await?;
 
+                    bucket_clone
+                        .put(LANDMARK_CHECKPOINT_KEY, bundle.checkpoint)
+                        .execute()
+                        .await?;
+
+                    // The sequence is the commit marker for all landmark-dependent objects.
+                    put_landmark_sequence(&bucket_clone, &seq).await?;
+
                     Ok(())
                 }
             })
         },
     )
+}
+
+async fn put_landmark_sequence(bucket: &Bucket, sequence: &LandmarkSequence) -> Result<()> {
+    bucket
+        .put(
+            LANDMARK_KEY,
+            sequence.to_bytes().map_err(|e| e.to_string())?,
+        )
+        .http_metadata(HttpMetadata {
+            content_type: Some("text/plain; charset=utf-8".to_owned()),
+            ..Default::default()
+        })
+        .execute()
+        .await?;
+    Ok(())
 }
 
 // Computes the sequence of landmark subtrees and, for each subtree, a proof of consistency with the
@@ -274,8 +291,8 @@ async fn sign_and_cache_batch_subtrees(
     new_tree_size: u64,
     checkpoint_size: u64,
     checkpoint_hash: Hash,
-    cosigner_id: &TrustAnchorID,
-    log_id: &TrustAnchorID,
+    ca_id: &TrustAnchorID,
+    log_number: u16,
     sk: &ietf_mtc_api::MtcSigningKey,
     vk: &ietf_mtc_api::MtcVerifyingKey,
     bucket: &Bucket,
@@ -284,15 +301,20 @@ async fn sign_and_cache_batch_subtrees(
         return Ok(());
     }
     let cosigner = ietf_mtc_api::MtcCosigner::new_checkpoint(
-        cosigner_id.clone(),
-        log_id.clone(),
+        ca_id.clone(),
+        ca_id,
+        log_number,
         sk.clone(),
         vk.clone(),
-    );
+    )
+    .map_err(|e| e.to_string())?;
     let object_bucket = CachedRoObjectBucket::new(ObjectBucket::new(bucket.clone()));
     let (left, right) =
         Subtree::split_interval(old_tree_size, new_tree_size).map_err(|e| e.to_string())?;
-    for subtree in [Some(left), right].into_iter().flatten() {
+    for subtree in [left, right]
+        .into_iter()
+        .filter(|subtree| subtree.lo() < subtree.hi())
+    {
         // Compute the actual subtree root hash from the checkpoint tiles.
         let (_, subtree_hash) = match prove_subtree_consistency(
             checkpoint_hash,
@@ -317,7 +339,7 @@ async fn sign_and_cache_batch_subtrees(
             checkpoint_hash: checkpoint_hash.0,
             checkpoint_size,
             signature: sig,
-            cosigner_id: cosigner_id.to_string(),
+            cosigner_id: ca_id.to_string(),
         };
         bucket
             .put(
@@ -341,19 +363,21 @@ async fn sign_and_cache_landmark_subtrees(
     seq: &LandmarkSequence,
     checkpoint_hash: Hash,
     checkpoint_size: u64,
-    cosigner_id: &TrustAnchorID,
-    log_id: &TrustAnchorID,
+    ca_id: &TrustAnchorID,
+    log_number: u16,
     sk: &ietf_mtc_api::MtcSigningKey,
     vk: &ietf_mtc_api::MtcVerifyingKey,
     landmark_subtrees: &[SubtreeWithConsistencyProof],
     bucket: &Bucket,
 ) -> Result<()> {
     let cosigner = ietf_mtc_api::MtcCosigner::new_checkpoint(
-        cosigner_id.clone(),
-        log_id.clone(),
+        ca_id.clone(),
+        ca_id,
+        log_number,
         sk.clone(),
         vk.clone(),
-    );
+    )
+    .map_err(|e| e.to_string())?;
     for (subtree, proof) in seq.subtrees().zip(landmark_subtrees.iter()) {
         let subtree_hash = Hash(proof.hash);
         let sig = cosigner
@@ -366,7 +390,7 @@ async fn sign_and_cache_landmark_subtrees(
             checkpoint_hash: checkpoint_hash.0,
             checkpoint_size,
             signature: sig,
-            cosigner_id: cosigner_id.to_string(),
+            cosigner_id: ca_id.to_string(),
         };
         bucket
             .put(
