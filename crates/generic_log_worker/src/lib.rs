@@ -587,7 +587,17 @@ trait LockBackend {
     async fn get_multipart(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, value: &[u8]) -> Result<()>;
     async fn swap(&self, key: &str, old: &[u8], new: &[u8]) -> Result<()>;
+    async fn swap_and_put(
+        &self,
+        key: &str,
+        old: &[u8],
+        new: &[u8],
+        put_key: &str,
+        put_value: &[u8],
+    ) -> Result<()>;
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
+    async fn get_optional(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn delete(&self, key: &str) -> Result<()>;
 }
 
 impl LockBackend for State {
@@ -683,11 +693,38 @@ impl LockBackend for State {
         }
         self.put(key, new).await
     }
-    async fn get(&self, key: &str) -> Result<Vec<u8>> {
+    async fn swap_and_put(
+        &self,
+        key: &str,
+        expected_old: &[u8],
+        new: &[u8],
+        put_key: &str,
+        put_value: &[u8],
+    ) -> Result<()> {
+        let key = key.to_owned();
+        let expected_old = expected_old.to_vec();
+        let new = new.to_vec();
+        let put_key = put_key.to_owned();
+        let put_value = put_value.to_vec();
         self.storage()
-            .get::<Vec<u8>>(key)
-            .await?
-            .ok_or("key not found".into())
+            .transaction(move |txn| async move {
+                let old = txn.get::<Vec<u8>>(&key).await?;
+                if old != expected_old {
+                    return Err("old value does not match expected".into());
+                }
+                txn.put(&key, new).await?;
+                txn.put(&put_key, put_value).await
+            })
+            .await
+    }
+    async fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.get_optional(key).await?.ok_or("key not found".into())
+    }
+    async fn get_optional(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.storage().get(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.storage().delete(key).await.map(|_| ())
     }
 }
 

@@ -54,6 +54,16 @@ const AUX_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
 pub const CHECKPOINT_KEY: &str = "checkpoint";
 /// Path used to store staging bundles in the lock backend.
 const STAGING_KEY: &str = "staging";
+const PENDING_CHECKPOINT_CALLBACK_KEY: &str = "pending-checkpoint-callback";
+
+#[derive(Serialize, Deserialize)]
+struct PendingCheckpointCallback {
+    old_time: UnixTimestampMillis,
+    new_time: UnixTimestampMillis,
+    old_tree_size: u64,
+    new_tree_size: u64,
+    new_checkpoint: Vec<u8>,
+}
 
 // Limit on the number of entries per batch. Tune this parameter to avoid
 // running into various size limitations:
@@ -397,6 +407,9 @@ impl SequenceState {
                 );
                 let staged_uploads = lock.get_multipart(STAGING_KEY).await?;
                 apply_staged_uploads(object, &staged_uploads, c.size(), c.hash()).await?;
+                object
+                    .upload(CHECKPOINT_KEY, stored_checkpoint.clone(), &OPTS_CHECKPOINT)
+                    .await?;
             }
             (Ordering::Equal, true) => {} // Normal case: the sizes are the same and the hashes match.
         }
@@ -820,6 +833,29 @@ pub(crate) async fn sequence<L: LogEntry, M: SequencerMetadata>(
     result
 }
 
+pub(crate) async fn retry_checkpoint_callback(
+    config: &SequencerConfig,
+    lock: &impl LockBackend,
+) -> Result<(), anyhow::Error> {
+    if !config.durable_checkpoint_callback {
+        return Ok(());
+    }
+    let Some(bytes) = lock.get_optional(PENDING_CHECKPOINT_CALLBACK_KEY).await? else {
+        return Ok(());
+    };
+    let pending: PendingCheckpointCallback = crate::deserialize(&bytes)?;
+    (config.checkpoint_callback)(
+        pending.old_time,
+        pending.new_time,
+        pending.old_tree_size,
+        pending.new_tree_size,
+        &pending.new_checkpoint,
+    )
+    .await?;
+    lock.delete(PENDING_CHECKPOINT_CALLBACK_KEY).await?;
+    Ok(())
+}
+
 /// An error that can occur when sequencing a pool.
 #[derive(Error, Debug)]
 enum SequenceError {
@@ -1054,6 +1090,23 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         }
     };
 
+    let pending_callback = if config.durable_checkpoint_callback {
+        Some(
+            crate::serialize(&PendingCheckpointCallback {
+                old_time,
+                new_time: timestamp,
+                old_tree_size: old_size,
+                new_tree_size: new_size,
+                new_checkpoint: new.checkpoint().to_vec(),
+            })
+            .map_err(|e| {
+                SequenceError::NonFatal(format!("couldn't serialize checkpoint callback: {e}"))
+            })?,
+        )
+    } else {
+        None
+    };
+
     // Upload tiles to staging, where they can be recovered by [SequenceState::load] if we
     // crash right after updating DO storage.
     let staged_uploads = marshal_staged_uploads(&tile_uploads, new.tree.size(), new.tree.hash())
@@ -1065,11 +1118,20 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, &old_checkpoint, new.checkpoint())
+    if let Some(pending_callback) = &pending_callback {
+        lock.swap_and_put(
+            CHECKPOINT_KEY,
+            &old_checkpoint,
+            new.checkpoint(),
+            PENDING_CHECKPOINT_CALLBACK_KEY,
+            pending_callback,
+        )
         .await
-        .map_err(|e| {
-            SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
-        })?;
+    } else {
+        lock.swap(CHECKPOINT_KEY, &old_checkpoint, new.checkpoint())
+            .await
+    }
+    .map_err(|e| SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}")))?;
 
     // At this point the pool is fully serialized: new entries were persisted to
     // durable storage (in staging) and the checkpoint was committed to the
@@ -1092,10 +1154,24 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         .upload(CHECKPOINT_KEY, new.checkpoint(), &OPTS_CHECKPOINT)
         .await
         .map_err(|e| {
-            SequenceError::NonFatal(format!("couldn't upload checkpoint to object storage: {e}"))
+            SequenceError::Fatal(format!("couldn't upload checkpoint to object storage: {e}"))
         })?;
 
-    // Return SCTs to clients.
+    // Call the checkpoint callback. This is a no-op for CT, but is used to
+    // update landmark checkpoints for MTC.
+    let callback_result =
+        (config.checkpoint_callback)(old_time, timestamp, old_size, new_size, new.checkpoint())
+            .await;
+    if let Err(e) = callback_result {
+        warn!("{name}: Checkpoint callback failed: {e}");
+    } else if config.durable_checkpoint_callback
+        && let Err(e) = lock.delete(PENDING_CHECKPOINT_CALLBACK_KEY).await
+    {
+        warn!("{name}: Failed to clear checkpoint callback: {e}");
+    }
+
+    // Release metadata only after callback outputs are available or their retry
+    // record is durable.
     for (sender, metadata) in sequenced_metadata {
         sender.send_replace(metadata);
     }
@@ -1109,15 +1185,6 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
             "{name}: Cache put failed (entries={}): {e}",
             cache_metadata.len()
         );
-    }
-
-    // Call the checkpoint callback. This is a no-op for CT, but is used to
-    // update landmark checkpoints for MTC.
-    if let Err(e) =
-        (config.checkpoint_callback)(old_time, timestamp, old_size, new_size, new.checkpoint())
-            .await
-    {
-        warn!("{name}: Checkpoint callback failed: {e}");
     }
 
     for tile in new.edge_tiles {
@@ -1465,9 +1532,51 @@ mod tests {
     use static_ct_api::{
         PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
     };
-    use std::time::Duration;
+    use std::{cell::Cell, rc::Rc, time::Duration};
     use tlog_checkpoint::{CheckpointSigner, CheckpointText, Ed25519CheckpointSigner};
     use tlog_tiles::TlogTile;
+
+    #[test]
+    fn checkpoint_callback_retries_persisted_input() {
+        let calls = Rc::new(Cell::new(0));
+        let fail = Rc::new(Cell::new(true));
+        let callback_calls = calls.clone();
+        let callback_fail = fail.clone();
+        let mut log = TestLog::new();
+        log.config.durable_checkpoint_callback = true;
+        log.config.checkpoint_callback = Box::new(move |_, _, _, _, _| {
+            callback_calls.set(callback_calls.get() + 1);
+            let should_fail = callback_fail.get();
+            Box::pin(async move {
+                if should_fail {
+                    Err("callback failure".into())
+                } else {
+                    Ok(())
+                }
+            })
+        });
+
+        let result = log.add_certificate();
+        log.sequence().unwrap();
+        assert!(block_on(result.resolve()).is_some());
+        assert_eq!(calls.get(), 1);
+        assert!(
+            log.lock
+                .lock
+                .borrow()
+                .contains_key(PENDING_CHECKPOINT_CALLBACK_KEY)
+        );
+
+        fail.set(false);
+        block_on(retry_checkpoint_callback(&log.config, &log.lock)).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(
+            !log.lock
+                .lock
+                .borrow()
+                .contains_key(PENDING_CHECKPOINT_CALLBACK_KEY)
+        );
+    }
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -2272,7 +2381,7 @@ mod tests {
         },
         StorageMode::Ok,
         true,
-        false
+        true
     );
     test_sequence_errors!(
         checkpoint_upload_persisted,
@@ -2282,7 +2391,7 @@ mod tests {
         },
         StorageMode::Ok,
         true,
-        false
+        true
     );
     test_sequence_errors!(
         staging_upload,
@@ -2487,12 +2596,40 @@ mod tests {
             }
             self.put(key, new).await
         }
-        async fn get(&self, key: &str) -> worker::Result<Vec<u8>> {
-            if let Some(value) = self.lock.borrow().get(key) {
-                Ok(value.clone())
-            } else {
-                Err("key doesn't exist".into())
+        async fn swap_and_put(
+            &self,
+            key: &str,
+            old: &[u8],
+            new: &[u8],
+            put_key: &str,
+            put_value: &[u8],
+        ) -> worker::Result<()> {
+            if self.lock.borrow().get(key).is_none_or(|value| value != old) {
+                return Err("old value not present or does not match".into());
             }
+            let (ok, persist) = self.mode.borrow().check(key);
+            if persist {
+                let mut lock = self.lock.borrow_mut();
+                lock.insert(key.to_owned(), new.to_vec());
+                lock.insert(put_key.to_owned(), put_value.to_vec());
+            }
+            if ok {
+                Ok(())
+            } else {
+                Err("failed to swap and put values".into())
+            }
+        }
+        async fn get(&self, key: &str) -> worker::Result<Vec<u8>> {
+            self.get_optional(key)
+                .await?
+                .ok_or_else(|| "key doesn't exist".into())
+        }
+        async fn get_optional(&self, key: &str) -> worker::Result<Option<Vec<u8>>> {
+            Ok(self.lock.borrow().get(key).cloned())
+        }
+        async fn delete(&self, key: &str) -> worker::Result<()> {
+            self.lock.borrow_mut().remove(key);
+            Ok(())
         }
     }
 
@@ -2543,6 +2680,7 @@ mod tests {
                 sequence_skip_threshold_millis: None,
                 location_hint: None,
                 checkpoint_callback: empty_checkpoint_callback(),
+                durable_checkpoint_callback: false,
             };
             let pool_state = RefCell::new(PoolState::default());
             block_on(create_log(&config, &object, &lock)).unwrap();
