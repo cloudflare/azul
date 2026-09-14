@@ -39,6 +39,7 @@ pub struct GenericSequencer<L: LogEntry, M: SequencerMetadata> {
     pool_state: RefCell<PoolState<L::Pending, M>>,
     initialized: RefCell<bool>,
     init_mux: Mutex<()>,
+    alarm_mux: Mutex<()>,
     wshim: Option<Wshim>,
 }
 
@@ -57,6 +58,8 @@ pub struct SequencerConfig {
     pub max_tree_size: Option<u64>,
     pub location_hint: Option<String>,
     pub checkpoint_callback: CheckpointCallbacker,
+    /// Persist failed callback inputs and retry them before sequencing another checkpoint.
+    pub durable_checkpoint_callback: bool,
 }
 
 impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
@@ -88,6 +91,7 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
             pool_state: RefCell::new(PoolState::default()),
             initialized: RefCell::new(false),
             init_mux: Mutex::new(()),
+            alarm_mux: Mutex::new(()),
             wshim,
         }
     }
@@ -161,6 +165,8 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
     }
 
     async fn alarm_impl(&self, metrics: SequencerMetrics) -> Result<Response, WorkerError> {
+        let _alarm_lock = self.alarm_mux.lock().await;
+
         if !*self.initialized.borrow() {
             info!("{}: Initializing log from alarm handler", self.config.name);
             self.initialize(&metrics).await?;
@@ -171,6 +177,14 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
             .storage()
             .set_alarm(self.config.sequence_interval)
             .await?;
+
+        if let Err(e) = log_ops::retry_checkpoint_callback(&self.config, &self.do_state).await {
+            error!(
+                "{}: Checkpoint callback retry failed: {e}",
+                self.config.name
+            );
+            return Response::empty();
+        }
 
         if log_ops::sequence::<L, M>(
             &self.pool_state,
