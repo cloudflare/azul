@@ -1,0 +1,85 @@
+Cargo.lock
+  s_5d7713b7a1bc7d::t_29a2c2a547465e 1610-1613,1623,1627,1639-1642,3210,3212
+crates/bootstrap_mtc_api/README.md
+  s_41572ff5ca6d17::t_156d563fb50950 9-11
+crates/ct_worker/src/batcher_do.rs
+  s_41572ff5ca6d17::t_406ed45a81a75c 21
+crates/ct_worker/src/sequencer_do.rs
+  s_41572ff5ca6d17::t_a9698f0ecb2627 36
+crates/generic_log_worker/src/batcher_do.rs
+  s_41572ff5ca6d17::t_fa2396cb765d8a 50,81,124-125
+crates/generic_log_worker/src/log_ops.rs
+  s_41572ff5ca6d17::t_a2c254f1816d39 169,832-852,878,1665-1689,2542
+crates/generic_log_worker/src/sequencer_do.rs
+  s_41572ff5ca6d17::t_a137ac0241cd2c 57
+crates/ietf_mtc_api/src/landmark.rs
+  s_41572ff5ca6d17::t_5e8ff502131ae8 4,35,37,165,172,193-199,228-256,262-266,272-275,290-294,298,300-306,319-323,366,369,465-501,509
+crates/ietf_mtc_api/src/lib.rs
+  s_6e67e41cf84c26::t_98e60ec80c9aea 14-15,26-29,31,42,47,50,57-83,89-185,195,197-205,211,219,221-242,251,283-284,299-300,314-320,322-323,327,366,389-393,395,442,449-465,480-482,492-501,503,505-506,514,520,569-575,585-603,605,614-619,623,631,633-636,643,648,667,691,710,722,734,752,757,786,820,859,879-881,888-1102,1112-1116,1138-1142,1148-1163,1195,1244
+crates/ietf_mtc_worker/README.md
+  s_41572ff5ca6d17::t_cb423df0bd36ef 5-9,15
+crates/ietf_mtc_worker/config.dev.json
+  s_41572ff5ca6d17::t_97457c8012160b 6-8,16-18
+crates/ietf_mtc_worker/config.schema.json
+  s_41572ff5ca6d17::t_d9a421799ebb02 29,31,33-37,56,106-107,112-113,123
+crates/ietf_mtc_worker/src/batcher_do.rs
+  s_41572ff5ca6d17::t_defe778d2b70c4 1-2,9-12,15-16,20-21,23,25,30-34
+crates/ietf_mtc_worker/src/cleaner_do.rs
+  s_3eeece89f832c3::t_b5824e94ea798d 3,5,7,9-10,17-20,23-27,30,33,35,38,43-47,51-61
+crates/ietf_mtc_worker/src/frontend_worker.rs
+  s_41572ff5ca6d17::t_87ef21a92375e7 4,6-8,10-19,21-25,30-31,36-40,44,53-54,60-61,86-91,93-111,113-116,118,121-124,126-143,146-159,161-164,167-171,173-177,179-219,221-222,224-242,244-255,271,273-275,277-278,280,282-283,285-466,475-478,487,491,493-497,499,504,507,515,524-527,530,544,548-554,560-566,576-577,579-581,585-587,589-593,595-603
+crates/ietf_mtc_worker/src/lib.rs
+  s_b1c5384410aae0::t_da25d23c4340a0 8,23-25,42-60,105-107,114-115,117,121-124
+crates/ietf_mtc_worker/src/sequence_metadata.rs
+  s_41572ff5ca6d17::t_1fa31c6a4919bd 9-33,50-51,65
+crates/tlog_core/src/lib.rs
+  s_b1c5384410aae0::t_7e19ffeaf26b55 382-384,428-433,479-487,895-902,942-952,970-973,995,999-1005,1095,1118-1129,1131-1132,1157,1173,1177-1180,1182-1183,1201,1231-1232,1263-1265,1447-1449,1454-1470,1506,1512-1538,1544-1546,1557-1560,1563-1566,1573,1580,1582-1610
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e91c757ddec665d7b07c3f1fc6ec3bebc0ff0954",
+  "prompts": {},
+  "sessions": {
+    "s_3eeece89f832c3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_feae38cc0ffepiPCS487tvGPyv",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    },
+    "s_41572ff5ca6d17": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_feaef75d9ffekWmh16uhdOGqc6",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    },
+    "s_5d7713b7a1bc7d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f6e5d148fffeNcY5hLs6MolHA7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    },
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    },
+    "s_b1c5384410aae0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f6e53c06efferf916yNCnAjQoj",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
