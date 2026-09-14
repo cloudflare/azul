@@ -6,8 +6,6 @@
 # See: https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html#details
 resolver = "2"
 members = [
-    "crates/bootstrap_mtc_api",
-    "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
     "crates/integration_tests",
@@ -32,6 +30,11 @@ members = [
     "crates/x509_util",
     "fuzz",
 ]
+exclude = [
+    "crates/bootstrap_mtc_api",
+    "crates/bootstrap_mtc_worker",
+    "crates/bootstrap_mtc_worker/config",
+]
 # Exclude two kinds of crates from the default `cargo <cmd>` run:
 #   * `integration_tests`: requires a live wrangler dev instance and will
 #     hang if run without one. Invoke explicitly with, e.g.
@@ -40,8 +43,6 @@ members = [
 #     nightly toolchain / sanitizer runtime. Invoke explicitly with
 #     `cargo fuzz run <target>`.
 default-members = [
-    "crates/bootstrap_mtc_api",
-    "crates/bootstrap_mtc_worker",
     "crates/ct_worker",
     "crates/generic_log_worker",
     "crates/length_prefixed",
@@ -136,7 +137,6 @@ length_prefixed = { path = "crates/length_prefixed" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
 ml-dsa = "0.1.1"
-bootstrap_mtc_api = { version = "0.2.0", path = "crates/bootstrap_mtc_api" }
 p256 = { version = "0.14.0", features = ["ecdsa"] }
 p384 = { version = "0.14.0", features = ["ecdsa"] }
 p521 = { version = "0.14.0", features = ["ecdsa"] }

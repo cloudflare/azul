@@ -133,8 +133,6 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | npx wrangler -e
 
 **Alternatively, simply run the script [create-log.sh](./scripts/create-log.sh)**
 
-(Note: For `bootstrap_mtc_worker` we use ed25519 for the signing key. There is no witness.)
-
 1.  Deploy the worker. The worker will be available at `https://static-ct-${ENV}.<your-team>.workers.dev/logs/${LOG_NAME}`.
 
 ```bash
