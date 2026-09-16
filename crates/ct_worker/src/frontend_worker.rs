@@ -295,14 +295,16 @@ async fn add_chain_or_pre_chain(
     };
 
     // Temporal interval dates prior to the Unix epoch are treated as the Unix epoch.
+    let not_after_start = effective_not_after_start(
+        params.temporal_interval.start_inclusive.timestamp_millis(),
+        params.reject_expired,
+        Date::now().as_millis(),
+    );
     let roots = load_roots(env, log).await?;
     let (pending_entry, found_root_idx) = match static_ct_api::partially_validate_chain(
         &req.chain,
         &roots,
-        Some(
-            u64::try_from(params.temporal_interval.start_inclusive.timestamp_millis())
-                .unwrap_or_default(),
-        ),
+        Some(not_after_start),
         Some(
             u64::try_from(params.temporal_interval.end_exclusive.timestamp_millis())
                 .unwrap_or_default(),
@@ -411,4 +413,37 @@ async fn add_chain_or_pre_chain(
     let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
         .map_err(|e| e.to_string())?;
     Ok((StatusCode::OK, Json(sct)).into_response())
+}
+
+fn effective_not_after_start(
+    configured_start_millis: i64,
+    reject_expired: bool,
+    now_millis: u64,
+) -> u64 {
+    let configured_start = u64::try_from(configured_start_millis).unwrap_or_default();
+    if reject_expired {
+        configured_start.max(now_millis)
+    } else {
+        configured_start
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_not_after_start;
+
+    #[test]
+    fn expired_certificate_bound_uses_current_time() {
+        assert_eq!(effective_not_after_start(100, true, 200), 200);
+    }
+
+    #[test]
+    fn expired_certificate_check_can_be_disabled() {
+        assert_eq!(effective_not_after_start(100, false, 200), 100);
+    }
+
+    #[test]
+    fn temporal_interval_bound_is_preserved_when_later() {
+        assert_eq!(effective_not_after_start(300, true, 200), 300);
+    }
 }

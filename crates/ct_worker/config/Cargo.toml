@@ -13,3 +13,6 @@ description = "Configuration for ct_worker"
 [dependencies]
 chrono.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -32,7 +32,7 @@ use integration_tests::{
         fetch_and_verify_checkpoint, fetch_checkpoint_until_size, leaf_index_from_sct,
     },
     client::{CtClient, base_url},
-    fixtures::{empty_chain, garbage_chain, make_chains},
+    fixtures::{empty_chain, garbage_chain, make_chains, make_expired_chain},
     local_r2,
 };
 use tokio::sync::OnceCell;
@@ -212,6 +212,15 @@ async fn add_chain_with_empty_chain_returns_400() {
         .await
         .expect("add-chain request");
     assert_eq!(status, 400, "expected 400 for empty chain");
+}
+
+/// Expired leaf certificates are rejected when `reject_expired` uses its default value.
+#[tokio::test]
+async fn add_chain_with_expired_leaf_returns_400() {
+    let client = CtClient::new("e2etestshard");
+    let chain = make_expired_chain(&client.log).expect("generating expired chain fixture");
+    let (status, _) = client.add_chain(chain).await.expect("add-chain request");
+    assert_eq!(status, 400, "expected 400 for expired leaf certificate");
 }
 
 /// `POST /logs/:log/ct/v1/add-chain` returns a structurally valid SCT with

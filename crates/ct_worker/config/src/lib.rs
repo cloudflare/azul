@@ -27,6 +27,7 @@ pub enum LogType {
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LogParams {
     pub description: Option<String>,
     pub log_type: Option<LogType>,
@@ -50,6 +51,8 @@ pub struct LogParams {
     pub enable_dedup: bool,
     #[serde(default = "default_bool::<true>")]
     pub enable_ccadb_roots: bool,
+    #[serde(default = "default_bool::<true>")]
+    pub reject_expired: bool,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,
     #[serde(default = "default_bool::<false>")]
@@ -67,4 +70,18 @@ fn default_u64<const V: u64>() -> u64 {
 }
 fn default_usize<const V: usize>() -> usize {
     V
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn reject_expired_defaults_to_true_and_can_be_disabled() {
+        let config: AppConfig =
+            serde_json::from_str(include_str!("../../config.dev.json")).unwrap();
+
+        assert!(config.logs["e2etestshard"].reject_expired);
+        assert!(!config.logs["dev2026h1a"].reject_expired);
+    }
 }
