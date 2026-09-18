@@ -359,8 +359,37 @@ async fn tlog_witness_end_to_end() {
     let signer = log_signer();
     let mut log = ToyLog::new();
 
+    // A size-zero checkpoint must use the RFC 6962 empty-tree hash.
+    {
+        let tree = TreeWithTimestamp::new(0, Hash([1u8; HASH_SIZE]), now_millis());
+        let cp = tree.sign(LOG_ORIGIN, &[], &[&signer], &mut rng()).unwrap();
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "invalid empty-tree hash: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // The initial checkpoint transition cannot include a consistency proof.
+    {
+        log.push(b"leaf 0");
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[Hash([0u8; HASH_SIZE])], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "initial non-empty proof: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
     // ----------------------- (2) First submission: old=0 -----------------------
-    log.push(b"leaf 0");
     {
         let cp = log.sign_checkpoint(&signer);
         let note = Note::from_bytes(&cp).unwrap();
@@ -378,6 +407,34 @@ async fn tlog_witness_end_to_end() {
             "response must contain at least one signature"
         );
         verify_witness_signature(&note, &sigs, &meta);
+    }
+
+    // A same-size transition must match the recorded hash and omit the proof.
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(1, &[Hash([0u8; HASH_SIZE])], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "same-size non-empty proof: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+
+        let different = TreeWithTimestamp::new(1, Hash([1u8; HASH_SIZE]), now_millis());
+        let cp = different
+            .sign(LOG_ORIGIN, &[], &[&signer], &mut rng())
+            .unwrap();
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(1, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            409,
+            "same-size hash mismatch: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
     }
 
     // ----------------------- (3) Second submission with consistency proof -----------------------

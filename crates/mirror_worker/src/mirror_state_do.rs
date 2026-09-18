@@ -240,13 +240,13 @@ impl MirrorState {
                         CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::SameSize) => {
                             Response::error(
                                 "consistency proof must be empty when old_size == checkpoint size",
-                                400,
+                                422,
                             )
                         }
                         CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::Initial) => {
                             Response::error(
                                 "consistency proof must be empty when old_size is 0 (first pending checkpoint for this origin)",
-                                400,
+                                422,
                             )
                         }
                         CheckpointTransitionError::ConsistencyProofFailed => {
@@ -254,7 +254,7 @@ impl MirrorState {
                         }
                         CheckpointTransitionError::InvalidEmptyTreeHash => Response::error(
                             "size-zero checkpoint must use the empty-tree hash",
-                            400,
+                            422,
                         ),
                     };
                 }
