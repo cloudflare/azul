@@ -1007,7 +1007,7 @@ fn resolve_target_pending(
     snapshot: &MirrorStateSnapshot,
     verifiers: &signed_note::VerifierList,
 ) -> std::result::Result<PendingCheckpoint, &'static str> {
-    let Some(pending) = snapshot.pending.as_ref() else {
+    let Some(pending) = &snapshot.pending else {
         return Err("no pending checkpoint");
     };
     if header.upload_end == pending.size {
