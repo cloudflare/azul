@@ -222,12 +222,12 @@ fn metadata_logs() -> Vec<LogMetadata<'static>> {
         .iter()
         .map(|(origin, log)| LogMetadata {
             description: log.description.as_deref(),
-            origin,
+            origin: origin.as_str(),
             checkpoint_signers: log
                 .checkpoint_signers
                 .iter()
                 .map(|signer| CheckpointSignerMetadata {
-                    name: &signer.name,
+                    name: signer.name.as_str(),
                     algorithm: signer.algorithm.as_str(),
                     public_key: &signer.public_key,
                 })
@@ -258,7 +258,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
             .expect("validated mirror mode has mirror config");
         let signer = load_mirror_signer(&env)?;
         Some(IdentityMetadata {
-            name: &identity.name,
+            name: identity.name.as_str(),
             description: identity.description.as_deref(),
             public_key: signer.public_key_der(),
             algorithm: signer.algorithm(),
@@ -288,7 +288,7 @@ fn identity_metadata<'a>(
     signer: &'a IdentitySigner,
 ) -> IdentityMetadata<'a> {
     IdentityMetadata {
-        name: &identity.name,
+        name: identity.name.as_str(),
         description: identity.description.as_deref(),
         public_key: signer.public_key_der(),
         algorithm: signer.algorithm(),

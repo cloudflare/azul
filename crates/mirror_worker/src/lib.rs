@@ -110,7 +110,7 @@ pub(crate) static LOG_KEYS: LazyLock<HashMap<String, Vec<LogKey>>> = LazyLock::n
     CONFIG
         .logs
         .iter()
-        .map(|(origin, log)| (origin.clone(), parse_log_keys(log)))
+        .map(|(origin, log)| (origin.as_str().to_owned(), parse_log_keys(log)))
         .collect()
 });
 
@@ -135,8 +135,7 @@ fn parse_log_keys(log: &config::LogParams) -> Vec<LogKey> {
     log.checkpoint_signers
         .iter()
         .map(|signer| {
-            let name = KeyName::new(signer.name.clone())
-                .expect("checkpoint signer name validated by AppConfig::validate");
+            let name = signer.name.clone();
             match signer.algorithm {
                 CheckpointAlgorithm::Ed25519 => LogKey::Ed25519 {
                     name,
@@ -268,7 +267,11 @@ pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static IdentitySigner> {
         return Ok(s);
     }
     let pem = env.secret("MIRROR_SIGNING_KEY")?.to_string();
-    let signer = build_identity_signer(&CONFIG.mirror_config().name, "MIRROR_SIGNING_KEY", &pem)?;
+    let signer = build_identity_signer(
+        CONFIG.mirror_config().name.as_str(),
+        "MIRROR_SIGNING_KEY",
+        &pem,
+    )?;
     Ok(MIRROR_SIGNER.get_or_init(|| signer))
 }
 
@@ -329,7 +332,7 @@ pub(crate) fn load_witness_signer(env: &Env) -> Result<&'static IdentitySigner> 
         .witness
         .as_ref()
         .expect("validated witness mode must have witness config");
-    let signer = build_identity_signer(&identity.name, "WITNESS_SIGNING_KEY", &pem)?;
+    let signer = build_identity_signer(identity.name.as_str(), "WITNESS_SIGNING_KEY", &pem)?;
     Ok(WITNESS_SIGNER.get_or_init(|| signer))
 }
 
@@ -486,12 +489,12 @@ mod signer_tests {
             description: None,
             checkpoint_signers: vec![
                 CheckpointSigner {
-                    name: "log.example/ed".to_owned(),
+                    name: KeyName::new("log.example/ed".to_owned()).unwrap(),
                     algorithm: CheckpointAlgorithm::Ed25519,
                     public_key: ed_key.verifying_key().to_public_key_der().unwrap().to_vec(),
                 },
                 CheckpointSigner {
-                    name: "log.example/ml".to_owned(),
+                    name: KeyName::new("log.example/ml".to_owned()).unwrap(),
                     algorithm: CheckpointAlgorithm::SubtreeV1,
                     public_key: ml_key.verifying_key().to_public_key_der().unwrap().to_vec(),
                 },

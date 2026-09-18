@@ -5,7 +5,7 @@
 
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ml_dsa::{MlDsa44, VerifyingKey as MlDsaVerifyingKey};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier};
 use std::collections::{BTreeSet, HashMap};
@@ -50,20 +50,22 @@ pub struct AppConfig {
     pub witness: Option<IdentityConfig>,
     pub mirror: Option<MirrorConfig>,
     #[serde(deserialize_with = "deserialize_logs")]
-    pub logs: HashMap<String, LogParams>,
+    pub logs: HashMap<KeyName, LogParams>,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityConfig {
-    pub name: String,
+    #[serde(deserialize_with = "deserialize_key_name")]
+    pub name: KeyName,
     pub description: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct MirrorConfig {
-    pub name: String,
+    #[serde(deserialize_with = "deserialize_key_name")]
+    pub name: KeyName,
     pub description: Option<String>,
     pub clean_interval_secs: Option<u64>,
     pub commit_packages: Option<u64>,
@@ -87,14 +89,22 @@ impl MirrorConfig {
     }
 }
 
-fn deserialize_logs<'de, D>(deserializer: D) -> Result<HashMap<String, LogParams>, D::Error>
+fn deserialize_key_name<'de, D>(deserializer: D) -> Result<KeyName, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    KeyName::new(name).map_err(D::Error::custom)
+}
+
+fn deserialize_logs<'de, D>(deserializer: D) -> Result<HashMap<KeyName, LogParams>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     struct LogsVisitor;
 
     impl<'de> serde::de::Visitor<'de> for LogsVisitor {
-        type Value = HashMap<String, LogParams>;
+        type Value = HashMap<KeyName, LogParams>;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("a map of checkpoint origin to log parameters")
@@ -106,6 +116,7 @@ where
         {
             let mut logs = HashMap::with_capacity(access.size_hint().unwrap_or(0));
             while let Some((origin, params)) = access.next_entry::<String, LogParams>()? {
+                let origin = KeyName::new(origin).map_err(serde::de::Error::custom)?;
                 if logs.contains_key(&origin) {
                     return Err(serde::de::Error::custom(format!(
                         "duplicate checkpoint origin {origin:?} in logs"
@@ -161,12 +172,6 @@ impl AppConfig {
                 self.mode.as_str()
             ));
         }
-        if let Some(identity) = &self.witness {
-            validate_identity_name("witness.name", &identity.name)?;
-        }
-        if let Some(identity) = &self.mirror {
-            validate_identity_name("mirror.name", &identity.name)?;
-        }
         if let (Some(witness), Some(mirror)) = (&self.witness, &self.mirror)
             && witness.name == mirror.name
         {
@@ -177,12 +182,6 @@ impl AppConfig {
         }
         Ok(())
     }
-}
-
-fn validate_identity_name(field: &str, name: &str) -> Result<(), String> {
-    KeyName::new(name.to_owned())
-        .map(|_| ())
-        .map_err(|e| format!("{field} {name:?} is not a valid signed-note key name: {e:?}"))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -214,15 +213,15 @@ pub struct LogParams {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointSigner {
-    pub name: String,
+    #[serde(deserialize_with = "deserialize_key_name")]
+    pub name: KeyName,
     pub algorithm: CheckpointAlgorithm,
     #[serde_as(as = "Base64")]
     pub public_key: Vec<u8>,
 }
 
 impl LogParams {
-    fn validate(&self, origin: &str) -> Result<(), String> {
-        validate_identity_name(&format!("log {origin:?} origin"), origin)?;
+    fn validate(&self, origin: &KeyName) -> Result<(), String> {
         if self.checkpoint_signers.is_empty() {
             return Err(format!(
                 "log {origin:?}: checkpoint_signers must not be empty"
@@ -230,11 +229,7 @@ impl LogParams {
         }
         let mut seen = BTreeSet::new();
         for (i, signer) in self.checkpoint_signers.iter().enumerate() {
-            let name = KeyName::new(signer.name.clone()).map_err(|e| {
-                format!(
-                    "log {origin:?}: checkpoint_signers[{i}].name is not a valid signed-note key name: {e:?}"
-                )
-            })?;
+            let name = signer.name.clone();
             let key_id = match signer.algorithm {
                 CheckpointAlgorithm::Ed25519 => {
                     let key = ed25519_dalek::VerifyingKey::from_public_key_der(&signer.public_key)
@@ -271,6 +266,10 @@ mod tests {
     use ed25519_dalek::pkcs8::EncodePublicKey as _;
     use ml_dsa::{Keypair as _, SigningKey};
 
+    fn key_name(name: &str) -> KeyName {
+        KeyName::new(name.to_owned()).unwrap()
+    }
+
     fn config(mode: Mode, witness: bool, mirror: bool) -> AppConfig {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
             .verifying_key()
@@ -283,22 +282,22 @@ mod tests {
             submission_prefix: "https://submit.example/".to_owned(),
             monitoring_prefix: Some("https://monitor.example/".to_owned()),
             witness: witness.then(|| IdentityConfig {
-                name: "witness.example".to_owned(),
+                name: key_name("witness.example"),
                 description: None,
             }),
             mirror: mirror.then(|| MirrorConfig {
-                name: "mirror.example".to_owned(),
+                name: key_name("mirror.example"),
                 description: None,
                 clean_interval_secs: None,
                 commit_packages: None,
                 max_chunk_bytes: None,
             }),
             logs: HashMap::from([(
-                "log.example".to_owned(),
+                key_name("log.example"),
                 LogParams {
                     description: None,
                     checkpoint_signers: vec![CheckpointSigner {
-                        name: "log.example".to_owned(),
+                        name: key_name("log.example"),
                         algorithm: CheckpointAlgorithm::Ed25519,
                         public_key: key,
                     }],
@@ -361,11 +360,11 @@ mod tests {
         let mut config = config(Mode::Witness, true, false);
         config
             .logs
-            .get_mut("log.example")
+            .get_mut(&key_name("log.example"))
             .unwrap()
             .checkpoint_signers
             .push(CheckpointSigner {
-                name: "log.example/post-quantum".to_owned(),
+                name: key_name("log.example/post-quantum"),
                 algorithm: CheckpointAlgorithm::SubtreeV1,
                 public_key: ml_dsa_spki(9),
             });
@@ -377,7 +376,7 @@ mod tests {
         let mut wrong_ml = config(Mode::Witness, true, false);
         let signer = &mut wrong_ml
             .logs
-            .get_mut("log.example")
+            .get_mut(&key_name("log.example"))
             .unwrap()
             .checkpoint_signers[0];
         signer.algorithm = CheckpointAlgorithm::SubtreeV1;
@@ -386,7 +385,7 @@ mod tests {
         let mut wrong_ed = config(Mode::Witness, true, false);
         let signer = &mut wrong_ed
             .logs
-            .get_mut("log.example")
+            .get_mut(&key_name("log.example"))
             .unwrap()
             .checkpoint_signers[0];
         signer.public_key = ml_dsa_spki(10);
@@ -398,7 +397,7 @@ mod tests {
         let mut config = config(Mode::Witness, true, false);
         config
             .logs
-            .get_mut("log.example")
+            .get_mut(&key_name("log.example"))
             .unwrap()
             .checkpoint_signers[0]
             .public_key = b"not DER".to_vec();
@@ -408,7 +407,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_signer_id() {
         let mut config = config(Mode::Witness, true, false);
-        let log = config.logs.get_mut("log.example").unwrap();
+        let log = config.logs.get_mut(&key_name("log.example")).unwrap();
         log.checkpoint_signers.push(CheckpointSigner {
             name: log.checkpoint_signers[0].name.clone(),
             algorithm: log.checkpoint_signers[0].algorithm,
@@ -422,6 +421,21 @@ mod tests {
         let mut config = config(Mode::WitnessAndMirror, true, true);
         config.mirror.as_mut().unwrap().name = config.witness.as_ref().unwrap().name.clone();
         assert!(config.validate().unwrap_err().contains("must be distinct"));
+    }
+
+    #[test]
+    fn invalid_key_names_fail_deserialization() {
+        let fixture = include_str!("../../config.witness.json");
+        for invalid in [
+            fixture.replace("dev.witness.example", "invalid witness"),
+            fixture.replace("\"example.com/witness-log\":", "\"invalid origin\":"),
+            fixture.replace(
+                "\"name\": \"example.com/witness-log\"",
+                "\"name\": \"invalid signer\"",
+            ),
+        ] {
+            assert!(serde_json::from_str::<AppConfig>(&invalid).is_err());
+        }
     }
 
     #[test]
