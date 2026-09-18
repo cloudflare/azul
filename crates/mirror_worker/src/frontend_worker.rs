@@ -312,17 +312,6 @@ async fn add_checkpoint(
     };
     verify_source_checkpoint(&checkpoint, &verifiers, "add-checkpoint")?;
 
-    let witness_signature = if enabled_roles(CONFIG.mode).witness() {
-        Some(
-            load_witness_signer(&env)?
-                .as_checkpoint_signer()
-                .sign(now_millis(), &checkpoint_text)
-                .map_err(|error| Error::from(format!("witness signing: {error:?}")))?,
-        )
-    } else {
-        None
-    };
-
     let update = UpdatePendingRequest {
         old_size,
         new_size: checkpoint_text.size(),
@@ -334,9 +323,13 @@ async fn add_checkpoint(
         return Ok(response);
     }
 
-    let Some(signature) = witness_signature else {
+    if !enabled_roles(CONFIG.mode).witness() {
         return Ok(StatusCode::OK.into_response());
-    };
+    }
+    let signature = load_witness_signer(&env)?
+        .as_checkpoint_signer()
+        .sign(now_millis(), &checkpoint_text)
+        .map_err(|error| Error::from(format!("witness signing: {error:?}")))?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
