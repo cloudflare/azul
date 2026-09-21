@@ -65,33 +65,6 @@ pub(crate) const MIRROR_STATE_BINDING: &str = "MIRROR_STATE";
 /// The binding name used in `wrangler.jsonc` for the `MirrorCleaner` DO.
 pub(crate) const MIRROR_CLEANER_BINDING: &str = "MIRROR_CLEANER";
 
-#[derive(Clone, Copy)]
-pub(crate) struct EnabledRoles {
-    witness: bool,
-    mirror: bool,
-}
-
-pub(crate) const fn enabled_roles(mode: config::Mode) -> EnabledRoles {
-    EnabledRoles {
-        witness: mode.witness_enabled(),
-        mirror: mode.mirror_enabled(),
-    }
-}
-
-impl EnabledRoles {
-    pub(crate) const fn witness(self) -> bool {
-        self.witness
-    }
-
-    pub(crate) const fn mirror(self) -> bool {
-        self.mirror
-    }
-
-    pub(crate) const fn combined(self) -> bool {
-        self.witness && self.mirror
-    }
-}
-
 /// The compile-time-embedded worker configuration.
 ///
 /// `build.rs` validates `config.<DEPLOY_ENV>.json` against the schema and
@@ -260,7 +233,7 @@ static WITNESS_SIGNER: OnceLock<IdentitySigner> = OnceLock::new();
 /// Returns an error if the `MIRROR_SIGNING_KEY` secret is missing, the PEM
 /// is malformed, or the key is neither Ed25519 nor ML-DSA-44.
 pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static IdentitySigner> {
-    if !enabled_roles(CONFIG.mode).mirror() {
+    if !CONFIG.mirror_enabled() {
         return Err(Error::from("mirror identity is disabled"));
     }
     if let Some(s) = MIRROR_SIGNER.get() {
@@ -321,7 +294,7 @@ fn build_identity_signer(
 }
 
 pub(crate) fn load_witness_signer(env: &Env) -> Result<&'static IdentitySigner> {
-    if !enabled_roles(CONFIG.mode).witness() {
+    if !CONFIG.witness_enabled() {
         return Err(Error::from("witness identity is disabled"));
     }
     if let Some(signer) = WITNESS_SIGNER.get() {
@@ -338,7 +311,7 @@ pub(crate) fn load_witness_signer(env: &Env) -> Result<&'static IdentitySigner> 
 
 /// Load enabled identity keys and reject key reuse across roles.
 pub(crate) fn validate_identity_keys(env: &Env) -> Result<()> {
-    if !enabled_roles(CONFIG.mode).combined() {
+    if !CONFIG.witness_enabled() || !CONFIG.mirror_enabled() {
         return Ok(());
     }
     let witness = load_witness_signer(env)?;
@@ -397,7 +370,7 @@ pub(crate) fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSealer> {
 #[cfg(test)]
 mod signer_tests {
     use super::{
-        IdentitySigner, build_identity_signer, enabled_roles, ensure_distinct_identity_keys,
+        IdentitySigner, build_identity_signer, ensure_distinct_identity_keys,
         log_verifiers_for_keys, parse_log_keys,
     };
     use base64::Engine as _;
@@ -522,21 +495,6 @@ mod signer_tests {
         let ml_signature = ml_signer.sign(1, &checkpoint).unwrap();
         let ml_note = Note::new(checkpoint_bytes.as_bytes(), &[ml_signature]).unwrap();
         ml_note.verify(&log_verifiers_for_keys(&keys)).unwrap();
-    }
-
-    #[test]
-    fn standalone_role_policy_gates_routes_metadata_and_secrets() {
-        let witness = enabled_roles(config::Mode::Witness);
-        assert!(witness.witness());
-        assert!(!witness.mirror());
-
-        let mirror = enabled_roles(config::Mode::Mirror);
-        assert!(!mirror.witness());
-        assert!(mirror.mirror());
-
-        let combined = enabled_roles(config::Mode::WitnessAndMirror);
-        assert!(combined.witness());
-        assert!(combined.mirror());
     }
 }
 

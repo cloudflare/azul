@@ -7,10 +7,9 @@ with one per-origin `MirrorState` Durable Object.
 
 ## Configuration
 
-`mode` is one of `witness`, `mirror`, or `witness-and-mirror`. The matching
-`witness` and `mirror` identity sections are required only when that role is
-enabled. `logs` is keyed by exact checkpoint origin and supports structured
-Ed25519 and `subtree/v1` checkpoint signers.
+The presence of the `witness` and `mirror` identity sections enables each role.
+`logs` is keyed by exact checkpoint origin and supports structured Ed25519 and
+`subtree/v1` checkpoint signers.
 
 Role keys remain separate secrets:
 

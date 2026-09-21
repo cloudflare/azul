@@ -4,7 +4,7 @@
 //! HTTP entry point and protocol handlers.
 
 use crate::{
-    CONFIG, IdentitySigner, enabled_roles, load_mirror_signer, load_witness_signer, log_verifiers,
+    CONFIG, IdentitySigner, load_mirror_signer, load_witness_signer, log_verifiers,
     mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, state_stub},
 };
 use axum::{
@@ -45,7 +45,7 @@ fn start() {
 async fn add_accept_encoding(
     mut response: axum::http::Response<axum::body::Body>,
 ) -> axum::http::Response<axum::body::Body> {
-    if enabled_roles(CONFIG.mode).mirror() {
+    if CONFIG.mirror_enabled() {
         response
             .headers_mut()
             .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
@@ -75,7 +75,7 @@ async fn fetch(
             )
             .route("/metadata", get(metadata))
             .route("/", get(root));
-        if enabled_roles(CONFIG.mode).mirror() {
+        if CONFIG.mirror_enabled() {
             router = router.route("/add-entries", post(crate::add_entries::add_entries));
         }
         router
@@ -100,11 +100,7 @@ async fn fetch(
 }
 
 async fn root() -> impl IntoResponse {
-    let roles = match CONFIG.mode {
-        config::Mode::Witness => "witness",
-        config::Mode::Mirror => "mirror",
-        config::Mode::WitnessAndMirror => "witness and mirror",
-    };
+    let roles = CONFIG.mode().replace('-', " ");
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -240,8 +236,7 @@ fn metadata_logs() -> Vec<LogMetadata<'static>> {
 
 #[worker::send]
 async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
-    let roles = enabled_roles(CONFIG.mode);
-    let witness = if roles.witness() {
+    let witness = if CONFIG.witness_enabled() {
         let identity = CONFIG
             .witness
             .as_ref()
@@ -251,7 +246,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
     } else {
         None
     };
-    let mirror = if roles.mirror() {
+    let mirror = if CONFIG.mirror_enabled() {
         let identity = CONFIG
             .mirror
             .as_ref()
@@ -270,7 +265,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
     Ok((
         StatusCode::OK,
         Json(MetadataResponse {
-            mode: CONFIG.mode.as_str(),
+            mode: CONFIG.mode(),
             submission_prefix: &CONFIG.submission_prefix,
             monitoring_prefix: CONFIG
                 .monitoring_prefix
@@ -323,7 +318,7 @@ async fn add_checkpoint(
         return Ok(response);
     }
 
-    if !enabled_roles(CONFIG.mode).witness() {
+    if !CONFIG.witness_enabled() {
         return Ok(StatusCode::OK.into_response());
     }
     let signature = load_witness_signer(&env)?
@@ -357,13 +352,12 @@ fn verify_source_checkpoint(
 #[worker::send]
 async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::response::Response> {
     let mut signers = Vec::with_capacity(2);
-    let roles = enabled_roles(CONFIG.mode);
-    if roles.witness()
+    if CONFIG.witness_enabled()
         && let Some(signer) = load_witness_signer(&env)?.as_subtree_signer()
     {
         signers.push(signer);
     }
-    if roles.mirror()
+    if CONFIG.mirror_enabled()
         && let Some(signer) = load_mirror_signer(&env)?.as_subtree_signer()
     {
         signers.push(signer);

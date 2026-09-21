@@ -11,39 +11,9 @@ use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier};
 use std::collections::{BTreeSet, HashMap};
 use tlog_cosignature::SubtreeV1NoteVerifier;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Mode {
-    Witness,
-    Mirror,
-    WitnessAndMirror,
-}
-
-impl Mode {
-    #[must_use]
-    pub const fn witness_enabled(self) -> bool {
-        matches!(self, Self::Witness | Self::WitnessAndMirror)
-    }
-
-    #[must_use]
-    pub const fn mirror_enabled(self) -> bool {
-        matches!(self, Self::Mirror | Self::WitnessAndMirror)
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Witness => "witness",
-            Self::Mirror => "mirror",
-            Self::WitnessAndMirror => "witness-and-mirror",
-        }
-    }
-}
-
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
-    pub mode: Mode,
     pub logging_level: Option<String>,
     pub submission_prefix: String,
     pub monitoring_prefix: Option<String>,
@@ -134,12 +104,22 @@ where
 impl AppConfig {
     #[must_use]
     pub const fn witness_enabled(&self) -> bool {
-        self.mode.witness_enabled()
+        self.witness.is_some()
     }
 
     #[must_use]
     pub const fn mirror_enabled(&self) -> bool {
-        self.mode.mirror_enabled()
+        self.mirror.is_some()
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> &'static str {
+        match (self.witness_enabled(), self.mirror_enabled()) {
+            (true, true) => "witness-and-mirror",
+            (true, false) => "witness",
+            (false, true) => "mirror",
+            (false, false) => "disabled",
+        }
     }
 
     #[must_use]
@@ -154,23 +134,14 @@ impl AppConfig {
             .expect("validated mirror mode must have mirror config")
     }
 
-    /// Validate mode-specific identities, signed-note names, algorithms, and keys.
+    /// Validate role configuration, algorithms, and keys.
     ///
     /// # Errors
     ///
     /// Returns an operator-readable description of the invalid field.
     pub fn validate(&self) -> Result<(), String> {
-        if self.witness_enabled() != self.witness.is_some() {
-            return Err(format!(
-                "mode {} requires witness configuration iff witness is enabled",
-                self.mode.as_str()
-            ));
-        }
-        if self.mirror_enabled() != self.mirror.is_some() {
-            return Err(format!(
-                "mode {} requires mirror configuration iff mirror is enabled",
-                self.mode.as_str()
-            ));
+        if !self.witness_enabled() && !self.mirror_enabled() {
+            return Err("at least one of witness or mirror must be configured".to_owned());
         }
         if let (Some(witness), Some(mirror)) = (&self.witness, &self.mirror)
             && witness.name == mirror.name
@@ -270,14 +241,13 @@ mod tests {
         KeyName::new(name.to_owned()).unwrap()
     }
 
-    fn config(mode: Mode, witness: bool, mirror: bool) -> AppConfig {
+    fn config(witness: bool, mirror: bool) -> AppConfig {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
             .verifying_key()
             .to_public_key_der()
             .unwrap()
             .to_vec();
         AppConfig {
-            mode,
             logging_level: None,
             submission_prefix: "https://submit.example/".to_owned(),
             monitoring_prefix: Some("https://monitor.example/".to_owned()),
@@ -308,43 +278,21 @@ mod tests {
 
     #[test]
     fn accepts_all_three_modes() {
-        config(Mode::Witness, true, false).validate().unwrap();
-        config(Mode::Mirror, false, true).validate().unwrap();
-        config(Mode::WitnessAndMirror, true, true)
-            .validate()
-            .unwrap();
+        config(true, false).validate().unwrap();
+        config(false, true).validate().unwrap();
+        config(true, true).validate().unwrap();
     }
 
     #[test]
-    fn rejects_missing_or_disabled_identity_sections() {
-        assert!(config(Mode::Witness, false, false).validate().is_err());
-        assert!(config(Mode::Witness, true, true).validate().is_err());
-        assert!(config(Mode::Mirror, false, false).validate().is_err());
-        assert!(config(Mode::Mirror, true, true).validate().is_err());
-        assert!(
-            config(Mode::WitnessAndMirror, true, false)
-                .validate()
-                .is_err()
-        );
+    fn rejects_disabled_config() {
+        assert!(config(false, false).validate().is_err());
     }
 
     #[test]
-    fn rejects_unknown_mode() {
-        let error = serde_json::from_str::<Mode>(r#""witness-mirror""#).unwrap_err();
-        assert!(error.to_string().contains("unknown variant"));
-    }
-
-    #[test]
-    fn mode_serde_spelling_is_stable() {
-        assert_eq!(
-            serde_json::to_string(&Mode::Witness).unwrap(),
-            r#""witness""#
-        );
-        assert_eq!(serde_json::to_string(&Mode::Mirror).unwrap(), r#""mirror""#);
-        assert_eq!(
-            serde_json::to_string(&Mode::WitnessAndMirror).unwrap(),
-            r#""witness-and-mirror""#
-        );
+    fn derives_mode_from_role_sections() {
+        assert_eq!(config(true, false).mode(), "witness");
+        assert_eq!(config(false, true).mode(), "mirror");
+        assert_eq!(config(true, true).mode(), "witness-and-mirror");
     }
 
     fn ml_dsa_spki(seed: u8) -> Vec<u8> {
@@ -357,7 +305,7 @@ mod tests {
 
     #[test]
     fn accepts_ml_dsa_spki_and_mixed_algorithms() {
-        let mut config = config(Mode::Witness, true, false);
+        let mut config = config(true, false);
         config
             .logs
             .get_mut(&key_name("log.example"))
@@ -373,7 +321,7 @@ mod tests {
 
     #[test]
     fn rejects_algorithm_key_mismatch() {
-        let mut wrong_ml = config(Mode::Witness, true, false);
+        let mut wrong_ml = config(true, false);
         let signer = &mut wrong_ml
             .logs
             .get_mut(&key_name("log.example"))
@@ -382,7 +330,7 @@ mod tests {
         signer.algorithm = CheckpointAlgorithm::SubtreeV1;
         assert!(wrong_ml.validate().unwrap_err().contains("ML-DSA-44 SPKI"));
 
-        let mut wrong_ed = config(Mode::Witness, true, false);
+        let mut wrong_ed = config(true, false);
         let signer = &mut wrong_ed
             .logs
             .get_mut(&key_name("log.example"))
@@ -394,7 +342,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_spki() {
-        let mut config = config(Mode::Witness, true, false);
+        let mut config = config(true, false);
         config
             .logs
             .get_mut(&key_name("log.example"))
@@ -406,7 +354,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_signer_id() {
-        let mut config = config(Mode::Witness, true, false);
+        let mut config = config(true, false);
         let log = config.logs.get_mut(&key_name("log.example")).unwrap();
         log.checkpoint_signers.push(CheckpointSigner {
             name: log.checkpoint_signers[0].name.clone(),
@@ -418,7 +366,7 @@ mod tests {
 
     #[test]
     fn combined_mode_requires_distinct_identity_names() {
-        let mut config = config(Mode::WitnessAndMirror, true, true);
+        let mut config = config(true, true);
         config.mirror.as_mut().unwrap().name = config.witness.as_ref().unwrap().name.clone();
         assert!(config.validate().unwrap_err().contains("must be distinct"));
     }

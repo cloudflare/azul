@@ -1,6 +1,5 @@
 {
     "logging_level": "info",
-    "mode": "mirror",
     "submission_prefix": "http://localhost:8789/",
     "monitoring_prefix": "http://localhost:8789/",
     "mirror": {
