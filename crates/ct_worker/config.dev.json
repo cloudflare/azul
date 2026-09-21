@@ -37,6 +37,7 @@
         "dev2026h1a": {
             "description": "Dev 2026h1a",
             "log_type": "test",
+            "reject_expired": false,
             "submission_url": "http://localhost:8787/logs/dev2026h1a/",
             "temporal_interval": {
                 "start_inclusive": "2026-01-01T00:00:00Z",

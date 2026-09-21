@@ -164,9 +164,8 @@ pub fn make_chains(log_name: &str) -> Result<GeneratedChains> {
     let start = log.temporal_interval.start_inclusive;
     let end = log.temporal_interval.end_exclusive;
 
-    // notBefore = start; notAfter = midpoint of the interval.
-    // The only constraint is that notAfter falls within [start_inclusive, end_exclusive).
-    // The CT chain validator does not check expiry against the current time.
+    // Fixed historical shard dates make these fixtures reproducible. Historical
+    // test shards must configure reject_expired=false.
     let not_before = start;
     let not_after = {
         let mid_ts = start.timestamp() + (end.timestamp() - start.timestamp()) / 2;
@@ -185,6 +184,25 @@ pub fn make_chains(log_name: &str) -> Result<GeneratedChains> {
         chain: vec![leaf_der, ca_cert_der_bytes()],
         pre_chain: vec![precert_der, ca_cert_der_bytes()],
     })
+}
+
+/// Generate a certificate chain that expired within the configured temporal interval.
+pub fn make_expired_chain(log_name: &str) -> Result<Vec<Vec<u8>>> {
+    let config: DevConfig =
+        serde_json::from_str(DEV_CONFIG_JSON).context("parsing config.dev.json")?;
+    let log = config
+        .logs
+        .get(log_name)
+        .with_context(|| format!("log '{log_name}' not found in config.dev.json"))?;
+    let not_before = log.temporal_interval.start_inclusive;
+    let not_after = not_before + chrono::TimeDelta::days(1);
+    anyhow::ensure!(not_after < log.temporal_interval.end_exclusive);
+    anyhow::ensure!(not_after < chrono::Utc::now());
+
+    let ca_key = SigningKey::from_pkcs8_pem(CA_KEY_PEM).context("loading CA key")?;
+    let leaf_der =
+        build_cert(&ca_key, not_before, not_after, false).context("building leaf cert")?;
+    Ok(vec![leaf_der, ca_cert_der_bytes()])
 }
 
 /// Returns the DER bytes of the test CA certificate.
