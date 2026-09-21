@@ -26,8 +26,6 @@
 //! [spec]: https://c2sp.org/tlog-mirror
 //! [add-cp]: https://c2sp.org/tlog-mirror#add-checkpoint
 
-use std::future::Future;
-
 use generic_log_worker::ObjectBackend;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64 as Base64As, serde_as};
@@ -406,16 +404,7 @@ impl MirrorState {
         let storage = self.state.storage();
 
         if let Some(intent) = storage.get::<PublicationIntent>(PUBLISHING_KEY).await? {
-            finish_publication(
-                &bucket,
-                &intent.0,
-                storage.put(COMMITTED_KEY, &intent.0),
-                async {
-                    storage.delete(PUBLISHING_KEY).await?;
-                    Ok(())
-                },
-            )
-            .await?;
+            finish_publication(&bucket, &intent.0, &storage).await?;
         }
 
         let snapshot = self.read_snapshot().await?;
@@ -449,16 +438,7 @@ impl MirrorState {
         storage
             .put(PUBLISHING_KEY, &PublicationIntent(new_committed.clone()))
             .await?;
-        finish_publication(
-            &bucket,
-            &new_committed,
-            storage.put(COMMITTED_KEY, &new_committed),
-            async {
-                storage.delete(PUBLISHING_KEY).await?;
-                Ok(())
-            },
-        )
-        .await?;
+        finish_publication(&bucket, &new_committed, &storage).await?;
 
         Response::from_json(&new_committed)
     }
@@ -537,21 +517,35 @@ fn checkpoint_text_matches(left: &[u8], right: &[u8]) -> Result<bool> {
     Ok(left.text() == right.text())
 }
 
+trait PublicationStorage {
+    async fn persist_committed(&self, checkpoint: &CommittedCheckpoint) -> Result<()>;
+    async fn clear_intent(&self) -> Result<()>;
+}
+
+impl PublicationStorage for Storage {
+    async fn persist_committed(&self, checkpoint: &CommittedCheckpoint) -> Result<()> {
+        self.put(COMMITTED_KEY, checkpoint).await
+    }
+
+    async fn clear_intent(&self) -> Result<()> {
+        self.delete(PUBLISHING_KEY).await?;
+        Ok(())
+    }
+}
+
 /// Complete an intent in the order required for crash recovery.
-async fn finish_publication<O, F, G>(
+async fn finish_publication<O, S>(
     object: &O,
     checkpoint: &CommittedCheckpoint,
-    persist: F,
-    clear: G,
+    storage: &S,
 ) -> Result<()>
 where
     O: ObjectBackend,
-    F: Future<Output = Result<()>>,
-    G: Future<Output = Result<()>>,
+    S: PublicationStorage,
 {
     commit::write_checkpoint(object, checkpoint.signed_note_bytes.clone()).await?;
-    persist.await?;
-    clear.await
+    storage.persist_committed(checkpoint).await?;
+    storage.clear_intent().await
 }
 
 /// Lookup helper used by the frontend: get a stub for the DO serving a
@@ -567,10 +561,14 @@ mod tests {
 
     use super::{
         AdvanceNextEntryRequest, CommitRequest, CommittedCheckpoint, MirrorStateSnapshot,
-        NextEntry, PendingCheckpoint, PublicationIntent, UpdatePendingRequest, finish_publication,
+        NextEntry, PendingCheckpoint, PublicationIntent, PublicationStorage, UpdatePendingRequest,
+        finish_publication,
     };
     use generic_log_worker::{ObjectBackend, log_ops::UploadOptions};
-    use std::{cell::RefCell, collections::HashMap};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+    };
     use tlog_core::{HASH_SIZE, Hash};
 
     #[test]
@@ -796,6 +794,8 @@ mod tests {
         objects: RefCell<HashMap<String, Vec<u8>>>,
         events: RefCell<Vec<&'static str>>,
         fail_upload: bool,
+        fail_persist: bool,
+        fail_clear: Cell<bool>,
     }
 
     impl ObjectBackend for RecordingBackend {
@@ -820,30 +820,36 @@ mod tests {
         }
     }
 
+    impl PublicationStorage for RecordingBackend {
+        async fn persist_committed(&self, _checkpoint: &CommittedCheckpoint) -> worker::Result<()> {
+            self.events.borrow_mut().push("committed");
+            if self.fail_persist {
+                return Err(worker::Error::from("injected state failure"));
+            }
+            Ok(())
+        }
+
+        async fn clear_intent(&self) -> worker::Result<()> {
+            self.events.borrow_mut().push("clear");
+            if self.fail_clear.get() {
+                return Err(worker::Error::from("injected clear failure"));
+            }
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn publication_finishes_in_order() {
         let backend = RecordingBackend::default();
-        let events = &backend.events;
         let checkpoint = CommittedCheckpoint {
             size: 1,
             hash: Hash([1; HASH_SIZE]),
             checkpoint_note_bytes: vec![],
             signed_note_bytes: b"checkpoint".to_vec(),
         };
-        finish_publication(
-            &backend,
-            &checkpoint,
-            async {
-                events.borrow_mut().push("committed");
-                Ok(())
-            },
-            async {
-                events.borrow_mut().push("clear");
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
+        finish_publication(&backend, &checkpoint, &backend)
+            .await
+            .unwrap();
         assert_eq!(&*backend.events.borrow(), &["r2", "committed", "clear"]);
     }
 
@@ -853,7 +859,6 @@ mod tests {
             fail_upload: true,
             ..RecordingBackend::default()
         };
-        let events = &backend.events;
         let checkpoint = CommittedCheckpoint {
             size: 1,
             hash: Hash([1; HASH_SIZE]),
@@ -861,28 +866,19 @@ mod tests {
             signed_note_bytes: b"checkpoint".to_vec(),
         };
         assert!(
-            finish_publication(
-                &backend,
-                &checkpoint,
-                async {
-                    events.borrow_mut().push("committed");
-                    Ok(())
-                },
-                async {
-                    events.borrow_mut().push("clear");
-                    Ok(())
-                },
-            )
-            .await
-            .is_err()
+            finish_publication(&backend, &checkpoint, &backend)
+                .await
+                .is_err()
         );
         assert_eq!(&*backend.events.borrow(), &["r2"]);
     }
 
     #[tokio::test]
     async fn publication_state_failure_retains_intent() {
-        let backend = RecordingBackend::default();
-        let events = &backend.events;
+        let backend = RecordingBackend {
+            fail_persist: true,
+            ..RecordingBackend::default()
+        };
         let checkpoint = CommittedCheckpoint {
             size: 1,
             hash: Hash([1; HASH_SIZE]),
@@ -890,28 +886,19 @@ mod tests {
             signed_note_bytes: b"checkpoint".to_vec(),
         };
         assert!(
-            finish_publication(
-                &backend,
-                &checkpoint,
-                async {
-                    events.borrow_mut().push("committed");
-                    Err(worker::Error::from("injected state failure"))
-                },
-                async {
-                    events.borrow_mut().push("clear");
-                    Ok(())
-                },
-            )
-            .await
-            .is_err()
+            finish_publication(&backend, &checkpoint, &backend)
+                .await
+                .is_err()
         );
         assert_eq!(&*backend.events.borrow(), &["r2", "committed"]);
     }
 
     #[tokio::test]
     async fn publication_clear_failure_is_retryable() {
-        let backend = RecordingBackend::default();
-        let events = &backend.events;
+        let backend = RecordingBackend {
+            fail_clear: Cell::new(true),
+            ..RecordingBackend::default()
+        };
         let checkpoint = CommittedCheckpoint {
             size: 1,
             hash: Hash([1; HASH_SIZE]),
@@ -919,35 +906,14 @@ mod tests {
             signed_note_bytes: b"checkpoint".to_vec(),
         };
         assert!(
-            finish_publication(
-                &backend,
-                &checkpoint,
-                async {
-                    events.borrow_mut().push("committed");
-                    Ok(())
-                },
-                async {
-                    events.borrow_mut().push("clear");
-                    Err(worker::Error::from("injected clear failure"))
-                },
-            )
-            .await
-            .is_err()
+            finish_publication(&backend, &checkpoint, &backend)
+                .await
+                .is_err()
         );
-        finish_publication(
-            &backend,
-            &checkpoint,
-            async {
-                events.borrow_mut().push("committed");
-                Ok(())
-            },
-            async {
-                events.borrow_mut().push("clear");
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
+        backend.fail_clear.set(false);
+        finish_publication(&backend, &checkpoint, &backend)
+            .await
+            .unwrap();
         assert_eq!(
             &*backend.events.borrow(),
             &["r2", "committed", "clear", "r2", "committed", "clear"]
