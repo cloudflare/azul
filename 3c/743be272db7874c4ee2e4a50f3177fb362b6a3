@@ -1,0 +1,87 @@
+Cargo.lock
+  s_6e67e41cf84c26::t_319757d72e51b4 637,1862,3333,3393,4176,4260-4268
+Cargo.toml
+  s_b28650ee2d2d56::t_b414da6d88107e 29,65,172
+crates/bootstrap_mtc_worker/Cargo.toml
+  s_b28650ee2d2d56::t_f62e38f6a57dc4 35
+crates/bootstrap_mtc_worker/build.rs
+  s_b28650ee2d2d56::t_4ec75da8a1b655 17-18,49
+crates/bootstrap_mtc_worker/src/lib.rs
+  s_b28650ee2d2d56::t_9366d58961d932 19-20
+crates/ct_worker/Cargo.toml
+  s_b28650ee2d2d56::t_e52e3b59be5f81 30
+crates/ct_worker/build.rs
+  s_b28650ee2d2d56::t_aa2b00dd59bcfe 15-16,59,69-74,90
+crates/ct_worker/src/lib.rs
+  s_b28650ee2d2d56::t_ed2794e3393b81 18-19
+crates/generic_log_worker/src/hash_serde.rs
+  s_b28650ee2d2d56::t_f61a804bb806c5 1-75
+crates/generic_log_worker/src/lib.rs
+  s_b28650ee2d2d56::t_396b3a0a7507be 10
+crates/generic_log_worker/src/obs/sentry.rs
+  s_b28650ee2d2d56::t_83afa98a8e9c97 13-14,63-86
+crates/mirror_worker/Cargo.toml
+  s_b28650ee2d2d56::t_0cfc62225685f2 30
+crates/mirror_worker/build.rs
+  s_b28650ee2d2d56::t_2ccf393f33fb95 9,13-14,16
+crates/mirror_worker/src/lib.rs
+  s_b28650ee2d2d56::t_d2054a6a396501 38-39
+crates/mirror_worker/src/mirror_state_do.rs
+  s_b28650ee2d2d56::t_f9de7a7596995f 53,76,99,125,141,155,160
+crates/tlog_core/src/lib.rs
+  s_b28650ee2d2d56::t_5e3d2ecde470a1 929,955,1450-1453,1458
+crates/tlog_cosignature/Cargo.toml
+  s_b28650ee2d2d56::t_decc1bd23cd3e0 22
+crates/tlog_cosignature/src/subtree_v1.rs
+  s_b28650ee2d2d56::t_ed47ba099fa98f 91,94,261-280,321-337,340,347-348,371-374,377-378,448-458,464,470,495,497-504,722-739
+crates/tlog_witness/Cargo.toml
+  s_b28650ee2d2d56::t_fc24e8b6e4d523 21
+crates/tlog_witness/src/add_checkpoint.rs
+  s_b28650ee2d2d56::t_c8af0b0819fd29 31-32,159,174
+crates/tlog_witness/src/common.rs
+  s_b28650ee2d2d56::t_e00ba72209b921 15,114-132
+crates/tlog_witness/src/lib.rs
+  s_b28650ee2d2d56::t_2fdb2c3754d93e 10-11,31-34,38-39,61,75-81
+crates/tlog_witness/src/sign_subtree.rs
+  s_b28650ee2d2d56::t_57644b464f1f92 44-45,285,301
+crates/tlog_witness/src/validation.rs
+  s_b28650ee2d2d56::t_4729acbca2c0b3 1-495
+crates/witness_worker/Cargo.toml
+  s_b28650ee2d2d56::t_3886db6f7277a1 26
+crates/witness_worker/build.rs
+  s_b28650ee2d2d56::t_01a1c4c0dea7fc 9,16-17,19
+crates/witness_worker/src/lib.rs
+  s_b28650ee2d2d56::t_75072f4af96c51 66-67
+crates/witness_worker/src/witness_state_do.rs
+  s_b28650ee2d2d56::t_c7b421cbeb086f 60,73,78
+crates/worker_build_config/Cargo.toml
+  s_b28650ee2d2d56::t_bbd577d322bf5a 1-15
+crates/worker_build_config/LICENSE
+  s_b28650ee2d2d56::t_4e66238e70b1db 1
+crates/worker_build_config/src/lib.rs
+  s_b28650ee2d2d56::t_ab0b8604054cd1 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3c743be272db7874c4ee2e4a50f3177fb362b6a3",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    },
+    "s_b28650ee2d2d56": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fa663b3b4ffes2ZvkzhiLveoot",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
