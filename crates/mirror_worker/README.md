@@ -8,8 +8,9 @@ with one per-origin `MirrorState` Durable Object.
 ## Configuration
 
 The presence of the `witness` and `mirror` identity sections enables each role.
-`logs` is keyed by exact checkpoint origin and supports structured Ed25519 and
-`subtree/v1` checkpoint signers.
+Combined deployments use a shared submission prefix and distinct monitoring
+prefixes per identity. `logs` is keyed by exact checkpoint origin and supports
+structured Ed25519 and `subtree/v1` checkpoint signers.
 
 Role keys remain separate secrets:
 

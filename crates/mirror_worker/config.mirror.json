@@ -1,10 +1,10 @@
 {
     "logging_level": "info",
     "submission_prefix": "http://localhost:8789/",
-    "monitoring_prefix": "http://localhost:8789/",
     "mirror": {
         "name": "dev.mirror.example",
         "description": "Standalone local-dev mirror",
+        "monitoring_prefix": "http://localhost:8789/",
         "clean_interval_secs": 5,
         "commit_packages": 2
     },

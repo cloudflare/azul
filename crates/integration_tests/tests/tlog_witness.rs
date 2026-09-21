@@ -194,8 +194,8 @@ fn base_url() -> String {
 struct MetadataResponse {
     mode: String,
     witness: Option<IdentityMetadata>,
+    mirror: Option<IdentityMetadata>,
     submission_prefix: String,
-    monitoring_prefix: String,
     logs: Vec<LogMetadata>,
 }
 
@@ -211,6 +211,7 @@ struct LogMetadata {
 #[derive(Deserialize, Debug)]
 struct IdentityMetadata {
     name: String,
+    monitoring_prefix: String,
     #[serde_as(as = "Base64")]
     public_key: Vec<u8>,
 }
@@ -341,10 +342,12 @@ async fn tlog_witness_end_to_end() {
     let meta = fetch_metadata().await;
     assert_eq!(meta.mode, "witness-and-mirror");
     let witness = meta.witness.as_ref().expect("witness identity metadata");
+    let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
     assert_eq!(witness.name, "dev.witness.example");
     assert!(!witness.public_key.is_empty());
     assert!(meta.submission_prefix.starts_with("http"));
-    assert!(meta.monitoring_prefix.starts_with("http"));
+    assert!(witness.monitoring_prefix.starts_with("http"));
+    assert_ne!(witness.monitoring_prefix, mirror.monitoring_prefix);
     let log = meta
         .logs
         .iter()

@@ -3,7 +3,8 @@
     "submission_prefix": "http://localhost:8788/",
     "witness": {
         "name": "dev.witness.example",
-        "description": "Standalone local-dev witness"
+        "description": "Standalone local-dev witness",
+        "monitoring_prefix": "http://localhost:8788/"
     },
     "logs": {
         "example.com/witness-log": {

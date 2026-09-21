@@ -175,7 +175,6 @@ impl IntoResponse for AppError {
 struct MetadataResponse<'a> {
     mode: &'a str,
     submission_prefix: &'a str,
-    monitoring_prefix: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     witness: Option<IdentityMetadata<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,6 +188,7 @@ struct IdentityMetadata<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
+    monitoring_prefix: &'a str,
     #[serde_as(as = "Base64As")]
     public_key: &'a [u8],
     algorithm: &'a str,
@@ -255,6 +255,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
         Some(IdentityMetadata {
             name: identity.name.as_str(),
             description: identity.description.as_deref(),
+            monitoring_prefix: &identity.monitoring_prefix,
             public_key: signer.public_key_der(),
             algorithm: signer.algorithm(),
             supports_sign_subtree: signer.supports_sign_subtree(),
@@ -267,10 +268,6 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
         Json(MetadataResponse {
             mode: CONFIG.mode(),
             submission_prefix: &CONFIG.submission_prefix,
-            monitoring_prefix: CONFIG
-                .monitoring_prefix
-                .as_deref()
-                .unwrap_or(&CONFIG.submission_prefix),
             witness,
             mirror,
             logs: metadata_logs(),
@@ -285,6 +282,7 @@ fn identity_metadata<'a>(
     IdentityMetadata {
         name: identity.name.as_str(),
         description: identity.description.as_deref(),
+        monitoring_prefix: &identity.monitoring_prefix,
         public_key: signer.public_key_der(),
         algorithm: signer.algorithm(),
         supports_sign_subtree: signer.supports_sign_subtree(),

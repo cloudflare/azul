@@ -16,7 +16,6 @@ use tlog_cosignature::SubtreeV1NoteVerifier;
 pub struct AppConfig {
     pub logging_level: Option<String>,
     pub submission_prefix: String,
-    pub monitoring_prefix: Option<String>,
     pub witness: Option<IdentityConfig>,
     pub mirror: Option<MirrorConfig>,
     #[serde(deserialize_with = "deserialize_logs")]
@@ -29,6 +28,7 @@ pub struct IdentityConfig {
     #[serde(deserialize_with = "deserialize_key_name")]
     pub name: KeyName,
     pub description: Option<String>,
+    pub monitoring_prefix: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -37,6 +37,7 @@ pub struct MirrorConfig {
     #[serde(deserialize_with = "deserialize_key_name")]
     pub name: KeyName,
     pub description: Option<String>,
+    pub monitoring_prefix: String,
     pub clean_interval_secs: Option<u64>,
     pub commit_packages: Option<u64>,
     pub max_chunk_bytes: Option<u64>,
@@ -148,6 +149,14 @@ impl AppConfig {
         {
             return Err("witness.name and mirror.name must be distinct".to_owned());
         }
+        if let (Some(witness), Some(mirror)) = (&self.witness, &self.mirror)
+            && witness.monitoring_prefix == mirror.monitoring_prefix
+        {
+            return Err(
+                "witness.monitoring_prefix and mirror.monitoring_prefix must be distinct"
+                    .to_owned(),
+            );
+        }
         for (origin, log) in &self.logs {
             log.validate(origin)?;
         }
@@ -250,14 +259,15 @@ mod tests {
         AppConfig {
             logging_level: None,
             submission_prefix: "https://submit.example/".to_owned(),
-            monitoring_prefix: Some("https://monitor.example/".to_owned()),
             witness: witness.then(|| IdentityConfig {
                 name: key_name("witness.example"),
                 description: None,
+                monitoring_prefix: "https://witness.example/".to_owned(),
             }),
             mirror: mirror.then(|| MirrorConfig {
                 name: key_name("mirror.example"),
                 description: None,
+                monitoring_prefix: "https://mirror.example/".to_owned(),
                 clean_interval_secs: None,
                 commit_packages: None,
                 max_chunk_bytes: None,
@@ -368,6 +378,14 @@ mod tests {
     fn combined_mode_requires_distinct_identity_names() {
         let mut config = config(true, true);
         config.mirror.as_mut().unwrap().name = config.witness.as_ref().unwrap().name.clone();
+        assert!(config.validate().unwrap_err().contains("must be distinct"));
+    }
+
+    #[test]
+    fn combined_mode_requires_distinct_monitoring_prefixes() {
+        let mut config = config(true, true);
+        config.mirror.as_mut().unwrap().monitoring_prefix =
+            config.witness.as_ref().unwrap().monitoring_prefix.clone();
         assert!(config.validate().unwrap_err().contains("must be distinct"));
     }
 

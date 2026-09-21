@@ -1,14 +1,15 @@
 {
     "logging_level": "info",
     "submission_prefix": "http://localhost:8787/",
-    "monitoring_prefix": "http://localhost:8787/",
     "witness": {
         "name": "dev.witness.example",
-        "description": "Local-dev witness for smoke testing"
+        "description": "Local-dev witness for smoke testing",
+        "monitoring_prefix": "http://localhost:8787/witness/"
     },
     "mirror": {
         "name": "dev.mirror.example",
         "description": "Local-dev mirror for smoke testing",
+        "monitoring_prefix": "http://localhost:8787/mirror/",
         "clean_interval_secs": 5,
         "commit_packages": 2
     },

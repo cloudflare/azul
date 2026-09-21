@@ -526,7 +526,6 @@ struct MetadataResponse {
     mode: String,
     mirror: Option<IdentityMetadata>,
     submission_prefix: String,
-    monitoring_prefix: String,
     logs: Vec<LogMetadata>,
 }
 
@@ -534,6 +533,7 @@ struct MetadataResponse {
 #[derive(Deserialize, Debug)]
 struct IdentityMetadata {
     name: String,
+    monitoring_prefix: String,
     #[serde_as(as = "Base64")]
     public_key: Vec<u8>,
     algorithm: String,
@@ -602,7 +602,7 @@ async fn tlog_mirror_end_to_end() {
     );
     assert!(mirror.supports_sign_subtree);
     assert!(meta.submission_prefix.starts_with("http"));
-    assert!(meta.monitoring_prefix.starts_with("http"));
+    assert!(mirror.monitoring_prefix.starts_with("http"));
     let log_meta = meta
         .logs
         .iter()
