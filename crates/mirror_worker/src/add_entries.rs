@@ -396,14 +396,15 @@ where
 {
     // config.schema.json caps commit_packages (max 1024), enforced by the
     // build script, so this always fits usize; the fallback is unreachable.
-    let commit_packages =
-        usize::try_from(crate::CONFIG.mirror_config().commit_packages()).unwrap_or(usize::MAX);
+    let mirror_config = crate::CONFIG.mirror.as_ref().ok_or_else(|| {
+        AppError::InternalServerError("add-entries requires mirror configuration".to_owned())
+    })?;
+    let commit_packages = usize::try_from(mirror_config.commit_packages()).unwrap_or(usize::MAX);
     // Byte ceiling on buffered entries; flush early when reached so peak
     // memory is bounded regardless of package sizes. Saturating to
     // usize::MAX on a 32-bit target just means "never trip the byte cap",
     // leaving the package-count cap in force.
-    let max_chunk_bytes =
-        usize::try_from(crate::CONFIG.mirror_config().max_chunk_bytes()).unwrap_or(usize::MAX);
+    let max_chunk_bytes = usize::try_from(mirror_config.max_chunk_bytes()).unwrap_or(usize::MAX);
 
     // Entries below the request-start frontier are already persisted; new
     // persistence begins at this fixed boundary.

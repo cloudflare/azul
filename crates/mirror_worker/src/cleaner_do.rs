@@ -200,10 +200,13 @@ impl MirrorCleaner {
             self.initialize().await?;
         }
         // Reschedule first so the loop continues even if cleaning fails.
+        let clean_interval_secs = CONFIG
+            .mirror
+            .as_ref()
+            .ok_or_else(|| Error::from("mirror cleaner requires mirror configuration"))?
+            .clean_interval_secs();
         self.storage()
-            .set_alarm(Duration::from_secs(
-                CONFIG.mirror_config().clean_interval_secs(),
-            ))
+            .set_alarm(Duration::from_secs(clean_interval_secs))
             .await?;
         if let Err(e) = self.clean(served).await {
             log::warn!("mirror cleaner [{}]: clean failed: {e}", served.origin);
@@ -227,10 +230,13 @@ impl MirrorCleaner {
     /// Start the alarm loop and load any checkpointed progress.
     async fn initialize(&self) -> Result<()> {
         // OK if an alarm is already set; this guarantees one exists.
+        let clean_interval_secs = CONFIG
+            .mirror
+            .as_ref()
+            .ok_or_else(|| Error::from("mirror cleaner requires mirror configuration"))?
+            .clean_interval_secs();
         self.storage()
-            .set_alarm(Duration::from_secs(
-                CONFIG.mirror_config().clean_interval_secs(),
-            ))
+            .set_alarm(Duration::from_secs(clean_interval_secs))
             .await?;
         if let Some(cleaned) = self.storage().get::<u64>(CLEANED_SIZE_KEY).await? {
             *self.cleaned_size.borrow_mut() = cleaned;

@@ -109,30 +109,13 @@ impl AppConfig {
     }
 
     #[must_use]
-    pub const fn mirror_enabled(&self) -> bool {
-        self.mirror.is_some()
-    }
-
-    #[must_use]
     pub const fn mode(&self) -> &'static str {
-        match (self.witness_enabled(), self.mirror_enabled()) {
+        match (self.witness_enabled(), self.mirror.is_some()) {
             (true, true) => "witness-and-mirror",
             (true, false) => "witness",
             (false, true) => "mirror",
             (false, false) => "disabled",
         }
-    }
-
-    #[must_use]
-    /// Return the mirror settings for a validated mirror-enabled config.
-    ///
-    /// # Panics
-    ///
-    /// Panics if mirror configuration is absent.
-    pub fn mirror_config(&self) -> &MirrorConfig {
-        self.mirror
-            .as_ref()
-            .expect("validated mirror mode must have mirror config")
     }
 
     /// Validate role configuration, algorithms, and keys.
@@ -141,7 +124,7 @@ impl AppConfig {
     ///
     /// Returns an operator-readable description of the invalid field.
     pub fn validate(&self) -> Result<(), String> {
-        if !self.witness_enabled() && !self.mirror_enabled() {
+        if !self.witness_enabled() && self.mirror.is_none() {
             return Err("at least one of witness or mirror must be configured".to_owned());
         }
         if let (Some(witness), Some(mirror)) = (&self.witness, &self.mirror)

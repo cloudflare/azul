@@ -233,18 +233,15 @@ static WITNESS_SIGNER: OnceLock<IdentitySigner> = OnceLock::new();
 /// Returns an error if the `MIRROR_SIGNING_KEY` secret is missing, the PEM
 /// is malformed, or the key is neither Ed25519 nor ML-DSA-44.
 pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static IdentitySigner> {
-    if !CONFIG.mirror_enabled() {
-        return Err(Error::from("mirror identity is disabled"));
-    }
+    let config = CONFIG
+        .mirror
+        .as_ref()
+        .ok_or_else(|| Error::from("mirror identity is disabled"))?;
     if let Some(s) = MIRROR_SIGNER.get() {
         return Ok(s);
     }
     let pem = env.secret("MIRROR_SIGNING_KEY")?.to_string();
-    let signer = build_identity_signer(
-        CONFIG.mirror_config().name.as_str(),
-        "MIRROR_SIGNING_KEY",
-        &pem,
-    )?;
+    let signer = build_identity_signer(config.name.as_str(), "MIRROR_SIGNING_KEY", &pem)?;
     Ok(MIRROR_SIGNER.get_or_init(|| signer))
 }
 
@@ -311,7 +308,7 @@ pub(crate) fn load_witness_signer(env: &Env) -> Result<&'static IdentitySigner> 
 
 /// Load enabled identity keys and reject key reuse across roles.
 pub(crate) fn validate_identity_keys(env: &Env) -> Result<()> {
-    if !CONFIG.witness_enabled() || !CONFIG.mirror_enabled() {
+    if !CONFIG.witness_enabled() || CONFIG.mirror.is_none() {
         return Ok(());
     }
     let witness = load_witness_signer(env)?;

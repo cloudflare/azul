@@ -43,7 +43,7 @@ fn start() {
 async fn add_accept_encoding(
     mut response: axum::http::Response<axum::body::Body>,
 ) -> axum::http::Response<axum::body::Body> {
-    if CONFIG.mirror_enabled() {
+    if CONFIG.mirror.is_some() {
         response
             .headers_mut()
             .insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
@@ -73,7 +73,7 @@ async fn fetch(
             )
             .route("/metadata", get(metadata))
             .route("/", get(root));
-        if CONFIG.mirror_enabled() {
+        if CONFIG.mirror.is_some() {
             router = router.route("/add-entries", post(crate::add_entries::add_entries));
         }
         router
@@ -244,11 +244,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
     } else {
         None
     };
-    let mirror = if CONFIG.mirror_enabled() {
-        let identity = CONFIG
-            .mirror
-            .as_ref()
-            .expect("validated mirror mode has mirror config");
+    let mirror = if let Some(identity) = CONFIG.mirror.as_ref() {
         let signer = load_mirror_signer(&env)?;
         Some(IdentityMetadata {
             name: identity.name.as_str(),
@@ -346,7 +342,7 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
     {
         signers.push(signer);
     }
-    if CONFIG.mirror_enabled()
+    if CONFIG.mirror.is_some()
         && let Some(signer) = load_mirror_signer(&env)?.as_subtree_signer()
     {
         signers.push(signer);
