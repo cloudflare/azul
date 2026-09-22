@@ -8,6 +8,7 @@ Azul is a Rust workspace implementing tiled transparency logs for deployment on 
 
 ```
 crates/ct_worker/      - Static CT API Worker (deployable); wrangler.jsonc here
+crates/mirror_worker/     - Configurable tlog mirror/witness Worker (deployable)
 crates/generic_log_worker/ - Shared Durable Object logic (Sequencer, Batcher, Cleaner)
 crates/tlog_tiles/     - C2SP tlog-tiles spec impl (published to crates.io)
 crates/static_ct_api/  - C2SP static-ct-api spec impl (published to crates.io)
@@ -48,9 +49,9 @@ npx wrangler -e=${ENV} tail
 
 - Worker crates use `crate-type = ["cdylib"]`; library crates use `rlib`
 - Worker build is handled by `worker-build`, not `cargo build` directly — wrangler.jsonc invokes it automatically
-- Config types live in separate sub-crates such as `crates/ct_worker/config/`
+- Config types live in separate sub-crates such as `crates/ct_worker/config/` and `crates/mirror_worker/config/`
 - `DEPLOY_ENV=<env>` env var must be set when invoking `worker-build` manually; wrangler.jsonc sets it per environment
-- Route HTTP with `axum::Router` (worker features `["http", "axum"]`), not the `worker::Router`. The `#[event(fetch)]` handler takes a `HttpRequest`, returns `axum::http::Response<axum::body::Body>`, and dispatches via `tower_service::Service::call`; handlers return `impl IntoResponse`. See `witness_worker`/`ct_worker` for the pattern.
+- Route HTTP with `axum::Router` (worker features `["http", "axum"]`), not the `worker::Router`. The `#[event(fetch)]` handler takes a `HttpRequest`, returns `axum::http::Response<axum::body::Body>`, and dispatches via `tower_service::Service::call`; handlers return `impl IntoResponse`. See `mirror_worker`/`ct_worker` for the pattern.
 
 
 ## Workflow

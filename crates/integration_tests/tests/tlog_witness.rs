@@ -1,12 +1,12 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
-//! End-to-end integration tests for the [`witness_worker`] implementation of
+//! End-to-end integration tests for the witness role in [`mirror_worker`].
 //! [`c2sp.org/tlog-witness`].
 //!
-//! These tests require a running `wrangler dev` instance of `witness_worker`
+//! These tests require a running combined `wrangler dev` instance of `mirror_worker`
 //! on `localhost:8787` (or `BASE_URL`), backed by **fresh** persistent state.
-//! Delete `crates/witness_worker/.wrangler/state/` between runs to reset the
+//! Delete `crates/mirror_worker/.wrangler/state/` between runs to reset the
 //! per-origin `(size, hash)` the witness has cosigned. CI does this
 //! automatically.
 //!
@@ -46,9 +46,9 @@
 //! per the dev `WITNESS_SIGNING_KEY` in `.dev.vars`. The log signing
 //! key remains Ed25519. Both PEMs are duplicated in the witness crate's
 //! unit tests so a rotation breaks closed; see
-//! `crates/witness_worker/src/lib.rs::dev_config_tests`.
+//! `crates/mirror_worker/src/lib.rs::dev_config_tests`.
 //!
-//! [`witness_worker`]: ../../../crates/witness_worker
+//! [`mirror_worker`]: ../../../crates/mirror_worker
 //! [`c2sp.org/tlog-witness`]: https://c2sp.org/tlog-witness
 
 use ed25519_dalek::{SigningKey as Ed25519SigningKey, pkcs8::DecodePrivateKey};
@@ -56,6 +56,7 @@ use ml_dsa::MlDsa44;
 use rand::rng;
 use serde::Deserialize;
 use serde_with::{base64::Base64, serde_as};
+use sha2::{Digest as _, Sha256};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
@@ -74,12 +75,13 @@ use tlog_witness::{
 // ---------------------------------------------------------------------------
 
 /// Origin the witness is configured to accept checkpoints for (see
-/// `crates/witness_worker/config.dev.json`).
-const LOG_ORIGIN: &str = "example.com/log1";
+/// `crates/mirror_worker/config.dev.json`).
+const LOG_ORIGIN: &str = "example.com/witness-log";
+const MIRROR_R2_BUCKET: &str = "mirror-worker-public-dev";
+const WITNESS_R2_BUCKET: &str = "witness-worker-public-dev";
 
 /// PKCS#8 PEM for the Ed25519 log key. The corresponding SPKI is committed
-/// in `crates/witness_worker/config.dev.json` as the only entry of
-/// `log_public_keys`. DEV-ONLY — this keypair is published in the repo and
+/// in `crates/mirror_worker/config.dev.json`. This keypair is dev-only and
 /// MUST NOT be used for anything other than these integration tests.
 const LOG_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
     MC4CAQAwBQYDK2VwBCIEIA2VCmSeCNVJTboEACcXvVahZHSHEJDxSl94aej1Q8hQ\n\
@@ -193,25 +195,37 @@ fn base_url() -> String {
 #[serde_as]
 #[derive(Deserialize, Debug)]
 struct MetadataResponse {
-    witness_name: String,
-    #[allow(dead_code)]
-    description: Option<String>,
-    #[serde_as(as = "Base64")]
-    witness_public_key: Vec<u8>,
+    mode: String,
+    witness: Option<IdentityMetadata>,
+    mirror: Option<IdentityMetadata>,
     submission_prefix: String,
-    #[allow(dead_code)]
-    monitoring_prefix: String,
     logs: Vec<LogMetadata>,
 }
 
 #[serde_as]
 #[derive(Deserialize, Debug)]
 struct LogMetadata {
-    #[allow(dead_code)]
     description: Option<String>,
     origin: String,
-    #[serde_as(as = "Vec<Base64>")]
-    log_public_keys: Vec<Vec<u8>>,
+    checkpoint_signers: Vec<CheckpointSignerMetadata>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct IdentityMetadata {
+    name: String,
+    monitoring_prefix: String,
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct CheckpointSignerMetadata {
+    name: String,
+    algorithm: String,
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
 }
 
 async fn fetch_metadata() -> MetadataResponse {
@@ -223,6 +237,32 @@ async fn fetch_metadata() -> MetadataResponse {
         .expect("metadata request");
     assert_eq!(resp.status().as_u16(), 200, "metadata status");
     resp.json().await.expect("metadata json")
+}
+
+async fn fetch_monitored_checkpoint() -> Note {
+    let origin_hash = hex::encode(Sha256::digest(LOG_ORIGIN.as_bytes()));
+    let key = format!("{origin_hash}/checkpoint");
+    let bytes = integration_tests::local_r2::get("mirror_worker", WITNESS_R2_BUCKET, &key)
+        .await
+        .expect("read witness checkpoint from local R2")
+        .expect("witness checkpoint in local R2");
+    Note::from_bytes(&bytes).expect("monitoring checkpoint note")
+}
+
+async fn assert_static_monitoring_only() {
+    let origin_hash = hex::encode(Sha256::digest(LOG_ORIGIN.as_bytes()));
+    let key = format!("{origin_hash}/checkpoint");
+    let worker_response = reqwest::get(format!("{}/{key}", base_url()))
+        .await
+        .expect("worker monitoring request");
+    assert_eq!(worker_response.status().as_u16(), 404);
+    assert!(
+        integration_tests::local_r2::get("mirror_worker", MIRROR_R2_BUCKET, &key)
+            .await
+            .expect("inspect mirror R2 bucket")
+            .is_none(),
+        "witness checkpoint leaked into the mirror bucket"
+    );
 }
 
 struct AddCheckpointResult {
@@ -297,9 +337,10 @@ async fn wait_for_witness() {
 /// `sign-subtree` responses.
 fn witness_verifier(meta: &MetadataResponse) -> SubtreeV1NoteVerifier {
     use pkcs8::DecodePublicKey;
-    let witness_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&meta.witness_public_key)
+    let identity = meta.witness.as_ref().expect("witness metadata");
+    let witness_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&identity.public_key)
         .expect("witness SPKI must parse as ML-DSA-44");
-    let name = KeyName::new(meta.witness_name.clone()).expect("KeyName for witness");
+    let name = KeyName::new(identity.name.clone()).expect("KeyName for witness");
     SubtreeV1NoteVerifier::new(name, witness_vk)
 }
 
@@ -328,21 +369,59 @@ async fn tlog_witness_end_to_end() {
 
     // ----------------------- (1) /metadata -----------------------
     let meta = fetch_metadata().await;
-    assert_eq!(meta.witness_name, "dev.witness.example");
-    assert!(!meta.witness_public_key.is_empty());
+    assert_eq!(meta.mode, "witness-and-mirror");
+    let witness = meta.witness.as_ref().expect("witness identity metadata");
+    let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
+    assert_eq!(witness.name, "dev.witness.example");
+    assert!(!witness.public_key.is_empty());
     assert!(meta.submission_prefix.starts_with("http"));
+    assert!(witness.monitoring_prefix.starts_with("http"));
+    assert_ne!(witness.monitoring_prefix, mirror.monitoring_prefix);
     let log = meta
         .logs
         .iter()
         .find(|l| l.origin == LOG_ORIGIN)
         .unwrap_or_else(|| panic!("metadata does not list the {LOG_ORIGIN} origin"));
-    assert_eq!(log.log_public_keys.len(), 1);
+    assert!(log.description.is_some());
+    assert_eq!(log.checkpoint_signers.len(), 1);
+    assert_eq!(log.checkpoint_signers[0].name, LOG_ORIGIN);
+    assert_eq!(log.checkpoint_signers[0].algorithm, "ed25519");
+    assert!(!log.checkpoint_signers[0].public_key.is_empty());
 
     let signer = log_signer();
     let mut log = ToyLog::new();
 
+    // A size-zero checkpoint must use the RFC 6962 empty-tree hash.
+    {
+        let tree = TreeWithTimestamp::new(0, Hash([1u8; HASH_SIZE]), now_millis());
+        let cp = tree.sign(LOG_ORIGIN, &[], &[&signer], &mut rng()).unwrap();
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "invalid empty-tree hash: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
+    // The initial checkpoint transition cannot include a consistency proof.
+    {
+        log.push(b"leaf 0");
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(0, &[Hash([0u8; HASH_SIZE])], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "initial non-empty proof: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+    }
+
     // ----------------------- (2) First submission: old=0 -----------------------
-    log.push(b"leaf 0");
     {
         let cp = log.sign_checkpoint(&signer);
         let note = Note::from_bytes(&cp).unwrap();
@@ -360,6 +439,38 @@ async fn tlog_witness_end_to_end() {
             "response must contain at least one signature"
         );
         verify_witness_signature(&note, &sigs, &meta);
+        let monitored = fetch_monitored_checkpoint().await;
+        assert_eq!(monitored.text(), note.text());
+        verify_witness_signature(&note, monitored.signatures(), &meta);
+        assert_static_monitoring_only().await;
+    }
+
+    // A same-size transition must match the recorded hash and omit the proof.
+    {
+        let cp = log.sign_checkpoint(&signer);
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(1, &[Hash([0u8; HASH_SIZE])], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            422,
+            "same-size non-empty proof: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
+
+        let different = TreeWithTimestamp::new(1, Hash([1u8; HASH_SIZE]), now_millis());
+        let cp = different
+            .sign(LOG_ORIGIN, &[], &[&signer], &mut rng())
+            .unwrap();
+        let note = Note::from_bytes(&cp).unwrap();
+        let body = serialize_add_checkpoint_request(1, &[], &note).unwrap();
+        let r = post_add_checkpoint(&body).await;
+        assert_eq!(
+            r.status,
+            409,
+            "same-size hash mismatch: body={:?}",
+            String::from_utf8_lossy(&r.body)
+        );
     }
 
     // ----------------------- (3) Second submission with consistency proof -----------------------
@@ -377,6 +488,9 @@ async fn tlog_witness_end_to_end() {
             "second submission: body={:?}",
             String::from_utf8_lossy(&r.body)
         );
+        let monitored = fetch_monitored_checkpoint().await;
+        assert_eq!(monitored.text(), note.text());
+        verify_witness_signature(&note, monitored.signatures(), &meta);
     }
 
     // ----------------------- (4) Stale old_size → 409 -----------------------

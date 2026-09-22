@@ -1,10 +1,10 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Object storage for the mirrored copy of each origin log.
+//! Object storage for mirror and witness monitoring data.
 //!
-//! A single R2 bucket (bound as [`PUBLIC_BUCKET_BINDING`]) backs every
-//! origin the mirror serves. Objects for a given origin are stored under
+//! Separate R2 buckets back the mirror and witness monitoring interfaces.
+//! Objects for a given origin are stored under
 //! a distinct `<origin hash>/` key prefix, where `origin hash` is the
 //! lowercase hex SHA-256 of the log's origin, the same identifier the
 //! [c2sp.org/tlog-mirror][spec] monitoring interface uses in its URL
@@ -30,6 +30,8 @@ use worker::*;
 
 /// `wrangler.jsonc` binding name for the mirror's public R2 bucket.
 pub(crate) const PUBLIC_BUCKET_BINDING: &str = "PUBLIC_BUCKET";
+/// `wrangler.jsonc` binding name for the witness's public R2 bucket.
+pub(crate) const WITNESS_BUCKET_BINDING: &str = "WITNESS_BUCKET";
 
 /// Compute a log's *origin hash*: the lowercase hex-encoded SHA-256 of
 /// the origin string, per [c2sp.org/tlog-mirror][spec]. Used both as the
@@ -84,7 +86,20 @@ impl ObjectBackend for OriginBucket {
 /// Returns an error if the `PUBLIC_BUCKET` binding is missing or not an
 /// R2 bucket.
 pub(crate) fn load_origin_bucket(env: &Env, origin: &str) -> Result<OriginBucket> {
-    let bucket = env.bucket(PUBLIC_BUCKET_BINDING)?;
+    load_bound_origin_bucket(env, PUBLIC_BUCKET_BINDING, origin)
+}
+
+/// Build an [`OriginBucket`] for witness checkpoints.
+///
+/// # Errors
+///
+/// Returns an error if the `WITNESS_BUCKET` binding is missing or invalid.
+pub(crate) fn load_witness_origin_bucket(env: &Env, origin: &str) -> Result<OriginBucket> {
+    load_bound_origin_bucket(env, WITNESS_BUCKET_BINDING, origin)
+}
+
+fn load_bound_origin_bucket(env: &Env, binding: &str, origin: &str) -> Result<OriginBucket> {
+    let bucket = env.bucket(binding)?;
     Ok(OriginBucket {
         inner: ObjectBucket::new(bucket),
         prefix: format!("{}/", origin_hash(origin)),
