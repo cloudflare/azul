@@ -210,61 +210,8 @@ impl MirrorState {
                 self.advance_next_entry(body).await
             }
             (Method::Post, "/update-pending") => {
-                // The DO input/output gates make the read-verify-compare-
-                // write below atomic: concurrent requests for this origin
-                // cannot interleave, and the response is held until the
-                // write is durable, so a following add-entries cannot race
-                // it.
                 let body: UpdatePendingRequest = req.json().await?;
-                let current: Option<PendingCheckpoint> =
-                    self.state.storage().get(PENDING_KEY).await?;
-                let transition = validate_checkpoint_transition(
-                    current.as_ref().map(|checkpoint| CheckpointState {
-                        size: checkpoint.size,
-                        hash: checkpoint.hash,
-                    }),
-                    body.old_size,
-                    CheckpointState {
-                        size: body.new_size,
-                        hash: body.new_hash,
-                    },
-                    &body.proof,
-                );
-                if let Err(error) = transition {
-                    return match error {
-                        CheckpointTransitionError::OldSizeMismatch
-                        | CheckpointTransitionError::HashMismatch => {
-                            Response::from_json(&current.unwrap_or_default())
-                                .map(|response| response.with_status(409))
-                        }
-                        CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::SameSize) => {
-                            Response::error(
-                                "consistency proof must be empty when old_size == checkpoint size",
-                                422,
-                            )
-                        }
-                        CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::Initial) => {
-                            Response::error(
-                                "consistency proof must be empty when old_size is 0 (first pending checkpoint for this origin)",
-                                422,
-                            )
-                        }
-                        CheckpointTransitionError::ConsistencyProofFailed => {
-                            Response::error("consistency proof failed", 422)
-                        }
-                        CheckpointTransitionError::InvalidEmptyTreeHash => Response::error(
-                            "size-zero checkpoint must use the empty-tree hash",
-                            422,
-                        ),
-                    };
-                }
-                let new_state = PendingCheckpoint {
-                    size: body.new_size,
-                    hash: body.new_hash,
-                    signed_note_bytes: body.signed_note_bytes,
-                };
-                self.state.storage().put(PENDING_KEY, &new_state).await?;
-                Response::from_json(&new_state)
+                self.update_pending(body).await
             }
             _ => Response::error("not found", 404),
         }
@@ -272,6 +219,58 @@ impl MirrorState {
 }
 
 impl MirrorState {
+    async fn update_pending(&self, body: UpdatePendingRequest) -> Result<Response> {
+        // The DO input/output gates make this read-verify-write sequence
+        // atomic and hold the response until the write is durable.
+        let current: Option<PendingCheckpoint> = self.state.storage().get(PENDING_KEY).await?;
+        let transition = validate_checkpoint_transition(
+            current.as_ref().map(|checkpoint| CheckpointState {
+                size: checkpoint.size,
+                hash: checkpoint.hash,
+            }),
+            body.old_size,
+            CheckpointState {
+                size: body.new_size,
+                hash: body.new_hash,
+            },
+            &body.proof,
+        );
+        if let Err(error) = transition {
+            return match error {
+                CheckpointTransitionError::OldSizeMismatch
+                | CheckpointTransitionError::HashMismatch => {
+                    Response::from_json(&current.unwrap_or_default())
+                        .map(|response| response.with_status(409))
+                }
+                CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::SameSize) => {
+                    Response::error(
+                        "consistency proof must be empty when old_size == checkpoint size",
+                        422,
+                    )
+                }
+                CheckpointTransitionError::ProofMustBeEmpty(ProofRequirement::Initial) => {
+                    Response::error(
+                        "consistency proof must be empty when old_size is 0 (first pending checkpoint for this origin)",
+                        422,
+                    )
+                }
+                CheckpointTransitionError::ConsistencyProofFailed => {
+                    Response::error("consistency proof failed", 422)
+                }
+                CheckpointTransitionError::InvalidEmptyTreeHash => {
+                    Response::error("size-zero checkpoint must use the empty-tree hash", 422)
+                }
+            };
+        }
+        let new_state = PendingCheckpoint {
+            size: body.new_size,
+            hash: body.new_hash,
+            signed_note_bytes: body.signed_note_bytes,
+        };
+        self.state.storage().put(PENDING_KEY, &new_state).await?;
+        Response::from_json(&new_state)
+    }
+
     /// Publish without rewinding the committed checkpoint.
     async fn commit(&self, body: CommitRequest) -> Result<Response> {
         let _guard = self.commit_mux.lock().await;
