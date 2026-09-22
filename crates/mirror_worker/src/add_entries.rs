@@ -1037,6 +1037,9 @@ fn resolve_target_pending(
             size: committed.size,
             hash: committed.hash,
             signed_note_bytes: committed.signed_note_bytes.clone(),
+            witness_published: true,
+            witness_response_bytes: Vec::new(),
+            update_request_hash: Hash::default(),
         });
     }
 
@@ -1098,6 +1101,9 @@ fn resolve_target_pending(
         size: cp_text.size(),
         hash: *cp_text.hash(),
         signed_note_bytes: plaintext,
+        witness_published: true,
+        witness_response_bytes: Vec::new(),
+        update_request_hash: Hash::default(),
     })
 }
 
@@ -1341,6 +1347,9 @@ mod tests {
             size: target,
             hash: target_hash,
             signed_note_bytes: Vec::new(),
+            witness_published: true,
+            witness_response_bytes: Vec::new(),
+            update_request_hash: Hash::default(),
         };
         (prefix, pkg, cp)
     }

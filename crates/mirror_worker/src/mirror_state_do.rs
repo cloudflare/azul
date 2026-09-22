@@ -26,15 +26,22 @@
 
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64 as Base64As, serde_as};
+use sha2::{Digest as _, Sha256};
+use signed_note::Note;
+use tlog_checkpoint::CheckpointText;
 use tlog_core::Hash;
 use tlog_witness::{
-    CheckpointState, CheckpointTransitionError, ProofRequirement, validate_checkpoint_transition,
+    CheckpointState, CheckpointTransitionError, ProofRequirement,
+    serialize_add_checkpoint_response, validate_checkpoint_transition,
 };
 use tokio::sync::Mutex;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
-use crate::{MIRROR_STATE_BINDING, commit, storage::load_origin_bucket};
+use crate::{
+    CONFIG, MIRROR_STATE_BINDING, commit, load_witness_signer,
+    storage::{load_origin_bucket, load_witness_origin_bucket},
+};
 
 const PENDING_KEY: &str = "pending";
 const COMMITTED_KEY: &str = "committed";
@@ -55,6 +62,16 @@ pub struct PendingCheckpoint {
     /// Full signed-note bytes, encoded as base64 in persisted JSON.
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
+    /// Whether the witness checkpoint has been published to R2.
+    #[serde(default)]
+    pub witness_published: bool,
+    /// Serialized witness response for idempotent request retries.
+    #[serde_as(as = "Base64As")]
+    #[serde(default)]
+    pub witness_response_bytes: Vec<u8>,
+    /// Fingerprint of the accepted update request.
+    #[serde(default, with = "generic_log_worker::hash_serde::hex")]
+    pub update_request_hash: Hash,
 }
 
 /// The persisted *committed checkpoint* (the *mirror checkpoint*) for a
@@ -160,6 +177,13 @@ pub struct UpdatePendingRequest {
     pub signed_note_bytes: Vec<u8>,
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UpdatePendingResponse {
+    #[serde_as(as = "Base64As")]
+    pub witness_response_bytes: Vec<u8>,
+}
+
 /// Per-origin witness and mirror state.
 #[durable_object(fetch)]
 struct MirrorState {
@@ -167,6 +191,8 @@ struct MirrorState {
     env: Env,
     /// Invariant: checkpoint commits are serialized per origin.
     commit_mux: Mutex<()>,
+    /// Invariant: pending checkpoint updates are serialized per origin.
+    update_mux: Mutex<()>,
 }
 
 // SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
@@ -181,6 +207,7 @@ impl DurableObject for MirrorState {
             state,
             env,
             commit_mux: Mutex::new(()),
+            update_mux: Mutex::new(()),
         }
     }
 
@@ -220,9 +247,34 @@ impl MirrorState {
 
 impl MirrorState {
     async fn update_pending(&self, body: UpdatePendingRequest) -> Result<Response> {
+        let _guard = self.update_mux.lock().await;
+        let request_hash = update_request_hash(&body);
+
         // The DO input/output gates make this read-verify-write sequence
         // atomic and hold the response until the write is durable.
-        let current: Option<PendingCheckpoint> = self.state.storage().get(PENDING_KEY).await?;
+        let mut current: Option<PendingCheckpoint> = self.state.storage().get(PENDING_KEY).await?;
+        if CONFIG.witness_enabled()
+            && let Some(checkpoint) = current.as_mut()
+            && !checkpoint.witness_published
+        {
+            self.recover_witness_checkpoint(checkpoint).await?;
+        }
+        if CONFIG.witness_enabled()
+            && let Some(checkpoint) = current.as_ref()
+            && !checkpoint.witness_response_bytes.is_empty()
+            && (checkpoint.update_request_hash == request_hash
+                || (checkpoint.update_request_hash == Hash::default()
+                    && checkpoint.size == body.new_size
+                    && checkpoint.hash == body.new_hash
+                    && checkpoint_text_matches(
+                        &checkpoint.signed_note_bytes,
+                        &body.signed_note_bytes,
+                    )?))
+        {
+            return Response::from_json(&UpdatePendingResponse {
+                witness_response_bytes: checkpoint.witness_response_bytes.clone(),
+            });
+        }
         let transition = validate_checkpoint_transition(
             current.as_ref().map(|checkpoint| CheckpointState {
                 size: checkpoint.size,
@@ -262,13 +314,65 @@ impl MirrorState {
                 }
             };
         }
-        let new_state = PendingCheckpoint {
+        let (signed_note_bytes, witness_response_bytes) = if CONFIG.witness_enabled() {
+            self.cosign_witness_checkpoint(&body.signed_note_bytes)?
+        } else {
+            (body.signed_note_bytes, Vec::new())
+        };
+        let mut new_state = PendingCheckpoint {
             size: body.new_size,
             hash: body.new_hash,
-            signed_note_bytes: body.signed_note_bytes,
+            signed_note_bytes,
+            witness_published: false,
+            witness_response_bytes: witness_response_bytes.clone(),
+            update_request_hash: request_hash,
         };
         self.state.storage().put(PENDING_KEY, &new_state).await?;
-        Response::from_json(&new_state)
+        if CONFIG.witness_enabled() {
+            self.publish_witness_checkpoint(&mut new_state).await?;
+        }
+        Response::from_json(&UpdatePendingResponse {
+            witness_response_bytes,
+        })
+    }
+
+    fn cosign_witness_checkpoint(&self, note_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        let mut note = Note::from_bytes(note_bytes)
+            .map_err(|error| Error::from(format!("parse checkpoint note: {error:?}")))?;
+        let checkpoint = CheckpointText::from_bytes(note.text())
+            .map_err(|error| Error::from(format!("parse checkpoint text: {error:?}")))?;
+        let signature = load_witness_signer(&self.env)?
+            .as_checkpoint_signer()
+            .sign(generic_log_worker::util::now_millis(), &checkpoint)
+            .map_err(|error| Error::from(format!("witness signing: {error:?}")))?;
+        let response = serialize_add_checkpoint_response(std::slice::from_ref(&signature));
+        let mut signatures = note.signatures().to_vec();
+        signatures.push(signature);
+        note = Note::new(note.text(), &signatures)
+            .map_err(|error| Error::from(format!("build witness checkpoint: {error:?}")))?;
+        Ok((note.to_bytes(), response))
+    }
+
+    async fn recover_witness_checkpoint(&self, checkpoint: &mut PendingCheckpoint) -> Result<()> {
+        if checkpoint.witness_response_bytes.is_empty() {
+            let (note, response) = self.cosign_witness_checkpoint(&checkpoint.signed_note_bytes)?;
+            checkpoint.signed_note_bytes = note;
+            checkpoint.witness_response_bytes = response;
+            self.state.storage().put(PENDING_KEY, &*checkpoint).await?;
+        }
+        self.publish_witness_checkpoint(checkpoint).await
+    }
+
+    async fn publish_witness_checkpoint(&self, checkpoint: &mut PendingCheckpoint) -> Result<()> {
+        let origin = self
+            .state
+            .id()
+            .name()
+            .ok_or_else(|| Error::from("mirror state DO missing origin name"))?;
+        let bucket = load_witness_origin_bucket(&self.env, &origin)?;
+        commit::write_checkpoint(&bucket, checkpoint.signed_note_bytes.clone()).await?;
+        checkpoint.witness_published = true;
+        self.state.storage().put(PENDING_KEY, checkpoint).await
     }
 
     /// Publish without rewinding the committed checkpoint.
@@ -366,6 +470,32 @@ impl MirrorState {
     }
 }
 
+fn update_request_hash(body: &UpdatePendingRequest) -> Hash {
+    let mut digest = Sha256::new();
+    digest.update(b"mirror-worker update-pending v1\0");
+    digest.update(body.old_size.to_be_bytes());
+    digest.update(body.new_size.to_be_bytes());
+    digest.update(body.new_hash.0);
+    digest.update(
+        u64::try_from(body.proof.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for hash in &body.proof {
+        digest.update(hash.0);
+    }
+    digest.update(&body.signed_note_bytes);
+    Hash(digest.finalize().into())
+}
+
+fn checkpoint_text_matches(left: &[u8], right: &[u8]) -> Result<bool> {
+    let left = Note::from_bytes(left)
+        .map_err(|error| Error::from(format!("parse persisted checkpoint note: {error:?}")))?;
+    let right = Note::from_bytes(right)
+        .map_err(|error| Error::from(format!("parse submitted checkpoint note: {error:?}")))?;
+    Ok(left.text() == right.text())
+}
+
 /// Lookup helper used by the frontend: get a stub for the DO serving a
 /// particular log origin.
 pub(crate) fn state_stub(env: &Env, origin: &str) -> Result<Stub> {
@@ -391,19 +521,25 @@ mod tests {
             size: 42,
             hash: Hash(bytes),
             signed_note_bytes: b"signed-note-bytes".to_vec(),
+            witness_published: true,
+            witness_response_bytes: b"witness-response".to_vec(),
+            update_request_hash: Hash([0xff; HASH_SIZE]),
         };
         let json = serde_json::to_string(&pc).unwrap();
         // Pin the expected canonical encoding, matching base64 of the
         // signed-note bytes.
         assert_eq!(
             json,
-            r#"{"size":42,"hash":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","signed_note_bytes":"c2lnbmVkLW5vdGUtYnl0ZXM="}"#
+            r#"{"size":42,"hash":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","signed_note_bytes":"c2lnbmVkLW5vdGUtYnl0ZXM=","witness_published":true,"witness_response_bytes":"d2l0bmVzcy1yZXNwb25zZQ==","update_request_hash":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}"#
         );
 
         let decoded: PendingCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.size, 42);
         assert_eq!(decoded.hash.0, bytes);
         assert_eq!(decoded.signed_note_bytes, b"signed-note-bytes");
+        assert!(decoded.witness_published);
+        assert_eq!(decoded.witness_response_bytes, b"witness-response");
+        assert_eq!(decoded.update_request_hash, Hash([0xff; HASH_SIZE]));
     }
 
     /// Pin the wire shape of the internal DO RPC body. The frontend
@@ -457,6 +593,9 @@ mod tests {
         assert_eq!(pc.size, 0);
         assert_eq!(pc.hash.0, [0u8; HASH_SIZE]);
         assert!(pc.signed_note_bytes.is_empty());
+        assert!(!pc.witness_published);
+        assert!(pc.witness_response_bytes.is_empty());
+        assert_eq!(pc.update_request_hash, Hash::default());
     }
 
     #[test]
@@ -489,6 +628,9 @@ mod tests {
                 size: 5,
                 hash: Hash([0xaa; HASH_SIZE]),
                 signed_note_bytes: b"p".to_vec(),
+                witness_published: true,
+                witness_response_bytes: Vec::new(),
+                update_request_hash: Hash::default(),
             }),
             committed: Some(CommittedCheckpoint {
                 size: 3,
@@ -523,6 +665,9 @@ mod tests {
                 size: 0,
                 hash: tlog_core::EMPTY_HASH,
                 signed_note_bytes: b"zero checkpoint".to_vec(),
+                witness_published: true,
+                witness_response_bytes: Vec::new(),
+                update_request_hash: Hash::default(),
             }),
             ..MirrorStateSnapshot::default()
         };

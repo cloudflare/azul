@@ -4,7 +4,7 @@
     "witness": {
         "name": "dev.witness.example",
         "description": "Standalone local-dev witness",
-        "monitoring_prefix": "http://localhost:8788/"
+        "monitoring_prefix": "https://witness.dev.example/"
     },
     "logs": {
         "example.com/witness-log": {

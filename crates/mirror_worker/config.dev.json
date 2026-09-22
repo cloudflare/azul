@@ -4,12 +4,12 @@
     "witness": {
         "name": "dev.witness.example",
         "description": "Local-dev witness for smoke testing",
-        "monitoring_prefix": "http://localhost:8787/witness/"
+        "monitoring_prefix": "https://witness.dev.example/"
     },
     "mirror": {
         "name": "dev.mirror.example",
         "description": "Local-dev mirror for smoke testing",
-        "monitoring_prefix": "http://localhost:8787/mirror/",
+        "monitoring_prefix": "https://mirror.dev.example/",
         "clean_interval_secs": 5,
         "commit_packages": 2
     },

@@ -56,6 +56,7 @@ use ml_dsa::MlDsa44;
 use rand::rng;
 use serde::Deserialize;
 use serde_with::{base64::Base64, serde_as};
+use sha2::{Digest as _, Sha256};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
@@ -76,6 +77,8 @@ use tlog_witness::{
 /// Origin the witness is configured to accept checkpoints for (see
 /// `crates/mirror_worker/config.dev.json`).
 const LOG_ORIGIN: &str = "example.com/witness-log";
+const MIRROR_R2_BUCKET: &str = "mirror-worker-public-dev";
+const WITNESS_R2_BUCKET: &str = "witness-worker-public-dev";
 
 /// PKCS#8 PEM for the Ed25519 log key. The corresponding SPKI is committed
 /// in `crates/mirror_worker/config.dev.json`. This keypair is dev-only and
@@ -234,6 +237,32 @@ async fn fetch_metadata() -> MetadataResponse {
         .expect("metadata request");
     assert_eq!(resp.status().as_u16(), 200, "metadata status");
     resp.json().await.expect("metadata json")
+}
+
+async fn fetch_monitored_checkpoint() -> Note {
+    let origin_hash = hex::encode(Sha256::digest(LOG_ORIGIN.as_bytes()));
+    let key = format!("{origin_hash}/checkpoint");
+    let bytes = integration_tests::local_r2::get("mirror_worker", WITNESS_R2_BUCKET, &key)
+        .await
+        .expect("read witness checkpoint from local R2")
+        .expect("witness checkpoint in local R2");
+    Note::from_bytes(&bytes).expect("monitoring checkpoint note")
+}
+
+async fn assert_static_monitoring_only() {
+    let origin_hash = hex::encode(Sha256::digest(LOG_ORIGIN.as_bytes()));
+    let key = format!("{origin_hash}/checkpoint");
+    let worker_response = reqwest::get(format!("{}/{key}", base_url()))
+        .await
+        .expect("worker monitoring request");
+    assert_eq!(worker_response.status().as_u16(), 404);
+    assert!(
+        integration_tests::local_r2::get("mirror_worker", MIRROR_R2_BUCKET, &key)
+            .await
+            .expect("inspect mirror R2 bucket")
+            .is_none(),
+        "witness checkpoint leaked into the mirror bucket"
+    );
 }
 
 struct AddCheckpointResult {
@@ -410,6 +439,10 @@ async fn tlog_witness_end_to_end() {
             "response must contain at least one signature"
         );
         verify_witness_signature(&note, &sigs, &meta);
+        let monitored = fetch_monitored_checkpoint().await;
+        assert_eq!(monitored.text(), note.text());
+        verify_witness_signature(&note, monitored.signatures(), &meta);
+        assert_static_monitoring_only().await;
     }
 
     // A same-size transition must match the recorded hash and omit the proof.
@@ -455,6 +488,9 @@ async fn tlog_witness_end_to_end() {
             "second submission: body={:?}",
             String::from_utf8_lossy(&r.body)
         );
+        let monitored = fetch_monitored_checkpoint().await;
+        assert_eq!(monitored.text(), note.text());
+        verify_witness_signature(&note, monitored.signatures(), &meta);
     }
 
     // ----------------------- (4) Stale old_size → 409 -----------------------

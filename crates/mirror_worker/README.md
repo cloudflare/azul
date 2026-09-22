@@ -12,14 +12,17 @@ Combined deployments use a shared submission prefix and distinct monitoring
 prefixes per identity. `logs` is keyed by exact checkpoint origin and supports
 structured Ed25519 and `subtree/v1` checkpoint signers.
 
+Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
+The Worker only serves submission and metadata APIs.
+
 Role keys remain separate secrets:
 
 - `WITNESS_SIGNING_KEY` signs successful `add-checkpoint` responses and witness subtree responses.
 - `MIRROR_SIGNING_KEY` signs completed mirror checkpoints and mirror subtree responses.
 - `MIRROR_TICKET_KEY` seals mirror upload tickets.
 
-Disabled-role secrets are not loaded. Mirror R2, ticket, and cleaner access is
-confined to mirror operations.
+Disabled-role secrets and R2 bindings are not loaded. Ticket and cleaner access
+is confined to mirror operations.
 
 ## Mirror State
 

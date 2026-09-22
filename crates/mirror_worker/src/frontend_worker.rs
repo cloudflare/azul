@@ -5,7 +5,7 @@
 
 use crate::{
     CONFIG, IdentitySigner, load_mirror_signer, load_witness_signer, log_verifiers,
-    mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, state_stub},
+    mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, UpdatePendingResponse, state_stub},
 };
 use axum::{
     Json, Router,
@@ -19,7 +19,6 @@ use generic_log_worker::{
     frontend::request_metrics,
     init_logging,
     obs::{Wshim, metrics},
-    util::now_millis,
 };
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};
@@ -27,9 +26,8 @@ use signed_note::{NoteSignature, VerifierList};
 use tlog_checkpoint::CheckpointSigner as _;
 use tlog_witness::{
     CONTENT_TYPE_TLOG_SIZE, MAX_REQUEST_BODY_SIZE, TrustedSignatureError,
-    serialize_add_checkpoint_response, serialize_sign_subtree_response,
-    validate_add_checkpoint_request, validate_sign_subtree_proof, validate_sign_subtree_request,
-    verify_trusted_checkpoint_signature,
+    serialize_sign_subtree_response, validate_add_checkpoint_request, validate_sign_subtree_proof,
+    validate_sign_subtree_request, verify_trusted_checkpoint_signature,
 };
 use tower_service::Service as _;
 #[allow(clippy::wildcard_imports)]
@@ -312,23 +310,16 @@ async fn add_checkpoint(
         proof: consistency_proof,
         signed_note_bytes: checkpoint.to_bytes(),
     };
-    if let Some(response) = dispatch_update_pending(&env, origin, &update).await? {
-        return Ok(response);
+    match dispatch_update_pending(&env, origin, &update).await? {
+        UpdatePendingOutcome::Rejected(response) => Ok(response),
+        UpdatePendingOutcome::Updated(update) if CONFIG.witness_enabled() => Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            update.witness_response_bytes,
+        )
+            .into_response()),
+        UpdatePendingOutcome::Updated(_) => Ok(StatusCode::OK.into_response()),
     }
-
-    if !CONFIG.witness_enabled() {
-        return Ok(StatusCode::OK.into_response());
-    }
-    let signature = load_witness_signer(&env)?
-        .as_checkpoint_signer()
-        .sign(now_millis(), &checkpoint_text)
-        .map_err(|error| Error::from(format!("witness signing: {error:?}")))?;
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        serialize_add_checkpoint_response(std::slice::from_ref(&signature)),
-    )
-        .into_response())
 }
 
 fn verify_source_checkpoint(
@@ -409,7 +400,7 @@ async fn dispatch_update_pending(
     env: &Env,
     origin: &str,
     update: &UpdatePendingRequest,
-) -> Result<Option<axum::response::Response>> {
+) -> Result<UpdatePendingOutcome> {
     let stub = state_stub(env, origin)?;
     let mut response = stub
         .fetch_with_request(Request::new_with_init(
@@ -427,12 +418,14 @@ async fn dispatch_update_pending(
         )?)
         .await?;
     match response.status_code() {
-        200 => Ok(None),
+        200 => Ok(UpdatePendingOutcome::Updated(response.json().await?)),
         409 => {
             let current: PendingCheckpoint = response.json().await?;
-            Ok(Some(tlog_size_conflict(current.size)))
+            Ok(UpdatePendingOutcome::Rejected(tlog_size_conflict(
+                current.size,
+            )))
         }
-        422 => Ok(Some(
+        422 => Ok(UpdatePendingOutcome::Rejected(
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Unprocessable Entity: consistency proof failed",
@@ -444,9 +437,11 @@ async fn dispatch_update_pending(
                 .text()
                 .await
                 .unwrap_or_else(|_| "Bad request".into());
-            Ok(Some((StatusCode::BAD_REQUEST, message).into_response()))
+            Ok(UpdatePendingOutcome::Rejected(
+                (StatusCode::BAD_REQUEST, message).into_response(),
+            ))
         }
-        status => Ok(Some(
+        status => Ok(UpdatePendingOutcome::Rejected(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Internal error: DO returned {status}"),
@@ -454,6 +449,11 @@ async fn dispatch_update_pending(
                 .into_response(),
         )),
     }
+}
+
+enum UpdatePendingOutcome {
+    Updated(UpdatePendingResponse),
+    Rejected(axum::response::Response),
 }
 
 fn tlog_size_conflict(size: u64) -> axum::response::Response {
