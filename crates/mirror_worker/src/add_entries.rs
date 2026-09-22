@@ -1024,7 +1024,7 @@ fn resolve_target_pending(
         return Ok(PendingCheckpoint {
             size: committed.size,
             hash: committed.hash,
-            signed_note_bytes: committed_checkpoint_note(committed, verifiers)?,
+            signed_note_bytes: committed.checkpoint_note_bytes.clone(),
             witness_published: true,
             witness_response_bytes: Vec::new(),
             update_request_hash: Hash::default(),
@@ -1093,24 +1093,6 @@ fn resolve_target_pending(
         witness_response_bytes: Vec::new(),
         update_request_hash: Hash::default(),
     })
-}
-
-fn committed_checkpoint_note(
-    committed: &CommittedCheckpoint,
-    verifiers: &signed_note::VerifierList,
-) -> std::result::Result<Vec<u8>, &'static str> {
-    if !committed.checkpoint_note_bytes.is_empty() {
-        return Ok(committed.checkpoint_note_bytes.clone());
-    }
-
-    let note = Note::from_bytes(&committed.signed_note_bytes)
-        .map_err(|_| "committed checkpoint is not a valid signed note")?;
-    let (log_signatures, _) = note
-        .verify(verifiers)
-        .map_err(|_| "committed checkpoint has no valid trusted log signature")?;
-    Note::new(note.text(), &log_signatures)
-        .map(|note| note.to_bytes())
-        .map_err(|_| "committed checkpoint note reconstruction failed")
 }
 
 /// Verify a single [`EntryPackage`] against the target pending
