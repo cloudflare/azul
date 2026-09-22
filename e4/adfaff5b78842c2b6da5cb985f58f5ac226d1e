@@ -1,0 +1,22 @@
+crates/mirror_worker/src/mirror_state_do.rs
+  s_6e67e41cf84c26::t_179a53006b5b72 99,107,115,125-127,705-710,746
+  s_6e67e41cf84c26::t_c0ff1194e03f9b 108-114,116-124,711-745
+crates/mirror_worker/src/add_entries.rs
+  s_6e67e41cf84c26::t_3ac5887a896e9e 1024-1030,1034
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e4adfaff5b78842c2b6da5cb985f58f5ac226d1e",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
