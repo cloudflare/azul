@@ -67,14 +67,12 @@ pub struct PendingCheckpoint {
     #[serde_as(as = "Base64As")]
     pub signed_note_bytes: Vec<u8>,
     /// Whether the witness checkpoint has been published to R2.
-    #[serde(default)]
     pub witness_published: bool,
     /// Serialized witness response for idempotent request retries.
     #[serde_as(as = "Base64As")]
-    #[serde(default)]
     pub witness_response_bytes: Vec<u8>,
     /// Fingerprint of the accepted update request.
-    #[serde(default, with = "generic_log_worker::hash_serde::hex")]
+    #[serde(with = "generic_log_worker::hash_serde::hex")]
     pub update_request_hash: Hash,
 }
 
@@ -96,7 +94,6 @@ pub struct CommittedCheckpoint {
     pub hash: Hash,
     /// The source log's signed checkpoint note.
     #[serde_as(as = "Base64As")]
-    #[serde(default)]
     pub checkpoint_note_bytes: Vec<u8>,
     /// The served checkpoint bytes: the log's signed note with the
     /// mirror's cosignature line(s) appended, exactly as written to R2.
@@ -273,19 +270,12 @@ impl MirrorState {
             && let Some(checkpoint) = current.as_mut()
             && !checkpoint.witness_published
         {
-            self.recover_witness_checkpoint(checkpoint).await?;
+            self.publish_witness_checkpoint(checkpoint).await?;
         }
         if CONFIG.witness_enabled()
             && let Some(checkpoint) = current.as_ref()
             && !checkpoint.witness_response_bytes.is_empty()
-            && (checkpoint.update_request_hash == request_hash
-                || (checkpoint.update_request_hash == Hash::default()
-                    && checkpoint.size == body.new_size
-                    && checkpoint.hash == body.new_hash
-                    && checkpoint_text_matches(
-                        &checkpoint.signed_note_bytes,
-                        &body.signed_note_bytes,
-                    )?))
+            && checkpoint.update_request_hash == request_hash
         {
             return Response::from_json(&UpdatePendingResponse {
                 witness_response_bytes: checkpoint.witness_response_bytes.clone(),
@@ -367,16 +357,6 @@ impl MirrorState {
         note = Note::new(note.text(), &signatures)
             .map_err(|error| Error::from(format!("build witness checkpoint: {error:?}")))?;
         Ok((note.to_bytes(), response))
-    }
-
-    async fn recover_witness_checkpoint(&self, checkpoint: &mut PendingCheckpoint) -> Result<()> {
-        if checkpoint.witness_response_bytes.is_empty() {
-            let (note, response) = self.cosign_witness_checkpoint(&checkpoint.signed_note_bytes)?;
-            checkpoint.signed_note_bytes = note;
-            checkpoint.witness_response_bytes = response;
-            self.state.storage().put(PENDING_KEY, &*checkpoint).await?;
-        }
-        self.publish_witness_checkpoint(checkpoint).await
     }
 
     async fn publish_witness_checkpoint(&self, checkpoint: &mut PendingCheckpoint) -> Result<()> {
@@ -507,14 +487,6 @@ fn update_request_hash(body: &UpdatePendingRequest) -> Hash {
     }
     digest.update(&body.signed_note_bytes);
     Hash(digest.finalize().into())
-}
-
-fn checkpoint_text_matches(left: &[u8], right: &[u8]) -> Result<bool> {
-    let left = Note::from_bytes(left)
-        .map_err(|error| Error::from(format!("parse persisted checkpoint note: {error:?}")))?;
-    let right = Note::from_bytes(right)
-        .map_err(|error| Error::from(format!("parse submitted checkpoint note: {error:?}")))?;
-    Ok(left.text() == right.text())
 }
 
 trait PublicationStorage {
@@ -680,15 +652,6 @@ mod tests {
         assert_eq!(decoded.hash.0, bytes);
         assert_eq!(decoded.checkpoint_note_bytes, b"source-note-bytes");
         assert_eq!(decoded.signed_note_bytes, b"signed-note-bytes");
-    }
-
-    #[test]
-    fn committed_checkpoint_accepts_legacy_json() {
-        let json = r#"{"size":42,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","signed_note_bytes":"c2VydmVk"}"#;
-        let decoded: CommittedCheckpoint = serde_json::from_str(json).unwrap();
-        assert_eq!(decoded.size, 42);
-        assert!(decoded.checkpoint_note_bytes.is_empty());
-        assert_eq!(decoded.signed_note_bytes, b"served");
     }
 
     #[test]
