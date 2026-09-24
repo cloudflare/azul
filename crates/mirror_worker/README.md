@@ -15,7 +15,7 @@ structured Ed25519 and `subtree/v1` checkpoint signers.
 When `enable_chrome_cosigners` is true, an hourly scheduled event synchronizes
 the public MTC cosigner registry into the singleton `CosignerRegistry` SQLite
 Durable Object. Synchronized issuer logs are merged with `logs`; static
-configuration takes precedence for an origin. The option defaults to false.
+configuration takes precedence for an origin. The option defaults to true.
 Registry versions are opaque identifiers because the upstream schema does not
 require semantic-version syntax. Replacement rejects changed content under the
 same version and parseable timestamp regressions.
