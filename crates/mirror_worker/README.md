@@ -45,8 +45,10 @@ publication is retried before an older or newer request is evaluated.
 The dev configuration enables both roles. Run from this directory:
 
 ```bash
-npx wrangler -e=dev dev
 ./reset-dev.sh
+npx wrangler -e=dev dev --test-scheduled \
+  --var COSIGNERS_JSON_URL:http://127.0.0.1:8790/cosigners.json \
+  --var COSIGNERS_PEM_URL:http://127.0.0.1:8790/cosigners.pem
 ```
 
 Run the integration suites from the workspace root against the same worker:
@@ -55,3 +57,7 @@ Run the integration suites from the workspace root against the same worker:
 cargo test -p integration_tests --test tlog_witness
 cargo test -p integration_tests --test tlog_mirror
 ```
+
+The mirror integration test starts the registry fixture server on port 8790.
+The URL overrides are only honored by the `dev` build and are needed for that
+suite. Other builds use the public gstatic registry.
