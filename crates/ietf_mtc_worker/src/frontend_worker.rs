@@ -298,7 +298,12 @@ async fn get_certificate(
     if leaf_index >= checkpoint.size() {
         return Err(AppError::LeafIndexNotInLog);
     }
-    let sequence = get_landmark_sequence(&log, &object_backend).await?;
+    let Some(sequence) = get_landmark_sequence(&log, &object_backend).await? else {
+        let interval = params.landmark_interval_secs as u64;
+        return Err(AppError::LeafIndexPendingLandmark {
+            retry_after: interval - (now_millis() / 1000) % interval,
+        });
+    };
     if leaf_index < sequence.first_index() {
         return Err(AppError::LeafIndexBeforeFirstActiveLandmark);
     }
@@ -492,6 +497,10 @@ async fn build_standalone_cert(
     for _ in 0..MAX_SIG_RETRIES {
         if let Some(raw) = object_bucket.fetch(&key).await.ok().flatten()
             && let Ok(value) = serde_json::from_slice::<SignedSubtree>(&raw)
+            && value.has_signatures_for(
+                std::iter::once(params.ca_id.as_str())
+                    .chain(params.cosigners.iter().map(|cosigner| cosigner.id.as_str())),
+            )
         {
             signed = Some(value);
             break;
@@ -500,7 +509,6 @@ async fn build_standalone_cert(
     }
     let signed = signed?;
     let subtree = signed.as_subtree().ok()?;
-    let cosigner_id = TrustAnchorID::from_str(&signed.cosigner_id).ok()?;
     let checkpoint_hash = tlog_core::Hash(signed.checkpoint_hash);
     let csr = x509_cert::request::CertReq::from_der(&req.csr).ok()?;
     let spki_der = der::Encode::to_der(&csr.info.public_key).ok()?;
@@ -525,6 +533,16 @@ async fn build_standalone_cert(
         log::warn!("{name}: subtree inclusion proof failed for leaf {leaf_index}: {error:?}");
     })
     .ok()?;
+    let signatures = signed
+        .signatures
+        .into_iter()
+        .map(|signature| {
+            Some((
+                TrustAnchorID::from_str(&signature.cosigner_id).ok()?,
+                signature.signature,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     serialize_mtc_cert(
         &log_entry,
         params.log_number,
@@ -532,7 +550,7 @@ async fn build_standalone_cert(
         &spki_der,
         &subtree,
         proof,
-        &[(cosigner_id, signed.signature)],
+        &signatures,
     )
     .ok()
 }
@@ -557,12 +575,12 @@ async fn get_current_checkpoint(
 async fn get_landmark_sequence(
     name: &str,
     object_backend: &ObjectBucket,
-) -> ApiResult<LandmarkSequence> {
-    let bytes = object_backend
-        .fetch(LANDMARK_KEY)
-        .await?
-        .ok_or_else(|| AppError::InternalServerError("failed to get landmark sequence".into()))?;
+) -> ApiResult<Option<LandmarkSequence>> {
+    let Some(bytes) = object_backend.fetch(LANDMARK_KEY).await? else {
+        return Ok(None);
+    };
     LandmarkSequence::from_bytes(&bytes, CONFIG.logs[name].max_active_landmarks())
+        .map(Some)
         .map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 

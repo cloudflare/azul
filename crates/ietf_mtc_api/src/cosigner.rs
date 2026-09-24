@@ -3,9 +3,9 @@
 
 //! Draft-06 MTC cosigner types for checkpoints, subtrees, and certificate proofs.
 //!
-//! Ed25519 and ML-DSA-44 signatures use the `subtree/v1` cosigned message. Signed-note
-//! signatures carry the POSIX-seconds timestamp prefix; raw certificate signatures commit
-//! to timestamp zero and omit that prefix.
+//! Ed25519 and ML-DSA-44 signatures use the `subtree/v1` cosigned message. Checkpoint
+//! signature values carry a POSIX-seconds timestamp prefix. Subtree signature values are
+//! raw signatures and commit to timestamp zero.
 
 use byteorder::{BigEndian, ReadBytesExt};
 use ed25519_dalek::pkcs8::EncodePublicKey as Ed25519EncodePublicKey;
@@ -24,7 +24,7 @@ use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType
 use std::collections::BTreeMap;
 use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_core::{HASH_SIZE, Hash, LeafIndex, Subtree};
-use tlog_cosignature::subtree_v1::{build_cosigned_message, timestamped_signature};
+use tlog_cosignature::subtree_v1::{build_cosigned_message, checkpoint_cosignature};
 
 use crate::RelativeOid;
 
@@ -226,7 +226,7 @@ impl CheckpointSigner for MtcCosigner {
         Ok(NoteSignature::new(
             self.name().clone(),
             self.key_id(),
-            timestamped_signature(timestamp, &sig),
+            checkpoint_cosignature(timestamp, &sig),
         ))
     }
 
@@ -387,32 +387,16 @@ impl NoteVerifier for MtcSubtreeNoteVerifier {
         let Some((origin, start, end, hash)) = parse_subtree_note_body(msg) else {
             return false;
         };
-        if origin != self.log_id.oid_name()
-            || sig_bytes.len() != 8 + self.verifying_key.signature_len()
+        if origin != self.log_id.oid_name() || sig_bytes.len() != self.verifying_key.signature_len()
         {
             return false;
         }
-        let mut timestamp_bytes = &sig_bytes[..8];
-        let Ok(timestamp) = timestamp_bytes.read_u64::<BigEndian>() else {
-            return false;
-        };
-        if start != 0 && timestamp != 0 {
-            return false;
-        }
-        let msg = build_cosigned_message(&self.name, timestamp, &origin, start, end, &hash);
-        self.verifying_key.verify(&msg, &sig_bytes[8..])
+        let msg = build_cosigned_message(&self.name, 0, &origin, start, end, &hash);
+        self.verifying_key.verify(&msg, sig_bytes)
     }
 
-    fn extract_timestamp_millis(&self, mut sig: &[u8]) -> Result<Option<u64>, NoteError> {
-        if sig.len() != 8 + self.verifying_key.signature_len() {
-            return Err(NoteError::Timestamp);
-        }
-        let timestamp = sig
-            .read_u64::<BigEndian>()
-            .map_err(|_| NoteError::Timestamp)?;
-        Ok(Some(
-            timestamp.checked_mul(1000).ok_or(NoteError::Timestamp)?,
-        ))
+    fn extract_timestamp_millis(&self, _sig: &[u8]) -> Result<Option<u64>, NoteError> {
+        Ok(None)
     }
 }
 
@@ -726,5 +710,39 @@ mod tests {
         proof
             .verify_cosignature(&hash, &MtcVerifyingKey::MlDsa44(vk), &ca_id, &ca_id, 3)
             .unwrap();
+    }
+
+    #[test]
+    fn ml_dsa_subtree_note_uses_raw_signature() {
+        use base64::prelude::*;
+
+        let sk = MlDsaExpandedSigningKey::<MlDsa44>::from_seed(&ml_dsa::B32::from([8; 32]));
+        let vk = sk.verifying_key();
+        let ca_id = TrustAnchorID::from_str("44363.5").unwrap();
+        let signer = MtcCosigner::new_checkpoint(
+            ca_id.clone(),
+            &ca_id,
+            3,
+            MtcSigningKey::MlDsa44(sk),
+            MtcVerifyingKey::MlDsa44(vk.clone()),
+        )
+        .unwrap();
+        let verifier =
+            MtcSubtreeNoteVerifier::new(&ca_id, &ca_id, 3, MtcVerifyingKey::MlDsa44(vk)).unwrap();
+        let hash = Hash([9; HASH_SIZE]);
+        let signature = signer.sign_subtree(8, 16, &hash).unwrap();
+        let note = format!(
+            "{}\n8 16\n{}\n",
+            signer.log_id().oid_name(),
+            BASE64_STANDARD.encode(hash.0)
+        );
+
+        assert_eq!(signature.len(), verifier.verifying_key.signature_len());
+        assert!(verifier.verify(note.as_bytes(), &signature));
+        assert_eq!(verifier.extract_timestamp_millis(&signature).unwrap(), None);
+
+        let mut prefixed = vec![0; 8];
+        prefixed.extend_from_slice(&signature);
+        assert!(!verifier.verify(note.as_bytes(), &prefixed));
     }
 }

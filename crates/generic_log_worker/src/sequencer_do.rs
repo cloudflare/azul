@@ -60,6 +60,8 @@ pub struct SequencerConfig {
     pub checkpoint_callback: CheckpointCallbacker,
     /// Persist failed callback inputs and retry them before sequencing another checkpoint.
     pub durable_checkpoint_callback: bool,
+    /// Invoke the checkpoint callback when a sequencing alarm has no pending entries.
+    pub checkpoint_callback_on_idle: bool,
 }
 
 impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
