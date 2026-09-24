@@ -32,6 +32,7 @@ worker_build_config.workspace = true
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+chrono.workspace = true
 config = { path = "./config", package = "mirror_worker_config" }
 ed25519-dalek.workspace = true
 flate2.workspace = true
@@ -44,6 +45,7 @@ length_prefixed.workspace = true
 log.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true
+sentry-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true

@@ -1832,6 +1832,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
+ "chrono",
  "ed25519-dalek",
  "flate2",
  "futures-util",
@@ -1844,6 +1845,7 @@ dependencies = [
  "mirror_worker_config",
  "ml-dsa",
  "pkcs8",
+ "sentry-core",
  "serde",
  "serde_json",
  "serde_with",

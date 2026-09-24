@@ -1,6 +1,7 @@
 {
     "logging_level": "info",
     "submission_prefix": "http://localhost:8789/",
+    "enable_chrome_cosigners": true,
     "mirror": {
         "name": "dev.mirror.example",
         "description": "Standalone local-dev mirror",

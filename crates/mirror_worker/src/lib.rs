@@ -55,6 +55,7 @@ mod add_entries;
 mod body;
 mod cleaner_do;
 mod commit;
+mod cosigner_registry_do;
 mod frontend_worker;
 mod mirror_state_do;
 mod storage;
@@ -129,23 +130,7 @@ fn parse_log_keys(log: &config::LogParams) -> Vec<LogKey> {
         .collect()
 }
 
-/// Every configured source-log origin, as `'static` string slices.
-///
-/// This is the set of Durable Object names for the per-origin
-/// `MirrorState`/`MirrorCleaner` instances; the DOs recover their own
-/// origin by matching the runtime-provided DO name against this set.
-pub(crate) fn log_origins() -> impl Iterator<Item = &'static str> {
-    LOG_KEYS.keys().map(String::as_str)
-}
-
-/// Build a [`VerifierList`] for a given origin from the cached keys, or
-/// `None` if no log is configured at that origin.
-pub(crate) fn log_verifiers(origin: &str) -> Option<VerifierList> {
-    let keys = LOG_KEYS.get(origin)?;
-    Some(log_verifiers_for_keys(keys))
-}
-
-fn log_verifiers_for_keys(keys: &[LogKey]) -> VerifierList {
+pub(crate) fn log_verifiers_for_keys(keys: &[LogKey]) -> VerifierList {
     let verifiers: Vec<Box<dyn NoteVerifier>> = keys
         .iter()
         .map(|key| match key {

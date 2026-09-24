@@ -12,6 +12,14 @@ Combined deployments use a shared submission prefix and distinct monitoring
 prefixes per identity. `logs` is keyed by exact checkpoint origin and supports
 structured Ed25519 and `subtree/v1` checkpoint signers.
 
+When `enable_chrome_cosigners` is true, an hourly scheduled event synchronizes
+the public MTC cosigner registry into the singleton `CosignerRegistry` SQLite
+Durable Object. Synchronized issuer logs are merged with `logs`; static
+configuration takes precedence for an origin. The option defaults to false.
+Registry versions are opaque identifiers because the upstream schema does not
+require semantic-version syntax. Replacement rejects changed content under the
+same version and parseable timestamp regressions.
+
 Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
 The Worker only serves submission and metadata APIs.
 
