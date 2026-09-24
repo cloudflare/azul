@@ -50,8 +50,9 @@ use generic_log_worker::{ObjectBackend, util::now_millis};
 use crate::{
     body::{self, BodyError},
     commit,
+    cosigner_registry_do::log_verifiers,
     frontend_worker::{ApiResult, AppError},
-    load_mirror_signer, load_ticket_sealer, log_verifiers,
+    load_mirror_signer, load_ticket_sealer,
     mirror_state_do::{
         AdvanceNextEntryRequest, CommitRequest, CommittedCheckpoint, MirrorStateSnapshot,
         NextEntry, PendingCheckpoint, state_stub,
@@ -96,7 +97,7 @@ pub(crate) async fn add_entries(
     // header size is bounded (~131 KB max), so the loop terminates.
     let header = parse_header(&mut buf).await?;
 
-    let Some(verifiers) = log_verifiers(&header.log_origin) else {
+    let Some(verifiers) = log_verifiers(&env, &header.log_origin).await? else {
         return Err(AppError::UnknownLogOrigin);
     };
 

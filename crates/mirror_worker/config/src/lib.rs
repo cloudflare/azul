@@ -16,6 +16,8 @@ use tlog_cosignature::SubtreeV1NoteVerifier;
 pub struct AppConfig {
     pub logging_level: Option<String>,
     pub submission_prefix: String,
+    #[serde(default)]
+    pub enable_chrome_cosigners: bool,
     pub witness: Option<IdentityConfig>,
     pub mirror: Option<MirrorConfig>,
     #[serde(deserialize_with = "deserialize_logs")]
@@ -242,6 +244,7 @@ mod tests {
         AppConfig {
             logging_level: None,
             submission_prefix: "https://submit.example/".to_owned(),
+            enable_chrome_cosigners: false,
             witness: witness.then(|| IdentityConfig {
                 name: key_name("witness.example"),
                 description: None,
@@ -286,6 +289,20 @@ mod tests {
         assert_eq!(config(true, false).mode(), "witness");
         assert_eq!(config(false, true).mode(), "mirror");
         assert_eq!(config(true, true).mode(), "witness-and-mirror");
+    }
+
+    #[test]
+    fn chrome_cosigners_default_disabled_and_accept_explicit_enablement() {
+        let fixture = include_str!("../../config.witness.json");
+        let config: AppConfig = serde_json::from_str(fixture).unwrap();
+        assert!(!config.enable_chrome_cosigners);
+
+        let enabled = fixture.replace(
+            "\"submission_prefix\": \"http://localhost:8788/\",",
+            "\"submission_prefix\": \"http://localhost:8788/\",\n    \"enable_chrome_cosigners\": true,",
+        );
+        let config: AppConfig = serde_json::from_str(&enabled).unwrap();
+        assert!(config.enable_chrome_cosigners);
     }
 
     fn ml_dsa_spki(seed: u8) -> Vec<u8> {
@@ -389,14 +406,14 @@ mod tests {
 
     #[test]
     fn standalone_config_fixtures_validate() {
-        for fixture in [
-            include_str!("../../config.witness.json"),
-            include_str!("../../config.mirror.json"),
-        ] {
-            serde_json::from_str::<AppConfig>(fixture)
-                .unwrap()
-                .validate()
-                .unwrap();
-        }
+        let witness: AppConfig =
+            serde_json::from_str(include_str!("../../config.witness.json")).unwrap();
+        witness.validate().unwrap();
+        assert!(!witness.enable_chrome_cosigners);
+
+        let mirror: AppConfig =
+            serde_json::from_str(include_str!("../../config.mirror.json")).unwrap();
+        mirror.validate().unwrap();
+        assert!(mirror.enable_chrome_cosigners);
     }
 }
