@@ -1,0 +1,47 @@
+Cargo.lock
+  s_d763391973ddd6::t_d018415498179e 1627,1643,1645-1646,1659
+crates/ietf_mtc_api/src/cosigner.rs
+  s_00fda69df30f05::t_86a2ef55fd1209 6-8,27,229,390,394-395,398-399,714-747
+crates/ietf_mtc_api/src/lib.rs
+  s_d763391973ddd6::t_dae79da35116b0 308-314
+crates/ietf_mtc_worker/Cargo.toml
+  s_d763391973ddd6::t_09bddeec7548de 33-35,59-61,70-72
+crates/ietf_mtc_worker/config.dev.json
+  s_d763391973ddd6::t_03621ae7522737 12-19
+crates/ietf_mtc_worker/config.schema.json
+  s_d763391973ddd6::t_f1e2f66a8bedaf 109-133
+crates/ietf_mtc_worker/config/Cargo.toml
+  s_d763391973ddd6::t_5fea21a6f10947 15-16
+crates/ietf_mtc_worker/config/src/lib.rs
+  s_d763391973ddd6::t_66be9b71f7e729 6,43-53
+crates/ietf_mtc_worker/src/lib.rs
+  s_d763391973ddd6::t_0a7bcd65101f26 24-25
+crates/integration_tests/tests/ietf_mtc_api.rs
+  s_d763391973ddd6::t_83d5e8e6bddcf7 35-36,257-271,315-338,345,400-410,520
+crates/tlog_cosignature/src/subtree_v1.rs
+  s_00fda69df30f05::t_8b8d70c73d351e 18-19,27,49-51,55-57,106,109,183,186-187,202,274,279-283,286-287,290-295,299,316,338,393-395,421,424,452-460,465-466,469,476,489,500-501,511-512,519,547,549,557,568,588,590,594,596,613,660,740-741,748,762,765,770,801
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "aaae20ffc6f18c071b51bb1eb4be0ecb47c1be1b",
+  "prompts": {},
+  "sessions": {
+    "s_00fda69df30f05": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f3a5d99ddffeyh6b24hyDqnNb4",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    },
+    "s_d763391973ddd6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fcbd8fa50ffekGEVljtE5pVpXM",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
