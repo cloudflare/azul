@@ -38,7 +38,7 @@ npx wrangler -e=dev dev &
 # From workspace root:
 cargo test -p integration_tests --test static_ct_api
 # Override defaults:
-BASE_URL=http://localhost:8787 LOG_NAME=dev2026h1a cargo test -p integration_tests --test static_ct_api
+BASE_URL=http://localhost:8787 LOG_NAME=dev2026h2a cargo test -p integration_tests --test static_ct_api
 
 # Worker deploy
 npx wrangler -e=${ENV} deploy

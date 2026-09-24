@@ -23,10 +23,10 @@ pub fn base_url() -> String {
     std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8787".to_string())
 }
 
-/// Log shard name to test against.  Defaults to `dev2026h1a`.
+/// Log shard name to test against.  Defaults to `dev2026h2a`.
 #[must_use]
 pub fn log_name() -> String {
-    std::env::var("LOG_NAME").unwrap_or_else(|_| "dev2026h1a".to_string())
+    std::env::var("LOG_NAME").unwrap_or_else(|_| "dev2026h2a".to_string())
 }
 
 /// Full URL prefix for a given log: `{base_url}/logs/{log_name}`.
@@ -47,23 +47,42 @@ pub struct GetRootsResponse {
     pub certificates: Vec<Vec<u8>>,
 }
 
-/// Response body from `GET /logs/:log/log.v3.json`.
+/// Response body from `GET /logs/:log/metadata.json`.
 #[serde_as]
 #[derive(Deserialize, Debug)]
-pub struct LogV3JsonResponse {
-    pub description: Option<String>,
-    pub log_type: Option<String>,
+pub struct LogMetadataResponse {
+    #[serde(rename = "$schema")]
+    pub schema: String,
     #[serde_as(as = "Base64")]
     pub log_id: Vec<u8>,
     #[serde_as(as = "Base64")]
     pub key: Vec<u8>,
-    pub mmd: u64,
-    pub submission_url: String,
-    pub monitoring_url: Option<String>,
+    pub friendly_name: String,
+    pub log_spec: String,
+    pub mmd_seconds: u64,
+    pub intended_use: String,
+    pub tls_only: bool,
     pub temporal_interval: TemporalInterval,
+    pub status: String,
+    pub status_timestamp: String,
+    pub submission_endpoint: EndpointInfo,
+    pub monitoring_endpoint: EndpointInfo,
 }
 
-/// Temporal interval within a `LogV3JsonResponse`.
+#[derive(Deserialize, Debug)]
+pub struct EndpointInfo {
+    pub url: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct OperatorListResponse {
+    #[serde(rename = "$schema")]
+    pub schema: String,
+    pub operator_name: String,
+    pub logs: Vec<String>,
+}
+
+/// Temporal interval within a `LogMetadataResponse`.
 #[derive(Deserialize, Debug)]
 pub struct TemporalInterval {
     pub start_inclusive: String,
@@ -111,7 +130,7 @@ impl CtClient {
         }
     }
 
-    /// Creates a client for the default log (from `LOG_NAME` env / `dev2026h1a`).
+    /// Creates a client for the default log (from `LOG_NAME` env / `dev2026h2a`).
     #[must_use]
     pub fn default_log() -> Self {
         Self::new(log_name())
@@ -136,19 +155,48 @@ impl CtClient {
         resp.json().await.context("parsing get-roots response")
     }
 
-    /// `GET /logs/:log/log.v3.json`
-    pub async fn get_log_v3_json(&self) -> Result<LogV3JsonResponse> {
+    /// `GET /logs/:log/metadata.json`
+    pub async fn get_metadata(&self) -> Result<LogMetadataResponse> {
+        serde_json::from_value(self.get_metadata_json().await?)
+            .context("parsing metadata.json response")
+    }
+
+    /// Returns the raw response from `GET /logs/:log/metadata.json`.
+    pub async fn get_metadata_json(&self) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .get(self.url("log.v3.json"))
+            .get(self.url("metadata.json"))
             .send()
             .await
-            .context("GET log.v3.json")?;
+            .context("GET metadata.json")?;
         let status = resp.status();
         if !status.is_success() {
-            bail!("GET log.v3.json returned {status}");
+            bail!("GET metadata.json returned {status}");
         }
-        resp.json().await.context("parsing log.v3.json response")
+        resp.json().await.context("parsing metadata.json response")
+    }
+
+    /// `GET /operator-list.json`
+    pub async fn get_operator_list(&self) -> Result<OperatorListResponse> {
+        serde_json::from_value(self.get_operator_list_json().await?)
+            .context("parsing operator-list.json response")
+    }
+
+    /// Returns the raw response from `GET /operator-list.json`.
+    pub async fn get_operator_list_json(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/operator-list.json", base_url()))
+            .send()
+            .await
+            .context("GET operator-list.json")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("GET operator-list.json returned {status}");
+        }
+        resp.json()
+            .await
+            .context("parsing operator-list.json response")
     }
 
     /// `POST /logs/:log/ct/v1/add-chain`
@@ -202,8 +250,8 @@ impl CtClient {
                 .with_context(|| format!("R2 object missing: {path}"));
         }
 
-        let metadata = self.get_log_v3_json().await?;
-        get_raw_http(&self.client, metadata.monitoring_url.as_deref(), path).await
+        let metadata = self.get_metadata().await?;
+        get_raw_http(&self.client, &metadata.monitoring_endpoint.url, path).await
     }
 
     /// `GET /logs/:log/{path}` — returns the HTTP status code (does not fail on 4xx/5xx).
@@ -220,10 +268,9 @@ impl CtClient {
 
 async fn get_raw_http(
     client: &reqwest::Client,
-    monitoring_url: Option<&str>,
+    monitoring_url: &str,
     path: &str,
 ) -> Result<Vec<u8>> {
-    let monitoring_url = monitoring_url.context("log does not advertise a monitoring URL")?;
     let url = format!("{}/{path}", monitoring_url.trim_end_matches('/'));
     let resp = client
         .get(&url)

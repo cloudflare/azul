@@ -5,7 +5,7 @@
 //!
 //! These tests require a running `wrangler dev` instance.
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
-//! Set `LOG_NAME` to choose which log shard; defaults to `dev2026h1a`.
+//! Set `LOG_NAME` to choose which log shard; defaults to `dev2026h2a`.
 //!
 //! # Running
 //!
@@ -21,7 +21,7 @@
 //!
 //! To run against a different shard or URL:
 //! ```text
-//! BASE_URL=http://localhost:8787 LOG_NAME=dev2026h1a cargo test -p integration_tests --test static_ct_api
+//! BASE_URL=http://localhost:8787 LOG_NAME=dev2026h2a cargo test -p integration_tests --test static_ct_api
 //! ```
 
 use std::time::Duration;
@@ -31,11 +31,18 @@ use integration_tests::{
         assert_leaf_in_checkpoint, assert_sct_signature, assert_sct_structure,
         fetch_and_verify_checkpoint, fetch_checkpoint_until_size, leaf_index_from_sct,
     },
-    client::{CtClient, base_url},
+    client::{CtClient, LogMetadataResponse, OperatorListResponse},
     fixtures::{empty_chain, garbage_chain, make_chains, make_expired_chain},
-    local_r2,
 };
 use tokio::sync::OnceCell;
+
+const LOG_METADATA_SCHEMA: &str = include_str!("../schemas/log_schema_v2.json");
+const OPERATOR_LIST_SCHEMA: &str = include_str!("../schemas/operator_list_schema_v1.json");
+
+fn assert_matches_schema(instance: &serde_json::Value, schema: &str) {
+    let schema = serde_json::from_str(schema).expect("valid vendored JSON schema");
+    jsonschema::validate(&schema, instance).expect("response matches JSON schema");
+}
 
 // ---------------------------------------------------------------------------
 // Initialization guard
@@ -52,7 +59,7 @@ use tokio::sync::OnceCell;
 /// specific test ordering.
 ///
 /// Tests that only need stateless metadata endpoints (`get-roots`,
-/// `log.v3.json`, `unknown_log`) should NOT call this — they work immediately
+/// `metadata.json`, `unknown_log`) should NOT call this — they work immediately
 /// and calling it would slow them down unnecessarily.
 static INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
@@ -68,7 +75,7 @@ async fn ensure_initialized() {
             // Fetch log metadata (needed for checkpoint verification).
             // Retry until the frontend is reachable.
             let meta = loop {
-                match client.get_log_v3_json().await {
+                match client.get_metadata().await {
                     Ok(m) => break m,
                     Err(_) => tokio::time::sleep(RETRY_DELAY).await,
                 }
@@ -136,25 +143,38 @@ async fn get_roots_returns_valid_certs() {
     }
 }
 
-/// `GET /logs/:log/log.v3.json` returns 200 with all required fields.
+/// `GET /logs/:log/metadata.json` returns 200 with all required fields.
 #[tokio::test]
-async fn log_v3_json_returns_valid_metadata() {
+async fn metadata_json_returns_valid_metadata() {
     use p256::pkcs8::{DecodePublicKey, EncodePublicKey};
     use sha2::{Digest, Sha256};
 
     let client = CtClient::default_log();
-    let meta = client.get_log_v3_json().await.expect("log.v3.json failed");
+    let metadata = client
+        .get_metadata_json()
+        .await
+        .expect("metadata.json failed");
+    assert_matches_schema(&metadata, LOG_METADATA_SCHEMA);
+    let meta: LogMetadataResponse =
+        serde_json::from_value(metadata).expect("valid metadata response");
 
+    assert_eq!(
+        meta.schema,
+        "https://googlechrome.github.io/CertificateTransparency/log_schema_v2.json"
+    );
     assert_eq!(meta.log_id.len(), 32, "log_id must be 32 bytes");
     assert!(!meta.key.is_empty(), "key must be non-empty");
-    assert!(meta.mmd > 0, "mmd must be positive");
-    assert!(
-        !meta.submission_url.is_empty(),
-        "submission_url must be set"
-    );
-    if local_r2::is_loopback_base_url(&base_url()) {
-        assert!(meta.monitoring_url.is_none());
-    }
+    assert!(!meta.friendly_name.is_empty());
+    assert_eq!(meta.log_spec, "static-ct-api");
+    assert!(meta.mmd_seconds > 0, "mmd_seconds must be positive");
+    assert_eq!(meta.intended_use, "test");
+    assert!(meta.tls_only);
+    assert!(["active", "readonly", "inactive"].contains(&meta.status.as_str()));
+    assert!(meta.status_timestamp.ends_with('Z'));
+    assert!(!meta.submission_endpoint.url.is_empty());
+    assert!(!meta.monitoring_endpoint.url.is_empty());
+    assert!(!meta.temporal_interval.start_inclusive.is_empty());
+    assert!(!meta.temporal_interval.end_exclusive.is_empty());
 
     // Key must be a valid P-256 SPKI.
     p256::ecdsa::VerifyingKey::from_public_key_der(&meta.key)
@@ -171,6 +191,30 @@ async fn log_v3_json_returns_valid_metadata() {
     );
 }
 
+#[tokio::test]
+async fn operator_list_returns_metadata_urls() {
+    let operator_list = CtClient::default_log()
+        .get_operator_list_json()
+        .await
+        .expect("operator-list.json failed");
+    assert_matches_schema(&operator_list, OPERATOR_LIST_SCHEMA);
+    let operator_list: OperatorListResponse =
+        serde_json::from_value(operator_list).expect("valid operator list response");
+
+    assert_eq!(
+        operator_list.schema,
+        "https://googlechrome.github.io/CertificateTransparency/operator_list_schema_v1.json"
+    );
+    assert_eq!(operator_list.operator_name, "Cloudflare");
+    assert_eq!(
+        operator_list.logs,
+        [
+            "http://localhost:8787/logs/dev2027h1a/metadata.json",
+            "http://localhost:8787/logs/dev2027h2a/metadata.json",
+        ]
+    );
+}
+
 /// Requesting an unknown log name returns 400.
 #[tokio::test]
 async fn unknown_log_returns_400() {
@@ -180,6 +224,16 @@ async fn unknown_log_returns_400() {
         .await
         .expect("GET request");
     assert_eq!(status, 400, "expected 400 for unknown log");
+}
+
+#[tokio::test]
+async fn readonly_log_rejects_submissions() {
+    let client = CtClient::new("readonlytest");
+    let (status, _) = client
+        .add_chain(empty_chain())
+        .await
+        .expect("add-chain request");
+    assert_eq!(status, 503);
 }
 
 /// Persisted log objects are not exposed by the submission Worker.
@@ -230,7 +284,7 @@ async fn add_chain_returns_sct_with_valid_signature() {
     ensure_initialized().await;
     let client = CtClient::default_log();
     let chains = make_chains(&client.log).expect("generating chain fixtures");
-    let meta = client.get_log_v3_json().await.expect("log.v3.json");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     let (status, sct) = client
         .add_chain(chains.chain.clone())
@@ -250,7 +304,7 @@ async fn add_pre_chain_returns_valid_sct() {
     ensure_initialized().await;
     let client = CtClient::default_log();
     let chains = make_chains(&client.log).expect("generating chain fixtures");
-    let meta = client.get_log_v3_json().await.expect("log.v3.json");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     let (status, sct) = client
         .add_pre_chain(chains.pre_chain.clone())
@@ -299,7 +353,7 @@ async fn add_chain_sct_appears_in_checkpoint() {
     ensure_initialized().await;
     let client = CtClient::default_log();
     let chains = make_chains(&client.log).expect("generating chain fixtures");
-    let meta = client.get_log_v3_json().await.expect("log.v3.json");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     let (status, sct) = client
         .add_chain(chains.chain.clone())
@@ -330,7 +384,7 @@ async fn add_chain_leaf_verifiable_in_tree() {
     ensure_initialized().await;
     let client = CtClient::default_log();
     let chains = make_chains(&client.log).expect("generating chain fixtures");
-    let meta = client.get_log_v3_json().await.expect("log.v3.json");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     let (status, sct) = client
         .add_chain(chains.chain.clone())
@@ -357,7 +411,7 @@ async fn add_pre_chain_leaf_verifiable_in_tree() {
     ensure_initialized().await;
     let client = CtClient::default_log();
     let chains = make_chains(&client.log).expect("generating chain fixtures");
-    let meta = client.get_log_v3_json().await.expect("log.v3.json");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     let (status, sct) = client
         .add_pre_chain(chains.pre_chain.clone())
@@ -385,7 +439,7 @@ async fn add_pre_chain_leaf_verifiable_in_tree() {
 async fn checkpoint_signature_is_valid() {
     ensure_initialized().await;
     let client = CtClient::default_log();
-    let meta = client.get_log_v3_json().await.expect("log.v3.json");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     fetch_and_verify_checkpoint(&client, &meta, None)
         .await

@@ -5,7 +5,7 @@
 
 use chrono::Months;
 use config::AppConfig;
-use config::LogType;
+use config::IntendedUse;
 use std::env;
 use std::fs;
 use url::Url;
@@ -23,11 +23,11 @@ fn main() {
                 && (3..R2_BUCKET_PREFIX_LEN).contains(&name.len()),
             "invalid shard name '{name}'. Shard names only contain lowercase letters, numbers, and be between 3 and {R2_BUCKET_PREFIX_LEN} characters long."
         );
-        if params.log_type != Some(LogType::Test) {
+        if params.intended_use == IntendedUse::Production {
             // Chrome's CT policy (https://googlechrome.github.io/CertificateTransparency/log_policy.html) states:
-            // "The certificate expiry ranges for CT Logs must be no longer than one calendar year and should be no shorter than six months."
+            // "each log's expiry range should be between 3 and 12 months."
             assert!(
-                (params.temporal_interval.start_inclusive + Months::new(6)
+                (params.temporal_interval.start_inclusive + Months::new(3)
                     ..=params.temporal_interval.start_inclusive + Months::new(12))
                     .contains(&params.temporal_interval.end_exclusive),
                 "{name} invalid temporal interval: [{}, {})",
@@ -46,10 +46,8 @@ fn main() {
             );
         }
 
-        check_url(&params.submission_url);
-        if !params.monitoring_url.is_empty() {
-            check_url(&params.monitoring_url);
-        }
+        check_url(&params.submission_endpoint.url);
+        check_url(&params.monitoring_endpoint.url);
     }
 
     // Get and validate roots from an embedded roots file, which must exist if

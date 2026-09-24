@@ -4,7 +4,7 @@
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 use crate::ccadb_roots_cron::{CCADB_ROOTS_NAMESPACE, ccadb_roots_filename, update_ccadb_roots};
-use config::{AppConfig, LogType};
+use config::{AppConfig, IntendedUse};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use p256::{ecdsa::SigningKey as EcdsaSigningKey, pkcs8::DecodePrivateKey};
 use signed_note::KeyName;
@@ -92,7 +92,8 @@ pub(crate) fn load_origin(name: &str) -> KeyName {
     // The origin line MUST be the submission prefix of the log as a schema-less URL with no trailing slashes.
     KeyName::new(
         CONFIG.logs[name]
-            .submission_url
+            .submission_endpoint
+            .url
             .trim_start_matches("http://")
             .trim_start_matches("https://")
             .trim_end_matches('/')
@@ -144,7 +145,7 @@ async fn load_roots(env: &Env, name: &str) -> Result<Arc<CertPool>> {
     // which the Workers runtime would cancel as a cross-request deadlock.
     let mut pool = CertPool::default();
 
-    if log_config.log_type == Some(LogType::Test) {
+    if log_config.intended_use == IntendedUse::Test {
         let pem = include_bytes!(concat!(env!("OUT_DIR"), "/roots.pem"));
         // load_pem_chain fails on empty input: https://github.com/RustCrypto/formats/pull/1965
         if !pem.is_empty() {

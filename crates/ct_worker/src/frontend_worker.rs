@@ -4,7 +4,7 @@
 //! Entrypoint for the static CT submission APIs.
 
 use crate::{CONFIG, StaticCTSequenceMetadata, init_sentry, load_roots, load_signing_key};
-use config::{LogType, TemporalInterval};
+use config::{EndpointInfo, IntendedUse, LogStatus, TemporalInterval};
 use generic_log_worker::{
     ENTRY_ENDPOINT, ObjectBucket, batcher_id_from_lookup_key, deserialize,
     frontend::request_metrics,
@@ -39,23 +39,38 @@ use tower_service::Service;
 // maximum allowed in Chrome's policy, 60 seconds, to allow future flexibility.
 // For details, see https://github.com/C2SP/C2SP/issues/79.
 const MAX_MERGE_DELAY_SECS: usize = 60;
+const LOG_METADATA_SCHEMA: &str =
+    "https://googlechrome.github.io/CertificateTransparency/log_schema_v2.json";
+const OPERATOR_LIST_SCHEMA: &str =
+    "https://googlechrome.github.io/CertificateTransparency/operator_list_schema_v1.json";
 
 #[serde_as]
 #[derive(Serialize)]
-struct LogV3JsonResponse<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: &'a Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    log_type: Option<LogType>,
+struct LogMetadataResponse<'a> {
+    #[serde(rename = "$schema")]
+    schema: &'static str,
     #[serde_as(as = "Base64")]
     log_id: &'a [u8],
     #[serde_as(as = "Base64")]
     key: &'a [u8],
-    mmd: usize,
-    submission_url: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    monitoring_url: Option<&'a str>,
+    friendly_name: &'a str,
+    log_spec: &'static str,
+    mmd_seconds: usize,
+    intended_use: IntendedUse,
+    tls_only: bool,
     temporal_interval: &'a TemporalInterval,
+    status: LogStatus,
+    status_timestamp: &'a chrono::DateTime<chrono::Utc>,
+    submission_endpoint: &'a EndpointInfo,
+    monitoring_endpoint: &'a EndpointInfo,
+}
+
+#[derive(Serialize)]
+struct OperatorListResponse {
+    #[serde(rename = "$schema")]
+    schema: &'static str,
+    operator_name: &'static str,
+    logs: Vec<String>,
 }
 
 /// Start is the first code run when the Wasm module is loaded.
@@ -84,7 +99,8 @@ async fn main(
             .route("/logs/{log}/ct/v1/get-roots", get(get_roots))
             .route("/logs/{log}/ct/v1/add-chain", post(add_chain))
             .route("/logs/{log}/ct/v1/add-pre-chain", post(add_pre_chain))
-            .route("/logs/{log}/log.v3.json", get(log_v3_json))
+            .route("/logs/{log}/metadata.json", get(log_metadata))
+            .route("/operator-list.json", get(operator_list))
             .route("/logs/{log}/sequencer_id", get(sequencer_id))
             .layer(middleware::from_fn_with_state(
                 (env.clone(), metrics::FrontendWorkerMetrics::new(&registry)),
@@ -143,7 +159,7 @@ enum AppError {
     InternalServerError(String),
     BadRequest(String),
     UnknownLog,
-    ReadonlyLog,
+    SubmissionsClosed,
 }
 
 impl From<Error> for AppError {
@@ -169,28 +185,19 @@ impl IntoResponse for AppError {
         match self {
             Self::InternalServerError(msg) => {
                 log::error!("Internal error: {msg}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal error",
-                )
-                    .into_response()
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
             }
-            Self::BadRequest(e) => {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Bad request{}{e}", if e.is_empty() { "" } else { ": " })
-                ).into_response()
-            }
-            Self::UnknownLog => {
-                (StatusCode::BAD_REQUEST, "Unknown log").into_response()
-            }
-            Self::ReadonlyLog => {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    [(header::RETRY_AFTER, "300")],
-                    "The log is temporarily in read-only mode during maintenance. Please try again after 5 minutes."
-                ).into_response()
-            }
+            Self::BadRequest(e) => (
+                StatusCode::BAD_REQUEST,
+                format!("Bad request{}{e}", if e.is_empty() { "" } else { ": " }),
+            )
+                .into_response(),
+            Self::UnknownLog => (StatusCode::BAD_REQUEST, "Unknown log").into_response(),
+            Self::SubmissionsClosed => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The log is not accepting submissions.",
+            )
+                .into_response(),
         }
     }
 }
@@ -229,9 +236,9 @@ async fn add_pre_chain(
     add_chain_or_pre_chain(body, &env, &log, true).await
 }
 
-/// `GET /logs/{log}/log.v3.json`
+/// `GET /logs/{log}/metadata.json`
 #[worker::send]
-async fn log_v3_json(
+async fn log_metadata(
     State(env): State<Env>,
     PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
@@ -244,20 +251,45 @@ async fn log_v3_json(
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_string(&LogV3JsonResponse {
-            description: &params.description,
-            log_type: params.log_type,
+        serde_json::to_string(&LogMetadataResponse {
+            schema: LOG_METADATA_SCHEMA,
             log_id,
             key: key.as_bytes(),
-            submission_url: &params.submission_url,
-            monitoring_url: (!params.monitoring_url.is_empty())
-                .then_some(params.monitoring_url.as_str()),
-            mmd: MAX_MERGE_DELAY_SECS,
+            friendly_name: &params.friendly_name,
+            log_spec: "static-ct-api",
+            mmd_seconds: MAX_MERGE_DELAY_SECS,
+            intended_use: params.intended_use,
+            tls_only: true,
             temporal_interval: &params.temporal_interval,
+            status: params.status,
+            status_timestamp: &params.status_timestamp,
+            submission_endpoint: &params.submission_endpoint,
+            monitoring_endpoint: &params.monitoring_endpoint,
         })
         .unwrap(),
     )
         .into_response())
+}
+
+/// `GET /operator-list.json`
+async fn operator_list() -> impl IntoResponse {
+    let mut logs = CONFIG
+        .logs
+        .values()
+        .filter(|params| params.include_in_operator_list)
+        .map(|params| {
+            format!(
+                "{}/metadata.json",
+                params.submission_endpoint.url.trim_end_matches('/')
+            )
+        })
+        .collect::<Vec<_>>();
+    logs.sort();
+    Json(OperatorListResponse {
+        schema: OPERATOR_LIST_SCHEMA,
+        operator_name: &CONFIG.operator_name,
+        logs,
+    })
 }
 
 /// `GET /logs/{log}/sequencer_id`
@@ -281,8 +313,8 @@ async fn add_chain_or_pre_chain(
     expect_precert: bool,
 ) -> ApiResult<impl IntoResponse + use<>> {
     let params = &CONFIG.logs[log];
-    if params.read_only {
-        return Err(AppError::ReadonlyLog);
+    if params.status != LogStatus::Active {
+        return Err(AppError::SubmissionsClosed);
     }
     let req: AddChainRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
