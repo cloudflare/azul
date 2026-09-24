@@ -5,7 +5,7 @@
 //! IETF MTC sequencer.
 
 use generic_log_worker::SequencerMetadata;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use tlog_checkpoint::UnixTimestampMillis;
 use tlog_core::{LeafIndex, Subtree};
 
@@ -15,13 +15,61 @@ pub fn subtree_sig_key(lo: LeafIndex, hi: LeafIndex) -> String {
     format!("{SUBTREE_SIG_KEY_PREFIX}/{lo:020}-{hi:020}")
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct SignedSubtree {
     pub lo: LeafIndex,
     pub hi: LeafIndex,
     pub hash: [u8; 32],
     pub checkpoint_hash: [u8; 32],
     pub checkpoint_size: u64,
+    pub signatures: Vec<CachedSubtreeSignature>,
+}
+
+#[derive(Deserialize)]
+struct SignedSubtreeWire {
+    lo: LeafIndex,
+    hi: LeafIndex,
+    hash: [u8; 32],
+    checkpoint_hash: [u8; 32],
+    checkpoint_size: u64,
+    signatures: Option<Vec<CachedSubtreeSignature>>,
+    signature: Option<Vec<u8>>,
+    cosigner_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SignedSubtree {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SignedSubtreeWire::deserialize(deserializer)?;
+        let signatures = match (wire.signatures, wire.signature, wire.cosigner_id) {
+            (Some(signatures), None, None) => signatures,
+            (None, Some(signature), Some(cosigner_id)) => {
+                vec![CachedSubtreeSignature {
+                    signature,
+                    cosigner_id,
+                }]
+            }
+            _ => {
+                return Err(de::Error::custom(
+                    "expected signatures or legacy signature and cosigner_id fields",
+                ));
+            }
+        };
+        Ok(Self {
+            lo: wire.lo,
+            hi: wire.hi,
+            hash: wire.hash,
+            checkpoint_hash: wire.checkpoint_hash,
+            checkpoint_size: wire.checkpoint_size,
+            signatures,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CachedSubtreeSignature {
     pub signature: Vec<u8>,
     pub cosigner_id: String,
 }
@@ -29,6 +77,14 @@ pub struct SignedSubtree {
 impl SignedSubtree {
     pub fn as_subtree(&self) -> Result<Subtree, tlog_core::TlogError> {
         Subtree::new(self.lo, self.hi)
+    }
+
+    pub fn has_signatures_for<'a>(&self, required_ids: impl IntoIterator<Item = &'a str>) -> bool {
+        required_ids.into_iter().all(|required_id| {
+            self.signatures
+                .iter()
+                .any(|signature| signature.cosigner_id == required_id)
+        })
     }
 }
 
@@ -71,5 +127,72 @@ impl SequencerMetadata for IetfMtcSequenceMetadata {
             old_tree_size,
             new_tree_size,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_subtree_reads_legacy_signature() {
+        let value = serde_json::json!({
+            "lo": 1,
+            "hi": 2,
+            "hash": vec![0; 32],
+            "checkpoint_hash": vec![1; 32],
+            "checkpoint_size": 3,
+            "signature": [4, 5],
+            "cosigner_id": "1.2.3"
+        });
+
+        let signed: SignedSubtree = serde_json::from_value(value).unwrap();
+        assert_eq!(signed.signatures.len(), 1);
+        assert_eq!(signed.signatures[0].signature, [4, 5]);
+        assert_eq!(signed.signatures[0].cosigner_id, "1.2.3");
+    }
+
+    #[test]
+    fn signed_subtree_writes_current_format() {
+        let signed = SignedSubtree {
+            lo: 1,
+            hi: 2,
+            hash: [0; 32],
+            checkpoint_hash: [1; 32],
+            checkpoint_size: 3,
+            signatures: vec![CachedSubtreeSignature {
+                signature: vec![4, 5],
+                cosigner_id: "1.2.3".to_owned(),
+            }],
+        };
+
+        let value = serde_json::to_value(signed).unwrap();
+        assert!(value.get("signatures").is_some());
+        assert!(value.get("signature").is_none());
+        assert!(value.get("cosigner_id").is_none());
+    }
+
+    #[test]
+    fn signed_subtree_requires_every_configured_signature() {
+        let signed = SignedSubtree {
+            lo: 1,
+            hi: 2,
+            hash: [0; 32],
+            checkpoint_hash: [1; 32],
+            checkpoint_size: 3,
+            signatures: vec![
+                CachedSubtreeSignature {
+                    signature: vec![4],
+                    cosigner_id: "1.2.3".to_owned(),
+                },
+                CachedSubtreeSignature {
+                    signature: vec![5],
+                    cosigner_id: "1.2.4".to_owned(),
+                },
+            ],
+        };
+
+        assert!(signed.has_signatures_for(["1.2.3", "1.2.4"]));
+        assert!(!signed.has_signatures_for(["1.2.3", "1.2.5"]));
     }
 }

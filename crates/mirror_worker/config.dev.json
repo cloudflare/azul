@@ -7,15 +7,25 @@
         "monitoring_prefix": "https://witness.dev.example/"
     },
     "mirror": {
-        "name": "dev.mirror.example",
+        "name": "oid/1.3.6.1.4.1.44363.48.2",
         "description": "Local-dev mirror for smoke testing",
         "monitoring_prefix": "https://mirror.dev.example/",
         "clean_interval_secs": 5,
         "commit_packages": 2
     },
     "logs": {
+        "oid/1.3.6.1.4.1.44363.48.1.0.1": {
+            "description": "Dev-only IETF MTC issuance log.",
+            "checkpoint_signers": [
+                {
+                    "name": "oid/1.3.6.1.4.1.44363.48.1",
+                    "algorithm": "subtree/v1",
+                    "public_key": "MIIFMjALBglghkgBZQMEAxEDggUhALhF+iiBQHpZGDBxYpsIIjEoEWAU+1j/a7TIyf4Zz1sL13sWZIo0T/5Ia8Pjy1+rmrxMwvHDSQFpK+xdKQ2BWmzffpcQoziCR6fgNxYVUHpXLJg15nN78wuSp5b/86EKcwx7VQkk6x+21WGV8C3m03RvnzML6+mQyQxNZ2rUFfQmjS1rVIqLzfJ/3UZ+Z0nA+Htx6Fwnl2lHcruojU8awGx8DpF4ZHLNdjU3CNa7xcKOnbiRw5QOh5BS0wyP0Qlly7juG9ebBg03+4OQmFUqq906V6scaoKwkR0c8UhlSqVhOwcBSyHkoRgrSlUBZx0RL1l1+wyKKsRdV13EL0iXf/N//0IdsnxF55+KlHIAcCPfC2QgXNn1fALOnR9h8q4k9xOfVkGYTujfeDuepD6ZfG4Z0J4GKvylbk92qquPZmAPx49qtPZ4VpDRhYFu41qTlFi2AyTu/GDmSxH6DSAxestsspqgPHdfFRZylSaJ+k+Pg4Mpy55tyZRbbHreTntmNXj4fTk18qFSIJetUEKg2ZCmKFELYQPLJCzYo6/Bpa2lIzH030YbwdpR0dIkCU56vtPYfZjw2BcIR4DugDcPOXYx7LddQmS2teLmbAWGtft0NRY5kWWDeg/f98YTTwM7+mnBskFpZcbleFkvQOJYy237KfuOD1Q1W24kpl9nq64xk9AHEVzAuf+Uy5Eak7GnbA52YvXisgE54BWe2SnLky1IlfiaAuVcWd8tu49uXdfVsfPOw3tKkWazgcVEDiPmc2jN4KKdWaoFo8m+JKTcjddb4w6CvGNdNqrGbeiAxnAamH1+BfDy/yh4KL7DBZUInYq5qjkO1xnKpuV2zbvpsYSjIuXi2rtpwjzGltVPwy/1cAG2tk4qg38wYtha61CzUQ9+38NN844IPU2blP+rDeFdc9mvMLnzHMT0HJwk8tYYsqfDxL37dF1S0+tUWJyL2orAXa0U7HRFBVdaCYjuxlHBcVQ5/fspkjOApDwaZqhsmCqEHxGCCmoOHi8v/1EI7K5Rpqq8m5SSJtIo/4TE5eXWMRTYA1nEkx5hLc7Rg4t9BmrJGCzs+iI6IaTI4VWu+ngDc7zBUJiu5AwDOvIvjnxnoNJSbadHXoMDCMBK7Z0yvMxy5xnucKjRPwmsEeJuojfVzI+Yta4OVPkzvQUHlC7ZANBW/TL45ugXd5Ev1IJ0YCm3HM47ppuPwtA+tEECfDh7wvlQMaCucFIhXrJLnqj7CpYbD4C/qA0NYlfBwitQjF0xuX/N/h0XZuipyHcZMt1Zitt+cXdD9F/FcfIeSlFiSfgddH8VMpeQ8PcKC45GGk7fUFBK8D8w3fiogY44dh4Wgdbd7wsd0yay7CKM5IVw8oW0nSnXwu83hm1URt+CuOQ7NMskiWKiGpo5RhWXQPiu6Oahak6ytC0UP+JhLgXvS15kbYEySERFVqKov5LOELrey2uKQLCA3ULVM0b+/MS5tAseSZiZHsdTyVqi8qUG8xHnELDx02wdymZE7m0dSunOpWZu9LPoiNvbuVp37P4ei0d958sHY51oLVMCDsFOpsfdfnFTidEJOEKfq4oGihRmpM2JE1n4B04PWhQq3XMbh4eNmF5Ppuyztz0phVNBgnPpUDqoQJLAgOXykC+Q9cWZRNJMoCcdEdDWc0YG0DlVCjf8orc1hQ5j9UDy8Gt5FEtcTtLHALtRwz0mWz0Dc4nJnv1ZdkLYKdsetYZDz80H9N7GC49yfZe9fEtZvaE="
+                }
+            ]
+        },
         "oid/1.3.6.1.4.1.32473.2.0.1": {
-            "description": "Dev-only MTC issuance log. Its ML-DSA-44 signer name is the CA ID rather than the checkpoint origin.",
+            "description": "Dev-only MTC issuance log used by the mirror integration suite.",
             "checkpoint_signers": [
                 {
                     "name": "oid/1.3.6.1.4.1.32473.2",

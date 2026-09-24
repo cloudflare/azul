@@ -1525,16 +1525,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        verify_subtree_consistency_proof(&vec![], 4, Hash::default(), &empty, EMPTY_HASH).unwrap();
+        verify_subtree_consistency_proof(&[], 4, Hash::default(), &empty, EMPTY_HASH).unwrap();
         verify_subtree_consistency_proof(
-            &vec![Hash::default()],
+            &[Hash::default()],
             4,
             Hash::default(),
             &empty,
             EMPTY_HASH,
         )
         .unwrap_err();
-        verify_subtree_consistency_proof(&vec![], 4, Hash::default(), &empty, Hash::default())
+        verify_subtree_consistency_proof(&[], 4, Hash::default(), &empty, Hash::default())
             .unwrap_err();
 
         // Empty tree.

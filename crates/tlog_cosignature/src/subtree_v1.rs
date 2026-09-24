@@ -15,10 +15,8 @@
 //!   both the C2SP signed-note flow below and by other consumers (notably
 //!   [draft-ietf-plants-merkle-tree-certs][mtc], which embeds the same
 //!   body inside an X.509 certificate's `signatureValue`).
-//! - [`timestamped_signature`]: pure wrapper builder for the
-//!   `BE u64 timestamp || raw signature` blob used inside signed-note
-//!   lines. Available as a building block for callers that need to
-//!   produce signed-note lines but supply their own algorithm.
+//! - [`checkpoint_cosignature`]: wrapper for the
+//!   `BE u64 timestamp || raw signature` checkpoint signature value.
 //! - [`SubtreeV1CheckpointSigner`] / [`SubtreeV1NoteVerifier`]:
 //!   ML-DSA-44 signer / verifier for the C2SP-mandated signed-note
 //!   variant. C2SP `tlog-cosignature` mandates ML-DSA-44 for
@@ -26,10 +24,7 @@
 //!
 //! Consumers needing a different signature algorithm (e.g. an MTC CA
 //! cosigner using ECDSA or RSA per its own X.509 SPKI) should use
-//! [`build_cosigned_message`] (and [`timestamped_signature`] if they
-//! need signed-note-line output) directly with their own signer/verifier
-//! types; the algorithm-independent body builder is the abstraction
-//! point.
+//! [`build_cosigned_message`] directly with their own signer/verifier.
 //!
 //! # Signed message
 //!
@@ -51,21 +46,15 @@
 //! `cosigner_name` is the cosigner's signed-note key name. `log_origin`
 //! is the log's checkpoint-origin line *without* its trailing newline.
 //!
-//! `timestamp` is a POSIX-seconds value. It MAY be zero, in which case
-//! no statement is made about the signing time or the largest observed
-//! tree. If `start` is non-zero, `timestamp` MUST be zero. If
-//! `timestamp` is non-zero, `end` MUST be the size of the largest
-//! consistent tree the cosigner has observed for the log.
+//! For checkpoint cosignatures, `timestamp` is the POSIX-seconds value
+//! carried in the checkpoint signature value. For subtree cosignatures,
+//! `timestamp` is zero.
 //!
 //! # Wire format for signed-note lines
 //!
-//! The signed-note signature blob is the [`timestamped_signature`][spec]
-//! struct: a big-endian `u64` timestamp prefix followed by the raw
-//! algorithm-specific signature bytes. For ML-DSA-44 the signature is
-//! 2420 bytes; [`SubtreeV1CheckpointSigner`] produces this layout
-//! directly. Other consumers (e.g. MTC certificates) embed the raw
-//! signature without the timestamp prefix; the timestamp is conveyed
-//! by the `cosigned_message` body itself.
+//! Checkpoint signature values contain a big-endian `u64` timestamp
+//! followed by the raw signature. Subtree signature values contain only
+//! the 2420-byte raw ML-DSA-44 signature.
 //!
 //! # Key identity
 //!
@@ -114,10 +103,10 @@ const LABEL: &[u8; 12] = b"subtree/v1\n\0";
 /// replaced.
 const MLDSA_44_SIGNATURE_LEN: usize = core::mem::size_of::<MlDsaEncodedSignature<MlDsa44>>();
 
-/// The size in bytes of the ML-DSA-44 `timestamped_signature` blob: a
+/// The size in bytes of an ML-DSA-44 checkpoint signature value: a
 /// big-endian `u64` timestamp prefix followed by the
 /// [`MLDSA_44_SIGNATURE_LEN`]-byte ML-DSA-44 signature.
-const TIMESTAMPED_SIGNATURE_LEN: usize = 8 + MLDSA_44_SIGNATURE_LEN;
+const CHECKPOINT_COSIGNATURE_LEN: usize = 8 + MLDSA_44_SIGNATURE_LEN;
 
 /// Build the [`cosigned_message`][spec] bytes for a `subtree/v1`
 /// cosignature.
@@ -191,17 +180,11 @@ pub fn build_cosigned_message(
     buf
 }
 
-/// Build the [`timestamped_signature`][spec] blob for a signed-note line:
+/// Build a checkpoint cosignature value:
 /// a big-endian `u64` timestamp prefix followed by `raw_signature`.
 ///
-/// This is the wire format for signed-note lines carrying a `subtree/v1`
-/// cosignature, irrespective of signature algorithm. Consumers that
-/// produce signed-note-line output but use an algorithm other than
-/// ML-DSA-44 (e.g. an MTC log serving its own `sign-subtree` responses)
-/// can call this directly. Consumers embedding raw signatures elsewhere
-/// (e.g. inside an X.509 certificate's `signatureValue`) do not need
-/// this wrapper; the signature is the bare algorithm output, and the
-/// timestamp is conveyed via the [`cosigned_message`][spec] body alone.
+/// Subtree cosignatures do not use this wrapper; their signature value is
+/// the raw algorithm output and their signed message uses timestamp zero.
 ///
 /// `timestamp_unix_secs` MUST match the timestamp embedded in the
 /// signed `cosigned_message` body — verifiers parse this prefix and
@@ -216,7 +199,7 @@ pub fn build_cosigned_message(
 ///
 /// [spec]: https://c2sp.org/tlog-cosignature
 #[must_use]
-pub fn timestamped_signature(timestamp_unix_secs: u64, raw_signature: &[u8]) -> Vec<u8> {
+pub fn checkpoint_cosignature(timestamp_unix_secs: u64, raw_signature: &[u8]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(8 + raw_signature.len());
     blob.write_u64::<BigEndian>(timestamp_unix_secs).unwrap();
     blob.extend_from_slice(raw_signature);
@@ -286,49 +269,34 @@ impl SubtreeV1CheckpointSigner {
     /// `[start, end)` subtree per draft-ietf-plants-merkle-tree-certs
     /// §4.1 (`start < end`, alignment to the next-power-of-two width).
     ///
-    /// `timestamp_unix_secs` is the POSIX-seconds timestamp embedded in
-    /// the [`cosigned_message`][spec]. Per the spec it MAY be zero, in
-    /// which case no statement is made about the signing time or the
-    /// largest observed tree.
-    ///
-    /// Note that for the checkpoint case (`subtree.lo() == 0`) the
-    /// [c2sp.org/tlog-witness][witness] spec additionally REQUIRES a
-    /// non-zero timestamp; passing zero here for the checkpoint case
-    /// produces a spec-legal cosignature that is operationally useless
-    /// for a witness response. This is not enforced by `sign_subtree`
-    /// because the signer doesn't know the calling context — callers
-    /// producing checkpoint cosignatures for witness use must supply a
-    /// non-zero timestamp themselves. The [`CheckpointSigner`] impl
-    /// forwards a millis timestamp from its caller and trusts that
-    /// caller to set it correctly.
-    ///
     /// # Panics
     ///
-    /// Panics if `subtree.lo() != 0` and `timestamp_unix_secs != 0`
-    /// (the spec requires `timestamp == 0` whenever `start != 0`), or
-    /// if `log_origin` does not satisfy the TLS-presentation
+    /// Panics if `log_origin` does not satisfy the TLS-presentation
     /// `opaque<1..2^8-1>` length bound.
     ///
     /// [spec]: https://c2sp.org/tlog-cosignature
-    /// [witness]: https://c2sp.org/tlog-witness
     #[must_use]
-    pub fn sign_subtree(
+    pub fn sign_subtree(&self, log_origin: &str, subtree: &Subtree, hash: &Hash) -> NoteSignature {
+        self.sign_subtree_range(log_origin, subtree.lo(), subtree.hi(), hash)
+    }
+
+    fn sign_subtree_range(
         &self,
-        timestamp_unix_secs: u64,
         log_origin: &str,
-        subtree: &Subtree,
+        start: u64,
+        end: u64,
         hash: &Hash,
     ) -> NoteSignature {
-        self.sign_range(
-            timestamp_unix_secs,
-            log_origin,
-            subtree.lo(),
-            subtree.hi(),
-            hash,
+        let msg = build_cosigned_message(self.v.name(), 0, log_origin, start, end, hash);
+        let sig: MlDsaSignature<MlDsa44> = self.k.sign(&msg);
+        NoteSignature::new(
+            self.v.name().clone(),
+            self.v.key_id(),
+            sig.encode().as_slice().to_vec(),
         )
     }
 
-    fn sign_range(
+    fn sign_checkpoint_range(
         &self,
         timestamp_unix_secs: u64,
         log_origin: &str,
@@ -336,10 +304,6 @@ impl SubtreeV1CheckpointSigner {
         end: u64,
         hash: &Hash,
     ) -> NoteSignature {
-        assert!(
-            !(start != 0 && timestamp_unix_secs != 0),
-            "timestamp must be zero when start is non-zero",
-        );
         let msg = build_cosigned_message(
             self.v.name(),
             timestamp_unix_secs,
@@ -349,7 +313,7 @@ impl SubtreeV1CheckpointSigner {
             hash,
         );
         let sig: MlDsaSignature<MlDsa44> = self.k.sign(&msg);
-        let blob = timestamped_signature(timestamp_unix_secs, sig.encode().as_slice());
+        let blob = checkpoint_cosignature(timestamp_unix_secs, sig.encode().as_slice());
         NoteSignature::new(self.v.name().clone(), self.v.key_id(), blob)
     }
 }
@@ -371,7 +335,7 @@ impl CheckpointSigner for SubtreeV1CheckpointSigner {
         if checkpoint.size() == 0 && checkpoint.hash() != &EMPTY_HASH {
             return Err(NoteError::Format);
         }
-        Ok(self.sign_range(
+        Ok(self.sign_checkpoint_range(
             timestamp / 1000,
             checkpoint.origin(),
             0,
@@ -426,12 +390,9 @@ impl SubtreeV1NoteVerifier {
     /// Verify a subtree cosignature blob against an arbitrary
     /// `(subtree, hash)`.
     ///
-    /// Returns `true` if `sig_blob` is a well-formed
-    /// `timestamped_signature` (8-byte big-endian POSIX-seconds
-    /// timestamp followed by a 2420-byte ML-DSA-44 signature) over
-    /// the [`cosigned_message`][spec] for the given subtree. Returns
-    /// `false` for any malformation, including when the spec's
-    /// timestamp/start invariant is violated.
+    /// Returns `true` if `sig_blob` is a raw 2420-byte ML-DSA-44
+    /// signature over the [`cosigned_message`][spec] for the given
+    /// subtree with timestamp zero.
     ///
     /// `subtree` carries `(start, end)` as a `tlog_core::Subtree`,
     /// which has been validated at construction time; the previous
@@ -457,17 +418,10 @@ impl SubtreeV1NoteVerifier {
         hash: &Hash,
         sig_blob: &[u8],
     ) -> bool {
-        let Some(timestamp) = parse_timestamped_signature_timestamp(sig_blob) else {
+        let Some(sig) = decode_signature(sig_blob) else {
             return false;
         };
-        // Spec: `timestamp` MUST be zero when `start` is non-zero.
-        if start != 0 && timestamp != 0 {
-            return false;
-        }
-        let Some(sig) = decode_signature(&sig_blob[8..]) else {
-            return false;
-        };
-        let msg = build_cosigned_message(&self.name, timestamp, log_origin, start, end, hash);
+        let msg = build_cosigned_message(&self.name, 0, log_origin, start, end, hash);
         MlDsaVerifier::verify(&self.verifying_key, &msg, &sig).is_ok()
     }
 }
@@ -495,23 +449,31 @@ impl NoteVerifier for SubtreeV1NoteVerifier {
         if checkpoint.size() == 0 && checkpoint.hash() != &EMPTY_HASH {
             return false;
         }
-        self.verify_range(
+        let Some(timestamp) = parse_checkpoint_cosignature_timestamp(sig_blob) else {
+            return false;
+        };
+        let Some(sig) = decode_signature(&sig_blob[8..]) else {
+            return false;
+        };
+        let msg = build_cosigned_message(
+            &self.name,
+            timestamp,
             checkpoint.origin(),
             0,
             checkpoint.size(),
             checkpoint.hash(),
-            sig_blob,
-        )
+        );
+        MlDsaVerifier::verify(&self.verifying_key, &msg, &sig).is_ok()
     }
 
-    /// Parse the timestamp prefix from a `timestamped_signature` blob
+    /// Parse the timestamp prefix from a checkpoint cosignature value
     /// and return it in milliseconds.
     ///
     /// This is a **parse-only** helper for callers that need to read a
     /// note signature's embedded timestamp before verifying the signature
     /// itself (e.g. for ordering, rate limiting, or coarse pruning).
     /// Returning `Ok(Some(_))` means the blob has the correct envelope
-    /// shape (exactly [`TIMESTAMPED_SIGNATURE_LEN`] bytes — 8-byte
+    /// shape (exactly [`CHECKPOINT_COSIGNATURE_LEN`] bytes — 8-byte
     /// timestamp + [`MLDSA_44_SIGNATURE_LEN`]-byte tail) and the prefix
     /// decodes as a `u64`. It does **not** mean the signature itself is
     /// valid, or that the timestamp is the one the signer actually
@@ -524,7 +486,7 @@ impl NoteVerifier for SubtreeV1NoteVerifier {
     /// (impossible for any timestamp this side of POSIX year 5.85e14).
     fn extract_timestamp_millis(&self, sig_blob: &[u8]) -> Result<Option<u64>, NoteError> {
         let ts_secs =
-            parse_timestamped_signature_timestamp(sig_blob).ok_or(NoteError::Timestamp)?;
+            parse_checkpoint_cosignature_timestamp(sig_blob).ok_or(NoteError::Timestamp)?;
         let ts_millis = ts_secs.checked_mul(1000).ok_or(NoteError::Timestamp)?;
         Ok(Some(ts_millis))
     }
@@ -535,8 +497,8 @@ impl NoteVerifier for SubtreeV1NoteVerifier {
 // ---------------------------------------------------------------------------
 
 /// Read the 8-byte big-endian timestamp prefix from a
-/// `timestamped_signature` blob, returning `None` unless the blob is
-/// exactly [`TIMESTAMPED_SIGNATURE_LEN`] bytes (8-byte timestamp prefix
+/// checkpoint cosignature value, returning `None` unless the value is
+/// exactly [`CHECKPOINT_COSIGNATURE_LEN`] bytes (8-byte timestamp prefix
 /// + [`MLDSA_44_SIGNATURE_LEN`]-byte signature tail).
 ///
 /// The exact-length check rejects malformed blobs at the parse layer
@@ -546,17 +508,15 @@ impl NoteVerifier for SubtreeV1NoteVerifier {
 ///
 /// Hardcoded to the ML-DSA-44 envelope length today; would take an
 /// algorithm descriptor when [`MLDSA_44_SIGNATURE_LEN`] does.
-fn parse_timestamped_signature_timestamp(sig_blob: &[u8]) -> Option<u64> {
-    if sig_blob.len() != TIMESTAMPED_SIGNATURE_LEN {
+fn parse_checkpoint_cosignature_timestamp(sig_blob: &[u8]) -> Option<u64> {
+    if sig_blob.len() != CHECKPOINT_COSIGNATURE_LEN {
         return None;
     }
     let mut head = &sig_blob[..8];
     head.read_u64::<BigEndian>().ok()
 }
 
-/// Decode the [`MLDSA_44_SIGNATURE_LEN`]-byte ML-DSA-44 signature from
-/// the tail of a `timestamped_signature` blob. See
-/// [`MLDSA_44_SIGNATURE_LEN`] for the future-extension note.
+/// Decode an [`MLDSA_44_SIGNATURE_LEN`]-byte ML-DSA-44 signature.
 fn decode_signature(bytes: &[u8]) -> Option<MlDsaSignature<MlDsa44>> {
     let encoded = MlDsaEncodedSignature::<MlDsa44>::try_from(bytes).ok()?;
     MlDsaSignature::<MlDsa44>::decode(&encoded)
@@ -584,18 +544,17 @@ mod tests {
         Subtree::new(lo, hi).expect("valid test subtree")
     }
 
-    /// Sign-then-verify roundtrip for a checkpoint cosignature
-    /// (start = 0, end = size, non-zero timestamp).
+    /// A subtree signature uses the raw signature format even when start is zero.
     #[test]
-    fn checkpoint_sign_verify_roundtrip() {
+    fn zero_start_subtree_sign_verify_roundtrip() {
         let sk = signing_key(1);
         let signer = SubtreeV1CheckpointSigner::new(name("witness.example/w"), sk.clone());
         let sig = signer.sign_subtree(
-            1_700_000_000,
             "log.example/origin",
             &subtree(0, 42),
             &Hash([0x33u8; HASH_SIZE]),
         );
+        assert_eq!(sig.signature().len(), MLDSA_44_SIGNATURE_LEN);
 
         let verifier = SubtreeV1NoteVerifier::new(name("witness.example/w"), sk.verifying_key());
         assert!(verifier.verify_subtree(
@@ -606,14 +565,12 @@ mod tests {
         ));
     }
 
-    /// Sign-then-verify roundtrip for a non-zero-start subtree
-    /// cosignature (timestamp must be zero per the spec).
+    /// Sign-then-verify roundtrip for a non-zero-start subtree cosignature.
     #[test]
     fn subtree_sign_verify_roundtrip() {
         let sk = signing_key(2);
         let signer = SubtreeV1CheckpointSigner::new(name("ca.example/c"), sk.clone());
         let sig = signer.sign_subtree(
-            0,
             "log.example/origin",
             &subtree(8, 16),
             &Hash([0x77u8; HASH_SIZE]),
@@ -628,25 +585,15 @@ mod tests {
         ));
     }
 
-    /// `verify_subtree` rejects when the spec invariant
-    /// "timestamp == 0 if start != 0" is violated, even when ML-DSA
-    /// verification of the underlying signature succeeds.
+    /// `verify_subtree` rejects the old zero-prefixed signature value.
     #[test]
-    fn verify_rejects_nonzero_timestamp_with_nonzero_start() {
+    fn verify_rejects_timestamp_prefix() {
         let sk = signing_key(3);
         let name = name("witness/w");
         let verifier = SubtreeV1NoteVerifier::new(name.clone(), sk.verifying_key());
-
-        // Hand-craft a sig blob with a non-zero timestamp paired with
-        // start=4. `build_cosigned_message` takes `(start, end)`
-        // directly because callers may have already validated
-        // upstream; the test goes through it to forge a
-        // cryptographically-valid blob with the bad timestamp/start
-        // combination.
-        let msg = build_cosigned_message(&name, 12345, "log/origin", 4, 8, &Hash([0u8; HASH_SIZE]));
+        let msg = build_cosigned_message(&name, 0, "log/origin", 4, 8, &Hash([0u8; HASH_SIZE]));
         let raw_sig: MlDsaSignature<MlDsa44> = sk.sign(&msg);
-        let mut blob = Vec::new();
-        blob.write_u64::<BigEndian>(12345).unwrap();
+        let mut blob = vec![0; 8];
         blob.extend_from_slice(raw_sig.encode().as_slice());
 
         assert!(!verifier.verify_subtree(
@@ -663,7 +610,7 @@ mod tests {
     fn verify_rejects_mismatched_subtree() {
         let sk = signing_key(4);
         let signer = SubtreeV1CheckpointSigner::new(name("w"), sk.clone());
-        let sig = signer.sign_subtree(0, "log", &subtree(0, 100), &Hash([0xAAu8; HASH_SIZE]));
+        let sig = signer.sign_subtree("log", &subtree(0, 100), &Hash([0xAAu8; HASH_SIZE]));
 
         let verifier = SubtreeV1NoteVerifier::new(name("w"), sk.verifying_key());
         // Different subtree (and a valid one in its own right per
@@ -710,6 +657,7 @@ mod tests {
         )
         .unwrap();
         let sig = signer.sign(1_700_000_000_000, &cp_text).unwrap();
+        assert_eq!(sig.signature().len(), CHECKPOINT_COSIGNATURE_LEN);
 
         // Assemble the note + signature and verify via NoteVerifier.
         let note = Note::new(&cp_text.to_bytes(), &[sig]).unwrap();
@@ -789,19 +737,15 @@ mod tests {
     fn extract_timestamp_millis_parses_prefix() {
         let sk = signing_key(7);
         let signer = SubtreeV1CheckpointSigner::new(name("w"), sk.clone());
-        let sig = signer.sign_subtree(
-            1_700_000_000,
-            "log",
-            &subtree(0, 1),
-            &Hash([0u8; HASH_SIZE]),
-        );
+        let checkpoint = CheckpointText::new("log", 1, Hash([0u8; HASH_SIZE]), &[]).unwrap();
+        let sig = signer.sign(1_700_000_000_000, &checkpoint).unwrap();
         let v = signer.verifier();
         let ts = v.extract_timestamp_millis(sig.signature()).unwrap();
         assert_eq!(ts, Some(1_700_000_000_000));
     }
 
     /// `extract_timestamp_millis` rejects blobs whose length doesn't match
-    /// the `timestamped_signature` envelope exactly. Both a too-short
+    /// the checkpoint cosignature envelope exactly. Both a too-short
     /// blob and an over-long blob with otherwise-valid 8-byte prefix
     /// must be rejected at the parse layer so callers using the helper
     /// for pre-verification ordering can't be fed a timestamp inside
@@ -815,15 +759,15 @@ mod tests {
         let too_short = [0u8; 8];
         assert!(v.extract_timestamp_millis(&too_short).is_err());
 
-        // Too long: TIMESTAMPED_SIGNATURE_LEN + 1 — looks like a
+        // Too long: CHECKPOINT_COSIGNATURE_LEN + 1 looks like a
         // well-formed envelope plus one trailing byte. Pre-tightening
         // this would have decoded the prefix and returned a timestamp.
-        let too_long = vec![0u8; TIMESTAMPED_SIGNATURE_LEN + 1];
+        let too_long = vec![0u8; CHECKPOINT_COSIGNATURE_LEN + 1];
         assert!(v.extract_timestamp_millis(&too_long).is_err());
 
         // Exact length is accepted (even with garbage tail — the helper
         // is parse-only).
-        let exact = vec![0u8; TIMESTAMPED_SIGNATURE_LEN];
+        let exact = vec![0u8; CHECKPOINT_COSIGNATURE_LEN];
         assert_eq!(v.extract_timestamp_millis(&exact).unwrap(), Some(0));
     }
 
@@ -854,7 +798,7 @@ mod tests {
 
         // Build a well-shaped envelope with a u64 timestamp prefix
         // that overflows when multiplied by 1000.
-        let mut blob = vec![0u8; TIMESTAMPED_SIGNATURE_LEN];
+        let mut blob = vec![0u8; CHECKPOINT_COSIGNATURE_LEN];
         blob[..8].copy_from_slice(&u64::MAX.to_be_bytes());
         assert!(v.extract_timestamp_millis(&blob).is_err());
     }

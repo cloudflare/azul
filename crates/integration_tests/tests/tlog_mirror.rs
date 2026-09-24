@@ -600,7 +600,7 @@ async fn tlog_mirror_end_to_end() {
     let meta = fetch_metadata().await;
     assert_eq!(meta.mode, "witness-and-mirror");
     let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
-    assert_eq!(mirror.name, "dev.mirror.example");
+    assert_eq!(mirror.name, "oid/1.3.6.1.4.1.44363.48.2");
     assert!(!mirror.public_key.is_empty());
     assert_eq!(
         mirror.algorithm, "subtree/v1",
@@ -814,8 +814,8 @@ async fn tlog_mirror_end_to_end() {
         let tree = TreeWithTimestamp::new(1, record_hash(b"x"), now_millis());
         // Sign a valid checkpoint, then replace the log's real
         // signature line with one carrying the right `(name, id)` but
-        // garbage bytes (a correctly-sized subtree/v1 timestamped
-        // signature blob, 8-byte timestamp + 2420-byte ML-DSA-44
+        // garbage bytes (a correctly-sized checkpoint cosignature,
+        // 8-byte timestamp + 2420-byte ML-DSA-44
         // signature, that is all zeroes and so fails to verify).
         let cp = tree.sign(LOG_ORIGIN, &[], &[&signer], &mut rng()).unwrap();
         let parsed = Note::from_bytes(&cp).unwrap();

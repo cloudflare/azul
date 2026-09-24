@@ -368,7 +368,6 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
         let verifiers = VerifierList::new(vec![signer.verifier()]);
         match verify_trusted_checkpoint_signature(validated.checkpoint(), &verifiers) {
             Ok(()) => signatures.push(signer.sign_subtree(
-                0,
                 origin,
                 validated.subtree(),
                 validated.subtree_hash(),

@@ -3,6 +3,7 @@
 
 // CT log configuration, in a separate crate to allow build.rs to use it.
 use serde::Deserialize;
+use serde_with::{base64::Base64, serde_as};
 use std::collections::HashMap;
 
 #[derive(Deserialize, Debug)]
@@ -39,6 +40,17 @@ pub struct LogParams {
     /// The version of draft-ietf-plants-merkle-tree-certs that this log implements.
     #[serde(default)]
     pub version: ietf_mtc_api::DraftVersion,
+    #[serde(default)]
+    pub cosigners: Vec<CosignerParams>,
+}
+
+#[serde_as]
+#[derive(Clone, Deserialize, Debug)]
+pub struct CosignerParams {
+    pub id: String,
+    pub submission_url: String,
+    #[serde_as(as = "Base64")]
+    pub public_key: Vec<u8>,
 }
 
 impl LogParams {

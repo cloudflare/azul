@@ -21,7 +21,8 @@ mod sequence_metadata;
 mod sequencer_do;
 
 pub(crate) use sequence_metadata::{
-    IetfMtcSequenceMetadata, SUBTREE_SIG_KEY_PREFIX, SignedSubtree, subtree_sig_key,
+    CachedSubtreeSignature, IetfMtcSequenceMetadata, SUBTREE_SIG_KEY_PREFIX, SignedSubtree,
+    subtree_sig_key,
 };
 
 // Algorithm OID constants.

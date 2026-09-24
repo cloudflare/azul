@@ -30,6 +30,9 @@ serde.workspace = true
 url.workspace = true
 x509-cert.workspace = true
 der.workspace = true
+ml-dsa.workspace = true
+pkcs8.workspace = true
+signed_note.workspace = true
 
 [dependencies]
 axum.workspace = true
@@ -53,6 +56,9 @@ tower-service.workspace = true
 worker = { workspace = true, features = ["http", "axum"] }
 x509-cert.workspace = true
 ietf_mtc_api.workspace = true
+tlog_cosignature.workspace = true
+tlog_mirror.workspace = true
+tlog_witness.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
@@ -61,3 +67,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom"]
+
+[dev-dependencies]
+futures-executor.workspace = true

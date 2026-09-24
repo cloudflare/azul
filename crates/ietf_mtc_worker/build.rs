@@ -4,6 +4,9 @@
 // Build script to include per-environment configuration and trusted roots.
 
 use config::AppConfig;
+use ml_dsa::{MlDsa44, VerifyingKey};
+use pkcs8::DecodePublicKey;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use url::Url;
@@ -32,6 +35,11 @@ fn main() {
     });
     for (name, params) in conf.logs {
         let ca_id = params.ca_id.parse::<ietf_mtc_api::TrustAnchorID>().unwrap();
+        assert_eq!(
+            ca_id.to_string(),
+            params.ca_id,
+            "{name} ca_id must use canonical decimal arcs"
+        );
         ca_id.log_id(params.log_number).unwrap();
         ca_id.to_rdn_sequence().unwrap();
 
@@ -49,6 +57,22 @@ fn main() {
         check_url(&params.submission_url);
         if let Some(monitoring_url) = &params.monitoring_url {
             check_url(monitoring_url);
+        }
+        let mut signer_ids = HashSet::from([ca_id]);
+        for cosigner in &params.cosigners {
+            let id = cosigner.id.parse::<ietf_mtc_api::TrustAnchorID>().unwrap();
+            assert_eq!(
+                id.to_string(),
+                cosigner.id,
+                "{name} cosigner ID must use canonical decimal arcs"
+            );
+            assert!(
+                signer_ids.insert(id.clone()),
+                "{name} duplicate cosigner ID: {id}"
+            );
+            signed_note::KeyName::new(id.oid_name()).unwrap();
+            VerifyingKey::<MlDsa44>::from_public_key_der(&cosigner.public_key).unwrap();
+            check_url(&cosigner.submission_url);
         }
     }
 
@@ -75,4 +99,5 @@ fn check_url(s: &str) {
         &format!("{}{}", u.origin().ascii_serialization(), u.path()),
         "invalid URL components"
     );
+    assert!(u.path().ends_with('/'), "URL prefix must end with '/'");
 }

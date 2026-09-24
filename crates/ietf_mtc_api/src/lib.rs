@@ -305,6 +305,13 @@ impl PendingLogEntry for IetfMtcPendingLogEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IetfMtcLogEntry(TlogTilesLogEntry);
 
+impl IetfMtcLogEntry {
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.0.inner.data
+    }
+}
+
 impl LogEntry for IetfMtcLogEntry {
     const REQUIRE_CHECKPOINT_TIMESTAMP: bool = false;
     type Pending = IetfMtcPendingLogEntry;

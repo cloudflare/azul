@@ -85,6 +85,27 @@ jobs:
         working-directory: crates/ietf_mtc_worker
         run: DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind
 
+      - name: Build mirror_worker (combined dev environment)
+        working-directory: crates/mirror_worker
+        run: DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind
+
+      - name: Start mirror worker
+        working-directory: crates/mirror_worker
+        run: wrangler -e=dev dev --port 18788 --inspector-port 9233 --persist-to .wrangler/state &
+
+      - name: Wait for mirror worker to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:18788/metadata > /dev/null 2>&1; then
+              echo "mirror worker is ready"
+              exit 0
+            fi
+            echo "Waiting for mirror worker... attempt $i/30"
+            sleep 2
+          done
+          echo "mirror worker failed to start in time"
+          exit 1
+
       - name: Start wrangler dev
         working-directory: crates/ietf_mtc_worker
         run: wrangler -e=dev dev --port 8787 --persist-to .wrangler/state &
@@ -112,6 +133,7 @@ jobs:
         run: cargo test -p integration_tests --test ietf_mtc_api --verbose
         env:
           BASE_URL: http://localhost:8787
+          MIRROR_URL: http://localhost:18788
           IETF_MTC_LOG_NAME: dev1
 
   integration-tlog-mirror:

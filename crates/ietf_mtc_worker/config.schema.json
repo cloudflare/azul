@@ -106,6 +106,31 @@
                             "enum": ["draft06"],
                             "default": "draft06",
                             "description": "The version of draft-ietf-plants-merkle-tree-certs that this log implements."
+                        },
+                        "cosigners": {
+                            "type": "array",
+                            "default": [],
+                            "description": "Mandatory tlog-mirror cosigners advanced before subtree signatures are published.",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "description": "Trust anchor ID used as the cosigner ID. The mirror signed-note name must be oid/<id>."
+                                    },
+                                    "submission_url": {
+                                        "type": "string",
+                                        "description": "tlog-mirror submission URL prefix."
+                                    },
+                                    "public_key": {
+                                        "type": "string",
+                                        "contentEncoding": "base64",
+                                        "description": "DER-encoded ML-DSA-44 SubjectPublicKeyInfo."
+                                    }
+                                },
+                                "required": ["id", "submission_url", "public_key"]
+                            }
                         }
                     },
                     "required": [
