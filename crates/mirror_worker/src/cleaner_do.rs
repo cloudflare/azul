@@ -95,7 +95,7 @@ fn plan_clean(origin_prefix: &str, lo: u64) -> Vec<CleanTarget> {
 /// The origin an instance cleans, resolved from the DO name in
 /// [`MirrorCleaner::new`].
 struct Served {
-    origin: &'static str,
+    origin: String,
     /// `<origin hash>/` key prefix for this origin in the shared bucket.
     prefix: String,
 }
@@ -105,10 +105,7 @@ struct Served {
 struct MirrorCleaner {
     state: State,
     env: Env,
-    /// `None` when the DO name is outside the served-origin set, which a
-    /// config change produces: an MTC CA log-number window advancing
-    /// leaves the dropped origin's alarm scheduled.
-    served: Option<Served>,
+    served: Served,
     bucket: Bucket,
     cleaned_size: RefCell<u64>,
     /// Cache of what [`Self::committed_size`] last read.
@@ -124,22 +121,14 @@ impl std::panic::RefUnwindSafe for MirrorCleaner {}
 
 impl DurableObject for MirrorCleaner {
     fn new(state: State, env: Env) -> Self {
-        // Recover the origin from the runtime-provided DO name, matching
-        // the served-origin set for a 'static slice. `crate::log_origins`
-        // has already expanded any MTC CA log-number window. A name
-        // outside that set is left for the handlers: `new` runs outside
-        // the catch-unwind guard, so panicking here would surface as an
-        // uncaught exception on every retry of the orphaned alarm.
         let name = state
             .id()
             .name()
             .expect("durable object name not provided by runtime");
-        let served = crate::log_origins()
-            .find(|o| *o == name)
-            .map(|origin| Served {
-                origin,
-                prefix: format!("{}/", origin_hash(origin)),
-            });
+        let served = Served {
+            prefix: format!("{}/", origin_hash(&name)),
+            origin: name,
+        };
         let bucket = env
             .bucket(PUBLIC_BUCKET_BINDING)
             .expect("PUBLIC_BUCKET binding must be a configured R2 bucket");
@@ -177,9 +166,6 @@ impl MirrorCleaner {
     /// Kick handler: ensure the alarm loop is running. Idempotent: the
     /// `add-entries` handler calls this after every commit.
     async fn fetch_inner(&self, _req: Request) -> Result<Response> {
-        if self.served.is_none() {
-            return Response::error("origin not served by this mirror", 404);
-        }
         if !*self.initialized.borrow() {
             self.initialize().await?;
         }
@@ -189,13 +175,7 @@ impl MirrorCleaner {
     /// Alarm handler: reschedule, then clean one bounded batch of partials.
     async fn alarm_inner(&self) -> Result<Response> {
         *self.subrequests.borrow_mut() = 0;
-        let Some(served) = self.served.as_ref() else {
-            // The origin left the served set while this alarm was
-            // pending. Drop the alarm instead of waking forever with
-            // nothing to clean.
-            self.storage().delete_alarm().await?;
-            return Response::ok("mirror cleaner origin no longer served");
-        };
+        let served = &self.served;
         if !*self.initialized.borrow() {
             self.initialize().await?;
         }
@@ -254,7 +234,7 @@ impl MirrorCleaner {
         // Refresh the ceiling once cleaning has caught up to the
         // last-seen value.
         if *self.committed_size.borrow() < *self.cleaned_size.borrow() + STEP {
-            let committed = self.committed_size(served.origin).await?;
+            let committed = self.committed_size(&served.origin).await?;
             *self.committed_size.borrow_mut() = committed;
             self.storage().put(COMMITTED_SIZE_KEY, committed).await?;
         }

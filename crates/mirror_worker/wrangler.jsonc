@@ -21,6 +21,9 @@
                 "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "workers_dev": true,
+            "triggers": {
+                "crons": ["17 * * * *"]
+            },
             "durable_objects": {
                 "bindings": [
                     {
@@ -34,6 +37,10 @@
                     {
                         "name": "MIRROR_CLEANER",
                         "class_name": "MirrorCleaner"
+                    },
+                    {
+                        "name": "COSIGNER_REGISTRY",
+                        "class_name": "CosignerRegistry"
                     }
                 ]
             },
@@ -56,6 +63,10 @@
                 {
                     "tag": "v1",
                     "new_sqlite_classes": ["MirrorState", "MirrorCleaner"]
+                },
+                {
+                    "tag": "v2",
+                    "new_sqlite_classes": ["CosignerRegistry"]
                 }
             ]
         },
@@ -64,11 +75,18 @@
                 "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=witness RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "workers_dev": true,
+            "triggers": {
+                "crons": ["17 * * * *"]
+            },
             "durable_objects": {
                 "bindings": [
                     {
                         "name": "MIRROR_STATE",
                         "class_name": "MirrorState"
+                    },
+                    {
+                        "name": "COSIGNER_REGISTRY",
+                        "class_name": "CosignerRegistry"
                     }
                 ]
             },
@@ -85,6 +103,10 @@
                 {
                     "tag": "v1",
                     "new_sqlite_classes": ["MirrorState"]
+                },
+                {
+                    "tag": "v2",
+                    "new_sqlite_classes": ["CosignerRegistry"]
                 }
             ]
         },
@@ -93,6 +115,9 @@
                 "command": "cargo install -q worker-build@0.8.5 && DEPLOY_ENV=mirror RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind"
             },
             "workers_dev": true,
+            "triggers": {
+                "crons": ["17 * * * *"]
+            },
             "durable_objects": {
                 "bindings": [
                     {
@@ -102,6 +127,10 @@
                     {
                         "name": "MIRROR_CLEANER",
                         "class_name": "MirrorCleaner"
+                    },
+                    {
+                        "name": "COSIGNER_REGISTRY",
+                        "class_name": "CosignerRegistry"
                     }
                 ]
             },
@@ -118,6 +147,10 @@
                 {
                     "tag": "v1",
                     "new_sqlite_classes": ["MirrorState", "MirrorCleaner"]
+                },
+                {
+                    "tag": "v2",
+                    "new_sqlite_classes": ["CosignerRegistry"]
                 }
             ]
         }
