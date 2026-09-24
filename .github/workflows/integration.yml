@@ -93,7 +93,10 @@ jobs:
 
       - name: Start wrangler dev
         working-directory: crates/mirror_worker
-        run: wrangler -e=dev dev --port 8787 --persist-to .wrangler/state &
+        run: >-
+          wrangler -e=dev dev --port 8787 --persist-to .wrangler/state --test-scheduled
+          --var COSIGNERS_JSON_URL:http://127.0.0.1:8790/cosigners.json
+          --var COSIGNERS_PEM_URL:http://127.0.0.1:8790/cosigners.pem &
 
       - name: Wait for wrangler dev to be ready
         run: |

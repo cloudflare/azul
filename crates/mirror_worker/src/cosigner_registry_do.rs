@@ -20,8 +20,8 @@ use crate::{CONFIG, LogKey, log_verifiers_for_keys};
 pub(crate) const COSIGNER_REGISTRY_BINDING: &str = "COSIGNER_REGISTRY";
 const REGISTRY_NAME: &str = "cosigners-v1";
 const REGISTRY_KEY: &str = "registry";
-const COSIGNERS_JSON_URL: &str = "https://www.gstatic.com/mtcs/cosigners/v1/cosigners.json";
-const COSIGNERS_PEM_URL: &str = "https://www.gstatic.com/mtcs/cosigners/v1/cosigners.pem";
+const DEFAULT_COSIGNERS_JSON_URL: &str = "https://www.gstatic.com/mtcs/cosigners/v1/cosigners.json";
+const DEFAULT_COSIGNERS_PEM_URL: &str = "https://www.gstatic.com/mtcs/cosigners/v1/cosigners.pem";
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_PEM_BYTES: usize = 2 * 1024 * 1024;
 
@@ -61,6 +61,8 @@ struct Issuer {
 #[durable_object]
 struct CosignerRegistry {
     state: State,
+    json_url: String,
+    pem_url: String,
 }
 
 impl std::panic::RefUnwindSafe for CosignerRegistry {}
@@ -68,7 +70,13 @@ impl std::panic::RefUnwindSafe for CosignerRegistry {}
 impl DurableObject for CosignerRegistry {
     fn new(state: State, env: Env) -> Self {
         crate::init_sentry(&env);
-        Self { state }
+        let json_url = registry_url(&env, "COSIGNERS_JSON_URL", DEFAULT_COSIGNERS_JSON_URL);
+        let pem_url = registry_url(&env, "COSIGNERS_PEM_URL", DEFAULT_COSIGNERS_PEM_URL);
+        Self {
+            state,
+            json_url,
+            pem_url,
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -78,6 +86,14 @@ impl DurableObject for CosignerRegistry {
         )
         .await
     }
+}
+
+fn registry_url(env: &Env, name: &str, default: &str) -> String {
+    if env!("DEPLOY_ENV") != "dev" {
+        return default.to_owned();
+    }
+    env.var(name)
+        .map_or_else(|_| default.to_owned(), |var| var.to_string())
 }
 
 impl CosignerRegistry {
@@ -93,8 +109,8 @@ impl CosignerRegistry {
             }
             "/sync" => {
                 let (json, pem) = futures_util::try_join!(
-                    fetch_bounded(COSIGNERS_JSON_URL, MAX_JSON_BYTES),
-                    fetch_bounded(COSIGNERS_PEM_URL, MAX_PEM_BYTES),
+                    fetch_bounded(&self.json_url, MAX_JSON_BYTES),
+                    fetch_bounded(&self.pem_url, MAX_PEM_BYTES),
                 )?;
                 let record = normalize_registry(&json, &pem).map_err(Error::from)?;
                 let current = self
