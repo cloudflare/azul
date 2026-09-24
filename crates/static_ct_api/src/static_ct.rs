@@ -18,57 +18,6 @@
 //!
 //! # Examples
 //!
-//! ## Opening and verifying a checkpoint
-//! ```
-//! use base64::prelude::*;
-//! use p256::{pkcs8::DecodePublicKey, ecdsa::VerifyingKey as EcdsaVerifyingKey};
-//! use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
-//! use signed_note::{Ed25519NoteVerifier, VerifierList, KeyName};
-//! use static_ct_api::RFC6962NoteVerifier;
-//!
-//! let origin = KeyName::new("static-ct-dev.cloudflareresearch.com/logs/dev2024h2b".into()).unwrap();
-//! let checkpoint: &str = "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b
-//! 5
-//! YsndMEZccH1fI4kviHLu/Z1Ye3MgKkDwUHluUAOYuoY=
-//!
-//! — grease.invalid DLzQSDHFSzQAoz8nHm/h+UEP9JGkNhwVb9IP1sW3lvI+zQ==
-//! — static-ct-dev.cloudflareresearch.com/logs/dev2024h2b sFXEux8xfyu4r8oNjISiP7KHW+We4qeOjAtSpKFgGUiD9agTzD81XyNWGMw=
-//! — static-ct-dev.cloudflareresearch.com/logs/dev2024h2b 30nmRgAAAZSU01GqBAMASDBGAiEAps+yrlD9GB9pxdNomlfgABvNTI+NGlMFEsiJTynTkqwCIQDcxRtu9jY1gjLV1S+W55rCrr2yvl1PqSPY2UWh3dZ+eQ==
-//! — static-ct-dev.cloudflareresearch.com/logs/dev2024h2b P6OcbFTzjZ8KFH9Oi3qOwgVdtJI5XiPcCbtLDeB/GrpzhtvSIZKAq8QgmAL5YwW6wFgpcp4PYuAhbQQ87R1S2nVAqAM=
-//! ";
-//!
-//! // Log verification key from `curl <submission_url>/metadata | jq -r ".key"`
-//! let rfc6962_verifier = {
-//!     let vkey_bytes = &BASE64_STANDARD.decode(
-//!         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAES4yrL7jarwxEdSWrJp35uef789UYLma/F0x7bfBpW2KWnN5yuDE5XgeOAKeWM3RpycCZF2xRGAp2iHFCa4PtqA=="
-//!     ).unwrap();
-//!     let ecdsa_vkey = EcdsaVerifyingKey::from_public_key_der(vkey_bytes).unwrap();
-//!     RFC6962NoteVerifier::new(origin.clone(), &ecdsa_vkey).unwrap()
-//! };
-//!
-//! // Witness verification key from `curl <submission_url>/metadata | jq -r ".witness_key"`.
-//! let witness_verifier = {
-//!     let vkey_bytes = &BASE64_STANDARD.decode(
-//!         "MCowBQYDK2VwAyEARN4KXLGKQrfUUGU1zwbFvEN1AckVY76d4CnuNRc20vI="
-//!     ).unwrap();
-//!     let ed25519_vkey = Ed25519VerifyingKey::from_public_key_der(vkey_bytes).unwrap();
-//!     let ed25519_verifier = signed_note::new_encoded_ed25519_verifier_key(&origin, &ed25519_vkey);
-//!     Ed25519NoteVerifier::new_from_encoded_key(&ed25519_verifier).unwrap()
-//! };
-//!
-//! // Timestamp to use for verification, which must be at least as recent as the timestamp of the checkpoint.
-//! let now: u64 = 1_737_664_860_920;
-//!
-//! // Make a list of the verifiers that MUST apear on the checkpoint, and load the checkpoint
-//! let verifiers = VerifierList::new(vec![Box::new(rfc6962_verifier), Box::new(witness_verifier)]);
-//! let (_checkpoint, _timestamp) = tlog_checkpoint::open_checkpoint(
-//!   "static-ct-dev.cloudflareresearch.com/logs/dev2024h2b",
-//!   &verifiers,
-//!   now,
-//!   checkpoint.as_bytes(),
-//! ).unwrap();
-//! ```
-//!
 //! ## Verifying only the log signature on a checkpoint
 //!
 //! ```

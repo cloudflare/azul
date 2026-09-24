@@ -49,6 +49,7 @@ tokio = { version = "1", features = ["full"] }
 # Used only by the integration test binaries in tests/, not by the shared
 # support library in src/.
 flate2.workspace = true
+jsonschema.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true
 tlog_cosignature.workspace = true
