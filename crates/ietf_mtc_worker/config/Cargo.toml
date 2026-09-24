@@ -12,4 +12,5 @@ description = "Configuration for ietf_mtc_worker"
 
 [dependencies]
 serde.workspace = true
+serde_with.workspace = true
 ietf_mtc_api.workspace = true

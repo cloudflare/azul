@@ -9,7 +9,14 @@
             "submission_url": "http://localhost:8787/logs/dev1/",
             "location_hint": "enam",
             "max_certificate_lifetime_secs": 100,
-            "landmark_interval_secs": 10
+            "landmark_interval_secs": 10,
+            "cosigners": [
+                {
+                    "id": "44363.48.2",
+                    "submission_url": "http://localhost:18788/",
+                    "public_key": "MIIFMjALBglghkgBZQMEAxEDggUhAN+rQVjIlSpU+L0BmuPMunAb2PC6944wjXHCtqf5WnBmjSka+MVN5MhwewBovnLk2i0OMZ2C/CPBAlhYZFRJqSe/Us34H6BtyMB5G6HtFCAdMGcLU53c0x1QG3thjbcgObS/kRJF920LQbzUOJ8Gov1tMS1kSyeTkDRYDA7j8b0UUo/vtZIZ1F++FTceUJ/SeEtDJOmj0jT881ElS1cYiXE3RPkm33a3eM09aCT5RCrPDELQxxeX8tWb8Vb0M0gzb6rKcYGThtWYP/NASZGJ367eA+KXeJCOrcyTkLhayae0kAtafFzVjQZCPNXNZmt3NRAI3vmKFCa3MXnFCIK1MYsh+f+CNcxaYfE1qI4KmNGeaLZAXveKSOtQosO3csA6qcXzMu//npPHkyjM+/c1P7p8EkAjdCeZ5PQkkm10PNoQm+VxaVGUI5WlH8NrZt3dmvtF/sowrc1oCfSEYI24+bBYIN7Dpf4HbIukVsM3VepPbMacuaJ9PphepHU4FcPvwd7O2vTkiKkbuCFmKdYhhgt16gJ9m0eEPaTuAxs6SqOx0dosxwoNnSnqoR5yGZG+2SBBI0ZLKoI/haATBAlxFK6fZuVWDbeDCmGROAlD19xFR7mYDXSpMzQIr/9RgWYRrRliZB+cs+TMXV24luEc2xUhm/iMyNw6l/hBTIhIJLLZdjkwoQrrXk3GN6i/zhnjpLESotZ9E+bgrRiI3YmoKNOHE3a3QNs/7xU/Zla032zlYC5pAjgqb1raBHqA6AB3AyzuaHDsohWTY8jVcWij93ZvMqXlmmVZp2CaVFIZSj0pLPjChGbG3pJsyOi7uv3nfGC+e+y3W4b+aHB+8s9EEP1yUjS88IabNb8QzhyfXqNkYdEDIYH9iHGAcXmrLpvX4ktTaT3/uHU+yhfO0qZ1sXR3KnSn/l3ICtEOZsmLnXAxM0zjFoyWw79Wxjsg3ER4oH2vOUpbaKkp/esekbEnRkp2W/wOkzTnK+ctTHI2+0K4SCK8RSSaWEVJSktb45J1YXYu+eOjmqMcJ2Wk0hf5ZJAX3hq4NLwxrVjf8Wh3xgcoOYP7KWkuRXzlcRgnBzV4VVs2ErRt3C6SowgClUDTVFEyMftPlKPE8eQpVr2R6dTE11clugVC3GeM7bbegSxxMBXWer2KA/C8A9iU79zi8yZjTT4sQiuSiQyj63Iokg4qSF3q3GC5LZ+9WoKo8fAS74UgSapAQTtPpdDkyiRkl4++VsUhHE5ZmYwEjWiRIcugwBHHg0YkUrGhg0SNGKE8ATGECA52avuneN5nwS2pimBypSS8IkLZO8bZwIQsC9+ZKgbC4gJYi+7RrcfwOyHVD3dFhprf38mzMAP8z1QYD2JI+HJuRJbRPkLk37YbUR0s7gmNeDqFSCvWAM5yBPBStb33hpM8f7hEi1gJ0YhDNUBcLBtwBTmFquh7ZVoBolyvmMZGIP3yrKVcnF0GRnT6TygaFxcuG7tvgEpfp4UPikV6juvO7dnsLG1KBW96GLbhS0bcHdK8z8qMdVxjXIxZqV5S29U61Eg60nvbC91hmNB2zGnhQ3UYHDPVrH2N67X23okBqJdv47kZ0KyFZNIT5xZQy8BeyKs5ohA50vM8MRPM/wkORQMbxCaRWkPUhg1WI9aF5pQDQCYP69NcBkJ9gGz6k7bi30O6fR/+YPPWO17U4wOG3vfnuU7hOrIaxurOh/eyhpE9Dg5EtzgnUZytPF3S1Fnjos+VK+31nYJW8pY="
+                }
+            ]
         },
         "dev2": {
             "description": "MTC CA Dev2 (Ed25519)",

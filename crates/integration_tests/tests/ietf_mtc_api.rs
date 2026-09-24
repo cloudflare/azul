@@ -32,6 +32,8 @@ use integration_tests::{
     client::{IetfMtcClient, ietf_mtc_log_name},
     fixtures::make_ietf_mtc_csr,
 };
+use serde::Deserialize;
+use serde_with::{base64::Base64, serde_as};
 use signed_note::VerifierList;
 use tlog_checkpoint::open_checkpoint;
 use tlog_core::{
@@ -252,6 +254,49 @@ struct VerificationContext {
     log_number: u16,
     cosigner_id: TrustAnchorID,
     checkpoint_origin: String,
+    mirror: Option<(TrustAnchorID, MtcVerifyingKey)>,
+}
+
+#[derive(Deserialize)]
+struct MirrorMetadata {
+    mirror: Option<MirrorMetadataIdentity>,
+}
+
+#[derive(Deserialize)]
+struct MirrorMetadataIdentity {
+    name: String,
+    public_keys: Vec<MirrorMetadataKey>,
+}
+
+#[serde_as]
+#[derive(Deserialize)]
+struct MirrorMetadataKey {
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
+}
+
+#[serde_as]
+#[derive(Deserialize)]
+struct MirrorIdentity {
+    name: String,
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
+}
+
+impl From<MirrorMetadataIdentity> for MirrorIdentity {
+    /// The first published key is the current signing key; later keys are
+    /// rotation candidates that the CA is not yet configured to trust.
+    fn from(identity: MirrorMetadataIdentity) -> Self {
+        let key = identity
+            .public_keys
+            .into_iter()
+            .next()
+            .expect("mirror metadata must publish a key");
+        Self {
+            name: identity.name,
+            public_key: key.public_key,
+        }
+    }
 }
 
 async fn fetch_verification_context(client: &IetfMtcClient) -> VerificationContext {
@@ -295,12 +340,37 @@ async fn fetch_verification_context(client: &IetfMtcClient) -> VerificationConte
     let cosigner_id = TrustAnchorID::from_str(&meta.cosigner_id).expect("cosigner_id");
     assert_eq!(cosigner_id, ca_id);
     let checkpoint_origin = derived_log_id.oid_name();
+    let mirror = if client.log == "dev1" {
+        use pkcs8::DecodePublicKey;
+        let base_url =
+            std::env::var("MIRROR_URL").unwrap_or_else(|_| "http://localhost:18788".to_owned());
+        let metadata = reqwest::get(format!("{base_url}/metadata"))
+            .await
+            .expect("mirror metadata request")
+            .error_for_status()
+            .expect("mirror metadata status")
+            .json::<MirrorMetadata>()
+            .await
+            .expect("mirror metadata JSON");
+        let identity = MirrorIdentity::from(metadata.mirror.expect("mirror identity"));
+        let id = "44363.48.2"
+            .parse::<TrustAnchorID>()
+            .expect("mirror cosigner ID");
+        assert_eq!(identity.name, id.oid_name());
+        let key =
+            ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(&identity.public_key)
+                .expect("mirror ML-DSA-44 SPKI");
+        Some((id, MtcVerifyingKey::MlDsa44(key)))
+    } else {
+        None
+    };
     VerificationContext {
         key: vk,
         ca_id,
         log_number: meta.log_number,
         cosigner_id,
         checkpoint_origin,
+        mirror,
     }
 }
 
@@ -355,6 +425,17 @@ fn verify_standalone_cert(cert: &Certificate, leaf_index: u64, context: &Verific
             context.log_number,
         )
         .expect("at least one cosignature must be valid");
+    if let Some((id, key)) = &context.mirror {
+        proof
+            .verify_cosignature(
+                &expected_subtree_hash,
+                key,
+                id,
+                &context.ca_id,
+                context.log_number,
+            )
+            .expect("configured mirror cosignature must be valid");
+    }
 }
 
 /// Verify a landmark-relative MTC certificate following draft-ietf-plants-merkle-tree-certs §7.2.
@@ -464,7 +545,7 @@ async fn verify_landmark_relative_cert(
         expected_subtree_hash, trusted_subtree_hash,
         "evaluated subtree hash must match the trusted (predistributed) subtree hash"
     );
-    let consistency_proof = trusted
+    let consistency_proof: Vec<Hash> = trusted
         .consistency_proof
         .iter()
         .copied()

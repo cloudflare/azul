@@ -1624,6 +1624,7 @@ dependencies = [
  "axum",
  "der",
  "ed25519-dalek",
+ "futures-executor",
  "generic_log_worker",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
@@ -1639,7 +1640,10 @@ dependencies = [
  "signed_note",
  "tlog_checkpoint",
  "tlog_core",
+ "tlog_cosignature",
  "tlog_entry",
+ "tlog_mirror",
+ "tlog_witness",
  "tower-service",
  "url",
  "worker",
@@ -1652,6 +1656,7 @@ version = "0.2.0"
 dependencies = [
  "ietf_mtc_api",
  "serde",
+ "serde_with",
 ]
 
 [[package]]
