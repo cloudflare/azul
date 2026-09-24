@@ -22,7 +22,8 @@
 //! [spec]: https://c2sp.org/tlog-mirror
 
 use ed25519_dalek::{SigningKey as Ed25519SigningKey, pkcs8::DecodePrivateKey as _};
-use ml_dsa::{ExpandedSigningKey, MlDsa44};
+use ml_dsa::{ExpandedSigningKey, Keypair as _, MlDsa44, SigningKey};
+use pkcs8::EncodePublicKey as _;
 use rand::Rng as _;
 use rand::rng;
 use serde::Deserialize;
@@ -30,6 +31,10 @@ use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest as _, Sha256};
 use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 use std::time::Duration;
 use tlog_checkpoint::{
     CheckpointSigner, CheckpointText, Ed25519CheckpointSigner, TreeWithTimestamp,
@@ -58,7 +63,11 @@ const LOG_KEY_NAME: &str = "oid/1.3.6.1.4.1.32473.2";
 /// Numbered log origin accepted under [`LOG_KEY_NAME`].
 const LOG_ORIGIN: &str = "oid/1.3.6.1.4.1.32473.2.0.1";
 const OTHER_LOG_ORIGIN: &str = "example.com/log1";
+const DYNAMIC_BASE_ID: &str = "32473.999.20260924";
+const DYNAMIC_LOG_KEY_NAME: &str = "oid/1.3.6.1.4.1.32473.999.20260924";
+const DYNAMIC_LOG_ORIGIN: &str = "oid/1.3.6.1.4.1.32473.999.20260924.0.1";
 const R2_BUCKET: &str = "mirror-worker-public-dev";
+const REGISTRY_FIXTURE_ADDR: &str = "127.0.0.1:8790";
 
 /// Dev-only ML-DSA-44 `subtree/v1` key matching `config.dev.json`.
 /// Do not use outside these integration tests.
@@ -101,6 +110,12 @@ fn random_log_signer(name: &str) -> SubtreeV1CheckpointSigner {
 /// name but with an untrusted key, used by the 403 step.
 fn untrusted_log_signer() -> SubtreeV1CheckpointSigner {
     random_log_signer(LOG_KEY_NAME)
+}
+
+fn dynamic_log_signer() -> SubtreeV1CheckpointSigner {
+    let key = ExpandedSigningKey::<MlDsa44>::from_seed(&ml_dsa::B32::from([42; 32]));
+    let name = KeyName::new(DYNAMIC_LOG_KEY_NAME.to_owned()).expect("dynamic log key name");
+    SubtreeV1CheckpointSigner::new(name, key)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +223,123 @@ fn now_millis() -> u64 {
 // HTTP plumbing
 // ---------------------------------------------------------------------------
 
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum RegistryFixtureMode {
+    ValidV1,
+    HttpFailure,
+    EmptyV2,
+}
+
+struct RegistryFixture {
+    mode: Arc<AtomicU8>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RegistryFixture {
+    async fn start() -> Self {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let key = SigningKey::<MlDsa44>::from_seed(&ml_dsa::B32::from([42; 32]));
+        let der = key
+            .verifying_key()
+            .to_public_key_der()
+            .expect("encode dynamic registry key");
+        let fingerprint = hex::encode(Sha256::digest(der.as_bytes()));
+        let pem = key
+            .verifying_key()
+            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .expect("encode dynamic registry PEM");
+        let pem = Arc::<[u8]>::from(format!("# {fingerprint}\n{pem}").into_bytes());
+        let valid = Arc::<[u8]>::from(
+            format!(
+                r#"{{"version":"fixture-v1","timestamp":"2026-09-24T00:00:00Z","issuers":[{{"friendly_name":"Integration fixture","base_id":"{DYNAMIC_BASE_ID}","type":"ISSUER","key_sha256":"{fingerprint}","min_log_number":1}}]}}"#,
+            )
+            .into_bytes(),
+        );
+        let empty = Arc::<[u8]>::from(
+            br#"{"version":"fixture-v2","timestamp":"2026-09-24T00:01:00Z","issuers":[]}"#
+                .as_slice(),
+        );
+        let mode = Arc::new(AtomicU8::new(RegistryFixtureMode::ValidV1 as u8));
+        let listener = tokio::net::TcpListener::bind(REGISTRY_FIXTURE_ADDR)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("bind registry fixture at {REGISTRY_FIXTURE_ADDR}: {error}")
+            });
+        let task_mode = Arc::clone(&mode);
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept fixture request");
+                let mode = Arc::clone(&task_mode);
+                let valid = Arc::clone(&valid);
+                let empty = Arc::clone(&empty);
+                let pem = Arc::clone(&pem);
+                tokio::spawn(async move {
+                    let mut request = Vec::with_capacity(1024);
+                    while request.len() < 8192 && !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let mut chunk = [0; 1024];
+                        let read =
+                            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+                                .await
+                                .expect("fixture request timeout")
+                                .expect("read fixture request");
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    let path = request
+                        .split(|byte| *byte == b' ')
+                        .nth(1)
+                        .and_then(|path| std::str::from_utf8(path).ok())
+                        .unwrap_or("");
+                    let mode = mode.load(Ordering::SeqCst);
+                    let (status, content_type, body): (&str, &str, &[u8]) =
+                        if mode == RegistryFixtureMode::HttpFailure as u8 {
+                            ("503 Service Unavailable", "text/plain", b"fixture failure")
+                        } else {
+                            match path {
+                                "/cosigners.json" => (
+                                    "200 OK",
+                                    "application/json",
+                                    if mode == RegistryFixtureMode::EmptyV2 as u8 {
+                                        &empty
+                                    } else {
+                                        &valid
+                                    },
+                                ),
+                                "/cosigners.pem" => ("200 OK", "application/x-pem-file", &pem),
+                                _ => ("404 Not Found", "text/plain", b"not found"),
+                            }
+                        };
+                    let headers = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                    );
+                    stream
+                        .write_all(headers.as_bytes())
+                        .await
+                        .expect("write fixture headers");
+                    stream.write_all(body).await.expect("write fixture body");
+                    stream.shutdown().await.expect("close fixture response");
+                });
+            }
+        });
+        Self { mode, task }
+    }
+
+    fn set_mode(&self, mode: RegistryFixtureMode) {
+        self.mode.store(mode as u8, Ordering::SeqCst);
+    }
+}
+
+impl Drop for RegistryFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 fn base_url() -> String {
     std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8787".to_string())
 }
@@ -220,35 +352,35 @@ fn http_client() -> reqwest::Client {
         .expect("build HTTP client")
 }
 
-fn r2_key(path: &str) -> String {
-    let origin_hash = hex::encode(Sha256::digest(LOG_ORIGIN.as_bytes()));
+fn r2_key(origin: &str, path: &str) -> String {
+    let origin_hash = hex::encode(Sha256::digest(origin.as_bytes()));
     format!("{origin_hash}/{path}")
 }
 
-async fn local_r2_object(path: &str) -> Option<Vec<u8>> {
-    integration_tests::local_r2::get("mirror_worker", R2_BUCKET, &r2_key(path))
+async fn local_r2_object(origin: &str, path: &str) -> Option<Vec<u8>> {
+    integration_tests::local_r2::get("mirror_worker", R2_BUCKET, &r2_key(origin, path))
         .await
         .unwrap_or_else(|e| panic!("local R2 read failed for {path}: {e}"))
 }
 
-async fn require_local_r2_object(path: &str) -> Vec<u8> {
-    local_r2_object(path)
+async fn require_local_r2_object(origin: &str, path: &str) -> Vec<u8> {
+    local_r2_object(origin, path)
         .await
         .unwrap_or_else(|| panic!("R2 object missing: {path}"))
 }
 
-async fn delete_local_r2_object(path: &str) {
-    integration_tests::local_r2::delete("mirror_worker", R2_BUCKET, &r2_key(path))
+async fn delete_local_r2_object(origin: &str, path: &str) {
+    integration_tests::local_r2::delete("mirror_worker", R2_BUCKET, &r2_key(origin, path))
         .await
         .unwrap_or_else(|e| panic!("local R2 delete failed for {path}: {e}"));
 }
 
-async fn wait_for_local_r2_absence(paths: &[&str]) {
+async fn wait_for_local_r2_absence(origin: &str, paths: &[&str]) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let mut any_present = false;
         for path in paths {
-            any_present |= local_r2_object(path).await.is_some();
+            any_present |= local_r2_object(origin, path).await.is_some();
         }
         if !any_present {
             return;
@@ -275,7 +407,7 @@ fn parse_entry_bundle(bytes: &[u8]) -> Vec<Vec<u8>> {
     entries
 }
 
-async fn assert_cut_tiles(log: &ToyLog, tree_size: u64) {
+async fn assert_cut_tiles(origin: &str, log: &ToyLog, tree_size: u64) {
     let leaf_index = tree_size - 1;
     let hash_index = tlog_core::stored_hash_index(0, leaf_index);
     let recorder = TlogTileRecorder::default();
@@ -284,7 +416,7 @@ async fn assert_cut_tiles(log: &ToyLog, tree_size: u64) {
 
     let mut tile_data = HashMap::new();
     for tile in recorder.0.into_inner() {
-        let bytes = require_local_r2_object(&tile.path()).await;
+        let bytes = require_local_r2_object(origin, &tile.path()).await;
         tile_data.insert(tile, bytes);
     }
     let preloaded = PreloadedTlogTileReader(tile_data);
@@ -298,7 +430,7 @@ async fn assert_cut_tiles(log: &ToyLog, tree_size: u64) {
         .parent(0, tree_size)
         .expect("cut leaf tile");
     let data_path = hash_tile.with_data_path(PathElem::Entries).path();
-    let entries = parse_entry_bundle(&require_local_r2_object(&data_path).await);
+    let entries = parse_entry_bundle(&require_local_r2_object(origin, &data_path).await);
     let base = usize::try_from(leaf_index / 256 * 256).unwrap();
     let end = usize::try_from(tree_size).unwrap();
     assert_eq!(entries, log.entries[base..end]);
@@ -387,6 +519,7 @@ fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
 /// `max_packages` truncates at a package boundary; `corrupt_proof`
 /// corrupts the first proof.
 fn build_add_entries_body(
+    origin: &str,
     log: &ToyLog,
     upload_start: u64,
     upload_end: u64,
@@ -396,7 +529,7 @@ fn build_add_entries_body(
 ) -> Vec<u8> {
     let mut buf = Vec::new();
     AddEntriesRequestHeader {
-        log_origin: LOG_ORIGIN.to_owned(),
+        log_origin: origin.to_owned(),
         upload_start,
         upload_end,
         ticket,
@@ -510,8 +643,13 @@ fn verify_mirror_signature(
 /// Sign `log`'s current tree and advance the mirror's pending checkpoint
 /// to it via `add-checkpoint` (200 expected). `old_size` is the mirror's
 /// current pending size, used to build the consistency proof.
-async fn advance_pending(log: &ToyLog, signer: &SubtreeV1CheckpointSigner, old_size: u64) -> Note {
-    let cp = log.sign_checkpoint(signer);
+async fn advance_pending(
+    origin: &str,
+    log: &ToyLog,
+    signer: &SubtreeV1CheckpointSigner,
+    old_size: u64,
+) -> Note {
+    let cp = log.sign_checkpoint_for(origin, signer);
     let note = Note::from_bytes(&cp).unwrap();
     let proof = log.consistency_proof(old_size);
     let body = serialize_add_checkpoint_request(old_size, &proof, &note).unwrap();
@@ -574,6 +712,24 @@ async fn fetch_metadata() -> MetadataResponse {
     resp.json().await.expect("metadata json")
 }
 
+async fn trigger_scheduled_sync() {
+    let client = http_client();
+    let resp = client
+        .get(format!(
+            "{}/__scheduled?cron=17+*+*+*+*&format=json",
+            base_url()
+        ))
+        .send()
+        .await
+        .expect("scheduled registry sync request");
+    assert!(
+        resp.status().is_success(),
+        "scheduled registry sync dispatch returned {}: {:?}",
+        resp.status(),
+        resp.text().await.unwrap_or_default(),
+    );
+}
+
 async fn wait_for_mirror() {
     let client = http_client();
     for _ in 0..30 {
@@ -595,6 +751,8 @@ async fn wait_for_mirror() {
 #[tokio::test]
 async fn tlog_mirror_end_to_end() {
     wait_for_mirror().await;
+    let registry_fixture = RegistryFixture::start().await;
+    trigger_scheduled_sync().await;
 
     // --- GET /metadata ---
     let meta = fetch_metadata().await;
@@ -627,6 +785,112 @@ async fn tlog_mirror_end_to_end() {
     assert_eq!(ed_log_meta.checkpoint_signers[0].name, OTHER_LOG_ORIGIN);
     assert_eq!(ed_log_meta.checkpoint_signers[0].algorithm, "ed25519");
 
+    let dynamic_meta = meta
+        .logs
+        .iter()
+        .find(|log| log.origin == DYNAMIC_LOG_ORIGIN)
+        .unwrap_or_else(|| panic!("metadata does not list {DYNAMIC_LOG_ORIGIN}"));
+    assert_eq!(
+        dynamic_meta.description.as_deref(),
+        Some("Integration fixture")
+    );
+    assert_eq!(dynamic_meta.checkpoint_signers.len(), 1);
+    assert_eq!(
+        dynamic_meta.checkpoint_signers[0].name,
+        DYNAMIC_LOG_KEY_NAME
+    );
+    assert_eq!(dynamic_meta.checkpoint_signers[0].algorithm, "subtree/v1");
+
+    let dynamic_signer = dynamic_log_signer();
+    let mut dynamic_log = ToyLog::new();
+    dynamic_log.push_n(88);
+    advance_pending(DYNAMIC_LOG_ORIGIN, &dynamic_log, &dynamic_signer, 0).await;
+    {
+        let body = build_add_entries_body(
+            DYNAMIC_LOG_ORIGIN,
+            &dynamic_log,
+            0,
+            88,
+            Vec::new(),
+            None,
+            false,
+        );
+        let r = post_add_entries(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "dynamic partial mirror: body={:?}",
+            String::from_utf8_lossy(&r.body),
+        );
+    }
+    let dynamic_partials = ["tile/0/000.p/88", "tile/entries/000.p/88"];
+    for path in dynamic_partials {
+        require_local_r2_object(DYNAMIC_LOG_ORIGIN, path).await;
+    }
+
+    dynamic_log.push_n(256 - dynamic_log.size());
+    advance_pending(DYNAMIC_LOG_ORIGIN, &dynamic_log, &dynamic_signer, 88).await;
+    {
+        let body = build_add_entries_body(
+            DYNAMIC_LOG_ORIGIN,
+            &dynamic_log,
+            88,
+            256,
+            Vec::new(),
+            None,
+            false,
+        );
+        let r = post_add_entries(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "dynamic full-tile mirror: body={:?}",
+            String::from_utf8_lossy(&r.body),
+        );
+    }
+    wait_for_local_r2_absence(DYNAMIC_LOG_ORIGIN, &dynamic_partials).await;
+
+    registry_fixture.set_mode(RegistryFixtureMode::HttpFailure);
+    trigger_scheduled_sync().await;
+    assert!(
+        fetch_metadata()
+            .await
+            .logs
+            .iter()
+            .any(|log| log.origin == DYNAMIC_LOG_ORIGIN),
+        "failed sync must retain the last-known-good dynamic origin",
+    );
+    let same_size_note =
+        Note::from_bytes(&dynamic_log.sign_checkpoint_for(DYNAMIC_LOG_ORIGIN, &dynamic_signer))
+            .expect("same-size dynamic checkpoint");
+    let same_size_body =
+        serialize_add_checkpoint_request(dynamic_log.size(), &[], &same_size_note).unwrap();
+    let r = post_add_checkpoint(&same_size_body).await;
+    assert_eq!(
+        r.status,
+        200,
+        "last-known-good dynamic checkpoint: body={:?}",
+        String::from_utf8_lossy(&r.body),
+    );
+
+    registry_fixture.set_mode(RegistryFixtureMode::EmptyV2);
+    trigger_scheduled_sync().await;
+    assert!(
+        fetch_metadata()
+            .await
+            .logs
+            .iter()
+            .all(|log| log.origin != DYNAMIC_LOG_ORIGIN),
+        "empty v2 registry must remove the dynamic origin",
+    );
+    let r = post_add_checkpoint(&same_size_body).await;
+    assert_eq!(
+        r.status,
+        404,
+        "removed dynamic origin: body={:?}",
+        String::from_utf8_lossy(&r.body),
+    );
+
     let signer = log_signer();
     let mut log = ToyLog::new();
 
@@ -648,18 +912,18 @@ async fn tlog_mirror_end_to_end() {
         );
         assert_eq!(parse_add_checkpoint_response(&r.body).unwrap().len(), 1);
 
-        let served = require_local_r2_object("checkpoint").await;
+        let served = require_local_r2_object(LOG_ORIGIN, "checkpoint").await;
         let served = Note::from_bytes(&served).expect("served empty checkpoint note");
         let checkpoint = CheckpointText::from_bytes(served.text()).unwrap();
         assert_eq!(checkpoint.size(), 0);
         assert_eq!(*checkpoint.hash(), tlog_core::EMPTY_HASH);
 
         // Same-size retries republish the object before returning success.
-        delete_local_r2_object("checkpoint").await;
-        assert!(local_r2_object("checkpoint").await.is_none());
+        delete_local_r2_object(LOG_ORIGIN, "checkpoint").await;
+        assert!(local_r2_object(LOG_ORIGIN, "checkpoint").await.is_none());
         let r = post_add_entries(&body).await;
         assert_eq!(r.status, 200, "empty checkpoint retry");
-        assert!(local_r2_object("checkpoint").await.is_some());
+        assert!(local_r2_object(LOG_ORIGIN, "checkpoint").await.is_some());
     }
 
     // A configured origin needs a pending checkpoint before accepting
@@ -894,7 +1158,7 @@ async fn tlog_mirror_end_to_end() {
     // 600 spans three packages ([0,256), [256,512), [512,600)); enough to
     // test partial progress and a non-aligned resume later.
     log.push_n(600 - log.size());
-    let checkpoint_600 = advance_pending(&log, &signer, 2).await;
+    let checkpoint_600 = advance_pending(LOG_ORIGIN, &log, &signer, 2).await;
 
     // `upload_end` names a pending checkpoint rather than the end of the
     // request body. Size 256 has no accepted checkpoint.
@@ -931,7 +1195,7 @@ async fn tlog_mirror_end_to_end() {
     // ([0,256)) and truncate, gzip-compressed. The mirror ingests package
     // 0, persists [0,256), and returns 202 with next_entry = 256.
     {
-        let body = build_add_entries_body(&log, 0, 600, Vec::new(), Some(1), false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 0, 600, Vec::new(), Some(1), false);
         let r = post_gzip_add_entries(&body).await;
         let info = parse_mirror_info(&r, 202);
         assert_eq!(info.tree_size, 600, "202 tree_size is the pending size");
@@ -945,7 +1209,7 @@ async fn tlog_mirror_end_to_end() {
     // Send the remaining two packages (plain, not gzipped). This reaches
     // the pending size, so the mirror cosigns and advances committed=600.
     {
-        let body = build_add_entries_body(&log, 256, 600, Vec::new(), None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 256, 600, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -961,12 +1225,12 @@ async fn tlog_mirror_end_to_end() {
 
     let partial_600 = ["tile/0/002.p/88", "tile/entries/002.p/88"];
     for path in partial_600 {
-        require_local_r2_object(path).await;
+        require_local_r2_object(LOG_ORIGIN, path).await;
     }
 
     // Re-verifying 256 already persisted entries is idempotent.
     {
-        let body = build_add_entries_body(&log, 344, 600, Vec::new(), None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 344, 600, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -983,7 +1247,7 @@ async fn tlog_mirror_end_to_end() {
     // Now next_entry (= 600) is non-256-aligned, setting up the
     // non-aligned resume below.
     log.push_n(1000 - log.size());
-    advance_pending(&log, &signer, 600).await;
+    advance_pending(LOG_ORIGIN, &log, &signer, 600).await;
 
     // The committed checkpoint remains a valid target after pending moves
     // ahead. No ticket is required.
@@ -1022,7 +1286,7 @@ async fn tlog_mirror_end_to_end() {
     let cp_size = log.size(); // 1000
     let cosigned_checkpoint;
     {
-        let body = build_add_entries_body(&log, 600, 1000, Vec::new(), None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 600, 1000, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1037,25 +1301,25 @@ async fn tlog_mirror_end_to_end() {
             Note::new(log_note.text(), &mirror_sigs).expect("assemble cosigned reference note");
     }
 
-    wait_for_local_r2_absence(&partial_600).await;
+    wait_for_local_r2_absence(LOG_ORIGIN, &partial_600).await;
     for path in [
         "tile/0/002",
         "tile/entries/002",
         "tile/0/003.p/232",
         "tile/entries/003.p/232",
     ] {
-        require_local_r2_object(path).await;
+        require_local_r2_object(LOG_ORIGIN, path).await;
     }
 
     // --- Advance pending 1000 -> 1256 ---
     log.push_n(1256 - log.size());
-    advance_pending(&log, &signer, 1000).await;
+    advance_pending(LOG_ORIGIN, &log, &signer, 1000).await;
 
     // --- Truncate before any complete package -> 400 ---
     // Header declares [1000, 1256) but no packages follow. With zero
     // complete packages there is nothing to persist, so this is malformed.
     {
-        let body = build_add_entries_body(&log, 1000, 1256, Vec::new(), Some(0), false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 1000, 1256, Vec::new(), Some(0), false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1068,7 +1332,7 @@ async fn tlog_mirror_end_to_end() {
     // --- Bad subtree proof -> 422 ---
     {
         // Last arg `true` corrupts the first package's subtree proof.
-        let body = build_add_entries_body(&log, 1000, 1256, Vec::new(), None, true);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 1000, 1256, Vec::new(), None, true);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1195,7 +1459,7 @@ async fn tlog_mirror_end_to_end() {
 
     // --- Finish [1000, 1256) ---
     {
-        let body = build_add_entries_body(&log, 1000, 1256, Vec::new(), None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 1000, 1256, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1208,9 +1472,9 @@ async fn tlog_mirror_end_to_end() {
     // --- Multi-flush complete upload [1256, 2280) -> 200 ---
     // Five packages produce two full flushes and a trailing flush.
     log.push_n(2280 - log.size());
-    advance_pending(&log, &signer, 1256).await;
+    advance_pending(LOG_ORIGIN, &log, &signer, 1256).await;
     {
-        let body = build_add_entries_body(&log, 1256, 2280, Vec::new(), None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 1256, 2280, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1227,9 +1491,9 @@ async fn tlog_mirror_end_to_end() {
     // --- Multi-flush truncated upload [2280, 3000) -> 202 ---
     // Three packages flush through 2816 before truncation.
     log.push_n(3000 - log.size());
-    advance_pending(&log, &signer, 2280).await;
+    advance_pending(LOG_ORIGIN, &log, &signer, 2280).await;
     {
-        let body = build_add_entries_body(&log, 2280, 3000, Vec::new(), Some(3), false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 2280, 3000, Vec::new(), Some(3), false);
         let r = post_add_entries(&body).await;
         let info = parse_mirror_info(&r, 202);
         assert_eq!(info.tree_size, 3000, "202 tree_size is the pending size");
@@ -1241,7 +1505,7 @@ async fn tlog_mirror_end_to_end() {
 
     // --- Resume from the mid-flush boundary [2816, 3000) -> 200 ---
     {
-        let body = build_add_entries_body(&log, 2816, 3000, Vec::new(), None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 2816, 3000, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1259,7 +1523,7 @@ async fn tlog_mirror_end_to_end() {
     // A ticket permits size 3256 after pending advances to 4000 and
     // persistence reaches 3328. The checkpoint requires cut tiles.
     log.push_n(3256 - log.size());
-    let checkpoint_3256 = advance_pending(&log, &signer, 3000).await;
+    let checkpoint_3256 = advance_pending(LOG_ORIGIN, &log, &signer, 3000).await;
     let ticket_3256 = {
         let body = build_add_entries_header(3000, 3001, Vec::new());
         let r = post_add_entries(&body).await;
@@ -1279,16 +1543,16 @@ async fn tlog_mirror_end_to_end() {
     }
 
     log.push_n(4000 - log.size());
-    advance_pending(&log, &signer, 3256).await;
+    advance_pending(LOG_ORIGIN, &log, &signer, 3256).await;
     {
-        let body = build_add_entries_body(&log, 3000, 4000, Vec::new(), Some(2), false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 3000, 4000, Vec::new(), Some(2), false);
         let r = post_add_entries(&body).await;
         let info = parse_mirror_info(&r, 202);
         assert_eq!(info.tree_size, 4000);
         assert_eq!(info.next_entry, 3328);
     }
     {
-        let body = build_add_entries_body(&log, 3072, 3256, ticket_3256, None, false);
+        let body = build_add_entries_body(LOG_ORIGIN, &log, 3072, 3256, ticket_3256, None, false);
         let r = post_add_entries(&body).await;
         assert_eq!(
             r.status,
@@ -1300,6 +1564,6 @@ async fn tlog_mirror_end_to_end() {
             parse_sign_subtree_response(&r.body).expect("parse ticketed checkpoint response");
         assert_eq!(signatures.len(), 1);
         verify_mirror_signature(&checkpoint_3256, &signatures, &meta);
-        assert_cut_tiles(&log, 3256).await;
+        assert_cut_tiles(LOG_ORIGIN, &log, 3256).await;
     }
 }

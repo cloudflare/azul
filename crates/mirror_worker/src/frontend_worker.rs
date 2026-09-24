@@ -4,7 +4,9 @@
 //! HTTP entry point and protocol handlers.
 
 use crate::{
-    CONFIG, IdentitySigner, load_mirror_signer, load_witness_signer, log_verifiers,
+    CONFIG, IdentitySigner,
+    cosigner_registry_do::{log_verifiers, merged_registry_logs, registry_record},
+    load_mirror_signer, load_witness_signer,
     mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, UpdatePendingResponse, state_stub},
 };
 use axum::{
@@ -177,7 +179,7 @@ struct MetadataResponse<'a> {
     witness: Option<IdentityMetadata<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mirror: Option<IdentityMetadata<'a>>,
-    logs: Vec<LogMetadata<'a>>,
+    logs: Vec<LogMetadata>,
 }
 
 #[serde_as]
@@ -194,41 +196,54 @@ struct IdentityMetadata<'a> {
 }
 
 #[derive(Serialize)]
-struct LogMetadata<'a> {
+struct LogMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    origin: &'a str,
-    checkpoint_signers: Vec<CheckpointSignerMetadata<'a>>,
+    description: Option<String>,
+    origin: String,
+    checkpoint_signers: Vec<CheckpointSignerMetadata>,
 }
 
 #[serde_as]
 #[derive(Serialize)]
-struct CheckpointSignerMetadata<'a> {
-    name: &'a str,
-    algorithm: &'a str,
+struct CheckpointSignerMetadata {
+    name: String,
+    algorithm: &'static str,
     #[serde_as(as = "Base64As")]
-    public_key: &'a [u8],
+    public_key: Vec<u8>,
 }
 
-fn metadata_logs() -> Vec<LogMetadata<'static>> {
+fn metadata_logs(dynamic: Option<crate::cosigner_registry_do::RegistryRecord>) -> Vec<LogMetadata> {
     let mut logs = CONFIG
         .logs
         .iter()
         .map(|(origin, log)| LogMetadata {
-            description: log.description.as_deref(),
-            origin: origin.as_str(),
+            description: log.description.clone(),
+            origin: origin.as_str().to_owned(),
             checkpoint_signers: log
                 .checkpoint_signers
                 .iter()
                 .map(|signer| CheckpointSignerMetadata {
-                    name: signer.name.as_str(),
+                    name: signer.name.as_str().to_owned(),
                     algorithm: signer.algorithm.as_str(),
-                    public_key: &signer.public_key,
+                    public_key: signer.public_key.clone(),
                 })
                 .collect(),
         })
         .collect::<Vec<_>>();
-    logs.sort_by(|a, b| a.origin.cmp(b.origin));
+    logs.extend(
+        merged_registry_logs(dynamic)
+            .into_iter()
+            .map(|log| LogMetadata {
+                description: log.description,
+                origin: log.origin,
+                checkpoint_signers: vec![CheckpointSignerMetadata {
+                    name: log.signer_name,
+                    algorithm: "subtree/v1",
+                    public_key: log.public_key,
+                }],
+            }),
+    );
+    logs.sort_by(|a, b| a.origin.cmp(&b.origin));
     logs
 }
 
@@ -257,6 +272,19 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
     } else {
         None
     };
+    let dynamic_logs = match registry_record(&env).await {
+        Ok(record) => record,
+        Err(error) => {
+            log::error!("metadata: failed to read cosigner registry: {error}");
+            generic_log_worker::obs::sentry::capture_error_and_flush(
+                &error,
+                sentry_core::Level::Error,
+                &[("handler", "metadata"), ("dependency", "cosigner_registry")],
+            )
+            .await;
+            None
+        }
+    };
     Ok((
         StatusCode::OK,
         Json(MetadataResponse {
@@ -264,7 +292,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
             submission_prefix: &CONFIG.submission_prefix,
             witness,
             mirror,
-            logs: metadata_logs(),
+            logs: metadata_logs(dynamic_logs),
         }),
     ))
 }
@@ -294,7 +322,7 @@ async fn add_checkpoint(
     })?;
     let (old_size, consistency_proof, checkpoint, checkpoint_text) = validated.into_parts();
     let origin = checkpoint_text.origin();
-    let Some(verifiers) = log_verifiers(origin) else {
+    let Some(verifiers) = log_verifiers(&env, origin).await? else {
         return Err(AppError::UnknownLogOrigin);
     };
     verify_source_checkpoint(&checkpoint, &verifiers, "add-checkpoint")?;
@@ -356,7 +384,7 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
         AppError::BadRequest(error.to_string())
     })?;
     let origin = validated.checkpoint_text().origin();
-    if log_verifiers(origin).is_none() {
+    if log_verifiers(&env, origin).await?.is_none() {
         return Err(AppError::UnknownLogOrigin);
     }
     validate_sign_subtree_proof(&validated).map_err(|_| {

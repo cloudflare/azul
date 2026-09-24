@@ -6,6 +6,7 @@
     "properties": {
         "logging_level": {"type": "string", "enum": ["trace", "debug", "info", "warn", "error"]},
         "submission_prefix": {"type": "string"},
+        "enable_chrome_cosigners": {"type": "boolean", "default": true},
         "witness": {"$ref": "#/definitions/identity"},
         "mirror": {"$ref": "#/definitions/mirror"},
         "logs": {
