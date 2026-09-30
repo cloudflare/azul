@@ -20,42 +20,6 @@ The Batcher receives requests (keeping them open) and groups the entries into ba
 
 After persisting log state, the Sequencer returns sequenced entry metadata (7) to the Batcher, which in turn sends entry metadata to waiting Frontend requests and writes batch metadata to the deduplication cache in Workers KV. When the Frontend receives the response, it returns a Signed Certificate Timestamp (SCT) to the client (8).
 
-## Test logs
-
-Two prototype logs are available for testing, with configuration in `wrangler.jsonc` and `config.cftest.json` and roots from `roots.default.pem`.
-
-    curl -s https://static-ct.cloudflareresearch.com/logs/cftest2025h1a/metadata | jq
-    {
-      "description": "Cloudflare Research 'cftest2025h1a' log",
-      "log_type": "test",
-      "log_id": "7DSwkhPo35hYEZa4DVlPq6Pm/bG4aOw/kqhHvYd6z/k=",
-      "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8LxK0sAKYODiZe9gDeak7agggQ0wvBOeEMSi7cLlFzcTlm1AexxsC04r/4rBIhf8liQqyRTrL3u1jpz6NJ4tLg==",
-      "witness_key": "MCowBQYDK2VwAyEAWTVSsOnsIYq+LZ6CUxgI8ONvJvE+YSF27N9BXZ02EP8=",
-      "mmd": 86400,
-      "submission_url": "https://static-ct.cloudflareresearch.com/logs/cftest2025h1a/",
-      "monitoring_url": "https://static-ct-public-cftest2025h1a.cloudflareresearch.com/",
-      "temporal_interval": {
-        "start_inclusive": "2025-01-01T00:00:00Z",
-        "end_exclusive": "2025-07-01T00:00:00Z"
-      }
-    }
-
-    curl -s https://static-ct.cloudflareresearch.com/logs/cftest2025h2a/metadata | jq
-    {
-      "description": "Cloudflare Research 'cftest2025h2a' log",
-      "log_type": "test",
-      "log_id": "2KJiliJSBM2181NJWC5O1mWiRRsPJ6i2iWE2s7n8Bwg=",
-      "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYipauBOPEktPb0JVpkRQq6wtRDRIj8GmKYvzM0Lpw1oSh9Uis9khpPCH6xyrDstk019AHuCq19KT5f+/MkY/yA==",
-      "witness_key": "MCowBQYDK2VwAyEA8jhNnqw2LXtyjb0Os+R3eiKfxnsP8tnke5iZZ16nBbU=",
-      "mmd": 86400,
-      "submission_url": "https://static-ct.cloudflareresearch.com/logs/cftest2025h2a/",
-      "monitoring_url": "https://static-ct-public-cftest2025h2a.cloudflareresearch.com/",
-      "temporal_interval": {
-        "start_inclusive": "2025-07-01T00:00:00Z",
-        "end_exclusive": "2026-01-01T00:00:00Z"
-      }
-    }
-
 ## Deployment
 
 ### Local deployment
@@ -81,33 +45,37 @@ Follow these instructions to spin up a CT log on your local machine using the `d
       prefix=$(head -n1 $file | grep -o "pre-")
       cat $file | while (set -o pipefail; openssl x509 -outform DER 2>/dev/null | base64); do :; done |\
       sed '/^$/d' | sed 's/.*/"&"/' | jq -sc '{"chain":.}' |\
-      curl -s "http://localhost:8787/logs/dev2025h1a/ct/v1/add-${prefix}chain" -d@- &
+      curl -s "http://localhost:8787/logs/dev2026h2a/ct/v1/add-${prefix}chain" -d@- &
     done
     rm -r $tmpdir
     ```
 
     Checkpoints and other static data can also be retrieved through the worker (or directly from the R2 bucket):
 
-        curl -s "http://localhost:8787/logs/dev2025h1a/checkpoint"
+        curl -s "http://localhost:8787/logs/dev2026h2a/checkpoint"
 
-    Metadata necessary for writing to or consuming from logs is available at /metadata.
+    Metadata necessary for writing to or consuming from logs is available at /metadata.json.
 
-        curl -s "http://localhost:8787/logs/dev2025h1a/metadata"
+        curl -s "http://localhost:8787/logs/dev2026h2a/metadata.json"
+
+    The operator list is available at /operator-list.json.
+
+        curl -s "http://localhost:8787/operator-list.json"
 
     Prometheus metrics are exposed _publicly_ at /metrics.
 
-        curl -s "http://localhost:8787/logs/dev2025h1a/metrics"
+        curl -s "http://localhost:8787/logs/dev2026h2a/metrics"
 
 ### Deployment to a workers.dev subdomain
 
 Follow these instructions to deploy a CT log with the `dev` configuration to Cloudflare's network.
 
-Run the following for each of the `dev2025h1a` and `dev2025h2a` log shards to configure resources (or use `scripts/create-log.sh`):
+Run the following for each configured log shard to configure resources (or use `scripts/create-log.sh`):
 
 1.  Set log shard name and deployment environment. The [location hint][location-hint] is optional.
 
 ```bash
-export LOG_NAME=dev2025h1a
+export LOG_NAME=dev2026h2a
 export CLOUDFLARE_ACCOUNT_ID=some-account-id-here
 export ENV=dev
 export LOCATION=wnam # optional
@@ -149,9 +117,9 @@ npx wrangler -e=${ENV} tail
 
 ### Deployment to a custom domain
 
-Follow these instructions to deploy to a custom domain, suitable for running a public CT log. We'll use the `cftest` environment as an example, which was used to deploy the [test logs][#test-logs].
+Follow these instructions to deploy to a custom domain, suitable for running a public CT log.
 
-1.  Create a new [deployment environment](https://developers.cloudflare.com/workers/wrangler/environments/) in `wrangler.jsonc` by copying or editing the existing `cftest` environment.
+1.  Create a new [deployment environment](https://developers.cloudflare.com/workers/wrangler/environments/) in `wrangler.jsonc`.
 
 1.  Create a file `config.${ENV}.json` with the configuration for the log shards.
 
@@ -159,8 +127,8 @@ Follow these instructions to deploy to a custom domain, suitable for running a p
 
 1.  First set environment variables to specify the log shard name and deployment environment as below and then follow the [instructions above](#deployment-to-a-workersdev-subdomain) to create resources for each log shard.
 
-        export LOG_NAME=cftest2025h1a
-        export ENV=cftest
+        export LOG_NAME=example2027h1
+        export ENV=example
 
 1.  Configure R2 buckets via Cloudflare dashboard. The monitoring APIs are served directly from the bucket, so configure for public access with caching and compression.
 

@@ -20,7 +20,7 @@ use tlog_entry::{LogEntry, TileIterator};
 use tlog_tiles::{PathElem, PreloadedTlogTileReader, TileHashReader, TlogTile};
 use x509_cert::{Certificate, der::Decode, der::Encode};
 
-use crate::client::{AddChainResponse, CtClient, LogV3JsonResponse};
+use crate::client::{AddChainResponse, CtClient, LogMetadataResponse};
 
 // ---------------------------------------------------------------------------
 // SCT structure
@@ -66,7 +66,7 @@ pub fn leaf_index_from_sct(sct: &AddChainResponse) -> Result<u64> {
 /// Verify that the ECDSA P-256 signature in the SCT is valid over the correct
 /// RFC 6962 signed data.
 ///
-/// `log_meta` is the response from `GET /logs/:log/log.v3.json`.
+/// `log_meta` is the response from `GET /logs/:log/metadata.json`.
 /// `leaf_der` is the DER-encoded leaf certificate (for a plain cert chain,
 /// this is the first element of the `chain` array posted to `add-chain`).
 /// `issuer_der` is the DER-encoded issuer certificate.
@@ -76,7 +76,7 @@ pub fn leaf_index_from_sct(sct: &AddChainResponse) -> Result<u64> {
 /// Returns an error if signature verification fails or any encoding step fails.
 pub fn assert_sct_signature(
     sct: &AddChainResponse,
-    log_meta: &LogV3JsonResponse,
+    log_meta: &LogMetadataResponse,
     leaf_der: &[u8],
     issuer_der: &[u8],
 ) -> Result<()> {
@@ -201,7 +201,7 @@ pub struct VerifiedCheckpoint {
 /// Returns an error if the checkpoint cannot be fetched or the signature is invalid.
 pub async fn fetch_and_verify_checkpoint(
     client: &CtClient,
-    log_meta: &LogV3JsonResponse,
+    log_meta: &LogMetadataResponse,
     witness_key_der: Option<&[u8]>,
 ) -> Result<VerifiedCheckpoint> {
     let checkpoint_bytes = client
@@ -233,7 +233,7 @@ pub async fn fetch_and_verify_checkpoint(
 pub fn verify_checkpoint_bytes(
     checkpoint_bytes: &[u8],
     log_name: &str,
-    log_meta: &LogV3JsonResponse,
+    log_meta: &LogMetadataResponse,
     witness_key_der: Option<&[u8]>,
     now_millis: u64,
 ) -> Result<VerifiedCheckpoint> {
@@ -242,7 +242,8 @@ pub fn verify_checkpoint_bytes(
 
     // The origin is derived from the submission URL (schema-less, no trailing slash).
     let origin = log_meta
-        .submission_url
+        .submission_endpoint
+        .url
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .trim_end_matches('/');
@@ -440,7 +441,7 @@ async fn fetch_tile_with_retry(client: &CtClient, path: &str) -> Result<Vec<u8>>
 /// Panics if no attempt was ever made (impossible given `MAX_RETRIES > 0`).
 pub async fn fetch_checkpoint_until_size(
     client: &CtClient,
-    log_meta: &LogV3JsonResponse,
+    log_meta: &LogMetadataResponse,
     min_size: u64,
 ) -> Result<VerifiedCheckpoint> {
     const MAX_RETRIES: u32 = 12;

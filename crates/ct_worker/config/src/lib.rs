@@ -15,26 +15,43 @@ pub struct TemporalInterval {
 #[derive(Deserialize, Debug)]
 pub struct AppConfig {
     pub logging_level: Option<String>,
+    pub operator_name: String,
     pub logs: HashMap<String, LogParams>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum LogType {
-    Prod,
+pub enum IntendedUse {
+    Production,
     Test,
-    MonitoringOnly,
+    Decommissioned,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogStatus {
+    Active,
+    Readonly,
+    Inactive,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EndpointInfo {
+    pub url: String,
 }
 
 #[derive(Deserialize, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct LogParams {
-    pub description: Option<String>,
-    pub log_type: Option<LogType>,
-    #[serde(default)]
-    pub monitoring_url: String,
-    pub submission_url: String,
+    pub friendly_name: String,
+    pub intended_use: IntendedUse,
+    pub status: LogStatus,
+    pub status_timestamp: DateTime<Utc>,
+    pub submission_endpoint: EndpointInfo,
+    pub monitoring_endpoint: EndpointInfo,
     pub temporal_interval: TemporalInterval,
+    #[serde(default)]
+    pub include_in_operator_list: bool,
     pub location_hint: Option<String>,
     #[serde(default = "default_u64::<1000>")]
     pub sequence_interval_millis: u64,
@@ -55,8 +72,6 @@ pub struct LogParams {
     pub reject_expired: bool,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,
-    #[serde(default = "default_bool::<false>")]
-    pub read_only: bool,
 }
 
 fn default_bool<const V: bool>() -> bool {
@@ -82,6 +97,20 @@ mod tests {
             serde_json::from_str(include_str!("../../config.dev.json")).unwrap();
 
         assert!(config.logs["e2etestshard"].reject_expired);
-        assert!(!config.logs["dev2026h1a"].reject_expired);
+        assert!(!config.logs["dev2026h2a"].reject_expired);
+    }
+
+    #[test]
+    fn operator_list_contains_only_selected_shards() {
+        let config: AppConfig =
+            serde_json::from_str(include_str!("../../config.dev.json")).unwrap();
+        let mut logs = config
+            .logs
+            .iter()
+            .filter_map(|(name, params)| params.include_in_operator_list.then_some(name.as_str()))
+            .collect::<Vec<_>>();
+        logs.sort_unstable();
+
+        assert_eq!(logs, ["dev2027h1a", "dev2027h2a"]);
     }
 }

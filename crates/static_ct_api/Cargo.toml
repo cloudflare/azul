@@ -21,9 +21,6 @@ wasm-opt = false
 [lib]
 crate-type = ["rlib"]
 
-[dev-dependencies]
-ed25519-dalek.workspace = true
-
 [dependencies]
 base64.workspace = true
 byteorder.workspace = true

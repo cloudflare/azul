@@ -13,6 +13,10 @@
             ],
             "description": "Log verbosity."
         },
+        "operator_name": {
+            "type": "string",
+            "description": "Human-readable name published in the operator log list."
+        },
         "logs": {
             "type": "object",
             "description": "Dictionary CT log shard names to configurations.",
@@ -22,26 +26,38 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "description": {
+                        "friendly_name": {
                             "type": "string",
-                            "description": "Description of the log."
+                            "description": "Brief human-readable name for the log."
                         },
-                        "log_type": {
-                            "description": "The purpose of this log, e.g. test.",
+                        "intended_use": {
+                            "description": "The operator's intended use for the log.",
                             "type": "string",
                             "enum": [
-                                "prod",
+                                "production",
                                 "test",
-                                "monitoring_only"
+                                "decommissioned"
                             ]
                         },
-                        "submission_url": {
+                        "status": {
                             "type": "string",
-                            "description": "URL for log submissions."
+                            "enum": [
+                                "active",
+                                "readonly",
+                                "inactive"
+                            ],
+                            "description": "The intended operational state of the log."
                         },
-                        "monitoring_url": {
+                        "status_timestamp": {
                             "type": "string",
-                            "description": "URL for log monitoring. Omit when no monitoring service is configured."
+                            "format": "date-time",
+                            "description": "When the current status was set."
+                        },
+                        "submission_endpoint": {
+                            "$ref": "#/definitions/endpoint"
+                        },
+                        "monitoring_endpoint": {
+                            "$ref": "#/definitions/endpoint"
                         },
                         "temporal_interval": {
                             "type": "object",
@@ -124,21 +140,42 @@
                             "default": 60,
                             "description": "How long to wait in between runs of the partial tile cleaner. For static CT, the cleaner can clean 498 tiles (127,488 entries) per run before hitting the Workers limit of 1000 subrequests, so the default of once every 60 seconds should keep up with a log that grows at 2000 entries/second."
                         },
-                        "read_only": {
+                        "include_in_operator_list": {
                             "type": "boolean",
                             "default": false,
-                            "description": "Disable add-(pre-)chain requests to prevent a log from accepting new submissions and issuing SCTs. This can be used to limit the blast radius of log failures."
+                            "description": "Include this log's metadata URL in the operator log list."
                         }
                     },
                     "required": [
+                        "friendly_name",
+                        "intended_use",
+                        "status",
+                        "status_timestamp",
                         "temporal_interval",
-                        "submission_url"
+                        "submission_endpoint",
+                        "monitoring_endpoint"
                     ]
                 }
             }
         }
     },
     "required": [
+        "operator_name",
         "logs"
-    ]
+    ],
+    "definitions": {
+        "endpoint": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "format": "uri"
+                }
+            },
+            "required": [
+                "url"
+            ]
+        }
+    }
 }

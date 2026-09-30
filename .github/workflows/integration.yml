@@ -47,7 +47,7 @@ jobs:
       - name: Wait for wrangler dev to be ready
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8787/logs/dev2026h1a/ct/v1/get-roots > /dev/null 2>&1; then
+            if curl -sf http://localhost:8787/logs/dev2026h2a/ct/v1/get-roots > /dev/null 2>&1; then
               echo "wrangler dev is ready"
               exit 0
             fi
@@ -61,7 +61,7 @@ jobs:
         run: cargo test -p integration_tests --test static_ct_api --verbose
         env:
           BASE_URL: http://localhost:8787
-          LOG_NAME: dev2026h1a
+          LOG_NAME: dev2026h2a
 
   integration-tlog-mirror:
     name: TLog Mirror Integration Tests

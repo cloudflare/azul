@@ -6,7 +6,7 @@
 //! These tests run against a live `wrangler dev` instance.
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
 //!
-//! CT tests: set `LOG_NAME` to choose the log shard (default: `dev2026h1a`).
+//! CT tests: set `LOG_NAME` to choose the log shard (default: `dev2026h2a`).
 
 pub mod assertions;
 pub mod client;
