@@ -62,11 +62,7 @@
             "migrations": [
                 {
                     "tag": "v1",
-                    "new_sqlite_classes": ["MirrorState", "MirrorCleaner"]
-                },
-                {
-                    "tag": "v2",
-                    "new_sqlite_classes": ["CosignerRegistry"]
+                    "new_sqlite_classes": ["MirrorState", "MirrorCleaner", "CosignerRegistry"]
                 }
             ]
         },
@@ -102,11 +98,7 @@
             "migrations": [
                 {
                     "tag": "v1",
-                    "new_sqlite_classes": ["MirrorState"]
-                },
-                {
-                    "tag": "v2",
-                    "new_sqlite_classes": ["CosignerRegistry"]
+                    "new_sqlite_classes": ["MirrorState", "CosignerRegistry"]
                 }
             ]
         },
@@ -146,11 +138,7 @@
             "migrations": [
                 {
                     "tag": "v1",
-                    "new_sqlite_classes": ["MirrorState", "MirrorCleaner"]
-                },
-                {
-                    "tag": "v2",
-                    "new_sqlite_classes": ["CosignerRegistry"]
+                    "new_sqlite_classes": ["MirrorState", "MirrorCleaner", "CosignerRegistry"]
                 }
             ]
         }
