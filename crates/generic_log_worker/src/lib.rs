@@ -946,7 +946,7 @@ mod tests {
     fn test_compute_cache_keys_empty() {
         // Empty cache: head == tail
         let keys = compute_cache_keys_to_load(0, 0, 128);
-        assert!(keys.is_empty());
+        assert_eq!(keys, Vec::<String>::new());
     }
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
     fn test_compute_cache_keys_head_greater_than_tail_returns_empty() {
         // If head > tail (corrupted), saturating_sub returns 0
         let keys = compute_cache_keys_to_load(100, 50, 128);
-        assert!(keys.is_empty());
+        assert_eq!(keys, Vec::<String>::new());
     }
 
     // ==================== serialize/deserialize_cache_entries Tests ====================
@@ -1141,7 +1141,7 @@ mod tests {
         let entries: Vec<(LookupKey, (u64, u64))> = vec![];
         let serialized = serialize_sequence_metadata_entries(&entries);
         let deserialized = deserialize_sequence_metadata_entries(&serialized).unwrap();
-        assert!(deserialized.is_empty());
+        assert_eq!(deserialized, Vec::<(LookupKey, (u64, u64))>::new());
     }
 
     #[test]

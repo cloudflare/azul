@@ -367,7 +367,7 @@ pub type CheckpointCallbacker = Box<
 
 /// A no-op checkpoint callback that can be used in applications like CT that
 /// don't need to perform any action after the checkpoint is updated.
-#[must_use]
+#[must_use = "the callback must be installed to have an effect"]
 pub fn empty_checkpoint_callback() -> CheckpointCallbacker {
     Box::new(
         move |_old_time: UnixTimestampMillis,

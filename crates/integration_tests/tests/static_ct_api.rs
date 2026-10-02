@@ -164,17 +164,17 @@ async fn metadata_json_returns_valid_metadata() {
     );
     assert_eq!(meta.log_id.len(), 32, "log_id must be 32 bytes");
     assert!(!meta.key.is_empty(), "key must be non-empty");
-    assert!(!meta.friendly_name.is_empty());
+    assert_ne!(meta.friendly_name, "");
     assert_eq!(meta.log_spec, "static-ct-api");
     assert!(meta.mmd_seconds > 0, "mmd_seconds must be positive");
     assert_eq!(meta.intended_use, "test");
     assert!(meta.tls_only);
     assert!(["active", "readonly", "inactive"].contains(&meta.status.as_str()));
     assert!(meta.status_timestamp.ends_with('Z'));
-    assert!(!meta.submission_endpoint.url.is_empty());
-    assert!(!meta.monitoring_endpoint.url.is_empty());
-    assert!(!meta.temporal_interval.start_inclusive.is_empty());
-    assert!(!meta.temporal_interval.end_exclusive.is_empty());
+    assert_ne!(meta.submission_endpoint.url, "");
+    assert_ne!(meta.monitoring_endpoint.url, "");
+    assert_ne!(meta.temporal_interval.start_inclusive, "");
+    assert_ne!(meta.temporal_interval.end_exclusive, "");
 
     // Key must be a valid P-256 SPKI.
     p256::ecdsa::VerifyingKey::from_public_key_der(&meta.key)

@@ -317,7 +317,7 @@ mod tests {
         let decoded = collect(gunzip(chunked_stream(&compressed, 3)))
             .await
             .unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded, Vec::<u8>::new());
     }
 
     #[tokio::test]

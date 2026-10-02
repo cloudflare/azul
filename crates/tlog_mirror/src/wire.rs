@@ -430,7 +430,7 @@ mod tests {
         let err = header.write_to(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         // Nothing should have been written before the validation failure.
-        assert!(buf.is_empty());
+        assert_eq!(buf, Vec::<u8>::new());
     }
 
     #[test]
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn package_ranges_empty_when_start_equals_end() {
         let ranges: Vec<_> = package_ranges(1024, 1024).collect();
-        assert!(ranges.is_empty());
+        assert_eq!(ranges, Vec::<(u64, u64)>::new());
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
             pkg.entries.len(),
             usize::try_from(PACKAGE_ALIGNMENT).unwrap()
         );
-        assert!(pkg.proof.is_empty());
+        assert_eq!(pkg.proof, Vec::<Hash>::new());
     }
 
     #[test]

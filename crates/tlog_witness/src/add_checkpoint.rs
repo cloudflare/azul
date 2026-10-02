@@ -213,7 +213,7 @@ mod tests {
         let body = serialize_add_checkpoint_request(0, &[], &cp).unwrap();
         let parsed = parse_add_checkpoint_request(&body).unwrap();
         assert_eq!(parsed.old_size, 0);
-        assert!(parsed.consistency_proof.is_empty());
+        assert_eq!(parsed.consistency_proof, Vec::<Hash>::new());
         assert_eq!(parsed.checkpoint.text(), cp.text());
     }
 

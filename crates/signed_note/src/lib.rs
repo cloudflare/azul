@@ -167,7 +167,7 @@
 //!
 //! ### Sign and add signatures
 //! ```
-//! use signed_note::{Note, Ed25519NoteSigner, Ed25519NoteVerifier, VerifierList, KeyName};
+//! use signed_note::{Note, NoteSignature, Ed25519NoteSigner, Ed25519NoteVerifier, VerifierList, KeyName};
 //!
 //! let vkey = "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW";
 //! let msg = "If you think cryptography is the answer to your problem,\n\
@@ -182,7 +182,7 @@
 //! let verifier = Ed25519NoteVerifier::new_from_encoded_key(vkey).unwrap();
 //! let (verified_sigs, unverified_sigs) = n.verify(&VerifierList::new(vec![Box::new(verifier.clone())])).unwrap();
 //! assert_eq!(verified_sigs.len(), 1);
-//! assert!(unverified_sigs.is_empty());
+//! assert_eq!(unverified_sigs, Vec::<NoteSignature>::new());
 //!
 //! struct ZeroRng;
 //!
@@ -892,7 +892,7 @@ mod tests {
             ]))
             .unwrap();
         assert_eq!(verified_sigs, vec![peter.clone(), enoch.clone()]);
-        assert!(unverified_sigs.is_empty());
+        assert_eq!(unverified_sigs, Vec::<NoteSignature>::new());
 
         // Check both unverified.
         let err = n.verify(&VerifierList::new(vec![])).unwrap_err();
