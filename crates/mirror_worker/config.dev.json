@@ -1,6 +1,7 @@
 {
     "logging_level": "info",
     "submission_prefix": "http://localhost:8787/",
+    "chrome_cosigner_realms": ["UNTRUSTED_VALIDATION_ONLY"],
     "witness": {
         "name": "dev.witness.example",
         "description": "Local-dev witness for smoke testing",

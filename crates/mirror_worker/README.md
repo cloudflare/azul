@@ -20,6 +20,16 @@ Registry versions are opaque identifiers because the upstream schema does not
 require semantic-version syntax. Replacement rejects changed content under the
 same version and parseable timestamp regressions.
 
+A read that finds no snapshot synchronizes once before falling back to an empty
+registry, so a fresh deployment serves dynamic origins before the first hourly
+event. A failure there is logged and leaves the static logs servable.
+
+`chrome_cosigner_realms` lists the Chrome `realm` values accepted from the
+registry. An issuer whose realm is absent from the list is not trusted, so
+omitting the list trusts no dynamic cosigner. The registry currently publishes
+`UNTRUSTED_VALIDATION_ONLY` test CAs. Realms are stored in the snapshot and
+applied on read, so changing the list takes effect without a re-synchronization.
+
 Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
 The Worker only serves submission and metadata APIs.
 
