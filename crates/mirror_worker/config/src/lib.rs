@@ -18,6 +18,11 @@ pub struct AppConfig {
     pub submission_prefix: String,
     #[serde(default = "default_true")]
     pub enable_chrome_cosigners: bool,
+    /// Chrome `realm` values accepted from the cosigner registry. An issuer
+    /// whose realm is absent from this list is not trusted, so omitting the
+    /// list trusts no dynamic cosigner.
+    #[serde(default)]
+    pub chrome_cosigner_realms: BTreeSet<String>,
     pub witness: Option<IdentityConfig>,
     pub mirror: Option<MirrorConfig>,
     #[serde(deserialize_with = "deserialize_logs")]
@@ -249,6 +254,7 @@ mod tests {
             logging_level: None,
             submission_prefix: "https://submit.example/".to_owned(),
             enable_chrome_cosigners: false,
+            chrome_cosigner_realms: BTreeSet::new(),
             witness: witness.then(|| IdentityConfig {
                 name: key_name("witness.example"),
                 description: None,
@@ -307,6 +313,28 @@ mod tests {
         );
         let config: AppConfig = serde_json::from_str(&disabled).unwrap();
         assert!(!config.enable_chrome_cosigners);
+    }
+
+    #[test]
+    fn chrome_cosigner_realms_default_empty_and_parse_from_config() {
+        let fixture = include_str!("../../config.witness.json");
+        let config: AppConfig = serde_json::from_str(fixture).unwrap();
+        assert!(
+            config.chrome_cosigner_realms.is_empty(),
+            "an unset allowlist must trust no realm",
+        );
+
+        let with_realms = fixture.replace(
+            "\"submission_prefix\": \"http://localhost:8788/\",",
+            "\"submission_prefix\": \"http://localhost:8788/\",\n    \"chrome_cosigner_realms\": [\"PUBLIC_TRUST\", \"UNTRUSTED_VALIDATION_ONLY\"],",
+        );
+        let config: AppConfig = serde_json::from_str(&with_realms).unwrap();
+        assert!(config.chrome_cosigner_realms.contains("PUBLIC_TRUST"));
+        assert!(
+            config
+                .chrome_cosigner_realms
+                .contains("UNTRUSTED_VALIDATION_ONLY")
+        );
     }
 
     fn ml_dsa_spki(seed: u8) -> Vec<u8> {

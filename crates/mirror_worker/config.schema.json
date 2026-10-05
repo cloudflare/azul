@@ -7,6 +7,7 @@
         "logging_level": {"type": "string", "enum": ["trace", "debug", "info", "warn", "error"]},
         "submission_prefix": {"type": "string"},
         "enable_chrome_cosigners": {"type": "boolean", "default": true},
+        "chrome_cosigner_realms": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "default": []},
         "witness": {"$ref": "#/definitions/identity"},
         "mirror": {"$ref": "#/definitions/mirror"},
         "logs": {

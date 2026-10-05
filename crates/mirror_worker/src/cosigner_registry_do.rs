@@ -31,6 +31,11 @@ pub(crate) struct RegistryLog {
     pub(crate) origin: String,
     pub(crate) signer_name: String,
     pub(crate) public_key: Vec<u8>,
+    /// Chrome's `realm` for the issuing CA. Retained in the snapshot so the
+    /// configured allowlist is applied when the registry is read; filtering
+    /// during normalization would make the stored content depend on local
+    /// configuration, which `validate_replacement` rejects for a given version.
+    pub(crate) realm: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +59,7 @@ struct Issuer {
     base_id: String,
     key_sha256: String,
     min_log_number: Option<u64>,
+    realm: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
 }
@@ -242,6 +248,7 @@ fn normalize_registry(json: &[u8], pem: &[u8]) -> Result<RegistryRecord, String>
                 origin: format!("{signer_name}.0.{log_number}"),
                 signer_name: signer_name.clone(),
                 public_key: public_key.clone(),
+                realm: issuer.realm.clone(),
             });
         }
     }
@@ -337,6 +344,21 @@ pub(crate) async fn registry_record(env: &Env) -> Result<Option<RegistryRecord>>
     if !CONFIG.enable_chrome_cosigners {
         return Ok(None);
     }
+    if let Some(record) = stored_registry_record(env).await? {
+        return Ok(Some(record));
+    }
+    // The snapshot is absent until the hourly cron first runs, which would
+    // otherwise leave every dynamic origin unserved after a fresh deploy.
+    // Populate it once; a failure here leaves the registry empty rather than
+    // failing the request, since static logs remain servable.
+    if let Err(error) = synchronize(env).await {
+        log::warn!("initial cosigner registry synchronization failed: {error}");
+        return Ok(None);
+    }
+    stored_registry_record(env).await
+}
+
+async fn stored_registry_record(env: &Env) -> Result<Option<RegistryRecord>> {
     let mut response = registry_stub(env)?
         .fetch_with_str("http://do/registry")
         .await?;
@@ -357,9 +379,9 @@ pub(crate) async fn log_verifiers(
     if let Some(keys) = crate::LOG_KEYS.get(origin) {
         return Ok(Some(log_verifiers_for_keys(keys)));
     }
-    let Some(log) = registry_record(env)
-        .await?
-        .and_then(|record| record.logs.into_iter().find(|log| log.origin == origin))
+    let Some(log) = merged_registry_logs(registry_record(env).await?)
+        .into_iter()
+        .find(|log| log.origin == origin)
     else {
         return Ok(None);
     };
@@ -376,10 +398,13 @@ pub(crate) async fn log_verifiers(
 pub(crate) fn merged_registry_logs(record: Option<RegistryRecord>) -> Vec<RegistryLog> {
     let mut logs = record.map_or_else(Vec::new, |record| record.logs);
     logs.retain(|log| {
-        !CONFIG
-            .logs
-            .keys()
-            .any(|origin| origin.as_str() == log.origin)
+        log.realm
+            .as_ref()
+            .is_some_and(|realm| CONFIG.chrome_cosigner_realms.contains(realm))
+            && !CONFIG
+                .logs
+                .keys()
+                .any(|origin| origin.as_str() == log.origin)
     });
     logs
 }
@@ -419,7 +444,9 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistryRecord, merged_registry_logs, normalize_registry, validate_replacement};
+    use super::{
+        RegistryLog, RegistryRecord, merged_registry_logs, normalize_registry, validate_replacement,
+    };
     use ml_dsa::{Keypair as _, MlDsa44, SigningKey};
     use pkcs8::EncodePublicKey as _;
     use sha2::{Digest as _, Sha256};
@@ -465,11 +492,11 @@ mod tests {
     #[test]
     fn min_log_number_above_window_generates_no_logs() {
         let (json, pem, _) = fixture(Some(5));
-        assert!(
+        assert_eq!(
             normalize_registry(json.as_bytes(), pem.as_bytes())
                 .unwrap()
-                .logs
-                .is_empty()
+                .logs,
+            Vec::<RegistryLog>::new()
         );
     }
 
@@ -487,7 +514,7 @@ mod tests {
         let current = normalize_registry(json.as_bytes(), pem.as_bytes()).unwrap();
         let registry = normalize_registry(br#"{"version":"2.0.8"}"#, pem.as_bytes()).unwrap();
         assert_eq!(registry.timestamp, None);
-        assert!(registry.logs.is_empty());
+        assert_eq!(registry.logs, Vec::<RegistryLog>::new());
         assert!(validate_replacement(Some(&current), &registry).is_ok());
     }
 
@@ -552,13 +579,77 @@ mod tests {
             origin: static_origin,
             signer_name: "oid/1.3.6.1.4.1.1".to_owned(),
             public_key: pem.into_bytes(),
+            realm: Some(allowed_realm()),
         };
         let logs = merged_registry_logs(Some(RegistryRecord {
             version: "1".to_owned(),
             timestamp: None,
             logs: vec![dynamic],
         }));
-        assert!(logs.is_empty());
+        assert_eq!(logs, Vec::<RegistryLog>::new());
+    }
+
+    fn allowed_realm() -> String {
+        crate::CONFIG
+            .chrome_cosigner_realms
+            .iter()
+            .next()
+            .expect("dev config allows at least one realm")
+            .clone()
+    }
+
+    fn dynamic_log(realm: Option<&str>) -> super::RegistryLog {
+        super::RegistryLog {
+            description: None,
+            origin: "oid/1.3.6.1.4.1.11129.11.99.1.0.1".to_owned(),
+            signer_name: "oid/1.3.6.1.4.1.11129.11.99.1".to_owned(),
+            public_key: Vec::new(),
+            realm: realm.map(str::to_owned),
+        }
+    }
+
+    fn merge_one(log: super::RegistryLog) -> Vec<RegistryLog> {
+        merged_registry_logs(Some(RegistryRecord {
+            version: "1".to_owned(),
+            timestamp: None,
+            logs: vec![log],
+        }))
+    }
+
+    #[test]
+    fn merge_keeps_logs_whose_realm_is_allowed() {
+        let realm = allowed_realm();
+        let logs = merge_one(dynamic_log(Some(&realm)));
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].realm.as_ref(), Some(&realm));
+    }
+
+    #[test]
+    fn merge_removes_logs_with_unlisted_or_absent_realm() {
+        assert_eq!(
+            merge_one(dynamic_log(Some("PUBLIC_TRUST"))),
+            Vec::<RegistryLog>::new(),
+            "a realm outside the allowlist must not be trusted",
+        );
+        assert_eq!(
+            merge_one(dynamic_log(None)),
+            Vec::<RegistryLog>::new(),
+            "an issuer without a realm must not be trusted",
+        );
+    }
+
+    #[test]
+    fn normalize_retains_issuer_realm() {
+        let (json, pem, _) = fixture(Some(4));
+        let json = json.replace(
+            r#""type":"ISSUER""#,
+            r#""type":"ISSUER","realm":"UNTRUSTED_VALIDATION_ONLY""#,
+        );
+        let registry = normalize_registry(json.as_bytes(), pem.as_bytes()).unwrap();
+        assert_eq!(
+            registry.logs[0].realm.as_deref(),
+            Some("UNTRUSTED_VALIDATION_ONLY"),
+        );
     }
 
     #[test]

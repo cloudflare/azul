@@ -253,7 +253,7 @@ impl RegistryFixture {
         let pem = Arc::<[u8]>::from(format!("# {fingerprint}\n{pem}").into_bytes());
         let valid = Arc::<[u8]>::from(
             format!(
-                r#"{{"version":"fixture-v1","timestamp":"2026-09-24T00:00:00Z","issuers":[{{"friendly_name":"Integration fixture","base_id":"{DYNAMIC_BASE_ID}","type":"ISSUER","key_sha256":"{fingerprint}","min_log_number":1}}]}}"#,
+                r#"{{"version":"fixture-v1","timestamp":"2026-09-24T00:00:00Z","issuers":[{{"friendly_name":"Integration fixture","base_id":"{DYNAMIC_BASE_ID}","type":"ISSUER","realm":"UNTRUSTED_VALIDATION_ONLY","key_sha256":"{fingerprint}","min_log_number":1}}]}}"#,
             )
             .into_bytes(),
         );
