@@ -1346,7 +1346,7 @@ mod tests {
     fn verify_aligned_package_ok() {
         // Aligned first package: no persisted prefix.
         let (prefix, pkg, cp) = fixture(1000, 256, 256, 512);
-        assert!(prefix.is_empty());
+        assert_eq!(prefix, Vec::<Vec<u8>>::new());
         verify_package(&prefix, &pkg, 256, 512, &cp).expect("aligned package verifies");
     }
 

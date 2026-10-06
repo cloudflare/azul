@@ -616,7 +616,7 @@ mod tests {
             "proof must be serialized as an empty array, got: {json}"
         );
         let decoded: UpdatePendingRequest = serde_json::from_str(&json).unwrap();
-        assert!(decoded.proof.is_empty());
+        assert_eq!(decoded.proof, Vec::<Hash>::new());
     }
 
     #[test]
@@ -624,9 +624,9 @@ mod tests {
         let pc = PendingCheckpoint::default();
         assert_eq!(pc.size, 0);
         assert_eq!(pc.hash.0, [0u8; HASH_SIZE]);
-        assert!(pc.signed_note_bytes.is_empty());
+        assert_eq!(pc.signed_note_bytes, Vec::<u8>::new());
         assert!(!pc.witness_published);
-        assert!(pc.witness_response_bytes.is_empty());
+        assert_eq!(pc.witness_response_bytes, Vec::<u8>::new());
         assert_eq!(pc.update_request_hash, Hash::default());
     }
 
@@ -729,7 +729,7 @@ mod tests {
         let pending = decoded.pending.unwrap();
         assert_eq!(pending.size, 0);
         assert_eq!(pending.hash, tlog_core::EMPTY_HASH);
-        assert!(!pending.signed_note_bytes.is_empty());
+        assert_ne!(pending.signed_note_bytes, Vec::<u8>::new());
     }
 
     #[test]

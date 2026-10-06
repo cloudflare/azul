@@ -373,7 +373,7 @@ async fn tlog_witness_end_to_end() {
     let witness = meta.witness.as_ref().expect("witness identity metadata");
     let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
     assert_eq!(witness.name, "dev.witness.example");
-    assert!(!witness.public_key.is_empty());
+    assert_ne!(witness.public_key, Vec::<u8>::new());
     assert!(meta.submission_prefix.starts_with("http"));
     assert!(witness.monitoring_prefix.starts_with("http"));
     assert_ne!(witness.monitoring_prefix, mirror.monitoring_prefix);
@@ -386,7 +386,7 @@ async fn tlog_witness_end_to_end() {
     assert_eq!(log.checkpoint_signers.len(), 1);
     assert_eq!(log.checkpoint_signers[0].name, LOG_ORIGIN);
     assert_eq!(log.checkpoint_signers[0].algorithm, "ed25519");
-    assert!(!log.checkpoint_signers[0].public_key.is_empty());
+    assert_ne!(log.checkpoint_signers[0].public_key, Vec::<u8>::new());
 
     let signer = log_signer();
     let mut log = ToyLog::new();

@@ -601,7 +601,7 @@ async fn tlog_mirror_end_to_end() {
     assert_eq!(meta.mode, "witness-and-mirror");
     let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
     assert_eq!(mirror.name, "dev.mirror.example");
-    assert!(!mirror.public_key.is_empty());
+    assert_ne!(mirror.public_key, Vec::<u8>::new());
     assert_eq!(
         mirror.algorithm, "subtree/v1",
         "dev mirror loads ML-DSA-44 from .dev.vars; algorithm must surface as subtree/v1",
@@ -618,7 +618,7 @@ async fn tlog_mirror_end_to_end() {
     assert_eq!(log_meta.checkpoint_signers.len(), 1);
     assert_eq!(log_meta.checkpoint_signers[0].name, LOG_KEY_NAME);
     assert_eq!(log_meta.checkpoint_signers[0].algorithm, "subtree/v1");
-    assert!(!log_meta.checkpoint_signers[0].public_key.is_empty());
+    assert_ne!(log_meta.checkpoint_signers[0].public_key, Vec::<u8>::new());
     let ed_log_meta = meta
         .logs
         .iter()
@@ -904,7 +904,7 @@ async fn tlog_mirror_end_to_end() {
         let info = parse_mirror_info(&r, 409);
         assert_eq!(info.tree_size, 600);
         assert_eq!(info.next_entry, 0);
-        assert!(!info.ticket.is_empty());
+        assert_ne!(info.ticket, Vec::<u8>::new());
     }
 
     {
@@ -996,7 +996,7 @@ async fn tlog_mirror_end_to_end() {
             "committed checkpoint target: body={:?}",
             String::from_utf8_lossy(&r.body),
         );
-        assert!(!r.body.is_empty());
+        assert_ne!(r.body, Vec::<u8>::new());
     }
 
     // Replaying more than one package below the persisted frontier is
@@ -1007,7 +1007,7 @@ async fn tlog_mirror_end_to_end() {
         let info = parse_mirror_info(&r, 409);
         assert_eq!(info.tree_size, 1000);
         assert_eq!(info.next_entry, 600);
-        assert!(!info.ticket.is_empty());
+        assert_ne!(info.ticket, Vec::<u8>::new());
     }
 
     // --- Non-aligned resume [600, 1000) -> 200 ---
@@ -1266,7 +1266,7 @@ async fn tlog_mirror_end_to_end() {
         let info = parse_mirror_info(&r, 409);
         assert_eq!(info.tree_size, 3256);
         assert_eq!(info.next_entry, 3000);
-        assert!(!info.ticket.is_empty());
+        assert_ne!(info.ticket, Vec::<u8>::new());
         info.ticket
     };
 

@@ -410,8 +410,8 @@ mod tests {
         assert_eq!(parsed.subtree_start, 0);
         assert_eq!(parsed.subtree_end, 16);
         assert_eq!(parsed.subtree_hash.0, [0x77u8; 32]);
-        assert!(parsed.subtree_cosignatures.is_empty());
-        assert!(parsed.consistency_proof.is_empty());
+        assert_eq!(parsed.subtree_cosignatures, Vec::<NoteSignature>::new());
+        assert_eq!(parsed.consistency_proof, Vec::<Hash>::new());
         assert_eq!(parsed.checkpoint.text(), cp.text());
         assert_eq!(parsed.checkpoint.signatures().len(), 1);
     }
@@ -437,7 +437,7 @@ mod tests {
         );
         let parsed = parse_sign_subtree_request(&body).expect("parse");
         assert_eq!(parsed.checkpoint.text(), cp.text());
-        assert!(parsed.checkpoint.signatures().is_empty());
+        assert_eq!(parsed.checkpoint.signatures(), &[] as &[NoteSignature]);
     }
 
     /// Roundtrip with the full feature set: cosignatures, a

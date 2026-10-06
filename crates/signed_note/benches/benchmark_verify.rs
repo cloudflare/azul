@@ -13,7 +13,7 @@
 //! - [note_test.go](https://cs.opensource.google/go/x/mod/+/refs/tags/v0.21.0:sumdb/note/note_test.go)
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use signed_note::{Ed25519NoteVerifier, Note, NoteError, VerifierList};
+use signed_note::{Ed25519NoteVerifier, Note, NoteError, NoteSignature, VerifierList};
 use std::hint::black_box;
 
 fn benchmark_verify(c: &mut Criterion) {
@@ -44,7 +44,7 @@ fn benchmark_verify(c: &mut Criterion) {
                 )])))
                 .unwrap();
             assert_eq!(verified_sigs.len(), 1);
-            assert!(unverified_sigs.is_empty());
+            assert_eq!(unverified_sigs, Vec::<NoteSignature>::new());
         });
     });
 }
