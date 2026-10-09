@@ -161,8 +161,10 @@ impl LandmarkSequence {
         let (left, right) = Subtree::split_interval(lo, hi).unwrap();
         if left.contains(leaf_index) {
             Some((landmark_id, left))
+        } else if right.contains(leaf_index) {
+            Some((landmark_id, right))
         } else {
-            right.map(|tree| (landmark_id, tree))
+            None
         }
     }
 
@@ -309,10 +311,10 @@ impl Iterator for LandmarkSubtreesIterator<'_> {
             return None;
         }
 
-        let subtree;
-        (subtree, self.next_subtree) =
+        let (subtree, next_subtree) =
             Subtree::split_interval(self.landmarks[self.index - 1], self.landmarks[self.index])
                 .unwrap();
+        self.next_subtree = (next_subtree.lo() < next_subtree.hi()).then_some(next_subtree);
 
         self.index += 1;
         Some(subtree)
