@@ -38,7 +38,8 @@
 //!     recently-cosigned checkpoint and verify the response signature.
 //! 12. `/sign-subtree` with a checkpoint NOT cosigned by the witness → 403.
 //! 13. `/sign-subtree` with `end > checkpoint.size` → 400.
-//! 14. `/sign-subtree` with `start == end` → 400.
+//! 14. `/sign-subtree` with `start == end` and a non-empty-tree hash → 422.
+//! 15. `/sign-subtree` with `start == end` and the empty-tree hash → 200.
 //!
 //! # Key management
 //!
@@ -61,8 +62,8 @@ use signed_note::{KeyName, Note, NoteSignature, VerifierList};
 use std::time::Duration;
 use tlog_checkpoint::{CheckpointSigner, Ed25519CheckpointSigner, TreeWithTimestamp};
 use tlog_core::{
-    HASH_SIZE, Hash, HashReader, Subtree, TlogError, consistency_proof, record_hash, stored_hashes,
-    subtree_consistency_proof, tree_hash,
+    EMPTY_HASH, HASH_SIZE, Hash, HashReader, Subtree, TlogError, consistency_proof, record_hash,
+    stored_hashes, subtree_consistency_proof, tree_hash,
 };
 use tlog_cosignature::SubtreeV1NoteVerifier;
 use tlog_witness::{
@@ -741,11 +742,13 @@ async fn tlog_witness_end_to_end() {
         );
     }
 
-    // ----------------------- (14) /sign-subtree with start == end → 400 -----------------------
+    // ----------------------- (14) /sign-subtree with start == end and a wrong hash → 422 -----------------------
     //
-    // The wire-format parser only enforces ASCII-decimal shape on the
-    // range; the `start < end` invariant is enforced by `Subtree::new`
-    // inside the handler. Pin that path.
+    // `[x, x)` is a valid subtree per draft-ietf-plants-merkle-tree-certs
+    // §4.1 (BIT_CEIL(0) is 1), so the range passes the 400 checks and
+    // reaches proof verification. §4.4.3 step 2 requires an empty subtree
+    // to carry the hash of the empty string, so an all-zero hash fails
+    // there.
     {
         let body = serialize_sign_subtree_request(
             2,
@@ -759,8 +762,25 @@ async fn tlog_witness_end_to_end() {
         let r = post_sign_subtree(&body).await;
         assert_eq!(
             r.status,
-            400,
-            "start == end: body={:?}",
+            422,
+            "start == end with a non-empty-tree hash: body={:?}",
+            String::from_utf8_lossy(&r.body),
+        );
+    }
+
+    // ----------------------- (15) /sign-subtree with start == end and the empty-tree hash → 200 -----------------------
+    //
+    // The same empty subtree with the correct hash verifies against an
+    // empty consistency proof, so the witness cosigns it.
+    {
+        let body =
+            serialize_sign_subtree_request(2, 2, &EMPTY_HASH, &[], &[], &cosigned_checkpoint)
+                .unwrap();
+        let r = post_sign_subtree(&body).await;
+        assert_eq!(
+            r.status,
+            200,
+            "start == end with the empty-tree hash: body={:?}",
             String::from_utf8_lossy(&r.body),
         );
     }

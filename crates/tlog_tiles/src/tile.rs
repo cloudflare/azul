@@ -317,7 +317,9 @@ impl Tile {
         #[allow(clippy::case_sensitive_file_extension_comparisons)]
         if len > min_path_elems && components[len - 2].ends_with(".p") {
             let ww = u32::from_str(components[len - 1]).map_err(|_| BadPathError(path.into()))?;
-            if !(0..w).contains(&ww) {
+            // A zero-width partial tile is not representable: `Tile::new`
+            // requires a width in `1..=2^h`.
+            if !(1..w).contains(&ww) {
                 return Err(BadPathError(path.into()));
             }
             w = ww;
@@ -1100,6 +1102,10 @@ mod tests {
             ("tile/0/00", false, PathElem::Custom(""), false),
             // Invalid: H = 0
             ("tile/0/0/000", true, PathElem::Custom(""), false),
+            // Invalid: zero-width partial tile. Found by
+            // `cargo fuzz run fuzz_parse_tile_path`, which panicked in
+            // `Tile::new` instead of returning `BadPathError`.
+            ("tile/1/0/0.p/0", true, PathElem::Data, false),
             // Valid: minimum params support by library, with height
             ("tile/1/0/000", true, PathElem::Custom(""), true),
             // Valid: all parameters at max supported by library
