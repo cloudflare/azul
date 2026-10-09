@@ -827,20 +827,11 @@ mod tests {
         assert_eq!(v.extract_timestamp_millis(&exact).unwrap(), Some(0));
     }
 
-    /// `Subtree::new` rejects misaligned `(start, end)` per draft-ietf-
-    /// plants-merkle-tree-certs §4.1, so callers of `sign_subtree` /
-    /// `verify_subtree` cannot supply non-subtree inputs at all (the
-    /// type system rules them out before the cosignature layer ever
-    /// sees them). Pin the rejection here as a regression check.
     #[test]
-    fn subtree_constructor_rejects_misaligned_pairs() {
-        // `[3, 5)`: 3 is not a multiple of BIT_CEIL(2) = 2.
+    fn subtree_constructor_validates_ranges() {
         assert!(Subtree::new(3, 5).is_err());
-        // `[16, 100)`: 16 is not a multiple of BIT_CEIL(84) = 128.
         assert!(Subtree::new(16, 100).is_err());
-        // `[5, 5)`: empty subtree (lo >= hi).
-        assert!(Subtree::new(5, 5).is_err());
-        // `[8, 16)`: 8 is a multiple of BIT_CEIL(8) = 8. ✓
+        assert!(Subtree::new(5, 5).is_ok());
         assert!(Subtree::new(8, 16).is_ok());
     }
 

@@ -876,6 +876,14 @@ pub fn subtree_consistency_proof<R: HashReader>(
     r: &R,
 ) -> Result<Proof, TlogError> {
     let n = Subtree::new(0, tree_size)?;
+    if m.lo == m.hi {
+        if !n.contains_subtree(m) {
+            return Err(TlogError::ConditionNotMet(format!(
+                "{n} does not contain {m}"
+            )));
+        }
+        return Ok(vec![]);
+    }
     let indexes = n.subproof_indexes(m, true)?;
     if indexes.is_empty() {
         return Ok(vec![]);
@@ -915,7 +923,17 @@ pub fn subtree_consistency_proof_indexes(
     tree_size: u64,
     m: &Subtree,
 ) -> Result<Vec<u64>, TlogError> {
-    Subtree::new(0, tree_size)?.subproof_indexes(m, true)
+    let n = Subtree::new(0, tree_size)?;
+    if m.lo == m.hi {
+        return if n.contains_subtree(m) {
+            Ok(vec![])
+        } else {
+            Err(TlogError::ConditionNotMet(format!(
+                "{n} does not contain {m}"
+            )))
+        };
+    }
+    n.subproof_indexes(m, true)
 }
 
 /// Verify a consistency proof that the tree of size `n` with hash `root_hash`
@@ -963,6 +981,13 @@ pub fn verify_subtree_consistency_proof(
     // Check that `[start, end)` is a valid subtree, and that `end <= n`. If either do not hold, fail proof verification. These checks imply `0 <= start < end <= n`.
     if end > n {
         return Err(TlogError::InvalidProof);
+    }
+    if start == end {
+        return if proof.is_empty() && subtree_hash == EMPTY_HASH {
+            Ok(())
+        } else {
+            Err(TlogError::InvalidProof)
+        };
     }
 
     // Set `fn` to `start`, `sn` to `end - 1`, and `tn` to `n - 1`.
@@ -1053,7 +1078,7 @@ fn lsb_set(i: u64) -> bool {
 
 /// A subtree of a Merkle Tree of size `n` is defined by two integers `lo` and
 /// `hi` such that:
-/// - 0 ≤ lo < hi ≤ n
+/// - 0 ≤ lo ≤ hi ≤ n
 /// - if `s` is the smallest power of two `≥ hi - lo`, `lo` is a multple of `s`
 ///
 /// <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-06.html#section-4.1>
@@ -1076,11 +1101,20 @@ impl Subtree {
     ///
     /// Will return an error if `[lo, hi)` is not a valid subtree.
     pub fn new(lo: u64, hi: u64) -> Result<Self, TlogError> {
-        if lo >= hi {
-            return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
+        if lo > hi {
+            return Err(TlogError::ConditionNotMet("`lo <= hi`".into()));
         }
-        // `s` is the next power of 2 greater than or equal to `hi - lo`.
-        let s = (hi - lo).next_power_of_two();
+        let size = hi - lo;
+        if size > (1_u64 << 63) {
+            return if lo == 0 {
+                Ok(Self { lo, hi })
+            } else {
+                Err(TlogError::ConditionNotMet(
+                    "`lo` must be zero when the subtree size exceeds 2^63".into(),
+                ))
+            };
+        }
+        let s = size.next_power_of_two();
         if lo & (s - 1) != 0 {
             return Err(TlogError::ConditionNotMet(
                 "`lo` must be a multiple of the next power of two ≥ `hi - lo`".into(),
@@ -1105,7 +1139,7 @@ impl Subtree {
     }
     /// Return whether or not the subtree contains the given subtree.
     fn contains_subtree(&self, other: &Subtree) -> bool {
-        (self.lo..self.hi).contains(&other.lo) && (self.lo + 1..=self.hi).contains(&other.hi)
+        self.lo <= other.lo && other.hi <= self.hi
     }
     /// Return left and right children.
     fn children(&self) -> (Self, Self) {
@@ -1121,17 +1155,17 @@ impl Subtree {
             },
         )
     }
-    /// Returns a list of one or two subtrees that efficiently cover `[lo, hi)`.
+    /// Returns two subtrees that efficiently cover `[lo, hi)`.
     ///
     /// # Errors
     ///
-    /// Will return an error if `lo ≤ hi`.
-    pub fn split_interval(lo: u64, hi: u64) -> Result<(Self, Option<Self>), TlogError> {
-        if lo >= hi {
-            return Err(TlogError::ConditionNotMet("`lo < hi`".into()));
+    /// Will return an error if `lo > hi`.
+    pub fn split_interval(lo: u64, hi: u64) -> Result<(Self, Self), TlogError> {
+        if lo > hi {
+            return Err(TlogError::ConditionNotMet("`lo <= hi`".into()));
         }
-        if hi - lo == 1 {
-            return Ok((Self { lo, hi }, None));
+        if hi - lo <= 1 {
+            return Ok((Self { lo, hi }, Self { lo: hi, hi }));
         }
         let last = hi - 1;
         // Find where `lo` and `last`'s tree paths diverge. The two subtrees
@@ -1149,7 +1183,7 @@ impl Subtree {
         };
         let left = lo & !((1 << left_split) - 1);
 
-        Ok((Self { lo: left, hi: mid }, Some(Self { lo: mid, hi })))
+        Ok((Self { lo: left, hi: mid }, Self { lo: mid, hi }))
     }
 }
 
@@ -1179,7 +1213,8 @@ impl Subtree {
     {
         let mut lo = self.lo;
         while lo < self.hi {
-            let (k, level) = maxpow2(self.hi - lo + 1);
+            let level = u8::try_from((self.hi - lo).ilog2()).unwrap();
+            let k = 1 << level;
             debug_assert!(lo & (k - 1) == 0 && lo < self.hi, "bad math in walk_hash");
             f(level, lo);
             lo += k;
@@ -1210,6 +1245,9 @@ impl Subtree {
     ///
     /// Panics if there are internal math errors.
     fn hash(&self, hashes: &mut Vec<Hash>) -> Hash {
+        if self.lo == self.hi {
+            return EMPTY_HASH;
+        }
         let mut num_hashes = 0;
         let mut get_hash = |_: u8, _: u64| {
             num_hashes += 1;
@@ -1391,11 +1429,14 @@ mod tests {
         // Valid subtrees.
         assert!(Subtree::new(0, 1).is_ok());
         assert!(Subtree::new(36, 39).is_ok());
+        assert!(Subtree::new(0, 0).is_ok());
+        assert!(Subtree::new(u64::MAX, u64::MAX).is_ok());
+        assert!(Subtree::new(0, u64::MAX).is_ok());
 
         // Invalid subtrees.
         assert!(Subtree::new(39, 36).is_err());
         assert!(Subtree::new(123, 456).is_err());
-        assert!(Subtree::new(0, 0).is_err());
+        assert!(Subtree::new(1 << 62, (1 << 63) + 1).is_err());
     }
 
     #[test]
@@ -1428,23 +1469,42 @@ mod tests {
         assert!(evaluate_subtree_inclusion_proof(&empty_proof, &subtree, 2, leaves[2]).is_err());
     }
 
-    /// `verify_inclusion_proof(proof, 0, …)` delegates through
-    /// `Subtree::new(0, 0)`, which fails with `ConditionNotMet`. Pin the
-    /// variant so a future "`tree_size == 0` shortcut" cannot silently flip
-    /// it back to `InvalidProof`. The outcome ("this proof is bogus") is
-    /// the same; only the variant should differ.
     #[test]
     fn test_verify_inclusion_proof_rejects_zero_tree_size() {
         let err = verify_inclusion_proof(&Vec::new(), 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap_err();
-        assert!(
-            matches!(err, TlogError::ConditionNotMet(_)),
-            "expected ConditionNotMet, got {err:?}",
-        );
+        assert!(matches!(err, TlogError::InvalidProof));
     }
 
     #[test]
     fn test_empty_tree() {
         assert_eq!(tree_hash(0, &TestHashStorage::new()).unwrap(), EMPTY_HASH);
+        let empty = Subtree::new(4, 4).unwrap();
+        assert_eq!(
+            subtree_hash(&empty, &TestHashStorage::new()).unwrap(),
+            EMPTY_HASH
+        );
+        assert!(subtree_hash_indexes(&empty).is_empty());
+        assert!(
+            subtree_consistency_proof_indexes(4, &empty)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            subtree_consistency_proof(4, &empty, &TestHashStorage::new())
+                .unwrap()
+                .is_empty()
+        );
+        verify_subtree_consistency_proof(&[], 4, Hash::default(), &empty, EMPTY_HASH).unwrap();
+        verify_subtree_consistency_proof(
+            &[Hash::default()],
+            4,
+            Hash::default(),
+            &empty,
+            EMPTY_HASH,
+        )
+        .unwrap_err();
+        verify_subtree_consistency_proof(&[], 4, Hash::default(), &empty, Hash::default())
+            .unwrap_err();
 
         // Empty tree.
         verify_consistency_proof(&[], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
@@ -1461,25 +1521,29 @@ mod tests {
     #[test]
     fn test_subtrees_split_interval() {
         assert_eq!(
+            Subtree::split_interval(9, 9).unwrap(),
+            (Subtree::new(9, 9).unwrap(), Subtree::new(9, 9).unwrap())
+        );
+        assert_eq!(
             Subtree::split_interval(123, 124).unwrap(),
-            (Subtree::new(123, 124).unwrap(), None)
+            (
+                Subtree::new(123, 124).unwrap(),
+                Subtree::new(124, 124).unwrap()
+            )
         );
 
         assert_eq!(
             Subtree::split_interval(1200, 1300).unwrap(),
             (
                 Subtree::new(1152, 1280).unwrap(),
-                Some(Subtree::new(1280, 1300).unwrap())
+                Subtree::new(1280, 1300).unwrap()
             )
         );
 
         // Panic fixed by https://github.com/cloudflare/azul/commit/0c8b8574eaa8ab6114ebeded7b23ac40d517fa54.
         assert_eq!(
             Subtree::split_interval(64, 66).unwrap(),
-            (
-                Subtree::new(64, 65).unwrap(),
-                Some(Subtree::new(65, 66).unwrap())
-            )
+            (Subtree::new(64, 65).unwrap(), Subtree::new(65, 66).unwrap())
         );
     }
 
@@ -1500,6 +1564,148 @@ mod tests {
             storage.extend(hashes);
         }
         (storage, leaves)
+    }
+
+    fn build_vector_tree(n: u64) -> (TestHashStorage, Vec<Hash>) {
+        let mut storage = TestHashStorage::new();
+        let mut leaves = Vec::new();
+        for i in 0..n {
+            let data = [u8::try_from(i).unwrap()];
+            leaves.push(record_hash(&data));
+            storage.extend(stored_hashes(i, &data, &storage).unwrap());
+        }
+        (storage, leaves)
+    }
+
+    fn update_hash_hex(hasher: &mut Sha256, hash: Hash) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in hash.0 {
+            hasher.update([HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]]);
+        }
+    }
+
+    fn finalize_hash_hex(hasher: Sha256) -> String {
+        let mut output = String::with_capacity(HASH_SIZE * 2);
+        for byte in hasher.finalize() {
+            use std::fmt::Write;
+            write!(output, "{byte:02x}").unwrap();
+        }
+        output
+    }
+
+    #[test]
+    fn test_mtc_subtree_vectors() {
+        const MAX: u64 = 130;
+        let (storage, leaves) = build_vector_tree(MAX);
+
+        let mut subtree_hashes = Sha256::new();
+        for end in 0..=MAX {
+            for start in 0..=end {
+                let Ok(subtree) = Subtree::new(start, end) else {
+                    continue;
+                };
+                subtree_hashes.update(format!("[{start}, {end}) ").as_bytes());
+                update_hash_hex(
+                    &mut subtree_hashes,
+                    subtree_hash(&subtree, &storage).unwrap(),
+                );
+                subtree_hashes.update(b"\n");
+            }
+        }
+        assert_eq!(
+            finalize_hash_hex(subtree_hashes),
+            "b82806ad4265bb151c1119c0f4db437bb4d1a1f887b3a7fba1cd4ebf552e3e81"
+        );
+
+        let mut inclusion_proofs = Sha256::new();
+        for end in 0..=MAX {
+            for start in 0..=end {
+                let Ok(subtree) = Subtree::new(start, end) else {
+                    continue;
+                };
+                let subtree_hash = subtree_hash(&subtree, &storage).unwrap();
+                for index in start..end {
+                    let proof = subtree_inclusion_proof(&subtree, index, &storage).unwrap();
+                    assert_eq!(
+                        evaluate_subtree_inclusion_proof(
+                            &proof,
+                            &subtree,
+                            index,
+                            leaves[us(index)]
+                        )
+                        .unwrap(),
+                        subtree_hash
+                    );
+                    inclusion_proofs.update(format!("{index} [{start}, {end})").as_bytes());
+                    for hash in proof {
+                        inclusion_proofs.update(b" ");
+                        update_hash_hex(&mut inclusion_proofs, hash);
+                    }
+                    inclusion_proofs.update(b"\n");
+                }
+            }
+        }
+        assert_eq!(
+            finalize_hash_hex(inclusion_proofs),
+            "ac2a8f989e44d99e399db448050ff5f19757df53cfb716aa81015d3955d8163f"
+        );
+
+        let mut consistency_proofs = Sha256::new();
+        for tree_size in 0..=MAX {
+            let root_hash = tree_hash(tree_size, &storage).unwrap();
+            for end in 0..=tree_size {
+                for start in 0..=end {
+                    let Ok(subtree) = Subtree::new(start, end) else {
+                        continue;
+                    };
+                    let subtree_hash = subtree_hash(&subtree, &storage).unwrap();
+                    let proof = subtree_consistency_proof(tree_size, &subtree, &storage).unwrap();
+                    verify_subtree_consistency_proof(
+                        &proof,
+                        tree_size,
+                        root_hash,
+                        &subtree,
+                        subtree_hash,
+                    )
+                    .unwrap();
+                    consistency_proofs.update(format!("[{start}, {end}) {tree_size}").as_bytes());
+                    for hash in proof {
+                        consistency_proofs.update(b" ");
+                        update_hash_hex(&mut consistency_proofs, hash);
+                    }
+                    consistency_proofs.update(b"\n");
+                }
+            }
+        }
+        assert_eq!(
+            finalize_hash_hex(consistency_proofs),
+            "10fa99b37bf9bf9ffa26b412fbd98bd75363256d0b75d61bc4538b9c9c5a0a74"
+        );
+    }
+
+    #[test]
+    fn test_mtc_covering_subtree_vectors() {
+        const MAX: u64 = 130;
+        let mut covering_subtrees = Sha256::new();
+        for end in 0..=MAX {
+            for start in 0..=end {
+                let (left, right) = Subtree::split_interval(start, end).unwrap();
+                covering_subtrees.update(
+                    format!(
+                        "[{}, {}) [{}, {})\n",
+                        left.lo(),
+                        left.hi(),
+                        right.lo(),
+                        right.hi()
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+        assert_eq!(
+            finalize_hash_hex(covering_subtrees),
+            "7fd9c8b926e9d2b5cf831560e8ce295a5ef97ad5c5ede4ea0dea28a8c8fc8bb0"
+        );
     }
 
     /// A cached layer is the set of leaves of a Merkle tree whose root is the
