@@ -5,6 +5,12 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      run_large_mtc_vectors:
+        description: "Run the MTC Appendix C.2 large subtree vectors"
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,3 +51,13 @@ jobs:
       - run: rustup update stable && rustup default stable
       - name: Run tests
         run: cargo test --verbose
+
+  large-mtc-vectors:
+    name: Large MTC Vectors
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.run_large_mtc_vectors
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - name: Run Appendix C.2 vectors
+        run: cargo test -p tlog_core --test large_vectors -- --ignored

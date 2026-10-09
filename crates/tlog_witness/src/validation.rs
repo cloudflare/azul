@@ -162,6 +162,8 @@ pub enum SignSubtreeValidationError {
     },
     #[error("invalid subtree: {0:?}")]
     InvalidSubtree(tlog_core::TlogError),
+    #[error("empty subtree [{subtree_start}, {subtree_start})")]
+    EmptySubtree { subtree_start: u64 },
     #[error("subtree consistency proof failed")]
     ConsistencyProofFailed,
 }
@@ -190,6 +192,10 @@ pub fn validate_sign_subtree_request(
             subtree_end,
             checkpoint_size: checkpoint_text.size(),
         });
+    }
+    // An empty subtree carries no entries, so cosigning it asserts nothing.
+    if subtree_start == subtree_end {
+        return Err(SignSubtreeValidationError::EmptySubtree { subtree_start });
     }
     let subtree = Subtree::new(subtree_start, subtree_end)
         .map_err(SignSubtreeValidationError::InvalidSubtree)?;
