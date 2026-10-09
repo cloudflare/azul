@@ -7,10 +7,14 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
-      run_large_mtc_vectors:
-        description: "Run the MTC Appendix C.2 large subtree vectors"
+      run_slow_checks:
+        description: "Run the checks excluded from the default test run"
         type: boolean
         default: true
+      fuzz_seconds:
+        description: "Seconds to run each fuzz target for"
+        type: string
+        default: "60"
 
 env:
   CARGO_TERM_COLOR: always
@@ -52,12 +56,26 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-  large-mtc-vectors:
-    name: Large MTC Vectors
+  # Checks the default `cargo test` run skips: `#[ignore]`d tests and the
+  # cargo-fuzz targets, which need a nightly toolchain.
+  slow-checks:
+    name: Slow Checks
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && inputs.run_large_mtc_vectors
+    if: github.event_name == 'workflow_dispatch' && inputs.run_slow_checks
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
-      - name: Run Appendix C.2 vectors
-        run: cargo test -p tlog_core --test large_vectors -- --ignored
+      # Covers the MTC Appendix C.2 vectors and the long-running sequencer
+      # tests. `integration_tests` is excluded because it needs a live
+      # wrangler dev instance; the Integration Tests workflow runs it.
+      - name: Ignored tests
+        run: cargo test --workspace --exclude integration_tests -- --ignored
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz parse_tile_path
+        run: cargo +nightly fuzz run fuzz_parse_tile_path -- -max_total_time=${{ inputs.fuzz_seconds }}
+      - name: Fuzz parse_checkpoint
+        run: cargo +nightly fuzz run fuzz_parse_checkpoint -- -max_total_time=${{ inputs.fuzz_seconds }}

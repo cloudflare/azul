@@ -1581,6 +1581,8 @@ mod tests {
     #[test]
     #[ignore = "This test is skipped as it takes a long time, but can be run with `cargo test -- --ignored`."]
     fn test_sequence_large_log() {
+        const ROUNDS: u64 = 500;
+
         let mut log = TestLog::new();
 
         for _ in 0..5 {
@@ -1589,15 +1591,34 @@ mod tests {
         log.sequence().unwrap();
         log.check(5).unwrap();
 
-        for i in 0..500_u64 {
-            for k in 0..3000_u64 {
-                let certificate = (i * 3000 + k).to_be_bytes().to_vec();
+        // A batch larger than `MAX_POOL_SIZE` would be silently rate-limited
+        // away, so the per-round count tracks the cap rather than a literal.
+        let batch = u64::try_from(MAX_POOL_SIZE).unwrap();
+
+        // `check` resolves every fingerprint against `issuer/<hex>` in object
+        // storage, so the chain must be uploaded rather than synthesized.
+        let issuers = CHAINS[0];
+        block_on(upload_issuers(&log.object, issuers, &log.config.name)).unwrap();
+        let chain_fingerprints: Vec<[u8; 32]> = issuers
+            .iter()
+            .map(|&issuer| Sha256::digest(issuer).into())
+            .collect();
+
+        for i in 0..ROUNDS {
+            for k in 0..batch {
+                let certificate = (i * batch + k).to_be_bytes().to_vec();
                 let leaf = StaticCTPendingLogEntry {
                     certificate,
                     precert_opt: None,
-                    chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
+                    chain_fingerprints: chain_fingerprints.clone(),
                 };
-                add_leaf_to_pool(&log.pool_state, &log.cache, &log.config, leaf);
+                assert!(
+                    !matches!(
+                        add_leaf_to_pool(&log.pool_state, &log.cache, &log.config, leaf),
+                        AddLeafResult::RateLimited
+                    ),
+                    "entry {k} of round {i} was rate-limited"
+                );
             }
             log.sequence().unwrap();
 
@@ -1611,7 +1632,7 @@ mod tests {
             // It's annoying to verify these proofs right here. See
             // sequence_one_leaf() for the verifications
         }
-        log.check(5 + 500 * 3000).unwrap();
+        log.check(5 + ROUNDS * batch).unwrap();
     }
 
     #[test]
