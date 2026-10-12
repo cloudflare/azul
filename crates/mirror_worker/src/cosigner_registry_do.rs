@@ -67,6 +67,7 @@ struct Issuer {
 #[durable_object]
 struct CosignerRegistry {
     state: State,
+    env: Env,
     json_url: String,
     pem_url: String,
 }
@@ -80,15 +81,28 @@ impl DurableObject for CosignerRegistry {
         let pem_url = registry_url(&env, "COSIGNERS_PEM_URL", DEFAULT_COSIGNERS_PEM_URL);
         Self {
             state,
+            env,
             json_url,
             pem_url,
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        let operation = match req.path().as_str() {
+            "/registry" => "read",
+            "/sync" => "sync",
+            _ => "unknown",
+        };
         generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
             &[("handler", "do_fetch"), ("do_type", "cosigner_registry")],
-            self.fetch_inner(req),
+            async {
+                let obs =
+                    crate::observability::InvocationMetrics::new("cosigner_registry", operation);
+                let result = self.fetch_inner(req, &obs).await;
+                obs.response(&result);
+                obs.flush_do(&self.state, &self.env);
+                result
+            },
         )
         .await
     }
@@ -103,7 +117,11 @@ fn registry_url(env: &Env, name: &str, default: &str) -> String {
 }
 
 impl CosignerRegistry {
-    async fn fetch_inner(&self, req: Request) -> Result<Response> {
+    async fn fetch_inner(
+        &self,
+        req: Request,
+        obs: &crate::observability::InvocationMetrics,
+    ) -> Result<Response> {
         match req.path().as_str() {
             "/registry" => {
                 let record = self
@@ -128,6 +146,7 @@ impl CosignerRegistry {
                 let log_count = record.logs.len();
                 let version = record.version.clone();
                 self.state.storage().put(REGISTRY_KEY, &record).await?;
+                obs.registry_sync();
                 log::info!(
                     "cosigner registry synchronized version {version} with {log_count} logs"
                 );
@@ -429,7 +448,13 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         return;
     }
     generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
-        if let Err(error) = synchronize(&env).await {
+        let obs = crate::observability::InvocationMetrics::new("cosigner_registry", "scheduled");
+        let result = synchronize(&env).await;
+        obs.scheduled(&result);
+        if result.is_ok() {
+            obs.registry_sync();
+        }
+        if let Err(error) = result {
             log::error!("cosigner registry synchronization failed: {error}");
             generic_log_worker::obs::sentry::capture_error_and_flush(
                 &error,
@@ -438,6 +463,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
             )
             .await;
         }
+        obs.flush(&env).await;
     })
     .await;
 }

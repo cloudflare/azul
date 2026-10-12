@@ -58,6 +58,7 @@ mod commit;
 mod cosigner_registry_do;
 mod frontend_worker;
 mod mirror_state_do;
+mod observability;
 mod storage;
 mod stream_buffer;
 

@@ -71,3 +71,34 @@ cargo test -p integration_tests --test tlog_mirror
 The mirror integration test starts the registry fixture server on port 8790.
 The URL overrides are only honored by the `dev` build and are needed for that
 suite. Other builds use the public gstatic registry.
+
+## Operations
+
+The mirror Durable Objects and hourly registry job send invocation counts,
+latencies, errors, and buffered logs through the optional `WSHIM_SOCKET` /
+`WSHIM_TOKEN` bindings. The `MirrorState` DO reports
+`mirror_last_publication_timestamp_seconds{origin,role}` on successful checkpoint
+publication. The cleaner alarm reports `mirror_cleaner_backlog_leaves{origin}`; registry
+reads and syncs report `mirror_registry_last_sync_timestamp_seconds`.
+`origin` is the SHA-256 origin hash used in the monitoring URL. Publication
+and registry-sync timestamps are absent until the first successful operation.
+
+Publication timestamps are emitted only after the existing checkpoint writes
+succeed; the Worker does not persist monitoring timestamps. Registry-sync time
+is emitted when synchronization succeeds. Frontier and gap gauges are deferred:
+sampling state on `/get-state` alone would leave stale values when no read occurs.
+Without a separate progress source, there are no missing-origin or
+stalled-progress alerts.
+The cleaner backlog is emitted on successful cleaner alarm wakes (one hour by
+default). Publication timestamps are events: use the metrics backend's retained
+history to obtain the last value, and do not interpret a missing recent sample
+as no publication.
+Missing cleaner samples do not imply zero backlog. The cleaner reserves two of
+its 1,000 subrequests for the logs and metrics Wshim flushes; Wshim delivery
+remains best-effort. The metrics backend can alert on missing samples using an
+independent inventory of expected cleaner origins. Enroll a cleaner origin only
+after its first persisted upload, since checkpoint acceptance alone does not
+start the cleaner. The hourly registry job can likewise be monitored against
+expected deployments where `enable_chrome_cosigners` is true. Failed witness
+invocations emit per-origin event gauges. Incoming metrics need an `env` label
+matching the deployment's Wrangler environment for per-environment monitoring.

@@ -36,7 +36,9 @@ use crate::{
 /// Workers cap each invocation at 1000 subrequests, R2 ops included.
 /// Cleaning bails out before crossing the limit; the next alarm resumes
 /// from the checkpointed `cleaned_size`.
-const SUBREQUEST_LIMIT: usize = 1000;
+const SUBREQUEST_LIMIT: u16 = 1000;
+/// The DO flushes logs and metrics to Wshim with two fetches after cleaning.
+const CLEANING_SUBREQUEST_LIMIT: u16 = SUBREQUEST_LIMIT - 2;
 
 /// R2 `delete_multiple` accepts at most 1000 keys per call.
 /// <https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#bucket-method-definitions>
@@ -60,6 +62,28 @@ struct CleanTarget {
     full_tile_key: String,
     /// `.p/` key prefixes to list and delete once `full_tile_key` exists.
     partial_prefixes: Vec<String>,
+}
+
+/// A full invocation budget is routine; missing tiles and failed R2 calls are not.
+#[derive(Debug)]
+enum CleanRangeError {
+    Budget,
+    Failure(Error),
+}
+
+impl From<Error> for CleanRangeError {
+    fn from(error: Error) -> Self {
+        Self::Failure(error)
+    }
+}
+
+impl From<CleanRangeError> for Error {
+    fn from(error: CleanRangeError) -> Self {
+        match error {
+            CleanRangeError::Budget => Self::from("reached subrequest limit"),
+            CleanRangeError::Failure(error) => error,
+        }
+    }
 }
 
 /// Plan the partial-tile cleaning for the 256-entry tree range
@@ -110,7 +134,6 @@ struct MirrorCleaner {
     cleaned_size: RefCell<u64>,
     /// Cache of what [`Self::committed_size`] last read.
     committed_size: RefCell<u64>,
-    subrequests: RefCell<usize>,
     initialized: RefCell<bool>,
 }
 
@@ -118,6 +141,22 @@ struct MirrorCleaner {
 // is required by `wasm-bindgen` under `panic=unwind`, for the sentry
 // catch-unwind guard around the fetch/alarm handlers.
 impl std::panic::RefUnwindSafe for MirrorCleaner {}
+
+#[derive(Default, Debug)]
+struct SubrequestBudget(RefCell<u16>);
+
+impl SubrequestBudget {
+    /// Add `n` to the subrequest tally, erroring if it would exceed the
+    /// per-invocation limit.
+    fn checked_add_subrequests(&self, n: u16) -> std::result::Result<(), CleanRangeError> {
+        let mut current = self.0.borrow_mut();
+        if current.saturating_add(n) > CLEANING_SUBREQUEST_LIMIT {
+            return Err(CleanRangeError::Budget);
+        }
+        *current += n;
+        Ok(())
+    }
+}
 
 impl DurableObject for MirrorCleaner {
     fn new(state: State, env: Env) -> Self {
@@ -138,7 +177,6 @@ impl DurableObject for MirrorCleaner {
             served,
             cleaned_size: RefCell::new(0),
             committed_size: RefCell::new(0),
-            subrequests: RefCell::new(0),
             initialized: RefCell::new(false),
             state,
             env,
@@ -148,7 +186,13 @@ impl DurableObject for MirrorCleaner {
     async fn fetch(&self, req: Request) -> Result<Response> {
         generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
             &[("handler", "do_fetch"), ("do_type", "mirror_cleaner")],
-            self.fetch_inner(req),
+            async {
+                let obs = crate::observability::InvocationMetrics::new("mirror_cleaner", "kick");
+                let result = self.fetch_inner(req).await;
+                obs.response(&result);
+                obs.flush_do(&self.state, &self.env);
+                result
+            },
         )
         .await
     }
@@ -156,7 +200,13 @@ impl DurableObject for MirrorCleaner {
     async fn alarm(&self) -> Result<Response> {
         generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
             &[("handler", "do_alarm"), ("do_type", "mirror_cleaner")],
-            self.alarm_inner(),
+            async {
+                let obs = crate::observability::InvocationMetrics::new("mirror_cleaner", "alarm");
+                let result = self.alarm_inner(&obs).await;
+                obs.response(&result);
+                obs.flush_do(&self.state, &self.env);
+                result
+            },
         )
         .await
     }
@@ -173,8 +223,8 @@ impl MirrorCleaner {
     }
 
     /// Alarm handler: reschedule, then clean one bounded batch of partials.
-    async fn alarm_inner(&self) -> Result<Response> {
-        *self.subrequests.borrow_mut() = 0;
+    async fn alarm_inner(&self, obs: &crate::observability::InvocationMetrics) -> Result<Response> {
+        let req_budget = &SubrequestBudget::default();
         let served = &self.served;
         if !*self.initialized.borrow() {
             self.initialize().await?;
@@ -188,14 +238,20 @@ impl MirrorCleaner {
         self.storage()
             .set_alarm(Duration::from_secs(clean_interval_secs))
             .await?;
-        if let Err(e) = self.clean(served).await {
+        if let Err(e) = self.clean(served, req_budget).await {
             log::warn!("mirror cleaner [{}]: clean failed: {e}", served.origin);
+            obs.degraded("clean");
         } else {
             log::info!(
                 "mirror cleaner [{}]: cleaned_size={} committed_size={}",
                 served.origin,
                 self.cleaned_size.borrow(),
                 self.committed_size.borrow(),
+            );
+            obs.cleaner_backlog(
+                &served.origin,
+                *self.cleaned_size.borrow(),
+                *self.committed_size.borrow(),
             );
         }
         Response::ok("mirror cleaner alarm done")
@@ -230,32 +286,43 @@ impl MirrorCleaner {
 
     /// Clean orphaned partials below `committed.size`, stopping there or
     /// at the subrequest budget, and checkpoint progress.
-    async fn clean(&self, served: &Served) -> Result<()> {
+    async fn clean(&self, served: &Served, req_budget: &SubrequestBudget) -> Result<()> {
         // Refresh the ceiling once cleaning has caught up to the
         // last-seen value.
         if *self.committed_size.borrow() < *self.cleaned_size.borrow() + STEP {
-            let committed = self.committed_size(&served.origin).await?;
+            let committed = self.committed_size(&served.origin, req_budget).await?;
             *self.committed_size.borrow_mut() = committed;
             self.storage().put(COMMITTED_SIZE_KEY, committed).await?;
         }
 
         // Reserve one subrequest for the final delete.
-        self.checked_add_subrequests(1)?;
+        req_budget.checked_add_subrequests(1).map_err(Error::from)?;
 
         let mut pending_cleaned = *self.cleaned_size.borrow();
         let mut batch: Vec<String> = Vec::with_capacity(MAX_DELETE_BATCH);
+        let mut failure = None;
         // A block is eligible only once it lies wholly below
         // `committed.size`, which spares the block holding a mid-tile
         // `committed.size` and the narrow partials `ensure_cut_tiles`
         // wrote there for the served checkpoint.
         while pending_cleaned + STEP <= *self.committed_size.borrow() {
-            if let Err(e) = self.clean_range(served, pending_cleaned, &mut batch).await {
-                // Out of subrequest budget, or a listing failed. Stop
-                // enqueuing, but flush what was collected.
-                log::warn!("mirror cleaner [{}]: stopping early: {e}", served.origin);
-                break;
+            match self
+                .clean_range(served, pending_cleaned, &mut batch, req_budget)
+                .await
+            {
+                Ok(()) => pending_cleaned += STEP,
+                Err(CleanRangeError::Budget) => {
+                    log::info!(
+                        "mirror cleaner [{}]: subrequest budget reached",
+                        served.origin
+                    );
+                    break;
+                }
+                Err(CleanRangeError::Failure(error)) => {
+                    failure = Some(error);
+                    break;
+                }
             }
-            pending_cleaned += STEP;
         }
 
         if !batch.is_empty() {
@@ -265,29 +332,41 @@ impl MirrorCleaner {
         self.storage()
             .put(CLEANED_SIZE_KEY, pending_cleaned)
             .await?;
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     /// Enqueue for deletion the orphaned partials completed by the range
     /// `[lo, lo + 256)`, flushing full delete batches as they fill.
-    async fn clean_range(&self, served: &Served, lo: u64, batch: &mut Vec<String>) -> Result<()> {
+    async fn clean_range(
+        &self,
+        served: &Served,
+        lo: u64,
+        batch: &mut Vec<String>,
+        req_budget: &SubrequestBudget,
+    ) -> std::result::Result<(), CleanRangeError> {
         let mut prefixes = Vec::new();
         for target in plan_clean(&served.prefix, lo) {
             // A partial may only be deleted once the full tile exists.
-            self.checked_add_subrequests(1)?;
+            req_budget.checked_add_subrequests(1)?;
             if self.bucket.head(&target.full_tile_key).await?.is_none() {
-                return Err(format!("full tile absent: {}", target.full_tile_key).into());
+                return Err(CleanRangeError::Failure(
+                    format!("full tile absent: {}", target.full_tile_key).into(),
+                ));
             }
             prefixes.extend(target.partial_prefixes);
         }
-        for key in try_join_all(prefixes.iter().map(|prefix| self.list_prefix(prefix)))
-            .await?
-            .into_iter()
-            .flatten()
+        for key in try_join_all(
+            prefixes
+                .iter()
+                .map(|prefix| self.list_prefix(prefix, req_budget)),
+        )
+        .await?
+        .into_iter()
+        .flatten()
         {
             batch.push(key);
             if batch.len() == MAX_DELETE_BATCH {
-                self.checked_add_subrequests(1)?;
+                req_budget.checked_add_subrequests(1)?;
                 self.bucket
                     .delete_multiple(batch.iter().map(String::as_str).collect::<Vec<_>>())
                     .await?;
@@ -300,11 +379,15 @@ impl MirrorCleaner {
     }
 
     /// List every object key under `prefix`.
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+    async fn list_prefix(
+        &self,
+        prefix: &str,
+        req_budget: &SubrequestBudget,
+    ) -> std::result::Result<Vec<String>, CleanRangeError> {
         let mut keys = Vec::new();
         let mut cursor = None;
         loop {
-            self.checked_add_subrequests(1)?;
+            req_budget.checked_add_subrequests(1)?;
             let mut list = self.bucket.list().prefix(prefix);
             if let Some(cursor) = cursor {
                 list = list.cursor(cursor);
@@ -316,7 +399,7 @@ impl MirrorCleaner {
             }
             cursor = Some(
                 page.cursor()
-                    .ok_or("truncated R2 listing did not include a cursor")?,
+                    .ok_or_else(|| Error::from("truncated R2 listing did not include a cursor"))?,
             );
         }
     }
@@ -328,8 +411,8 @@ impl MirrorCleaner {
     /// the served checkpoint, and the full-tile test treats those as
     /// orphans as soon as the frontier passes their block.
     /// `committed.size <= next_entry.size`, so this only cleans less.
-    async fn committed_size(&self, origin: &str) -> Result<u64> {
-        self.checked_add_subrequests(1)?;
+    async fn committed_size(&self, origin: &str, req_budget: &SubrequestBudget) -> Result<u64> {
+        req_budget.checked_add_subrequests(1).map_err(Error::from)?;
         let stub = state_stub(&self.env, origin)?;
         let mut resp = stub
             .fetch_with_request(Request::new_with_init(
@@ -347,16 +430,6 @@ impl MirrorCleaner {
         }
         let snapshot: MirrorStateSnapshot = resp.json().await?;
         Ok(snapshot.committed.map_or(0, |committed| committed.size))
-    }
-
-    /// Add `n` to the subrequest tally, erroring if it would exceed the
-    /// per-invocation limit.
-    fn checked_add_subrequests(&self, n: usize) -> Result<()> {
-        if *self.subrequests.borrow() + n > SUBREQUEST_LIMIT {
-            return Err("reached subrequest limit".into());
-        }
-        *self.subrequests.borrow_mut() += n;
-        Ok(())
     }
 }
 
