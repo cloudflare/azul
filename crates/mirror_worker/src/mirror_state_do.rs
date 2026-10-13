@@ -225,16 +225,33 @@ impl DurableObject for MirrorState {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        let operation = match req.path().as_str() {
+            "/get-state" => "get_state",
+            "/commit" => "commit",
+            "/advance-next-entry" => "advance_next_entry",
+            "/update-pending" => "update_pending",
+            _ => "unknown",
+        };
         generic_log_worker::obs::sentry::catch_unwind_report_and_flush(
             &[("handler", "do_fetch"), ("do_type", "mirror_state")],
-            self.fetch_inner(req),
+            async {
+                let obs = crate::observability::InvocationMetrics::new("mirror_state", operation);
+                let result = self.fetch_inner(req, &obs).await;
+                obs.response(&result);
+                obs.flush_do(&self.state, &self.env);
+                result
+            },
         )
         .await
     }
 }
 
 impl MirrorState {
-    async fn fetch_inner(&self, mut req: Request) -> Result<Response> {
+    async fn fetch_inner(
+        &self,
+        mut req: Request,
+        obs: &crate::observability::InvocationMetrics,
+    ) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Post, "/get-state") => {
@@ -243,7 +260,7 @@ impl MirrorState {
             }
             (Method::Post, "/commit") => {
                 let body: CommitRequest = req.json().await?;
-                self.commit(body).await
+                self.commit(body, obs).await
             }
             (Method::Post, "/advance-next-entry") => {
                 let body: AdvanceNextEntryRequest = req.json().await?;
@@ -251,7 +268,7 @@ impl MirrorState {
             }
             (Method::Post, "/update-pending") => {
                 let body: UpdatePendingRequest = req.json().await?;
-                self.update_pending(body).await
+                self.update_pending(body, obs).await
             }
             _ => Response::error("not found", 404),
         }
@@ -259,7 +276,11 @@ impl MirrorState {
 }
 
 impl MirrorState {
-    async fn update_pending(&self, body: UpdatePendingRequest) -> Result<Response> {
+    async fn update_pending(
+        &self,
+        body: UpdatePendingRequest,
+        obs: &crate::observability::InvocationMetrics,
+    ) -> Result<Response> {
         let _guard = self.update_mux.lock().await;
         let request_hash = update_request_hash(&body);
 
@@ -270,7 +291,7 @@ impl MirrorState {
             && let Some(checkpoint) = current.as_mut()
             && !checkpoint.witness_published
         {
-            self.publish_witness_checkpoint(checkpoint).await?;
+            self.publish_witness_checkpoint(checkpoint, obs).await?;
         }
         if CONFIG.witness_enabled()
             && let Some(checkpoint) = current.as_ref()
@@ -321,7 +342,12 @@ impl MirrorState {
             };
         }
         let (signed_note_bytes, witness_response_bytes) = if CONFIG.witness_enabled() {
-            self.cosign_witness_checkpoint(&body.signed_note_bytes)?
+            self.cosign_witness_checkpoint(&body.signed_note_bytes)
+                .inspect_err(|_| {
+                    if let Some(origin) = self.state.id().name() {
+                        obs.witness_failure(&origin);
+                    }
+                })?
         } else {
             (body.signed_note_bytes, Vec::new())
         };
@@ -335,7 +361,7 @@ impl MirrorState {
         };
         self.state.storage().put(PENDING_KEY, &new_state).await?;
         if CONFIG.witness_enabled() {
-            self.publish_witness_checkpoint(&mut new_state).await?;
+            self.publish_witness_checkpoint(&mut new_state, obs).await?;
         }
         Response::from_json(&UpdatePendingResponse {
             witness_response_bytes,
@@ -359,20 +385,37 @@ impl MirrorState {
         Ok((note.to_bytes(), response))
     }
 
-    async fn publish_witness_checkpoint(&self, checkpoint: &mut PendingCheckpoint) -> Result<()> {
+    async fn publish_witness_checkpoint(
+        &self,
+        checkpoint: &mut PendingCheckpoint,
+        obs: &crate::observability::InvocationMetrics,
+    ) -> Result<()> {
         let origin = self
             .state
             .id()
             .name()
             .ok_or_else(|| Error::from("mirror state DO missing origin name"))?;
-        let bucket = load_witness_origin_bucket(&self.env, &origin)?;
-        commit::write_checkpoint(&bucket, checkpoint.signed_note_bytes.clone()).await?;
-        checkpoint.witness_published = true;
-        self.state.storage().put(PENDING_KEY, checkpoint).await
+        let result = async {
+            let bucket = load_witness_origin_bucket(&self.env, &origin)?;
+            commit::write_checkpoint(&bucket, checkpoint.signed_note_bytes.clone()).await?;
+            checkpoint.witness_published = true;
+            self.state.storage().put(PENDING_KEY, checkpoint).await?;
+            obs.publication(&origin, "witness");
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            obs.witness_failure(&origin);
+        }
+        result
     }
 
     /// Reconcile publication, then publish without rewinding.
-    async fn commit(&self, body: CommitRequest) -> Result<Response> {
+    async fn commit(
+        &self,
+        body: CommitRequest,
+        obs: &crate::observability::InvocationMetrics,
+    ) -> Result<Response> {
         let _guard = self.commit_mux.lock().await;
 
         let origin = self
@@ -385,6 +428,7 @@ impl MirrorState {
 
         if let Some(intent) = storage.get::<PublicationIntent>(PUBLISHING_KEY).await? {
             finish_publication(&bucket, &intent.0, &storage).await?;
+            obs.publication(&origin, "mirror");
         }
 
         let snapshot = self.read_snapshot().await?;
@@ -419,6 +463,7 @@ impl MirrorState {
             .put(PUBLISHING_KEY, &PublicationIntent(new_committed.clone()))
             .await?;
         finish_publication(&bucket, &new_committed, &storage).await?;
+        obs.publication(&origin, "mirror");
 
         Response::from_json(&new_committed)
     }

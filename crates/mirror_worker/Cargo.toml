@@ -45,6 +45,7 @@ length_prefixed.workspace = true
 log.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true
+prometheus.workspace = true
 sentry-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

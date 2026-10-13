@@ -1846,6 +1846,7 @@ dependencies = [
  "mirror_worker_config",
  "ml-dsa",
  "pkcs8",
+ "prometheus",
  "sentry-core",
  "serde",
  "serde_json",
