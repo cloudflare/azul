@@ -185,24 +185,34 @@ pub fn node_hash(left: Hash, right: Hash) -> Hash {
 /// traversal of the nodes in the tree. For information, see section 3.3 of
 /// Crosby and Wallach's paper ["Efficient Data Structures for Tamper-Evident
 /// Logging"](https://www.usenix.org/legacy/event/sec09/tech/full_papers/crosby.pdf).
+///
+/// # Panics
+///
+/// Panics if the dense index exceeds [`u64::MAX`]. Use
+/// [`tree_hash_indexes`] or [`subtree_hash_indexes`] when the index can be
+/// derived from an unbounded tree size.
 #[must_use]
 pub fn stored_hash_index(level: u8, n: u64) -> u64 {
+    checked_stored_hash_index(level, n).expect("stored hash index exceeds u64::MAX")
+}
+
+fn checked_stored_hash_index(level: u8, n: u64) -> Option<u64> {
     // Level L's n'th hash is written right after level L+1's 2n+1'th hash.
     // Work our way down to the level 0 ordering.
     // We'll add back the original level count at the end.
     let mut n = n;
     for _ in 0..level {
-        n = 2 * n + 1;
+        n = n.checked_mul(2)?.checked_add(1)?;
     }
 
     // Level 0's n'th hash is written at n+n/2+n/4+... (eventually n/2ⁱ hits zero).
-    let mut i = 0;
+    let mut i = 0_u64;
     while n > 0 {
-        i += n;
+        i = i.checked_add(n)?;
         n >>= 1;
     }
 
-    i + u64::from(level)
+    i.checked_add(u64::from(level))
 }
 
 /// This is the inverse of [`stored_hash_index`].  That is,
@@ -235,19 +245,28 @@ pub fn split_stored_hash_index(index: u64) -> (u8, u64) {
 }
 
 /// Returns the number of stored hashes that are expected for a tree with `n` records.
-#[must_use]
-pub fn stored_hash_count(n: u64) -> u64 {
+///
+/// # Errors
+///
+/// Returns an error if the count exceeds [`u64::MAX`].
+pub fn stored_hash_count(n: u64) -> Result<u64, TlogError> {
     if n == 0 {
-        return 0;
+        return Ok(0);
     }
     // The tree will have the hashes up to the last leaf hash.
-    let mut num_hash = stored_hash_index(0, n - 1) + 1;
+    let mut num_hash = checked_stored_hash_index(0, n - 1)
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(storage_index_overflow)?;
     let mut i = n - 1;
     while i & 1 != 0 {
-        num_hash += 1;
+        num_hash = num_hash.checked_add(1).ok_or_else(storage_index_overflow)?;
         i >>= 1;
     }
-    num_hash
+    Ok(num_hash)
+}
+
+fn storage_index_overflow() -> TlogError {
+    TlogError::ConditionNotMet("storage index exceeds u64::MAX".into())
 }
 
 /// Returns the hashes that must be stored when writing record n with the given data. The hashes
@@ -348,18 +367,26 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
 }
 
 /// Computes the indexes needed to compute the hash of the tree with `n` records.
-#[must_use]
-pub fn tree_hash_indexes(n: u64) -> Vec<u64> {
+///
+/// # Errors
+///
+/// Returns an error if any required index exceeds [`u64::MAX`]. See
+/// [`Subtree::hash_indexes`].
+pub fn tree_hash_indexes(n: u64) -> Result<Vec<u64>, TlogError> {
     if n == 0 {
-        return vec![];
+        return Ok(vec![]);
     }
     Subtree { lo: 0, hi: n }.hash_indexes()
 }
 
 /// Returns the storage indexes needed to compute the hash for the subtree.
 /// See <https://tools.ietf.org/html/rfc6962#section-2.1>.
-#[must_use]
-pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
+///
+/// # Errors
+///
+/// Returns an error if any required index exceeds [`u64::MAX`]. See
+/// [`Subtree::hash_indexes`].
+pub fn subtree_hash_indexes(n: &Subtree) -> Result<Vec<u64>, TlogError> {
     n.hash_indexes()
 }
 
@@ -379,7 +406,7 @@ pub fn subtree_hash_indexes(n: &Subtree) -> Vec<u64> {
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
 pub fn subtree_hash<R: HashReader>(n: &Subtree, r: &R) -> Result<Hash, TlogError> {
-    let indexes = n.hash_indexes();
+    let indexes = n.hash_indexes()?;
     let mut hashes = r.read_hashes(&indexes)?;
     debug_assert_eq!(
         hashes.len(),
@@ -664,7 +691,7 @@ fn containing_layer_node(
 fn build_layer_storage(cached_layer: &[Hash]) -> Result<Vec<Hash>, TlogError> {
     let m = u64::try_from(cached_layer.len()).map_err(|_| TlogError::BadMath)?;
     let mut storage: Vec<Hash> =
-        Vec::with_capacity(usize::try_from(stored_hash_count(m)).unwrap_or(0));
+        Vec::with_capacity(usize::try_from(stored_hash_count(m)?).unwrap_or(0));
     for (j, &h) in cached_layer.iter().enumerate() {
         let j = u64::try_from(j).map_err(|_| TlogError::BadMath)?;
         let hashes = stored_hashes_for_record_hash(j, h, &SliceReader(&storage))?;
@@ -983,7 +1010,10 @@ pub fn verify_subtree_consistency_proof(
         return Err(TlogError::InvalidProof);
     }
     if start == end {
-        return if proof.is_empty() && subtree_hash == EMPTY_HASH {
+        return if proof.is_empty()
+            && subtree_hash == EMPTY_HASH
+            && (n != 0 || root_hash == EMPTY_HASH)
+        {
             Ok(())
         } else {
             Err(TlogError::InvalidProof)
@@ -1224,17 +1254,25 @@ impl Subtree {
     /// Returns the storage indexes needed to compute the subtree's root hash.
     /// See <https://tools.ietf.org/html/rfc6962#section-2.1>.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if there are internal math errors.
-    fn hash_indexes(&self) -> Vec<u64> {
+    /// Returns an error if a required index exceeds [`u64::MAX`].
+    fn hash_indexes(&self) -> Result<Vec<u64>, TlogError> {
         let mut need = Vec::new();
+        let mut overflow = false;
         let mut get_indexes = |level: u8, lo: u64| {
-            need.push(stored_hash_index(level, lo >> level));
+            let n = lo >> level;
+            let Some(index) = checked_stored_hash_index(level, n) else {
+                overflow = true;
+                return;
+            };
+            need.push(index);
         };
         self.walk_hash(&mut get_indexes);
-
-        need
+        if overflow {
+            return Err(storage_index_overflow());
+        }
+        Ok(need)
     }
 
     /// Computes the subtree's root hash, assuming that `hashes` are the hashes
@@ -1295,7 +1333,7 @@ impl Subtree {
         strategy: CombinationStrategy,
     ) -> Result<Vec<T>, TlogError>
     where
-        F: FnMut(&Subtree) -> Vec<T>,
+        F: FnMut(&Subtree) -> Result<Vec<T>, TlogError>,
     {
         if !self.contains_subtree(m) {
             return Err(TlogError::ConditionNotMet(format!(
@@ -1306,7 +1344,7 @@ impl Subtree {
         if m == self {
             // If the subtree was one of the inputs it is `known` and there is
             // no need to return it.
-            return if known { Ok(vec![]) } else { Ok(f(self)) };
+            return if known { Ok(vec![]) } else { f(self) };
         }
 
         // Recursive step: traverse the children.
@@ -1316,11 +1354,11 @@ impl Subtree {
             //
             // Recurse on the left, fully include the right.
             let (mut recursive_proof, mut sibling) =
-                (left.walk_subproof(m, known, f, strategy)?, f(&right));
+                (left.walk_subproof(m, known, f, strategy)?, f(&right)?);
             recursive_proof.append(&mut sibling);
             Ok(recursive_proof)
         } else {
-            let mut sibling = f(&left);
+            let mut sibling = f(&left)?;
             let mut recursive_proof = if right.contains_subtree(m) {
                 // `m` is fully included in the right child.
                 //
@@ -1359,7 +1397,7 @@ impl Subtree {
     /// Returns the storage hash indexes needed for the subproof.
     fn subproof_indexes(&self, m: &Subtree, known: bool) -> Result<Vec<u64>, TlogError> {
         // Get all hash indexes for a given subtree.
-        let mut get_indexes = |t: &Subtree| -> Vec<u64> { t.hash_indexes() };
+        let mut get_indexes = |t: &Subtree| t.hash_indexes();
 
         self.walk_subproof(m, known, &mut get_indexes, CombinationStrategy::Index)
     }
@@ -1373,9 +1411,9 @@ impl Subtree {
     ) -> Result<Proof, TlogError> {
         // Reconstruct a single hash for a subtree and wrap it in a Vec.
         // The closure captures the mutable `hashes` vector to pass it to `reconstruct_hash`.
-        let mut get_hash = |t: &Subtree| -> Vec<Hash> { vec![t.hash(hashes)] };
+        let mut get_hash =
+            |t: &Subtree| -> Result<Vec<Hash>, TlogError> { Ok(vec![t.hash(hashes)]) };
 
-        // The closure's error type is Infallible, so we can safely unwrap.
         self.walk_subproof(m, known, &mut get_hash, CombinationStrategy::Hash)
     }
 }
@@ -1483,16 +1521,14 @@ mod tests {
             subtree_hash(&empty, &TestHashStorage::new()).unwrap(),
             EMPTY_HASH
         );
-        assert!(subtree_hash_indexes(&empty).is_empty());
-        assert!(
-            subtree_consistency_proof_indexes(4, &empty)
-                .unwrap()
-                .is_empty()
+        assert_eq!(subtree_hash_indexes(&empty).unwrap(), Vec::<u64>::new());
+        assert_eq!(
+            subtree_consistency_proof_indexes(4, &empty).unwrap(),
+            Vec::<u64>::new()
         );
-        assert!(
-            subtree_consistency_proof(4, &empty, &TestHashStorage::new())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            subtree_consistency_proof(4, &empty, &TestHashStorage::new()).unwrap(),
+            Vec::<Hash>::new()
         );
         verify_subtree_consistency_proof(&[], 4, Hash::default(), &empty, EMPTY_HASH).unwrap();
         verify_subtree_consistency_proof(
@@ -1507,6 +1543,10 @@ mod tests {
             .unwrap_err();
 
         // Empty tree.
+        let empty_tree = Subtree::new(0, 0).unwrap();
+        verify_subtree_consistency_proof(&[], 0, EMPTY_HASH, &empty_tree, EMPTY_HASH).unwrap();
+        verify_subtree_consistency_proof(&[], 0, Hash::default(), &empty_tree, EMPTY_HASH)
+            .unwrap_err();
         verify_consistency_proof(&[], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
         verify_consistency_proof(&[], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
         verify_consistency_proof(&[], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
@@ -1516,6 +1556,22 @@ mod tests {
         // Tree with single leaf.
         verify_inclusion_proof(&vec![], 1, Hash::default(), 0, Hash::default()).unwrap();
         verify_consistency_proof(&[], 1, Hash::default(), 1, Hash::default()).unwrap();
+    }
+
+    #[test]
+    fn test_tree_hash_indexes_reject_unrepresentable_storage_index() {
+        let largest_representable = (1_u64 << 63) + 1;
+        assert_eq!(
+            tree_hash_indexes(largest_representable).unwrap(),
+            vec![u64::MAX - 1, u64::MAX]
+        );
+        assert_eq!(stored_hash_count(1_u64 << 63).unwrap(), u64::MAX);
+
+        let first_unrepresentable = largest_representable + 1;
+        let subtree = Subtree::new(0, first_unrepresentable).unwrap();
+        assert!(tree_hash_indexes(first_unrepresentable).is_err());
+        assert!(subtree_hash_indexes(&subtree).is_err());
+        assert!(stored_hash_count(largest_representable).is_err());
     }
 
     #[test]
