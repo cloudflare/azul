@@ -2679,8 +2679,10 @@ mod tests {
                 hash_reader.read_hashes(&indexes)?
             };
 
-            let last_tile = TlogTile::from_index(tlog_core::stored_hash_count(c.size() - 1))
-                .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
+            let last_tile = TlogTile::from_index(
+                tlog_core::stored_hash_count(c.size() - 1).map_err(|e| anyhow!(e))?,
+            )
+            .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
 
             for n in 0..last_tile.level_index() {
                 let tile = if n == last_tile.level_index() {

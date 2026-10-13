@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use tlog_core::{
-    HASH_SIZE, Hash, HashReader, TlogError, node_hash, split_stored_hash_index, stored_hash_index,
-    tree_hash_indexes,
+    HASH_SIZE, Hash, HashReader, TlogError, node_hash, split_stored_hash_index, stored_hash_count,
+    stored_hash_index, tree_hash_indexes,
 };
 
 // To limit the size of any particular directory listing, we encode the (possibly very large)
@@ -586,7 +586,7 @@ impl HashReader for TileHashReader<'_> {
 
         // Plan to fetch tiles necessary to recompute tree hash. If it matches,
         // those tiles are authenticated.
-        let stx = tree_hash_indexes(self.tree_size);
+        let stx = tree_hash_indexes(self.tree_size)?;
         let mut stx_tile_order = vec![0; stx.len()];
 
         for (i, &x) in stx.iter().enumerate() {
@@ -605,7 +605,7 @@ impl HashReader for TileHashReader<'_> {
         // being fetched anyway.
         let mut index_tile_order = vec![0; indexes.len()];
         for (i, &x) in indexes.iter().enumerate() {
-            if x >= stored_hash_index(0, self.tree_size) {
+            if x >= stored_hash_count(self.tree_size)? {
                 return Err(TlogError::IndexesNotInTree);
             }
 
@@ -904,7 +904,7 @@ mod tests {
             let old_storage_len = storage.len();
             storage.extend(hashes);
 
-            assert_eq!(stored_hash_count(i + 1), storage.len() as u64);
+            assert_eq!(stored_hash_count(i + 1).unwrap(), storage.len() as u64);
 
             let th = tree_hash(i + 1, &storage).unwrap();
 
