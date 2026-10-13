@@ -18,8 +18,8 @@ use generic_log_worker::{
     log_ops::{ProofError, prove_consistency, prove_subtree_consistency, read_leaf_range},
 };
 use ietf_mtc_api::{
-    IetfMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY, LandmarkSequence,
-    TrustAnchorID, UINT48_MAX,
+    IetfMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY, Landmark,
+    LandmarkSequence, TrustAnchorID, UINT48_MAX,
 };
 use ml_dsa::{MlDsa44, VerifyingKey as MlDsaVerifyingKey};
 use pkcs8::DecodePublicKey as _;
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use signed_note::{KeyName, Note, NoteVerifier};
 use tlog_checkpoint::{CheckpointText, UnixTimestampMillis};
-use tlog_core::{Hash, Subtree};
+use tlog_core::{EMPTY_HASH, Hash, Subtree};
 use tlog_cosignature::SubtreeV1NoteVerifier;
 use tlog_mirror::{AddEntriesRequestHeader, EntryPackage, MirrorInfo, package_ranges};
 use tlog_witness::{
@@ -106,7 +106,7 @@ pub struct SubtreeWithConsistencyProof {
 pub struct LandmarkBundle {
     pub checkpoint: String,
     pub subtrees: Vec<SubtreeWithConsistencyProof>,
-    pub landmarks: VecDeque<u64>,
+    pub landmarks: VecDeque<Landmark>,
 }
 
 struct MirrorSession {
@@ -114,6 +114,16 @@ struct MirrorSession {
     submission_url: String,
     verifier: SubtreeV1NoteVerifier,
     checkpoint: Note,
+}
+
+fn landmark_expiration(
+    checkpoint_time_millis: UnixTimestampMillis,
+    max_certificate_lifetime_secs: usize,
+) -> Result<u64> {
+    checkpoint_time_millis
+        .div_ceil(1000)
+        .checked_add(max_certificate_lifetime_secs as u64)
+        .ok_or_else(|| "landmark expiration overflow".into())
 }
 
 /// Return a callback function that gets passed into the generic sequencer and
@@ -174,14 +184,24 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     }
 
                     let max_active_landmarks = params.max_active_landmarks();
+                    let current_time = new_time.div_ceil(1000);
+                    let expiration =
+                        landmark_expiration(new_time, params.max_certificate_lifetime_secs)?;
                     let mut landmark_sequence = None;
                     if idle {
                         if last_idle_landmark.get() == Some(tree_size) {
                             return Ok(());
                         }
-                        let mut sequence =
-                            load_landmark_sequence(&bucket_clone, max_active_landmarks).await?;
-                        if !sequence.add(tree_size).map_err(|e| e.to_string())? {
+                        let mut sequence = load_landmark_sequence(
+                            &bucket_clone,
+                            max_active_landmarks,
+                            current_time,
+                        )
+                        .await?;
+                        if !sequence
+                            .add(tree_size, expiration, current_time)
+                            .map_err(|e| e.to_string())?
+                        {
                             last_idle_landmark.set(Some(tree_size));
                             return Ok(());
                         }
@@ -228,9 +248,16 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
                     let seq = if let Some(sequence) = landmark_sequence {
                         sequence
                     } else {
-                        let mut sequence =
-                            load_landmark_sequence(&bucket_clone, max_active_landmarks).await?;
-                        if !sequence.add(tree_size).map_err(|e| e.to_string())? {
+                        let mut sequence = load_landmark_sequence(
+                            &bucket_clone,
+                            max_active_landmarks,
+                            current_time,
+                        )
+                        .await?;
+                        if !sequence
+                            .add(tree_size, expiration, current_time)
+                            .map_err(|e| e.to_string())?
+                        {
                             return Ok(());
                         }
                         sequence
@@ -288,10 +315,11 @@ fn checkpoint_callback(env: &Env, name: &str) -> CheckpointCallbacker {
 async fn load_landmark_sequence(
     bucket: &Bucket,
     max_active_landmarks: usize,
+    current_time: u64,
 ) -> Result<LandmarkSequence> {
     if let Some(object) = bucket.get(LANDMARK_KEY).execute().await? {
         let bytes = object.body().ok_or("missing object body")?.bytes().await?;
-        LandmarkSequence::from_bytes(&bytes, max_active_landmarks)
+        LandmarkSequence::from_bytes(&bytes, max_active_landmarks, current_time)
             .map_err(|error| error.to_string().into())
     } else {
         Ok(LandmarkSequence::create(max_active_landmarks))
@@ -705,19 +733,27 @@ async fn get_landmark_subtrees(
     let cached_object_backend = CachedRoObjectBucket::new(ObjectBucket::new(bucket));
     let mut subtrees = Vec::new();
     for landmark_subtree in landmark_sequence.subtrees() {
-        let (consistency_proof, landmark_subtree_hash) = match prove_subtree_consistency(
-            checkpoint_hash,
-            checkpoint_size,
-            landmark_subtree.lo(),
-            landmark_subtree.hi(),
-            &cached_object_backend,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(ProofError::Tlog(s)) => return Err(s.to_string().into()),
-            Err(ProofError::Other(e)) => return Err(e.to_string().into()),
-        };
+        if landmark_subtree.hi() > checkpoint_size {
+            return Err("landmark subtree exceeds checkpoint".into());
+        }
+        let (consistency_proof, landmark_subtree_hash) =
+            if landmark_subtree.lo() == landmark_subtree.hi() {
+                (Vec::new(), EMPTY_HASH)
+            } else {
+                match prove_subtree_consistency(
+                    checkpoint_hash,
+                    checkpoint_size,
+                    landmark_subtree.lo(),
+                    landmark_subtree.hi(),
+                    &cached_object_backend,
+                )
+                .await
+                {
+                    Ok(p) => p,
+                    Err(ProofError::Tlog(s)) => return Err(s.to_string().into()),
+                    Err(ProofError::Other(e)) => return Err(e.to_string().into()),
+                }
+            };
 
         subtrees.push(SubtreeWithConsistencyProof {
             hash: landmark_subtree_hash.0,
@@ -891,6 +927,13 @@ async fn sign_and_cache_landmark_subtrees(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landmark_expiration_rounds_checkpoint_time_up() {
+        assert_eq!(landmark_expiration(1_000, 60).unwrap(), 61);
+        assert_eq!(landmark_expiration(1_001, 60).unwrap(), 62);
+        assert!(landmark_expiration(u64::MAX, usize::MAX).is_err());
+    }
 
     #[test]
     fn add_checkpoint_accepts_completed_retry() {

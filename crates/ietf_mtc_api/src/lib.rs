@@ -39,24 +39,17 @@ use x509_cert::{
     time::Validity,
 };
 
-/// OID for Trust Anchor IDs, as specified in draft-ietf-plants-merkle-tree-certs-06.
-///
-/// The experimental value `1.3.6.1.4.1.44363.47.1` (Cloudflare's private OID arc)
-/// is used until the IANA assignment from the draft is finalized.
+/// OID for Trust Anchor IDs, as specified in draft-ietf-plants-merkle-tree-certs-07.
 pub const ID_RDNA_TRUSTANCHOR_ID: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.3");
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.25.3");
 
 /// OID for the MTC proof algorithm, used in the `signature_algorithm` field of
-/// landmark certificates, as specified in draft-ietf-plants-merkle-tree-certs-06.
-///
-/// The experimental value `1.3.6.1.4.1.44363.47.0` is used until the IANA
-/// assignment from the draft is finalized.
-pub const ID_ALG_MTCPROOF: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.0");
+/// MTC certificates, as specified in draft-ietf-plants-merkle-tree-certs-07.
+pub const ID_ALG_MTCPROOF: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.6.67");
 
-/// Experimental OID for the SHA-256 MTC CA certificate extension.
+/// OID for the SHA-256 MTC CA certificate extension.
 pub const ID_PE_MTC_CERTIFICATION_AUTHORITY_SHA256: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.44363.47.4");
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.38");
 
 /// Contents of the critical MTC CA certificate extension.
 #[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
@@ -86,7 +79,7 @@ impl MtcCertificationAuthority {
 #[serde(rename_all = "snake_case")]
 pub enum DraftVersion {
     #[default]
-    Draft06,
+    Draft07,
 }
 
 pub const UINT48_MAX: u64 = (1_u64 << 48) - 1;
@@ -185,13 +178,13 @@ fn write_u48(buffer: &mut Vec<u8>, value: u64) -> Result<(), MtcError> {
     Ok(())
 }
 
-// MTCSignature from draft-ietf-plants-merkle-tree-certs §6.1.
-struct MtcSignature {
+// Cosignature from draft-ietf-plants-merkle-tree-certs §6.2.
+struct Cosignature {
     cosigner_id: TrustAnchorID,
     signature: Vec<u8>,
 }
 
-impl MtcSignature {
+impl Cosignature {
     fn to_bytes(&self) -> Result<Vec<u8>, MtcError> {
         let mut buffer = Vec::new();
         write_length_prefixed(
@@ -206,13 +199,13 @@ impl MtcSignature {
     }
 }
 
-// MTCProof from draft-ietf-plants-merkle-tree-certs §6.1.
+// MTCProof from draft-ietf-plants-merkle-tree-certs §6.2.
 struct MtcProof {
     extensions: Vec<MerkleTreeCertEntryExtension>,
     start: u64,
     end: u64,
     inclusion_proof: Proof,
-    signatures: Vec<MtcSignature>,
+    signatures: Vec<Cosignature>,
 }
 
 impl MtcProof {
@@ -235,7 +228,7 @@ impl MtcProof {
         let signatures = self
             .signatures
             .iter()
-            .map(MtcSignature::to_bytes)
+            .map(Cosignature::to_bytes)
             .collect::<Result<Vec<_>, _>>()?
             .concat();
         write_length_prefixed(&mut buffer, &signatures, UINT24_MAX, 3, "signatures")?;
@@ -262,14 +255,14 @@ pub struct AddEntryRequest {
 
 /// Add-entry response.
 ///
-/// The DER-encoded standalone MTC certificate (§6.2) encodes all relevant
+/// The DER-encoded standalone MTC certificate (§6.3) encodes all relevant
 /// fields: the entry index is the certificate serial number, validity is in
 /// the `TBSCertificate`, and the inclusion proof and cosignature are in the
 /// `signatureValue`.
 #[serde_as]
 #[derive(Serialize)]
 pub struct AddEntryResponse {
-    /// DER-encoded standalone MTC certificate (§6.2), base64-encoded.
+    /// DER-encoded standalone MTC certificate (§6.3), base64-encoded.
     #[serde_as(as = "Base64")]
     pub certificate: Vec<u8>,
 }
@@ -435,10 +428,11 @@ fn extract_san_from_csr(
     Ok(None)
 }
 
-/// Serialize a DER-encoded MTC certificate (draft-ietf-plants-merkle-tree-certs §6.1).
+/// Serialize a DER-encoded MTC certificate (draft-ietf-plants-merkle-tree-certs §6.2).
 ///
-/// Pass an empty `cosignatures` slice for a landmark-relative certificate (§6.3)
-/// or a non-empty slice for a standalone certificate (§6.2).
+/// Pass an empty `cosignatures` slice for a landmark-relative certificate (§6.4)
+/// or a non-empty slice for a standalone certificate (§6.3). Draft 07 also
+/// permits GREASE cosignatures in either form.
 ///
 /// # Errors
 ///
@@ -508,7 +502,7 @@ pub fn serialize_mtc_cert(
     }
     let signatures = cosignatures
         .into_iter()
-        .map(|(cosigner_id, sig)| MtcSignature {
+        .map(|(cosigner_id, sig)| Cosignature {
             cosigner_id,
             signature: sig,
         })
@@ -835,6 +829,20 @@ mod tests {
         )
     }
 
+    #[test]
+    fn draft_07_allocations() {
+        assert_eq!(ID_ALG_MTCPROOF.to_string(), "1.3.6.1.5.5.7.6.67");
+        assert_eq!(
+            ID_PE_MTC_CERTIFICATION_AUTHORITY_SHA256.to_string(),
+            "1.3.6.1.5.5.7.1.38"
+        );
+        assert_eq!(ID_RDNA_TRUSTANCHOR_ID.to_string(), "1.3.6.1.5.5.7.25.3");
+        assert_eq!(
+            serde_json::to_string(&DraftVersion::default()).unwrap(),
+            "\"draft07\""
+        );
+    }
+
     /// Generate a CSR with no extensions.
     fn make_csr_no_san() -> Vec<u8> {
         use crypto_common::Generate as _;
@@ -956,7 +964,7 @@ mod tests {
             start: 0,
             end: 1,
             inclusion_proof: Vec::new(),
-            signatures: vec![MtcSignature {
+            signatures: vec![Cosignature {
                 cosigner_id: id.clone(),
                 signature: vec![0; UINT16_MAX],
             }],
@@ -969,7 +977,7 @@ mod tests {
         );
 
         let oversized_signature = MtcProof {
-            signatures: vec![MtcSignature {
+            signatures: vec![Cosignature {
                 cosigner_id: "1".parse().unwrap(),
                 signature: vec![0; UINT16_MAX + 1],
             }],

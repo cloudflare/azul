@@ -3,7 +3,7 @@
     "logs": {
         "dev1": {
             "description": "MTC CA Dev1 (ML-DSA-44)",
-            "version": "draft06",
+            "version": "draft07",
             "ca_id": "44363.48.1",
             "log_number": 1,
             "submission_url": "http://localhost:8787/logs/dev1/",
@@ -20,7 +20,7 @@
         },
         "dev2": {
             "description": "MTC CA Dev2 (Ed25519)",
-            "version": "draft06",
+            "version": "draft07",
             "ca_id": "44363.48.3",
             "log_number": 1,
             "submission_url": "http://localhost:8787/logs/dev2/",

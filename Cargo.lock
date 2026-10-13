@@ -1989,7 +1989,7 @@ name = "mirror_worker"
 version = "0.3.0"
 dependencies = [
  "axum",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
  "flate2",

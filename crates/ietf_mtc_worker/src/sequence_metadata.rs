@@ -99,7 +99,7 @@ impl SignedSubtree {
 /// having to enumerate candidate subtree keys.
 ///
 /// Unlike bootstrap/static-ct metadata, there is no `timestamp` field: the
-/// IETF MTC `add-entry` response is a DER-encoded §6.2 standalone certificate,
+/// IETF MTC `add-entry` response is a DER-encoded §6.3 standalone certificate,
 /// whose validity is carried inside the TBS entry rather than returned
 /// separately.
 ///
