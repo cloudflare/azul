@@ -74,7 +74,7 @@ pub struct GetCertificateRequest {
 pub struct GetCertificateResponse {
     #[serde_as(as = "Base64")]
     pub data: Vec<u8>,
-    pub landmark_id: usize,
+    pub landmark_id: u64,
 }
 
 #[event(start)]
@@ -579,9 +579,13 @@ async fn get_landmark_sequence(
     let Some(bytes) = object_backend.fetch(LANDMARK_KEY).await? else {
         return Ok(None);
     };
-    LandmarkSequence::from_bytes(&bytes, CONFIG.logs[name].max_active_landmarks())
-        .map(Some)
-        .map_err(|e| AppError::InternalServerError(e.to_string()))
+    LandmarkSequence::from_bytes(
+        &bytes,
+        CONFIG.logs[name].max_active_landmarks(),
+        now_millis().div_ceil(1000),
+    )
+    .map(Some)
+    .map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 
 #[cfg(test)]

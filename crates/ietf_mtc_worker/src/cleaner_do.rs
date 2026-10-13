@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::{CONFIG, SUBTREE_SIG_KEY_PREFIX, init_sentry, load_checkpoint_cosigner, load_origin};
 use generic_log_worker::{
     CleanerConfig, GenericCleaner, ObjectBackend, ObjectBucket, load_public_bucket,
+    util::now_millis,
 };
 use ietf_mtc_api::{IetfMtcPendingLogEntry, LANDMARK_KEY, LandmarkSequence};
 use signed_note::VerifierList;
@@ -79,11 +80,14 @@ impl Cleaner {
         let Some(seq_bytes) = object_bucket.fetch(LANDMARK_KEY).await? else {
             return Ok(()); // no landmarks yet, nothing to clean
         };
-        let seq = LandmarkSequence::from_bytes(&seq_bytes, params.max_active_landmarks())
-            .map_err(|e| e.to_string())?;
-        let Some(&oldest_landmark) = seq.landmarks.front() else {
+        let current_time = now_millis().div_ceil(1000);
+        let seq =
+            LandmarkSequence::from_bytes(&seq_bytes, params.max_active_landmarks(), current_time)
+                .map_err(|e| e.to_string())?;
+        let Some(oldest_landmark) = seq.landmarks.front() else {
             return Ok(());
         };
+        let oldest_landmark = oldest_landmark.tree_size;
 
         // List all subtree signature keys and delete those with hi <= oldest_landmark.
         let mut cursor = None;

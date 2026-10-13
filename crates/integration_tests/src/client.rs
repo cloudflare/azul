@@ -339,7 +339,13 @@ pub struct IetfMtcLandmarkSubtree {
 pub struct IetfMtcLandmarkBundle {
     pub checkpoint: String,
     pub subtrees: Vec<IetfMtcLandmarkSubtree>,
-    pub landmarks: std::collections::VecDeque<u64>,
+    pub landmarks: std::collections::VecDeque<IetfMtcLandmark>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcLandmark {
+    pub tree_size: u64,
+    pub expiration: u64,
 }
 
 /// Get-certificate response from the IETF MTC worker.
@@ -348,7 +354,7 @@ pub struct IetfMtcLandmarkBundle {
 pub struct IetfMtcGetCertificateResponse {
     #[serde_as(as = "Base64")]
     pub data: Vec<u8>,
-    pub landmark_id: usize,
+    pub landmark_id: u64,
 }
 
 /// HTTP client bound to a particular IETF MTC log shard.
@@ -516,7 +522,11 @@ impl IetfMtcClient {
         }
 
         let metadata = self.get_metadata().await?;
-        get_raw_http(&self.client, metadata.monitoring_url.as_deref(), path).await
+        let monitoring_url = metadata
+            .monitoring_url
+            .as_deref()
+            .context("MTC metadata has no monitoring URL")?;
+        get_raw_http(&self.client, monitoring_url, path).await
     }
 
     /// `GET /logs/:log/{path}` — returns the HTTP status code without failing on 4xx/5xx.

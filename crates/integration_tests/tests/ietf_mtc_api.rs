@@ -412,9 +412,10 @@ fn verify_standalone_cert(cert: &Certificate, leaf_index: u64, context: &Verific
 
 /// Verify a landmark-relative MTC certificate following draft-ietf-plants-merkle-tree-certs §7.2.
 ///
-/// Landmark-relative certs have no inline cosignatures (§6.3).  In a real relying
-/// party, the subtree hash would be predistributed (§7.4). In the test, the
-/// authenticated landmark bundle stands in for predistributed trusted subtree info.
+/// This implementation emits landmark-relative certs without optional GREASE cosignatures
+/// (§6.4). In a real relying party, the subtree hash would be predistributed
+/// (§7.4). In the test, the authenticated landmark bundle stands in for
+/// predistributed trusted subtree info.
 ///
 /// Steps performed:
 /// 1. Check `id-alg-mtcProof` (already done).
@@ -433,10 +434,10 @@ async fn verify_landmark_relative_cert(
     let proof =
         ParsedMtcProof::from_bytes(&proof_bytes).expect("MTCProof must parse from signatureValue");
 
-    // §6.3 / §7.2 step 7: landmark-relative certs carry no inline cosignatures.
+    // This PoC does not emit the optional GREASE cosignatures allowed by §6.4.
     assert!(
         proof.signatures.is_empty(),
-        "landmark-relative cert must have no inline cosignatures (§6.3)"
+        "landmark-relative cert unexpectedly contains inline cosignatures"
     );
 
     let subtree =
@@ -484,22 +485,12 @@ async fn verify_landmark_relative_cert(
     .expect("landmark bundle checkpoint signature");
 
     let mut bundle_ranges = Vec::new();
-    for (&lo, &hi) in bundle.landmarks.iter().zip(bundle.landmarks.iter().skip(1)) {
-        let (left, right) = Subtree::split_interval(lo, hi).expect("valid landmark interval");
+    for (lo, hi) in bundle.landmarks.iter().zip(bundle.landmarks.iter().skip(1)) {
+        let (left, right) =
+            Subtree::split_interval(lo.tree_size, hi.tree_size).expect("valid landmark interval");
         bundle_ranges.extend([left, right]);
     }
     assert_eq!(bundle_ranges.len(), bundle.subtrees.len());
-    if bundle
-        .landmarks
-        .iter()
-        .zip(bundle.landmarks.iter().skip(1))
-        .any(|(&lo, &hi)| hi - lo == 1)
-    {
-        assert!(
-            bundle_ranges.iter().any(|range| range.lo() == range.hi()),
-            "single-entry landmark intervals must publish an empty second subtree"
-        );
-    }
     assert!(
         bundle_ranges
             .iter()

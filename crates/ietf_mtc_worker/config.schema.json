@@ -103,8 +103,8 @@
                         },
                         "version": {
                             "type": "string",
-                            "enum": ["draft06"],
-                            "default": "draft06",
+                            "enum": ["draft07"],
+                            "default": "draft07",
                             "description": "The version of draft-ietf-plants-merkle-tree-certs that this log implements."
                         },
                         "cosigners": {

@@ -2,7 +2,7 @@
 
 A Rust implementation of an [IETF Merkle Tree Certificate CA](https://github.com/ietf-plants-wg/merkle-tree-certs/) for deployment on [Cloudflare Workers](https://workers.cloudflare.com/).
 
-This worker implements [draft-ietf-plants-merkle-tree-certs-06](https://datatracker.ietf.org/doc/draft-ietf-plants-merkle-tree-certs/).
+This worker implements [draft-ietf-plants-merkle-tree-certs-07](https://datatracker.ietf.org/doc/html/draft-ietf-plants-merkle-tree-certs-07).
 
 > **Warning:** The `add-entry` endpoint is an unauthenticated interoperability
 > endpoint. It does not perform ACME authorization or production certificate
@@ -21,6 +21,7 @@ Once a landmark interval elapses, the sequencer produces a landmark subtree and 
 - The subtree signing oracle (for external cosigners) is not yet implemented.
 - The ACME interface is not yet complete.
 - ACME order `notBefore`/`notAfter` fields are not currently supported.
+- Persisted state from earlier draft versions must be reset before upgrading.
 
 ## Development
 

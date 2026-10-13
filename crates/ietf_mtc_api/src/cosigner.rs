@@ -435,7 +435,7 @@ fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
 
 /// A decoded `MTCProof` extracted from a certificate's `signatureValue`.
 ///
-/// See draft-ietf-plants-merkle-tree-certs §6.1.
+/// See draft-ietf-plants-merkle-tree-certs §6.2.
 #[derive(Debug)]
 pub struct ParsedMtcProof {
     /// Extensions copied from the log entry.
@@ -482,7 +482,7 @@ impl ParsedMtcProof {
         }
         let inclusion_proof = proof_hashes.iter().copied().map(Hash).collect();
 
-        // signatures: uint24-prefixed list of MtcSignature
+        // signatures: uint24-prefixed list of Cosignature
         let sigs_len = read_u24(&mut bytes)?;
         if bytes.len() < sigs_len {
             return Err(crate::MtcError::Dynamic("truncated signatures".into()));
@@ -681,6 +681,12 @@ mod tests {
         let mut duplicate_extensions = proof_bytes(&[], &[]);
         duplicate_extensions.splice(0..2, [0, 8, 0, 1, 0, 0, 0, 1, 0, 0]);
         assert!(ParsedMtcProof::from_bytes(&duplicate_extensions).is_err());
+    }
+
+    #[test]
+    fn proof_parser_accepts_grease_cosignatures() {
+        let proof = ParsedMtcProof::from_bytes(&proof_bytes(&[&[1], &[2]], &[])).unwrap();
+        assert_eq!(proof.signatures.len(), 2);
     }
 
     #[test]

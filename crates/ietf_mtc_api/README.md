@@ -4,7 +4,7 @@ Core types and logic for the [IETF Merkle Tree CA Worker](../ietf_mtc_worker/REA
 
 This crate implements the IETF draft protocol layer on top of the shared
 split transparency-log crates, targeting
-[draft-ietf-plants-merkle-tree-certs-06](https://datatracker.ietf.org/doc/draft-ietf-plants-merkle-tree-certs/).
+[draft-ietf-plants-merkle-tree-certs-07](https://datatracker.ietf.org/doc/html/draft-ietf-plants-merkle-tree-certs-07).
 
 Key components:
 
