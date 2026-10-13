@@ -273,22 +273,10 @@ async fn log_metadata(
 
 /// `GET /operator-list.json`
 async fn operator_list() -> impl IntoResponse {
-    let mut logs = CONFIG
-        .logs
-        .values()
-        .filter(|params| params.include_in_operator_list)
-        .map(|params| {
-            format!(
-                "{}/metadata.json",
-                params.submission_endpoint.url.trim_end_matches('/')
-            )
-        })
-        .collect::<Vec<_>>();
-    logs.sort();
     Json(OperatorListResponse {
         schema: OPERATOR_LIST_SCHEMA,
         operator_name: &CONFIG.operator_name,
-        logs,
+        logs: CONFIG.operator_list_urls(),
     })
 }
 

@@ -17,6 +17,15 @@
             "type": "string",
             "description": "Human-readable name published in the operator log list."
         },
+        "operator_list_entries": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "format": "uri"
+            },
+            "default": [],
+            "description": "Additional log metadata URLs published in the operator log list."
+        },
         "logs": {
             "type": "object",
             "description": "Dictionary CT log shard names to configurations.",
