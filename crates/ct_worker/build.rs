@@ -49,6 +49,9 @@ fn main() {
         check_url(&params.submission_endpoint.url);
         check_url(&params.monitoring_endpoint.url);
     }
+    for url in &loaded.config.operator_list_entries {
+        check_url(url);
+    }
 
     // Get and validate roots from an embedded roots file, which must exist if
     // 'enable_ccadb_roots' is false. If 'enable_ccadb_roots' is true, the log

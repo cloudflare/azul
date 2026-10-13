@@ -211,6 +211,7 @@ async fn operator_list_returns_metadata_urls() {
         [
             "http://localhost:8787/logs/dev2027h1a/metadata.json",
             "http://localhost:8787/logs/dev2027h2a/metadata.json",
+            "https://example.com/external-log/metadata.json",
         ]
     );
 }

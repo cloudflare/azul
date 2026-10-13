@@ -16,7 +16,30 @@ pub struct TemporalInterval {
 pub struct AppConfig {
     pub logging_level: Option<String>,
     pub operator_name: String,
+    #[serde(default)]
+    pub operator_list_entries: Vec<String>,
     pub logs: HashMap<String, LogParams>,
+}
+
+impl AppConfig {
+    #[must_use]
+    pub fn operator_list_urls(&self) -> Vec<String> {
+        let mut urls = self
+            .logs
+            .values()
+            .filter(|params| params.include_in_operator_list)
+            .map(|params| {
+                format!(
+                    "{}/metadata.json",
+                    params.submission_endpoint.url.trim_end_matches('/')
+                )
+            })
+            .chain(self.operator_list_entries.iter().cloned())
+            .collect::<Vec<_>>();
+        urls.sort_unstable();
+        urls.dedup();
+        urls
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,16 +124,20 @@ mod tests {
     }
 
     #[test]
-    fn operator_list_contains_only_selected_shards() {
-        let config: AppConfig =
+    fn operator_list_combines_selected_shards_and_manual_entries() {
+        let mut config: AppConfig =
             serde_json::from_str(include_str!("../../config.dev.json")).unwrap();
-        let mut logs = config
-            .logs
-            .iter()
-            .filter_map(|(name, params)| params.include_in_operator_list.then_some(name.as_str()))
-            .collect::<Vec<_>>();
-        logs.sort_unstable();
+        config
+            .operator_list_entries
+            .push("http://localhost:8787/logs/dev2027h1a/metadata.json".to_owned());
 
-        assert_eq!(logs, ["dev2027h1a", "dev2027h2a"]);
+        assert_eq!(
+            config.operator_list_urls(),
+            [
+                "http://localhost:8787/logs/dev2027h1a/metadata.json",
+                "http://localhost:8787/logs/dev2027h2a/metadata.json",
+                "https://example.com/external-log/metadata.json",
+            ]
+        );
     }
 }

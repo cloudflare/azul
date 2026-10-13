@@ -1,6 +1,9 @@
 {
     "logging_level": "info",
     "operator_name": "Cloudflare",
+    "operator_list_entries": [
+        "https://example.com/external-log/metadata.json"
+    ],
     "logs": {
         "e2etestshard": {
             "friendly_name": "e2e test shard",
