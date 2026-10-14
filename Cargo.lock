@@ -3329,6 +3329,7 @@ dependencies = [
 name = "tlog_cosignature"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "byteorder",
  "ed25519-dalek",
  "length_prefixed",

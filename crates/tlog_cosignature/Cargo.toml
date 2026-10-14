@@ -15,6 +15,7 @@ keywords = ["transparency", "cosignature", "checkpoint", "crypto", "pki"]
 crate-type = ["rlib"]
 
 [dependencies]
+base64.workspace = true
 byteorder.workspace = true
 ed25519-dalek.workspace = true
 length_prefixed.workspace = true
