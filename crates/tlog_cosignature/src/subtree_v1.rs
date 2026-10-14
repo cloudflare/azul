@@ -81,11 +81,13 @@
 //! [cosignature_v1]: crate::cosignature_v1
 //! [`SignatureType::MlDsa44`]: signed_note::SignatureType::MlDsa44
 
+use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use length_prefixed::WriteLengthPrefixedBytesExt;
 use ml_dsa::{
-    EncodedSignature as MlDsaEncodedSignature, ExpandedSigningKey as MlDsaExpandedSigningKey,
-    MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
+    EncodedSignature as MlDsaEncodedSignature, EncodedVerifyingKey as MlDsaEncodedVerifyingKey,
+    ExpandedSigningKey as MlDsaExpandedSigningKey, MlDsa44, Signature as MlDsaSignature,
+    VerifyingKey as MlDsaVerifyingKey,
     signature::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
 };
 use pkcs8::{DecodePrivateKey as _, EncodePublicKey as _};
@@ -421,6 +423,37 @@ impl SubtreeV1NoteVerifier {
             id,
             verifying_key,
         }
+    }
+
+    /// Construct a new verifier from an encoded verifier key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`NoteError`] if `vkey` is malformed or otherwise invalid.
+    pub fn new_from_encoded_key(vkey: &str) -> Result<Self, NoteError> {
+        let (name, vkey) = vkey.split_once('+').ok_or(NoteError::Format)?;
+        let name = KeyName::new(name.into()).map_err(|_| NoteError::Format)?;
+        let (id16, key64) = vkey.split_once('+').ok_or(NoteError::Format)?;
+
+        let id = u32::from_str_radix(id16, 16).map_err(|_| NoteError::Format)?;
+        let key = BASE64_STANDARD
+            .decode(key64)
+            .map_err(|_| NoteError::Format)?;
+
+        if id16.len() != 8 || key.is_empty() {
+            return Err(NoteError::Format);
+        }
+
+        if id != signed_note::compute_key_id(&name, &key[0..1], &key[1..]) {
+            return Err(NoteError::Id);
+        }
+
+        if !matches!(SignatureType::try_from(key[0]), Ok(SignatureType::MlDsa44)) {
+            return Err(NoteError::Alg);
+        }
+        let encoded = MlDsaEncodedVerifyingKey::<MlDsa44>::try_from(&key[1..])
+            .map_err(|_| NoteError::Format)?;
+        Ok(Self::new(name, MlDsaVerifyingKey::decode(&encoded)))
     }
 
     /// Verify a subtree cosignature blob against an arbitrary
@@ -781,6 +814,33 @@ mod tests {
             pk_bytes.as_slice(),
         );
         assert_eq!(v.key_id(), expected);
+    }
+
+    #[test]
+    fn new_from_encoded_key_verifies_checkpoint() {
+        use signed_note::{Note, VerifierList};
+
+        let sk = signing_key(10);
+        let signer = SubtreeV1CheckpointSigner::new(name("log.example/origin"), sk.clone());
+        let pk = sk.verifying_key().encode();
+        let id = signed_note::compute_key_id(&name("log.example/origin"), &[0x06], pk.as_slice());
+        let key = [&[0x06], pk.as_slice()].concat();
+        let vkey = format!(
+            "log.example/origin+{id:08x}+{}",
+            BASE64_STANDARD.encode(key)
+        );
+        let parsed = SubtreeV1NoteVerifier::new_from_encoded_key(&vkey).unwrap();
+        assert_eq!(parsed.name(), &name("log.example/origin"));
+        assert_eq!(parsed.key_id(), signer.verifier().key_id());
+
+        let cp_text =
+            CheckpointText::new("log.example/origin", 42, Hash([0x55; HASH_SIZE]), &[]).unwrap();
+        let sig = signer.sign(1_700_000_000_000, &cp_text).unwrap();
+        let note = Note::new(&cp_text.to_bytes(), &[sig]).unwrap();
+        let (verified, _) = note
+            .verify(&VerifierList::new(vec![Box::new(parsed)]))
+            .unwrap();
+        assert_eq!(verified.len(), 1);
     }
 
     /// `extract_timestamp_millis` parses the BE-u64 prefix and returns
