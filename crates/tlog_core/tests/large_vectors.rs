@@ -7,7 +7,8 @@
 //! These exercise trees bounded by 2^48-1, 2^63-1, and 2^64-1, which the
 //! exhaustive Appendix C.1 vectors in the crate's unit tests do not reach.
 //! The vectors are verify-only: no tree is built, so the inputs are the
-//! published hashes and proofs rather than a [`tlog_core::HashReader`].
+//! published hashes and proofs rather than a [`tlog_core::HashReader`], so
+//! they run in milliseconds and are part of the default test run.
 //!
 //! The JSON fixtures under `tests/vectors/` are copied from the `demo`
 //! directory of <https://github.com/ietf-plants-wg/merkle-tree-certs>,
@@ -77,7 +78,6 @@ fn flip_first_bit(hash: Hash) -> Hash {
 }
 
 #[test]
-#[ignore = "large MTC vectors; run with `cargo test -p tlog_core --test large_vectors -- --ignored`"]
 fn large_subtree_validity_vectors() {
     for (start, end) in [
         (0, (1_u64 << 47) + 1),
@@ -102,7 +102,6 @@ fn large_subtree_validity_vectors() {
 }
 
 #[test]
-#[ignore = "large MTC vectors; run with `cargo test -p tlog_core --test large_vectors -- --ignored`"]
 fn large_subtree_inclusion_proof_vectors() {
     let vectors: Vec<InclusionVector> =
         serde_json::from_str(include_str!("vectors/large_inclusion_proofs.json")).unwrap();
@@ -176,7 +175,6 @@ fn large_subtree_inclusion_proof_vectors() {
 }
 
 #[test]
-#[ignore = "large MTC vectors; run with `cargo test -p tlog_core --test large_vectors -- --ignored`"]
 fn large_subtree_consistency_proof_vectors() {
     let vectors: Vec<ConsistencyVector> =
         serde_json::from_str(include_str!("vectors/large_consistency_proofs.json")).unwrap();
@@ -275,7 +273,6 @@ const COVERING_SUBTREES: [(u64, u64, u64, u64, u64, u64); 15] = [
 ];
 
 #[test]
-#[ignore = "large MTC vectors; run with `cargo test -p tlog_core --test large_vectors -- --ignored`"]
 fn large_covering_subtree_vectors() {
     for (start, end, left_start, left_end, right_start, right_end) in COVERING_SUBTREES {
         assert_eq!(
