@@ -1720,7 +1720,7 @@ mod tests {
         }
         log.sequence().unwrap();
 
-        let data_tile = TlogTile::from_index(tlog_core::stored_hash_count(2))
+        let data_tile = TlogTile::from_index(tlog_core::stored_hash_count(2).unwrap())
             .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
         log.object
             .objects
