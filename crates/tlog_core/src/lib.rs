@@ -518,11 +518,9 @@ pub fn verify_inclusion_proof(
 ) -> Result<(), TlogError> {
     // Delegate to the evaluator with a synthetic `[0, tree_size)` subtree,
     // matching how the MTC spec layers §4.3.3 on top of §4.3.2. A
-    // `tree_size` of 0 fails `Subtree::new` here (with `ConditionNotMet`
-    // rather than `InvalidProof`); this is a strict-subset behavioral
-    // change — nothing in the workspace matches on the specific error
-    // variant — and is the correct outcome, since an empty tree has no
-    // leaves to prove inclusion for.
+    // `tree_size` of 0 builds an empty subtree, which
+    // `evaluate_subtree_inclusion_proof` rejects with `InvalidProof`, since
+    // an empty tree has no leaves to prove inclusion for.
     let subtree = Subtree::new(0, tree_size)?;
     let evaluated = evaluate_subtree_inclusion_proof(proof, &subtree, leaf_index, leaf_hash)?;
     if evaluated == root_hash {
@@ -1005,7 +1003,7 @@ pub fn verify_subtree_consistency_proof(
 ) -> Result<(), TlogError> {
     let Subtree { lo: start, hi: end } = *m;
 
-    // Check that `[start, end)` is a valid subtree, and that `end <= n`. If either do not hold, fail proof verification. These checks imply `0 <= start < end <= n`.
+    // Check that `[start, end)` is a valid subtree, and that `end <= n`. If either do not hold, fail proof verification. These checks imply `0 <= start <= end <= n`; the empty case `start == end` is handled separately below.
     if end > n {
         return Err(TlogError::InvalidProof);
     }
@@ -1633,6 +1631,116 @@ mod tests {
         (storage, leaves)
     }
 
+    fn flip_first_bit(hash: Hash) -> Hash {
+        let mut flipped = hash;
+        flipped.0[0] ^= 1;
+        flipped
+    }
+
+    /// Appendix C.1.2 negative obligations: a proof that is truncated,
+    /// extended, or checked against a corrupted subtree hash must not verify.
+    fn assert_inclusion_proof_rejects_corruption(
+        proof: &Proof,
+        subtree: &Subtree,
+        subtree_hash: Hash,
+        index: u64,
+        leaf_hash: Hash,
+    ) {
+        let label = format!("{index} {subtree}");
+        verify_subtree_inclusion_proof(proof, subtree, subtree_hash, index, leaf_hash).unwrap();
+
+        if !proof.is_empty() {
+            let truncated = proof[..proof.len() - 1].to_vec();
+            assert!(
+                verify_subtree_inclusion_proof(&truncated, subtree, subtree_hash, index, leaf_hash)
+                    .is_err(),
+                "{label}: truncated proof verified"
+            );
+        }
+        let mut extended = proof.clone();
+        extended.push(Hash::default());
+        assert!(
+            verify_subtree_inclusion_proof(&extended, subtree, subtree_hash, index, leaf_hash)
+                .is_err(),
+            "{label}: extended proof verified"
+        );
+        assert!(
+            verify_subtree_inclusion_proof(
+                proof,
+                subtree,
+                flip_first_bit(subtree_hash),
+                index,
+                leaf_hash
+            )
+            .is_err(),
+            "{label}: proof verified against a corrupted subtree hash"
+        );
+    }
+
+    /// Appendix C.1.3 negative obligations, mirroring the inclusion cases. A
+    /// flipped tree hash is only decisive for a non-empty subtree, since an
+    /// empty subtree is consistent with any tree.
+    fn assert_consistency_proof_rejects_corruption(
+        proof: &Proof,
+        tree_size: u64,
+        root_hash: Hash,
+        subtree: &Subtree,
+        subtree_hash: Hash,
+    ) {
+        let label = format!("{subtree} {tree_size}");
+        if !proof.is_empty() {
+            let truncated = proof[..proof.len() - 1].to_vec();
+            assert!(
+                verify_subtree_consistency_proof(
+                    &truncated,
+                    tree_size,
+                    root_hash,
+                    subtree,
+                    subtree_hash
+                )
+                .is_err(),
+                "{label}: truncated proof verified"
+            );
+        }
+        let mut extended = proof.clone();
+        extended.push(Hash::default());
+        assert!(
+            verify_subtree_consistency_proof(
+                &extended,
+                tree_size,
+                root_hash,
+                subtree,
+                subtree_hash
+            )
+            .is_err(),
+            "{label}: extended proof verified"
+        );
+        assert!(
+            verify_subtree_consistency_proof(
+                proof,
+                tree_size,
+                root_hash,
+                subtree,
+                flip_first_bit(subtree_hash)
+            )
+            .is_err(),
+            "{label}: proof verified against a corrupted subtree hash"
+        );
+        if subtree.lo != subtree.hi {
+            assert!(
+                verify_subtree_consistency_proof(
+                    proof,
+                    tree_size,
+                    flip_first_bit(root_hash),
+                    subtree,
+                    subtree_hash
+                )
+                .is_err(),
+                "{label}: proof verified against a corrupted tree hash"
+            );
+        }
+    }
+
     fn update_hash_hex(hasher: &mut Sha256, hash: Hash) {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         for byte in hash.0 {
@@ -1692,6 +1800,13 @@ mod tests {
                         .unwrap(),
                         subtree_hash
                     );
+                    assert_inclusion_proof_rejects_corruption(
+                        &proof,
+                        &subtree,
+                        subtree_hash,
+                        index,
+                        leaves[us(index)],
+                    );
                     inclusion_proofs.update(format!("{index} [{start}, {end})").as_bytes());
                     for hash in proof {
                         inclusion_proofs.update(b" ");
@@ -1724,6 +1839,13 @@ mod tests {
                         subtree_hash,
                     )
                     .unwrap();
+                    assert_consistency_proof_rejects_corruption(
+                        &proof,
+                        tree_size,
+                        root_hash,
+                        &subtree,
+                        subtree_hash,
+                    );
                     consistency_proofs.update(format!("[{start}, {end}) {tree_size}").as_bytes());
                     for hash in proof {
                         consistency_proofs.update(b" ");

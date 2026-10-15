@@ -13,8 +13,8 @@ on:
         default: true
       fuzz_seconds:
         description: "Seconds to run each fuzz target for"
-        type: string
-        default: "60"
+        type: number
+        default: 60
 
 env:
   CARGO_TERM_COLOR: always
@@ -66,9 +66,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
-      # Covers the MTC Appendix C.2 vectors and the long-running sequencer
-      # tests. `integration_tests` is excluded because it needs a live
-      # wrangler dev instance; the Integration Tests workflow runs it.
+      # Covers the long-running sequencer tests. `integration_tests` is
+      # excluded because it needs a live wrangler dev instance; the
+      # Integration Tests workflow runs it.
       - name: Ignored tests
         run: cargo test --workspace --exclude integration_tests -- --ignored
       - name: Install nightly toolchain
@@ -76,6 +76,10 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Fuzz parse_tile_path
-        run: cargo +nightly fuzz run fuzz_parse_tile_path -- -max_total_time=${{ inputs.fuzz_seconds }}
+        env:
+          FUZZ_SECONDS: ${{ inputs.fuzz_seconds }}
+        run: cargo +nightly fuzz run fuzz_parse_tile_path -- -max_total_time="$FUZZ_SECONDS"
       - name: Fuzz parse_checkpoint
-        run: cargo +nightly fuzz run fuzz_parse_checkpoint -- -max_total_time=${{ inputs.fuzz_seconds }}
+        env:
+          FUZZ_SECONDS: ${{ inputs.fuzz_seconds }}
+        run: cargo +nightly fuzz run fuzz_parse_checkpoint -- -max_total_time="$FUZZ_SECONDS"
