@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "ietf_mtc_api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "ietf_mtc_worker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "der",
@@ -1652,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "ietf_mtc_worker_config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ietf_mtc_api",
  "serde",
@@ -3193,7 +3193,7 @@ version = "0.3.0"
 dependencies = [
  "console_error_panic_hook",
  "ed25519-dalek",
- "getrandom 0.4.2",
+ "getrandom 0.4.3",
  "signed_note",
  "tlog_cosignature",
  "wasm-bindgen",
@@ -3522,7 +3522,7 @@ dependencies = [
 name = "tlog_cosignature"
 version = "0.3.0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "byteorder",
  "ed25519-dalek",
  "length_prefixed",
