@@ -13,8 +13,8 @@ use url::Url;
 
 fn main() {
     let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
-    let config_file = &format!("config.{env}.json");
-    let config_contents = &fs::read_to_string(config_file).unwrap_or_else(|e| {
+    let config_file = env::var("IETF_MTC_CONFIG").unwrap_or_else(|_| format!("config.{env}.json"));
+    let config_contents = &fs::read_to_string(&config_file).unwrap_or_else(|e| {
         panic!("failed to read config file '{config_file}': {e}");
     });
 
@@ -78,12 +78,13 @@ fn main() {
 
     // Copy to OUT_DIR.
     let out_dir = env::var("OUT_DIR").unwrap();
-    fs::copy(config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
+    fs::copy(&config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
 
     // Make DEPLOY_ENV available at compile time via env!()
     println!("cargo::rustc-env=DEPLOY_ENV={env}");
 
     println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
+    println!("cargo::rerun-if-env-changed=IETF_MTC_CONFIG");
     println!("cargo::rerun-if-changed=config.schema.json");
     println!("cargo::rerun-if-changed={config_file}");
 }

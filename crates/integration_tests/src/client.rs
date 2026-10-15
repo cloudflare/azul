@@ -488,7 +488,7 @@ impl IetfMtcClient {
     pub async fn get_landmark(&self) -> Result<(String, Vec<u8>)> {
         let resp = self
             .client
-            .get(self.url("landmark"))
+            .get(self.url("landmarks"))
             .send()
             .await
             .context("GET landmark")?

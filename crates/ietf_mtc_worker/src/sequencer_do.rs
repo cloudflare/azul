@@ -18,8 +18,8 @@ use generic_log_worker::{
     log_ops::{ProofError, prove_consistency, prove_subtree_consistency, read_leaf_range},
 };
 use ietf_mtc_api::{
-    IetfMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY, Landmark,
-    LandmarkSequence, TrustAnchorID, UINT48_MAX,
+    IetfMtcLogEntry, LANDMARK_BUNDLE_KEY, LANDMARK_CHECKPOINT_KEY, LANDMARK_KEY,
+    LANDMARK_RESOURCE_KEY, Landmark, LandmarkSequence, TrustAnchorID, UINT48_MAX,
 };
 use ml_dsa::{MlDsa44, VerifyingKey as MlDsaVerifyingKey};
 use pkcs8::DecodePublicKey as _;
@@ -688,37 +688,54 @@ async fn mirror_subtree_signatures(
             "text/plain; charset=utf-8",
             &body,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            format!(
+                "mirror {} rejected subtree [{}, {}): {error}",
+                mirror.id,
+                subtree.lo(),
+                subtree.hi()
+            )
+        })?;
         let response = parse_sign_subtree_response(&response).map_err(|error| error.to_string())?;
         let signature = require_signature(&response, &mirror.verifier)?;
+        let mut signature = signature.signature();
         if !mirror
             .verifier
-            .verify_subtree(origin, subtree, hash, signature.signature())
+            .verify_subtree(origin, subtree, hash, signature)
         {
-            return Err(
-                format!("mirror {} returned an invalid subtree signature", mirror.id).into(),
-            );
+            // torchwood v0.10 retained the checkpoint timestamp field for subtrees.
+            signature = signature
+                .strip_prefix(&0_u64.to_be_bytes())
+                .filter(|signature| {
+                    mirror
+                        .verifier
+                        .verify_subtree(origin, subtree, hash, signature)
+                })
+                .ok_or_else(|| {
+                    format!("mirror {} returned an invalid subtree signature", mirror.id)
+                })?;
         }
         signatures.push(CachedSubtreeSignature {
             cosigner_id: mirror.id.to_string(),
-            signature: signature.signature().to_vec(),
+            signature: signature.to_vec(),
         });
     }
     Ok(signatures)
 }
 
 async fn put_landmark_sequence(bucket: &Bucket, sequence: &LandmarkSequence) -> Result<()> {
-    bucket
-        .put(
-            LANDMARK_KEY,
-            sequence.to_bytes().map_err(|e| e.to_string())?,
-        )
-        .http_metadata(HttpMetadata {
-            content_type: Some("text/plain; charset=utf-8".to_owned()),
-            ..Default::default()
-        })
-        .execute()
-        .await?;
+    let bytes = sequence.to_bytes().map_err(|e| e.to_string())?;
+    for key in [LANDMARK_RESOURCE_KEY, LANDMARK_KEY] {
+        bucket
+            .put(key, bytes.clone())
+            .http_metadata(HttpMetadata {
+                content_type: Some("text/plain; charset=utf-8".to_owned()),
+                ..Default::default()
+            })
+            .execute()
+            .await?;
+    }
     Ok(())
 }
 
