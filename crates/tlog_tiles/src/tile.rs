@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use tlog_core::{
-    HASH_SIZE, Hash, HashReader, TlogError, node_hash, split_stored_hash_index, stored_hash_index,
-    tree_hash_indexes,
+    HASH_SIZE, Hash, HashReader, TlogError, node_hash, split_stored_hash_index, stored_hash_count,
+    stored_hash_index, tree_hash_indexes,
 };
 
 // To limit the size of any particular directory listing, we encode the (possibly very large)
@@ -317,7 +317,9 @@ impl Tile {
         #[allow(clippy::case_sensitive_file_extension_comparisons)]
         if len > min_path_elems && components[len - 2].ends_with(".p") {
             let ww = u32::from_str(components[len - 1]).map_err(|_| BadPathError(path.into()))?;
-            if !(0..w).contains(&ww) {
+            // A zero-width partial tile is not representable: `Tile::new`
+            // requires a width in `1..=2^h`.
+            if !(1..w).contains(&ww) {
                 return Err(BadPathError(path.into()));
             }
             w = ww;
@@ -584,7 +586,7 @@ impl HashReader for TileHashReader<'_> {
 
         // Plan to fetch tiles necessary to recompute tree hash. If it matches,
         // those tiles are authenticated.
-        let stx = tree_hash_indexes(self.tree_size);
+        let stx = tree_hash_indexes(self.tree_size)?;
         let mut stx_tile_order = vec![0; stx.len()];
 
         for (i, &x) in stx.iter().enumerate() {
@@ -603,7 +605,7 @@ impl HashReader for TileHashReader<'_> {
         // being fetched anyway.
         let mut index_tile_order = vec![0; indexes.len()];
         for (i, &x) in indexes.iter().enumerate() {
-            if x >= stored_hash_index(0, self.tree_size) {
+            if x >= stored_hash_count(self.tree_size)? {
                 return Err(TlogError::IndexesNotInTree);
             }
 
@@ -902,7 +904,7 @@ mod tests {
             let old_storage_len = storage.len();
             storage.extend(hashes);
 
-            assert_eq!(stored_hash_count(i + 1), storage.len() as u64);
+            assert_eq!(stored_hash_count(i + 1).unwrap(), storage.len() as u64);
 
             let th = tree_hash(i + 1, &storage).unwrap();
 
@@ -1100,6 +1102,10 @@ mod tests {
             ("tile/0/00", false, PathElem::Custom(""), false),
             // Invalid: H = 0
             ("tile/0/0/000", true, PathElem::Custom(""), false),
+            // Invalid: zero-width partial tile. Found by
+            // `cargo fuzz run fuzz_parse_tile_path`, which panicked in
+            // `Tile::new` instead of returning `BadPathError`.
+            ("tile/1/0/0.p/0", true, PathElem::Data, false),
             // Valid: minimum params support by library, with height
             ("tile/1/0/000", true, PathElem::Custom(""), true),
             // Valid: all parameters at max supported by library
