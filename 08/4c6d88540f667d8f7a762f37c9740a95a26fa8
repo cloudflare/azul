@@ -1,0 +1,31 @@
+crates/generic_log_worker/src/log_ops.rs
+  s_6e67e41cf84c26::t_edfb5b43b5cdb5 907-911,2000-2003
+crates/ietf_mtc_api/README.md
+  s_6e67e41cf84c26::t_656d5e5a32eb93 7
+crates/ietf_mtc_api/src/cosigner.rs
+  s_6e67e41cf84c26::t_0746cef315b658 438,485,686-691
+crates/ietf_mtc_api/src/lib.rs
+  s_6e67e41cf84c26::t_b46f8a16b8ca8a 42,44,47-48,50,52,82,181-182,187,202,208,231,258,265,431,433-435,505,832-845,967,980
+crates/ietf_mtc_api/src/relative_oid.rs
+  s_6e67e41cf84c26::t_c94877c48bee35 232-233
+crates/ietf_mtc_worker/config.dev.json
+  s_6e67e41cf84c26::t_e9e4c7350cdd64 6,23
+crates/ietf_mtc_worker/config.schema.json
+  s_6e67e41cf84c26::t_a3d9f597d16cd6 106-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "084c6d88540f667d8f7a762f37c9740a95a26fa8",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
