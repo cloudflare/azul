@@ -39,6 +39,7 @@ pub struct LandmarkSequence {
 
 /// The location in object storage for the landmark sequence.
 pub const LANDMARK_KEY: &str = "landmark";
+pub const LANDMARK_RESOURCE_KEY: &str = "landmarks";
 
 /// The location in object storage for the landmark checkpoint.
 pub const LANDMARK_CHECKPOINT_KEY: &str = "landmark-checkpoint";

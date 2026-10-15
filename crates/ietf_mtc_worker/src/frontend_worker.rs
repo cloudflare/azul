@@ -97,6 +97,7 @@ async fn main(
             .route("/logs/{log}/get-certificate", post(get_certificate))
             .route("/logs/{log}/get-landmark-bundle", get(get_landmark_bundle))
             .route("/logs/{log}/landmark", get(get_landmark))
+            .route("/logs/{log}/landmarks", get(get_landmark))
             .route("/logs/{log}/metadata", get(metadata))
             .route("/logs/{log}/sequencer_id", get(sequencer_id))
             .layer(middleware::from_fn_with_state(

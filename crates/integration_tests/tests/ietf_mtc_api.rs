@@ -314,18 +314,26 @@ async fn fetch_verification_context(client: &IetfMtcClient) -> VerificationConte
     let checkpoint_origin = derived_log_id.oid_name();
     let mirror = if client.log == "dev1" {
         use pkcs8::DecodePublicKey;
-        let base_url =
-            std::env::var("MIRROR_URL").unwrap_or_else(|_| "http://localhost:18788".to_owned());
-        let metadata = reqwest::get(format!("{base_url}/metadata"))
-            .await
-            .expect("mirror metadata request")
-            .error_for_status()
-            .expect("mirror metadata status")
-            .json::<MirrorMetadata>()
-            .await
-            .expect("mirror metadata JSON");
-        let identity = metadata.mirror.expect("mirror identity");
-        let id = "44363.48.2"
+        let identity = if let Ok(metadata) = std::env::var("IETF_MTC_MIRROR_IDENTITY") {
+            serde_json::from_str::<MirrorIdentity>(&metadata).expect("mirror identity JSON")
+        } else {
+            let base_url =
+                std::env::var("MIRROR_URL").unwrap_or_else(|_| "http://localhost:18788".to_owned());
+            reqwest::get(format!("{base_url}/metadata"))
+                .await
+                .expect("mirror metadata request")
+                .error_for_status()
+                .expect("mirror metadata status")
+                .json::<MirrorMetadata>()
+                .await
+                .expect("mirror metadata JSON")
+                .mirror
+                .expect("mirror identity")
+        };
+        let id = identity
+            .name
+            .strip_prefix("oid/1.3.6.1.4.1.")
+            .expect("mirror name must be a private-enterprise OID")
             .parse::<TrustAnchorID>()
             .expect("mirror cosigner ID");
         assert_eq!(identity.name, id.oid_name());
@@ -595,6 +603,9 @@ async fn add_entry_returns_valid_response() {
 
     // Full signature and inclusion proof verification.
     verify_standalone_cert(&cert, leaf_index, &context);
+    if let Ok(path) = std::env::var("IETF_MTC_CERTIFICATE_OUT") {
+        std::fs::write(path, &resp.certificate).expect("write MTC certificate");
+    }
 }
 
 /// `POST` with garbage bytes (not a valid CSR) returns 400.
