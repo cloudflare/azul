@@ -3364,6 +3364,7 @@ dependencies = [
  "base64",
  "byteorder",
  "rand 0.10.1",
+ "reqwest",
  "thiserror 2.0.17",
  "tlog_core",
 ]

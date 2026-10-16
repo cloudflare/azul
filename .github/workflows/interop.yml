@@ -12,6 +12,7 @@ on:
         options:
           - all
           - sunlight
+          - tessera
         default: all
 
 env:
@@ -29,9 +30,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned at the uint8 log_origin switch (FiloSottile/sunlight#73).
           - implementation: sunlight
             repository: FiloSottile/sunlight
-            revision: 571eaf48089bbc8c697944600becb931e4ebf5fd
+            revision: 42d2b79f62b160c4cf84b615b7b0360c4c41128a
+          # Tessera still reads a uint16 log_origin length, so its cases are
+          # expected to fail until that is fixed upstream.
+          - implementation: tessera
+            repository: transparency-dev/tessera
+            revision: d051ea3a859675f5e4f14fbe4b2d700ce045e19e
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,3 +58,4 @@ jobs:
         run: bash scripts/test-interop.sh "${{ matrix.implementation }}"
         env:
           SUNLIGHT_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}
+          TESSERA_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}
