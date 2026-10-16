@@ -1,0 +1,61 @@
+name: Interop
+
+# Interoperability checks against external transparency-log implementations.
+# Manually dispatched: upstream revisions move independently, so a break
+# there should not fail unrelated pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      implementation:
+        description: "Implementation to test against"
+        type: choice
+        options:
+          - all
+          - sunlight
+          - tessera
+        default: all
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  interop:
+    name: Interop (${{ matrix.implementation }})
+    runs-on: ubuntu-latest
+    if: inputs.implementation == 'all' || inputs.implementation == matrix.implementation
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned at the uint8 log_origin switch (FiloSottile/sunlight#73).
+          - implementation: sunlight
+            repository: FiloSottile/sunlight
+            revision: 42d2b79f62b160c4cf84b615b7b0360c4c41128a
+          # Tessera still reads a uint16 log_origin length, so its cases are
+          # expected to fail until that is fixed upstream.
+          - implementation: tessera
+            repository: transparency-dev/tessera
+            revision: d051ea3a859675f5e4f14fbe4b2d700ce045e19e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out ${{ matrix.implementation }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.revision }}
+          path: interop/${{ matrix.implementation }}
+          persist-credentials: false
+      - run: rustup update stable && rustup default stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - name: Run interop checks
+        run: bash scripts/test-interop.sh "${{ matrix.implementation }}"
+        env:
+          SUNLIGHT_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}
+          TESSERA_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}

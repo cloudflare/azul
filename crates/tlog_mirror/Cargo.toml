@@ -27,3 +27,6 @@ byteorder.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tlog_core.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["blocking"] }
