@@ -1,0 +1,21 @@
+crates/ct_worker/src/sequencer_do.rs
+  s_6e67e41cf84c26::t_5a1e26c5561f01 36
+crates/generic_log_worker/src/sequencer_do.rs
+  s_6e67e41cf84c26::t_9d32ec3d9e46a6 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b408fdb8660b4a73b2e413f4c3622d369b9ff236",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
