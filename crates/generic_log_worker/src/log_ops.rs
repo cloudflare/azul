@@ -54,6 +54,16 @@ const AUX_TILE_LEVEL_KEY: u8 = u8::MAX - 1;
 pub const CHECKPOINT_KEY: &str = "checkpoint";
 /// Path used to store staging bundles in the lock backend.
 const STAGING_KEY: &str = "staging";
+const PENDING_CHECKPOINT_CALLBACK_KEY: &str = "pending-checkpoint-callback";
+
+#[derive(Serialize, Deserialize)]
+struct PendingCheckpointCallback {
+    old_time: UnixTimestampMillis,
+    new_time: UnixTimestampMillis,
+    old_tree_size: u64,
+    new_tree_size: u64,
+    new_checkpoint: Vec<u8>,
+}
 
 // Limit on the number of entries per batch. Tune this parameter to avoid
 // running into various size limitations:
@@ -397,6 +407,9 @@ impl SequenceState {
                 );
                 let staged_uploads = lock.get_multipart(STAGING_KEY).await?;
                 apply_staged_uploads(object, &staged_uploads, c.size(), c.hash()).await?;
+                object
+                    .upload(CHECKPOINT_KEY, stored_checkpoint.clone(), &OPTS_CHECKPOINT)
+                    .await?;
             }
             (Ordering::Equal, true) => {} // Normal case: the sizes are the same and the hashes match.
         }
@@ -778,6 +791,27 @@ pub(crate) async fn sequence<L: LogEntry, M: SequencerMetadata>(
     ) else {
         // Skip this checkpoint. Nothing to sequence.
         metrics.seq_count.with_label_values(&["skip"]).inc();
+        if config.checkpoint_callback_on_idle {
+            let (timestamp, tree_size, checkpoint) = {
+                let state = sequence_state.borrow();
+                (
+                    state.tree.time(),
+                    state.tree.size(),
+                    state.checkpoint.clone(),
+                )
+            };
+            if let Err(error) = (config.checkpoint_callback)(
+                timestamp,
+                now_millis(),
+                tree_size,
+                tree_size,
+                &checkpoint,
+            )
+            .await
+            {
+                warn!("{}: Idle checkpoint callback failed: {error}", config.name);
+            }
+        }
         return Ok(());
     };
 
@@ -818,6 +852,29 @@ pub(crate) async fn sequence<L: LogEntry, M: SequencerMetadata>(
     pool_state.borrow_mut().reset_in_sequencing_dedup();
 
     result
+}
+
+pub(crate) async fn retry_checkpoint_callback(
+    config: &SequencerConfig,
+    lock: &impl LockBackend,
+) -> Result<(), anyhow::Error> {
+    if !config.durable_checkpoint_callback {
+        return Ok(());
+    }
+    let Some(bytes) = lock.get_optional(PENDING_CHECKPOINT_CALLBACK_KEY).await? else {
+        return Ok(());
+    };
+    let pending: PendingCheckpointCallback = crate::deserialize(&bytes)?;
+    (config.checkpoint_callback)(
+        pending.old_time,
+        pending.new_time,
+        pending.old_tree_size,
+        pending.new_tree_size,
+        &pending.new_checkpoint,
+    )
+    .await?;
+    lock.delete(PENDING_CHECKPOINT_CALLBACK_KEY).await?;
+    Ok(())
 }
 
 /// An error that can occur when sequencing a pool.
@@ -1059,6 +1116,23 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         }
     };
 
+    let pending_callback = if config.durable_checkpoint_callback {
+        Some(
+            crate::serialize(&PendingCheckpointCallback {
+                old_time,
+                new_time: timestamp,
+                old_tree_size: old_size,
+                new_tree_size: new_size,
+                new_checkpoint: new.checkpoint().to_vec(),
+            })
+            .map_err(|e| {
+                SequenceError::NonFatal(format!("couldn't serialize checkpoint callback: {e}"))
+            })?,
+        )
+    } else {
+        None
+    };
+
     // Upload tiles to staging, where they can be recovered by [SequenceState::load] if we
     // crash right after updating DO storage.
     let staged_uploads = marshal_staged_uploads(&tile_uploads, new.tree.size(), new.tree.hash())
@@ -1070,11 +1144,20 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     // This is a critical error, since we don't know the state of the
     // checkpoint in the database at this point. Bail and let [SequenceState::load] get us
     // to a good state after restart.
-    lock.swap(CHECKPOINT_KEY, &old_checkpoint, new.checkpoint())
+    if let Some(pending_callback) = &pending_callback {
+        lock.swap_and_put(
+            CHECKPOINT_KEY,
+            &old_checkpoint,
+            new.checkpoint(),
+            PENDING_CHECKPOINT_CALLBACK_KEY,
+            pending_callback,
+        )
         .await
-        .map_err(|e| {
-            SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}"))
-        })?;
+    } else {
+        lock.swap(CHECKPOINT_KEY, &old_checkpoint, new.checkpoint())
+            .await
+    }
+    .map_err(|e| SequenceError::Fatal(format!("couldn't upload checkpoint to database: {e}")))?;
 
     // At this point the pool is fully serialized: new entries were persisted to
     // durable storage (in staging) and the checkpoint was committed to the
@@ -1097,10 +1180,24 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         .upload(CHECKPOINT_KEY, new.checkpoint(), &OPTS_CHECKPOINT)
         .await
         .map_err(|e| {
-            SequenceError::NonFatal(format!("couldn't upload checkpoint to object storage: {e}"))
+            SequenceError::Fatal(format!("couldn't upload checkpoint to object storage: {e}"))
         })?;
 
-    // Return SCTs to clients.
+    // Call the checkpoint callback. This is a no-op for CT, but is used to
+    // update landmark checkpoints for MTC.
+    let callback_result =
+        (config.checkpoint_callback)(old_time, timestamp, old_size, new_size, new.checkpoint())
+            .await;
+    if let Err(e) = callback_result {
+        warn!("{name}: Checkpoint callback failed: {e}");
+    } else if config.durable_checkpoint_callback
+        && let Err(e) = lock.delete(PENDING_CHECKPOINT_CALLBACK_KEY).await
+    {
+        warn!("{name}: Failed to clear checkpoint callback: {e}");
+    }
+
+    // Release metadata only after callback outputs are available or their retry
+    // record is durable.
     for (sender, metadata) in sequenced_metadata {
         sender.send_replace(metadata);
     }
@@ -1114,15 +1211,6 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
             "{name}: Cache put failed (entries={}): {e}",
             cache_metadata.len()
         );
-    }
-
-    // Call the checkpoint callback. This is a no-op for CT, but is used to
-    // update landmark checkpoints for MTC.
-    if let Err(e) =
-        (config.checkpoint_callback)(old_time, timestamp, old_size, new_size, new.checkpoint())
-            .await
-    {
-        warn!("{name}: Checkpoint callback failed: {e}");
     }
 
     for tile in new.edge_tiles {
@@ -1311,6 +1399,74 @@ pub async fn read_leaf<L: LogEntry>(
     bail!("did not find leaf")
 }
 
+/// Read and verify a range of entries contained in one data tile.
+///
+/// # Errors
+///
+/// Returns an error if the range is empty, outside the tree, crosses a data
+/// tile boundary, or a required tile is missing or fails authentication.
+pub async fn read_leaf_range<L: LogEntry>(
+    object: &impl ObjectBackend,
+    start_index: u64,
+    end_index: u64,
+    tree_size: u64,
+    tree_hash: &Hash,
+) -> Result<Vec<L>, anyhow::Error> {
+    if start_index >= end_index || end_index > tree_size {
+        bail!("invalid leaf range [{start_index}, {end_index}) for tree size {tree_size}");
+    }
+    let tile_width = u64::from(TlogTile::FULL_WIDTH);
+    if start_index / tile_width != (end_index - 1) / tile_width {
+        bail!("leaf range crosses a data tile boundary");
+    }
+
+    let indexes = (start_index..end_index)
+        .map(|index| tlog_core::stored_hash_index(0, index))
+        .collect::<Vec<_>>();
+    let tile_reader = tile_reader_for_indexes(tree_size, &indexes, object).await?;
+    let hash_reader = TileHashReader::new(tree_size, *tree_hash, &tile_reader);
+    let hashes = hash_reader
+        .read_hashes(&indexes)
+        .map_err(|error| anyhow!(error))?;
+    let first_hash = hashes.first().ok_or(anyhow!("no hashes read"))?;
+
+    let Some((level0_tile, level0_tile_bytes)) = tile_reader.0.into_iter().find(|(tile, bytes)| {
+        tile.level() == 0
+            && tile
+                .hash_at_index(bytes, indexes[0])
+                .is_ok_and(|hash| hash == *first_hash)
+    }) else {
+        bail!("failed to get level-0 tile");
+    };
+    let data_tile = level0_tile.with_data_path(L::Pending::DATA_TILE_PATH);
+    let data_tile_bytes = object
+        .fetch(&data_tile.path())
+        .await?
+        .ok_or(anyhow!("no data tile in object storage"))?;
+
+    let tile_start = tile_width * data_tile.level_index();
+    let mut entries = Vec::with_capacity(usize::try_from(end_index - start_index)?);
+    for (offset, entry_result) in
+        TileIterator::<L>::new(&data_tile_bytes, data_tile.width() as usize).enumerate()
+    {
+        let entry = entry_result?;
+        let index = tile_start + offset as u64;
+        let got = entry.merkle_tree_leaf();
+        let expected = level0_tile
+            .hash_at_index(&level0_tile_bytes, tlog_core::stored_hash_index(0, index))?;
+        if got != expected {
+            bail!("tile leaf entry {index} hashes to {got}, level 0 hash is {expected}");
+        }
+        if (start_index..end_index).contains(&index) {
+            entries.push(entry);
+        }
+    }
+    if entries.len() != usize::try_from(end_index - start_index)? {
+        bail!("data tile did not contain the requested leaf range");
+    }
+    Ok(entries)
+}
+
 /// Returns hashes from `edge_tiles` or from the overlay cache.
 #[derive(Debug)]
 pub struct HashReaderWithOverlay<'a> {
@@ -1470,9 +1626,139 @@ mod tests {
     use static_ct_api::{
         PrecertData, StaticCTCheckpointSigner, StaticCTLogEntry, StaticCTPendingLogEntry,
     };
-    use std::time::Duration;
+    use std::{cell::Cell, rc::Rc, time::Duration};
     use tlog_checkpoint::{CheckpointSigner, CheckpointText, Ed25519CheckpointSigner};
     use tlog_tiles::TlogTile;
+
+    #[test]
+    fn checkpoint_callback_retries_persisted_input() {
+        let calls = Rc::new(Cell::new(0));
+        let fail = Rc::new(Cell::new(true));
+        let callback_calls = calls.clone();
+        let callback_fail = fail.clone();
+        let mut log = TestLog::new();
+        log.config.durable_checkpoint_callback = true;
+        log.config.checkpoint_callback = Box::new(move |_, _, _, _, _| {
+            callback_calls.set(callback_calls.get() + 1);
+            let should_fail = callback_fail.get();
+            Box::pin(async move {
+                if should_fail {
+                    Err("callback failure".into())
+                } else {
+                    Ok(())
+                }
+            })
+        });
+
+        let result = log.add_certificate();
+        log.sequence().unwrap();
+        assert!(block_on(result.resolve()).is_some());
+        assert_eq!(calls.get(), 1);
+        assert!(
+            log.lock
+                .lock
+                .borrow()
+                .contains_key(PENDING_CHECKPOINT_CALLBACK_KEY)
+        );
+
+        fail.set(false);
+        block_on(retry_checkpoint_callback(&log.config, &log.lock)).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(
+            !log.lock
+                .lock
+                .borrow()
+                .contains_key(PENDING_CHECKPOINT_CALLBACK_KEY)
+        );
+    }
+
+    #[test]
+    fn checkpoint_callback_runs_for_idle_log_when_enabled() {
+        let calls = Rc::new(Cell::new(0));
+        let callback_calls = calls.clone();
+        let mut log = TestLog::new();
+        log.config.checkpoint_callback_on_idle = true;
+        log.config.checkpoint_callback = Box::new(move |_, _, old_size, new_size, checkpoint| {
+            assert_eq!(old_size, new_size);
+            assert!(!checkpoint.is_empty());
+            callback_calls.set(callback_calls.get() + 1);
+            Box::pin(async { Ok(()) })
+        });
+
+        log.sequence().unwrap();
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn read_leaf_range_returns_authenticated_entries() {
+        let mut log = TestLog::new();
+        for seed in 0..3 {
+            log.add_certificate_with_seed(seed);
+        }
+        log.sequence().unwrap();
+
+        let tree_hash = *log.sequence_state.borrow().tree.hash();
+        let entries = block_on(read_leaf_range::<StaticCTLogEntry>(
+            &log.object,
+            1,
+            3,
+            3,
+            &tree_hash,
+        ))
+        .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].leaf_index, 1);
+        assert_eq!(entries[1].leaf_index, 2);
+    }
+
+    #[test]
+    fn read_leaf_range_rejects_tampered_data_tile() {
+        let mut log = TestLog::new();
+        for seed in 0..3 {
+            log.add_certificate_with_seed(seed);
+        }
+        log.sequence().unwrap();
+
+        let data_tile = TlogTile::from_index(tlog_core::stored_hash_count(2).unwrap())
+            .with_data_path(StaticCTPendingLogEntry::DATA_TILE_PATH);
+        log.object
+            .objects
+            .borrow_mut()
+            .get_mut(&data_tile.path())
+            .unwrap()[0] ^= 1;
+        let tree_hash = *log.sequence_state.borrow().tree.hash();
+
+        assert!(
+            block_on(read_leaf_range::<StaticCTLogEntry>(
+                &log.object,
+                0,
+                3,
+                3,
+                &tree_hash,
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn read_leaf_range_rejects_invalid_bounds() {
+        let object = TestObjectBackend::new();
+        let hash = Hash([0; HASH_SIZE]);
+
+        assert!(block_on(read_leaf_range::<StaticCTLogEntry>(&object, 1, 1, 1, &hash)).is_err());
+        assert!(block_on(read_leaf_range::<StaticCTLogEntry>(&object, 0, 2, 1, &hash)).is_err());
+        assert!(
+            block_on(read_leaf_range::<StaticCTLogEntry>(
+                &object,
+                u64::from(TlogTile::FULL_WIDTH) - 1,
+                u64::from(TlogTile::FULL_WIDTH) + 1,
+                u64::from(TlogTile::FULL_WIDTH) + 1,
+                &hash,
+            ))
+            .is_err()
+        );
+    }
 
     #[test]
     fn test_sequence_one_leaf_short() {
@@ -2302,7 +2588,7 @@ mod tests {
         },
         StorageMode::Ok,
         true,
-        false
+        true
     );
     test_sequence_errors!(
         checkpoint_upload_persisted,
@@ -2312,7 +2598,7 @@ mod tests {
         },
         StorageMode::Ok,
         true,
-        false
+        true
     );
     test_sequence_errors!(
         staging_upload,
@@ -2517,12 +2803,40 @@ mod tests {
             }
             self.put(key, new).await
         }
-        async fn get(&self, key: &str) -> worker::Result<Vec<u8>> {
-            if let Some(value) = self.lock.borrow().get(key) {
-                Ok(value.clone())
-            } else {
-                Err("key doesn't exist".into())
+        async fn swap_and_put(
+            &self,
+            key: &str,
+            old: &[u8],
+            new: &[u8],
+            put_key: &str,
+            put_value: &[u8],
+        ) -> worker::Result<()> {
+            if self.lock.borrow().get(key).is_none_or(|value| value != old) {
+                return Err("old value not present or does not match".into());
             }
+            let (ok, persist) = self.mode.borrow().check(key);
+            if persist {
+                let mut lock = self.lock.borrow_mut();
+                lock.insert(key.to_owned(), new.to_vec());
+                lock.insert(put_key.to_owned(), put_value.to_vec());
+            }
+            if ok {
+                Ok(())
+            } else {
+                Err("failed to swap and put values".into())
+            }
+        }
+        async fn get(&self, key: &str) -> worker::Result<Vec<u8>> {
+            self.get_optional(key)
+                .await?
+                .ok_or_else(|| "key doesn't exist".into())
+        }
+        async fn get_optional(&self, key: &str) -> worker::Result<Option<Vec<u8>>> {
+            Ok(self.lock.borrow().get(key).cloned())
+        }
+        async fn delete(&self, key: &str) -> worker::Result<()> {
+            self.lock.borrow_mut().remove(key);
+            Ok(())
         }
     }
 
@@ -2573,6 +2887,8 @@ mod tests {
                 sequence_skip_threshold_millis: None,
                 location_hint: None,
                 checkpoint_callback: empty_checkpoint_callback(),
+                durable_checkpoint_callback: false,
+                checkpoint_callback_on_idle: false,
             };
             let pool_state = RefCell::new(PoolState::default());
             block_on(create_log(&config, &object, &lock)).unwrap();

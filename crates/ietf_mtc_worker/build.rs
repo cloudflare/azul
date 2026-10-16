@@ -1,0 +1,104 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+// Build script to include per-environment configuration and trusted roots.
+
+use config::AppConfig;
+use ml_dsa::{MlDsa44, VerifyingKey};
+use pkcs8::DecodePublicKey;
+use std::collections::HashSet;
+use std::env;
+use std::fs;
+use url::Url;
+
+fn main() {
+    let env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
+    let config_file = env::var("IETF_MTC_CONFIG").unwrap_or_else(|_| format!("config.{env}.json"));
+    let config_contents = &fs::read_to_string(&config_file).unwrap_or_else(|e| {
+        panic!("failed to read config file '{config_file}': {e}");
+    });
+
+    // Validate the config json against the schema.
+    let json = serde_json::from_str(config_contents).unwrap_or_else(|e| {
+        panic!("failed to deserialize JSON config '{config_file}': {e}");
+    });
+    let schema = serde_json::from_str(include_str!("config.schema.json")).unwrap_or_else(|e| {
+        panic!("failed to deserialize JSON schema 'config.schema.json': {e}");
+    });
+    jsonschema::validate(&schema, &json).unwrap_or_else(|e| {
+        panic!("config '{config_file}' does not match schema 'config.schema.json': {e}");
+    });
+
+    // Validate the config parameters.
+    let conf = serde_json::from_str::<AppConfig>(config_contents).unwrap_or_else(|e| {
+        panic!("failed to deserialize JSON config '{config_file}': {e}");
+    });
+    for (name, params) in conf.logs {
+        let ca_id = params.ca_id.parse::<ietf_mtc_api::TrustAnchorID>().unwrap();
+        assert_eq!(
+            ca_id.to_string(),
+            params.ca_id,
+            "{name} ca_id must use canonical decimal arcs"
+        );
+        ca_id.log_id(params.log_number).unwrap();
+        ca_id.to_rdn_sequence().unwrap();
+
+        // Valid location hints: https://developers.cloudflare.com/durable-objects/reference/data-location/#supported-locations-1
+        if let Some(location) = &params.location_hint {
+            assert!(
+                [
+                    "wnam", "enam", "sam", "weur", "eeur", "apac", "oc", "afr", "me",
+                ]
+                .contains(&location.as_str()),
+                "{name} invalid location hint: {location}"
+            );
+        }
+
+        check_url(&params.submission_url);
+        if let Some(monitoring_url) = &params.monitoring_url {
+            check_url(monitoring_url);
+        }
+        let mut signer_ids = HashSet::from([ca_id]);
+        for cosigner in &params.cosigners {
+            let id = cosigner.id.parse::<ietf_mtc_api::TrustAnchorID>().unwrap();
+            assert_eq!(
+                id.to_string(),
+                cosigner.id,
+                "{name} cosigner ID must use canonical decimal arcs"
+            );
+            assert!(
+                signer_ids.insert(id.clone()),
+                "{name} duplicate cosigner ID: {id}"
+            );
+            signed_note::KeyName::new(id.oid_name()).unwrap();
+            VerifyingKey::<MlDsa44>::from_public_key_der(&cosigner.public_key).unwrap();
+            check_url(&cosigner.submission_url);
+        }
+    }
+
+    // Copy to OUT_DIR.
+    let out_dir = env::var("OUT_DIR").unwrap();
+    fs::copy(&config_file, format!("{out_dir}/config.json")).expect("failed to copy config file");
+
+    // Make DEPLOY_ENV available at compile time via env!()
+    println!("cargo::rustc-env=DEPLOY_ENV={env}");
+
+    println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
+    println!("cargo::rerun-if-env-changed=IETF_MTC_CONFIG");
+    println!("cargo::rerun-if-changed=config.schema.json");
+    println!("cargo::rerun-if-changed={config_file}");
+}
+
+// Validate the URL prefix according to https://datatracker.ietf.org/doc/html/rfc6962#section-4.
+// "The <log server> prefix can include a path as well as a server name and a port."
+fn check_url(s: &str) {
+    let u = Url::parse(s).unwrap();
+    assert!(["http", "https"].contains(&u.scheme()), "invalid scheme");
+    assert!(u.domain().is_some(), "invalid domain");
+    assert_eq!(
+        u.as_str(),
+        &format!("{}{}", u.origin().ascii_serialization(), u.path()),
+        "invalid URL components"
+    );
+    assert!(u.path().ends_with('/'), "URL prefix must end with '/'");
+}

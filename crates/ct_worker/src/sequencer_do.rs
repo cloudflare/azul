@@ -37,6 +37,8 @@ impl DurableObject for Sequencer {
             sequence_skip_threshold_millis: params.sequence_skip_threshold_millis,
             location_hint: params.location_hint.clone(),
             checkpoint_callback: empty_checkpoint_callback(),
+            durable_checkpoint_callback: false,
+            checkpoint_callback_on_idle: false,
             name,
         };
 

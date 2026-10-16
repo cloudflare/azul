@@ -287,6 +287,260 @@ async fn get_raw_http(
         .with_context(|| format!("reading body for {url}"))
 }
 
+// ===========================================================================
+// IETF MTC client
+// ===========================================================================
+
+/// Log shard name to use for IETF MTC tests.  Defaults to `dev2` (fast landmark interval).
+#[must_use]
+pub fn ietf_mtc_log_name() -> String {
+    std::env::var("IETF_MTC_LOG_NAME").unwrap_or_else(|_| "dev2".to_string())
+}
+
+// ===========================================================================
+// IETF MTC client
+
+/// Add-entry response from the IETF MTC worker.
+#[serde_as]
+#[derive(Deserialize, Debug, Clone)]
+pub struct IetfMtcAddEntryResponse {
+    /// DER-encoded standalone MTC certificate, base64-encoded.
+    #[serde_as(as = "Base64")]
+    pub certificate: Vec<u8>,
+}
+
+/// Metadata response from the IETF MTC worker.
+#[serde_as]
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcMetadataResponse {
+    pub description: Option<String>,
+    pub ca_id: String,
+    pub log_number: u16,
+    pub log_id: String,
+    pub cosigner_id: String,
+    #[serde_as(as = "Base64")]
+    pub cosigner_public_key: Vec<u8>,
+    pub submission_url: String,
+    pub monitoring_url: Option<String>,
+}
+
+/// A landmark subtree and its consistency proof against the bundle checkpoint.
+#[serde_as]
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcLandmarkSubtree {
+    #[serde_as(as = "Base64")]
+    pub hash: [u8; 32],
+    #[serde_as(as = "Vec<Base64>")]
+    pub consistency_proof: Vec<[u8; 32]>,
+}
+
+/// Response from `GET /logs/:log/get-landmark-bundle`.
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcLandmarkBundle {
+    pub checkpoint: String,
+    pub subtrees: Vec<IetfMtcLandmarkSubtree>,
+    pub landmarks: std::collections::VecDeque<IetfMtcLandmark>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcLandmark {
+    pub tree_size: u64,
+    pub expiration: u64,
+}
+
+/// Get-certificate response from the IETF MTC worker.
+#[serde_as]
+#[derive(Deserialize, Debug)]
+pub struct IetfMtcGetCertificateResponse {
+    #[serde_as(as = "Base64")]
+    pub data: Vec<u8>,
+    pub landmark_id: u64,
+}
+
+/// HTTP client bound to a particular IETF MTC log shard.
+pub struct IetfMtcClient {
+    client: reqwest::Client,
+    pub log: String,
+}
+
+impl IetfMtcClient {
+    /// Creates a new client targeting the given IETF MTC log shard.
+    #[must_use]
+    pub fn new(log: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            log: log.into(),
+        }
+    }
+
+    /// Creates a client for the default IETF MTC log (from `IETF_MTC_LOG_NAME` env / `dev2`).
+    #[must_use]
+    pub fn default_log() -> Self {
+        Self::new(ietf_mtc_log_name())
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/{}", log_url(&self.log), path)
+    }
+
+    /// `GET /logs/:log/metadata`
+    pub async fn get_metadata(&self) -> Result<IetfMtcMetadataResponse> {
+        let resp = self
+            .client
+            .get(self.url("metadata"))
+            .send()
+            .await
+            .context("GET metadata")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("GET metadata returned {status}");
+        }
+        resp.json().await.context("parsing metadata response")
+    }
+
+    /// `POST /logs/:log/add-entry` — sends a base64url-encoded DER CSR.
+    pub async fn add_entry(
+        &self,
+        csr_der: Vec<u8>,
+    ) -> Result<(u16, Option<IetfMtcAddEntryResponse>)> {
+        use base64::prelude::*;
+        #[derive(serde::Serialize)]
+        struct Req {
+            csr: String,
+        }
+        let resp = self
+            .client
+            .post(self.url("add-entry"))
+            .json(&Req {
+                csr: BASE64_URL_SAFE_NO_PAD.encode(&csr_der),
+            })
+            .send()
+            .await
+            .context("POST add-entry")?;
+        let status = resp.status().as_u16();
+        if status == 200 {
+            let body: IetfMtcAddEntryResponse =
+                resp.json().await.context("parsing add-entry response")?;
+            Ok((status, Some(body)))
+        } else {
+            Ok((status, None))
+        }
+    }
+
+    /// `POST /logs/:log/get-certificate`
+    pub async fn get_certificate(
+        &self,
+        leaf_index: u64,
+        spki_der: Vec<u8>,
+    ) -> Result<(u16, Option<IetfMtcGetCertificateResponse>)> {
+        #[serde_as]
+        #[derive(serde::Serialize)]
+        struct Req {
+            leaf_index: u64,
+            #[serde_as(as = "Base64")]
+            spki_der: Vec<u8>,
+        }
+        let resp = self
+            .client
+            .post(self.url("get-certificate"))
+            .json(&Req {
+                leaf_index,
+                spki_der,
+            })
+            .send()
+            .await
+            .context("POST get-certificate")?;
+        let status = resp.status().as_u16();
+        if status == 200 {
+            let body: IetfMtcGetCertificateResponse = resp
+                .json()
+                .await
+                .context("parsing get-certificate response")?;
+            Ok((status, Some(body)))
+        } else {
+            Ok((status, None))
+        }
+    }
+
+    /// `GET /logs/:log/checkpoint` — raw bytes.
+    pub async fn get_checkpoint(&self) -> Result<Vec<u8>> {
+        self.get_raw("checkpoint").await
+    }
+
+    /// Fetch the current landmark bundle.
+    pub async fn get_landmark_bundle(&self) -> Result<IetfMtcLandmarkBundle> {
+        let resp = self
+            .client
+            .get(self.url("get-landmark-bundle"))
+            .send()
+            .await
+            .context("GET get-landmark-bundle")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("GET get-landmark-bundle returned {status}");
+        }
+        resp.json()
+            .await
+            .context("parsing get-landmark-bundle response")
+    }
+
+    /// Fetch the standard landmark text resource and its content type.
+    pub async fn get_landmark(&self) -> Result<(String, Vec<u8>)> {
+        let resp = self
+            .client
+            .get(self.url("landmarks"))
+            .send()
+            .await
+            .context("GET landmark")?
+            .error_for_status()
+            .context("GET landmark status")?;
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .context("landmark Content-Type missing")?
+            .to_str()
+            .context("invalid landmark Content-Type")?
+            .to_owned();
+        let bytes = resp
+            .bytes()
+            .await
+            .context("reading landmark response")?
+            .to_vec();
+        Ok((content_type, bytes))
+    }
+
+    /// Reads raw log data from local R2 or the advertised monitoring URL.
+    pub async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
+        if local_r2::is_loopback_base_url(&base_url()) {
+            return local_r2::get(
+                "ietf_mtc_worker",
+                &format!("ietf-mtc-public-{}", self.log),
+                path,
+            )
+            .await?
+            .with_context(|| format!("R2 object missing: {path}"));
+        }
+
+        let metadata = self.get_metadata().await?;
+        let monitoring_url = metadata
+            .monitoring_url
+            .as_deref()
+            .context("MTC metadata has no monitoring URL")?;
+        get_raw_http(&self.client, monitoring_url, path).await
+    }
+
+    /// `GET /logs/:log/{path}` — returns the HTTP status code without failing on 4xx/5xx.
+    pub async fn get_status(&self, path: &str) -> Result<u16> {
+        let resp = self
+            .client
+            .get(self.url(path))
+            .send()
+            .await
+            .with_context(|| format!("GET {path} (status probe)"))?;
+        Ok(resp.status().as_u16())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

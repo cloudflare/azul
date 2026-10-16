@@ -406,6 +406,9 @@ pub fn subtree_hash_indexes(n: &Subtree) -> Result<Vec<u64>, TlogError> {
 /// Panics if `read_hashes` returns a slice of hashes that is not the same
 /// length as the requested indexes, or if there are internal math errors.
 pub fn subtree_hash<R: HashReader>(n: &Subtree, r: &R) -> Result<Hash, TlogError> {
+    if n.lo == n.hi {
+        return Ok(EMPTY_HASH);
+    }
     let indexes = n.hash_indexes()?;
     let mut hashes = r.read_hashes(&indexes)?;
     debug_assert_eq!(
@@ -449,7 +452,12 @@ pub fn subtree_inclusion_proof<R: HashReader>(
     leaf_index: u64,
     r: &R,
 ) -> Result<Proof, TlogError> {
-    let m = &Subtree::new(leaf_index, leaf_index + 1)?;
+    let m = &Subtree::new(
+        leaf_index,
+        leaf_index
+            .checked_add(1)
+            .ok_or_else(|| TlogError::ConditionNotMet("leaf index overflow".into()))?,
+    )?;
 
     // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
     let indexes = n.subproof_indexes(m, true)?;
@@ -495,7 +503,15 @@ pub fn subtree_inclusion_proof_indexes(
     leaf_index: u64,
 ) -> Result<Vec<u64>, TlogError> {
     // SUBTREE_PROOF(start, start + 1, D_n) = PATH(start, D_n)
-    n.subproof_indexes(&Subtree::new(leaf_index, leaf_index + 1)?, true)
+    n.subproof_indexes(
+        &Subtree::new(
+            leaf_index,
+            leaf_index
+                .checked_add(1)
+                .ok_or_else(|| TlogError::ConditionNotMet("leaf index overflow".into()))?,
+        )?,
+        true,
+    )
 }
 
 /// Verify an inclusion proof that the tree of size `tree_size` with root hash
@@ -975,13 +991,11 @@ pub fn verify_consistency_proof(
     m: u64,
     m_hash: Hash,
 ) -> Result<(), TlogError> {
-    // Special case for proving consistency with an empty tree.
     if m == 0 {
-        return if proof.is_empty() && m_hash == EMPTY_HASH && (n != 0 || root_hash == EMPTY_HASH) {
-            Ok(())
-        } else {
-            Err(TlogError::InvalidProof)
-        };
+        if !proof.is_empty() || m_hash != EMPTY_HASH || (n == 0 && root_hash != EMPTY_HASH) {
+            return Err(TlogError::InvalidProof);
+        }
+        return Ok(());
     }
     verify_subtree_consistency_proof(proof, n, root_hash, &Subtree::new(0, m)?, m_hash)
 }
@@ -1473,6 +1487,22 @@ mod tests {
         assert!(Subtree::new(39, 36).is_err());
         assert!(Subtree::new(123, 456).is_err());
         assert!(Subtree::new(1 << 62, (1 << 63) + 1).is_err());
+
+        for (start, end) in [
+            (0, (1 << 47) + 1),
+            (0, (1 << 48) - 1),
+            (0, (1 << 63) + 1),
+            (0, u64::MAX),
+        ] {
+            assert!(Subtree::new(start, end).is_ok(), "[{start}, {end})");
+        }
+        for (start, end) in [
+            (1 << 46, (1 << 47) + 1),
+            (1 << 46, (1 << 48) - 1),
+            (1 << 62, (1 << 63) + 1),
+        ] {
+            assert!(Subtree::new(start, end).is_err(), "[{start}, {end})");
+        }
     }
 
     #[test]
@@ -1548,6 +1578,9 @@ mod tests {
         verify_consistency_proof(&[], 0, EMPTY_HASH, 0, EMPTY_HASH).unwrap();
         verify_consistency_proof(&[], 0, EMPTY_HASH, 1, EMPTY_HASH).unwrap_err();
         verify_consistency_proof(&[], 0, Hash::default(), 0, EMPTY_HASH).unwrap_err();
+        verify_consistency_proof(&[], 1, Hash::default(), 0, Hash::default()).unwrap_err();
+        verify_consistency_proof(&[Hash::default()], 1, Hash::default(), 0, EMPTY_HASH)
+            .unwrap_err();
         verify_consistency_proof(&[Hash::default()], 0, Hash::default(), 1, EMPTY_HASH)
             .unwrap_err();
 
@@ -1599,6 +1632,35 @@ mod tests {
             Subtree::split_interval(64, 66).unwrap(),
             (Subtree::new(64, 65).unwrap(), Subtree::new(65, 66).unwrap())
         );
+
+        for (start, end, left_start, left_end, right_start, right_end) in [
+            (5, 13, 4, 8, 8, 13),
+            (7, 9, 7, 8, 8, 9),
+            (
+                0,
+                0x8000_0000_0000,
+                0,
+                0x4000_0000_0000,
+                0x4000_0000_0000,
+                0x8000_0000_0000,
+            ),
+            (
+                0xffff_ffff_fffe,
+                0xffff_ffff_ffff,
+                0xffff_ffff_fffe,
+                0xffff_ffff_ffff,
+                0xffff_ffff_ffff,
+                0xffff_ffff_ffff,
+            ),
+        ] {
+            assert_eq!(
+                Subtree::split_interval(start, end).unwrap(),
+                (
+                    Subtree::new(left_start, left_end).unwrap(),
+                    Subtree::new(right_start, right_end).unwrap(),
+                )
+            );
+        }
     }
 
     /// Narrow a `u64` index to `usize` for slice access in tests.
