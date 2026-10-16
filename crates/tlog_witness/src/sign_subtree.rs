@@ -392,9 +392,9 @@ mod tests {
         NoteSignature::new(
             KeyName::new(name.to_owned()).unwrap(),
             key_id,
-            // ML-DSA-44 cosignatures attached as DoS-protection here
-            // would be 8-byte timestamp + 2420-byte signature, but the
-            // wire format itself doesn't constrain the blob beyond
+            // ML-DSA-44 cosignatures attached as DoS protection here
+            // would be 2420-byte raw signatures, but the wire format
+            // itself doesn't constrain the blob beyond
             // base64-decodable; 64 bytes is enough for the test.
             vec![sig_byte; 64],
         )
