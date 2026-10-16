@@ -59,6 +59,7 @@ pub struct SequencerConfig {
     pub location_hint: Option<String>,
     pub checkpoint_callback: CheckpointCallbacker,
     /// Persist failed callback inputs and retry them before sequencing another checkpoint.
+    /// The callback must be idempotent because delivery may be repeated after a delete or alarm failure.
     pub durable_checkpoint_callback: bool,
 }
 
@@ -179,6 +180,7 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
             .await?;
 
         if let Err(e) = log_ops::retry_checkpoint_callback(&self.config, &self.do_state).await {
+            metrics.checkpoint_callback_retry_failures.inc();
             error!(
                 "{}: Checkpoint callback retry failed: {e}",
                 self.config.name

@@ -18,6 +18,7 @@ use prometheus::{
 pub(crate) struct SequencerMetrics {
     pub(crate) dedup_cache_size: Gauge,
     pub(crate) dedup_cache_load_errors: Counter,
+    pub(crate) checkpoint_callback_retry_failures: Counter,
 
     pub(crate) req_count: CounterVec,
     pub(crate) req_in_flight: Gauge,
@@ -48,6 +49,12 @@ impl SequencerMetrics {
         let dedup_cache_load_errors = register_counter_with_registry!(
             "dedup_cache_load_errors_total",
             "Number of errors encountered while loading the dedup cache.",
+            r
+        )
+        .unwrap();
+        let checkpoint_callback_retry_failures = register_counter_with_registry!(
+            "checkpoint_callback_retry_failures_total",
+            "Number of failed durable checkpoint callback retries.",
             r
         )
         .unwrap();
@@ -143,6 +150,7 @@ impl SequencerMetrics {
         Self {
             dedup_cache_size,
             dedup_cache_load_errors,
+            checkpoint_callback_retry_failures,
             req_count,
             req_in_flight,
             req_duration,
