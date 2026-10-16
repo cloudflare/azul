@@ -1,18 +1,24 @@
 // Copyright (c) 2025-2026 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Client-side conformance suite for [c2sp.org/tlog-mirror](https://c2sp.org/tlog-mirror)
-//! server implementations.
+//! Client-side checks of the [c2sp.org/tlog-mirror](https://c2sp.org/tlog-mirror)
+//! `add-entries` request preamble, run against a live server.
 //!
 //! Each case encodes a request body with this crate and sends it to a live
 //! mirror, so a framing disagreement between implementations surfaces as a
 //! failing assertion rather than two self-consistent test suites that never
 //! exchange bytes.
 //!
+//! Scope is the preamble only: the `log_origin` length prefix, the `ticket`
+//! length prefix, and the `upload_start`/`upload_end` range. Entry packages,
+//! subtree consistency proofs, and the `mirror-info` response body need a
+//! configured log and an accepted checkpoint, so they are not covered here.
+//!
 //! The suite is skipped unless `TLOG_MIRROR_URL` names a submission prefix.
 //! `scripts/test-interop.sh` starts a server and sets it. Set
 //! `TLOG_MIRROR_EXPECT_FAIL=1` for an implementation that is known not to
-//! conform yet: the failures are reported but do not fail the run.
+//! conform yet: the failures are reported rather than failing the run, and
+//! the run fails if every case unexpectedly passes.
 
 use std::time::Duration;
 
@@ -68,12 +74,16 @@ fn post_add_entries(prefix: &str, body: Vec<u8>) -> Result<(u16, String), String
 }
 
 fn header_body(origin: &str) -> Vec<u8> {
+    header_body_with(origin, 0, 0, &[])
+}
+
+fn header_body_with(origin: &str, start: u64, end: u64, ticket: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     AddEntriesRequestHeader {
         log_origin: origin.to_owned(),
-        upload_start: 0,
-        upload_end: 0,
-        ticket: Vec::new(),
+        upload_start: start,
+        upload_end: end,
+        ticket: ticket.to_vec(),
     }
     .write_to(&mut body)
     .expect("encode add-entries header");
@@ -115,10 +125,53 @@ fn case_max_length_origin_is_parsed(prefix: &str) -> Result<(), String> {
     check_origin_was_parsed(status, &body, "255-byte origin")
 }
 
+/// A truncated `ticket` must be rejected rather than treated as an unknown
+/// log. The origin parses, so reaching the 404 would mean the server never
+/// validated the rest of the preamble.
+///
+/// Only the status class is asserted: the spec does not fix a response body
+/// for a malformed preamble, so implementations word these differently.
+fn case_truncated_ticket_is_rejected(prefix: &str) -> Result<(), String> {
+    // Claim eight ticket bytes and supply none.
+    let mut body = header_body_with(UNKNOWN_ORIGIN, 0, 0, &[]);
+    let ticket_size = body.len() - 2;
+    body[ticket_size..].copy_from_slice(&8u16.to_be_bytes());
+
+    let (status, response) = post_add_entries(prefix, body)?;
+    if (400..500).contains(&status) && status != 404 {
+        return Ok(());
+    }
+    Err(format!(
+        "truncated ticket: expected a 4xx rejection other than 404, got {status}: {}",
+        response.trim()
+    ))
+}
+
+/// `upload_start` must be less than or equal to `upload_end`. As above, the
+/// origin parses first, so a 404 would mean the range went unchecked.
+fn case_inverted_range_is_rejected(prefix: &str) -> Result<(), String> {
+    // `write_to` refuses an inverted range, so encode a valid one and swap the
+    // two big-endian u64s on the wire.
+    let mut body = header_body_with(UNKNOWN_ORIGIN, 5, 10, &[]);
+    let end_offset = body.len() - 2 - 8;
+    let start_offset = end_offset - 8;
+    body[start_offset..end_offset].copy_from_slice(&10u64.to_be_bytes());
+    body[end_offset..end_offset + 8].copy_from_slice(&5u64.to_be_bytes());
+
+    let (status, response) = post_add_entries(prefix, body)?;
+    if (400..500).contains(&status) && status != 404 {
+        return Ok(());
+    }
+    Err(format!(
+        "inverted range: expected a 4xx rejection other than 404, got {status}: {}",
+        response.trim()
+    ))
+}
+
 #[test]
-fn mirror_server_conformance() {
+fn add_entries_preamble_conformance() {
     let Some(prefix) = submission_prefix() else {
-        eprintln!("TLOG_MIRROR_URL is unset; skipping mirror conformance suite");
+        eprintln!("TLOG_MIRROR_URL is unset; skipping add-entries preamble conformance");
         return;
     };
 
@@ -127,6 +180,14 @@ fn mirror_server_conformance() {
         (
             "max_length_origin_is_parsed",
             case_max_length_origin_is_parsed,
+        ),
+        (
+            "truncated_ticket_is_rejected",
+            case_truncated_ticket_is_rejected,
+        ),
+        (
+            "inverted_range_is_rejected",
+            case_inverted_range_is_rejected,
         ),
     ];
 
@@ -142,6 +203,14 @@ fn mirror_server_conformance() {
     }
 
     if failures.is_empty() {
+        // A stale expectation is worth a failure: it is how we learn that an
+        // implementation shipped the fix we are waiting on.
+        assert!(
+            !expect_fail(),
+            "all {} conformance cases passed against {prefix}, but \
+             TLOG_MIRROR_EXPECT_FAIL is set; drop the marker for this implementation",
+            cases.len()
+        );
         return;
     }
     let summary = failures
