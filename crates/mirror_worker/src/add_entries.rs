@@ -94,7 +94,7 @@ pub(crate) async fn add_entries(
     let mut buf = StreamBuffer::new(stream);
 
     // Pull chunks until the header parses, retrying on UnexpectedEof. The
-    // header size is bounded (~131 KB max), so the loop terminates.
+    // header size is bounded (~64 KB max), so the loop terminates.
     let header = parse_header(&mut buf).await?;
 
     let Some(verifiers) = log_verifiers(&env, &header.log_origin).await? else {
@@ -802,9 +802,9 @@ enum ParseOutcome {
 /// [`AppError::BadRequest`] (400) if the input is malformed or truncated
 /// before the header is complete.
 ///
-/// The header has a bounded maximum size (u16 origin + u64s + u16
-/// ticket + hash + u8 proof-size + 63 hashes <= ~131 KB), so the
-/// retry-on-`UnexpectedEof` loop terminates.
+/// The header has a bounded maximum size (a u8-prefixed origin, two u64s,
+/// and a u16-prefixed ticket, so <= ~64 KB, almost all of it ticket), so
+/// the retry-on-`UnexpectedEof` loop terminates.
 async fn parse_header<S>(buf: &mut StreamBuffer<S>) -> ApiResult<AddEntriesRequestHeader>
 where
     S: futures_util::Stream<Item = std::result::Result<Vec<u8>, BodyError>> + Unpin,
