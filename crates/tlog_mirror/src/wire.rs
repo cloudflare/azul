@@ -38,7 +38,7 @@ pub const PACKAGE_ALIGNMENT: u64 = 256;
 /// [`package_ranges`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddEntriesRequestHeader {
-    /// Origin of the log being uploaded to. UTF-8, max 65535 bytes.
+    /// Origin of the log being uploaded to. UTF-8, max 255 bytes.
     pub log_origin: String,
     /// First log index in the upload, inclusive. Must be `<= upload_end`.
     pub upload_start: u64,
@@ -59,7 +59,7 @@ impl AddEntriesRequestHeader {
     /// if the origin is not valid UTF-8, or
     /// [`ParseError::UploadRangeInverted`] if `upload_start > upload_end`.
     pub fn read_from<R: Read>(mut reader: R) -> Result<Self, ParseError> {
-        let log_origin_size = reader.read_u16::<BigEndian>()?;
+        let log_origin_size = reader.read_u8()?;
         let mut log_origin_bytes = vec![0u8; usize::from(log_origin_size)];
         reader.read_exact(&mut log_origin_bytes)?;
         let log_origin =
@@ -91,8 +91,9 @@ impl AddEntriesRequestHeader {
     /// # Errors
     /// [`io::ErrorKind::InvalidInput`] if `upload_start > upload_end`
     /// (which [`read_from`](Self::read_from) rejects), or if `log_origin`
-    /// or `ticket` exceeds the u16 length-prefix limit (65535 bytes);
-    /// otherwise the writer's IO errors.
+    /// or `ticket` exceeds its wire length-prefix limit (255 bytes for
+    /// `log_origin`, 65535 bytes for `ticket`); otherwise the writer's IO
+    /// errors.
     pub fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
         // Keep read/write symmetric: the spec requires
         // upload_start <= upload_end, and read_from enforces it, so refuse
@@ -106,10 +107,11 @@ impl AddEntriesRequestHeader {
                 ),
             ));
         }
-        let log_origin_size =
-            u16::try_from(self.log_origin.len()).map_err(|_| oversize("log_origin"))?;
-        let ticket_size = u16::try_from(self.ticket.len()).map_err(|_| oversize("ticket"))?;
-        writer.write_u16::<BigEndian>(log_origin_size)?;
+        let log_origin_size = u8::try_from(self.log_origin.len())
+            .map_err(|_| oversize("log_origin", usize::from(u8::MAX)))?;
+        let ticket_size = u16::try_from(self.ticket.len())
+            .map_err(|_| oversize("ticket", usize::from(u16::MAX)))?;
+        writer.write_u8(log_origin_size)?;
         writer.write_all(self.log_origin.as_bytes())?;
         writer.write_u64::<BigEndian>(self.upload_start)?;
         writer.write_u64::<BigEndian>(self.upload_end)?;
@@ -119,10 +121,10 @@ impl AddEntriesRequestHeader {
     }
 }
 
-fn oversize(field: &'static str) -> io::Error {
+fn oversize(field: &'static str, max: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("{field} exceeds u16 length prefix (max {})", u16::MAX),
+        format!("{field} exceeds length prefix (max {max} bytes)"),
     )
 }
 
@@ -410,10 +412,35 @@ mod tests {
         };
         let mut buf = Vec::new();
         header.write_to(&mut buf).unwrap();
-        // Exact-bytes pin: u16(0) || u64(0) || u64(0) || u16(0) = 20 zero bytes.
-        assert_eq!(buf, vec![0u8; 20]);
+        // Exact-bytes pin: u8(0) || u64(0) || u64(0) || u16(0) = 19 zero bytes.
+        assert_eq!(buf, vec![0u8; 19]);
         let parsed = AddEntriesRequestHeader::read_from(Cursor::new(&buf)).unwrap();
         assert_eq!(parsed, header);
+    }
+
+    #[test]
+    fn header_origin_length_uses_one_byte_prefix() {
+        let header = AddEntriesRequestHeader {
+            log_origin: "a".repeat(255),
+            upload_start: 0,
+            upload_end: 0,
+            ticket: Vec::new(),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).unwrap();
+        assert_eq!(buf[0], 255);
+        assert_eq!(buf.len(), 1 + 255 + 8 + 8 + 2);
+        assert_eq!(
+            AddEntriesRequestHeader::read_from(Cursor::new(&buf)).unwrap(),
+            header
+        );
+
+        let oversized = AddEntriesRequestHeader {
+            log_origin: "a".repeat(256),
+            ..header
+        };
+        let err = oversized.write_to(Vec::new()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -437,7 +464,7 @@ mod tests {
     fn header_rejects_upload_range_inverted() {
         let mut buf = Vec::new();
         // log_origin_size = 0
-        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.push(0);
         // upload_start = 100, upload_end = 50 (inverted)
         buf.extend_from_slice(&100u64.to_be_bytes());
         buf.extend_from_slice(&50u64.to_be_bytes());
@@ -456,7 +483,7 @@ mod tests {
     #[test]
     fn header_rejects_non_utf8_origin() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&2u16.to_be_bytes()); // log_origin_size = 2
+        buf.push(2); // log_origin_size = 2
         buf.extend_from_slice(&[0xFF, 0xFE]); // not valid UTF-8
         buf.extend_from_slice(&0u64.to_be_bytes());
         buf.extend_from_slice(&0u64.to_be_bytes());
@@ -468,7 +495,7 @@ mod tests {
     #[test]
     fn header_rejects_truncated_origin() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&5u16.to_be_bytes()); // claims 5 origin bytes
+        buf.push(5); // claims 5 origin bytes
         buf.extend_from_slice(b"abc"); // but only 3 follow
         let err = AddEntriesRequestHeader::read_from(Cursor::new(&buf)).unwrap_err();
         assert!(matches!(
