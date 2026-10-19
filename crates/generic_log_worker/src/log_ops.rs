@@ -1175,8 +1175,8 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         warn!("{name}: Failed to clear checkpoint callback: {e}");
     }
 
-    // Release metadata only after callback outputs are available or their retry
-    // record is durable.
+    // Durable callbacks have a retry record before metadata is released;
+    // best-effort callbacks release metadata after the callback attempt.
     for (sender, metadata) in sequenced_metadata {
         sender.send_replace(metadata);
     }
