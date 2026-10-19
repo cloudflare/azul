@@ -1706,6 +1706,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sequence_rejects_whole_batch_past_max_tree_size() {
+        let mut log = TestLog::new();
+        log.config.max_tree_size = Some(2);
+
+        let first = log.add_certificate_with_seed(1);
+        let second = log.add_certificate_with_seed(2);
+        let third = log.add_certificate_with_seed(3);
+        log.sequence().unwrap();
+
+        assert!(block_on(first.resolve()).is_none());
+        assert!(block_on(second.resolve()).is_none());
+        assert!(block_on(third.resolve()).is_none());
+        assert_eq!(log.sequence_state.borrow().tree.size(), 0);
+    }
+
+    #[test]
     fn test_checked_new_tree_size_rejects_overflow() {
         assert!(matches!(
             checked_new_tree_size(u64::MAX, 1, None),
