@@ -42,7 +42,7 @@ use tokio::sync::Mutex;
 use worker::*;
 
 use crate::{
-    CONFIG, MIRROR_STATE_BINDING, commit, load_witness_signer,
+    CONFIG, MIRROR_STATE_BINDING, commit, load_witness_signers,
     storage::{load_origin_bucket, load_witness_origin_bucket},
 };
 
@@ -343,6 +343,7 @@ impl MirrorState {
         }
         let (signed_note_bytes, witness_response_bytes) = if CONFIG.witness_enabled() {
             self.cosign_witness_checkpoint(&body.signed_note_bytes)
+                .await
                 .inspect_err(|_| {
                     if let Some(origin) = self.state.id().name() {
                         obs.witness_failure(&origin);
@@ -368,19 +369,25 @@ impl MirrorState {
         })
     }
 
-    fn cosign_witness_checkpoint(&self, note_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    async fn cosign_witness_checkpoint(&self, note_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut note = Note::from_bytes(note_bytes)
             .map_err(|error| Error::from(format!("parse checkpoint note: {error:?}")))?;
         let checkpoint = CheckpointText::from_bytes(note.text())
             .map_err(|error| Error::from(format!("parse checkpoint text: {error:?}")))?;
-        let signature = load_witness_signer(&self.env)?
-            .as_checkpoint_signer()
-            .sign(generic_log_worker::util::now_millis(), &checkpoint)
-            .map_err(|error| Error::from(format!("witness signing: {error:?}")))?;
-        let response = serialize_add_checkpoint_response(std::slice::from_ref(&signature));
-        let mut signatures = note.signatures().to_vec();
-        signatures.push(signature);
-        note = Note::new(note.text(), &signatures)
+        let signatures = load_witness_signers(&self.env)
+            .await?
+            .iter()
+            .map(|signer| {
+                signer
+                    .as_checkpoint_signer()
+                    .sign(generic_log_worker::util::now_millis(), &checkpoint)
+                    .map_err(|error| Error::from(format!("witness signing: {error:?}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let response = serialize_add_checkpoint_response(&signatures);
+        let mut signatures_with_checkpoint = note.signatures().to_vec();
+        signatures_with_checkpoint.extend(signatures);
+        note = Note::new(note.text(), &signatures_with_checkpoint)
             .map_err(|error| Error::from(format!("build witness checkpoint: {error:?}")))?;
         Ok((note.to_bytes(), response))
     }

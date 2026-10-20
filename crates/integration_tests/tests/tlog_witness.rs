@@ -44,7 +44,7 @@
 //! # Key management
 //!
 //! The witness's `add-checkpoint` cosignature is `subtree/v1` (ML-DSA-44),
-//! per the dev `WITNESS_SIGNING_KEY` in `.dev.vars`. The log signing
+//! per the dev `WITNESS_SIGNING_KEY` and `WITNESS_SIGNING_KEY_NEXT` secrets in `.dev.vars`. The log signing
 //! key remains Ed25519. Both PEMs are duplicated in the witness crate's
 //! unit tests so a rotation breaks closed; see
 //! `crates/mirror_worker/src/lib.rs::dev_config_tests`.
@@ -216,6 +216,13 @@ struct LogMetadata {
 struct IdentityMetadata {
     name: String,
     monitoring_prefix: String,
+    public_keys: Vec<PublicKeyMetadata>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct PublicKeyMetadata {
+    algorithm: String,
     #[serde_as(as = "Base64")]
     public_key: Vec<u8>,
 }
@@ -333,27 +340,53 @@ async fn wait_for_witness() {
     panic!("witness did not become ready at {}", base_url());
 }
 
-/// Build a `SubtreeV1NoteVerifier` from the witness's `/metadata` SPKI
-/// and its configured name. Used to verify both `add-checkpoint` and
-/// `sign-subtree` responses.
-fn witness_verifier(meta: &MetadataResponse) -> SubtreeV1NoteVerifier {
+/// Build verifiers for every witness key advertised by `/metadata`.
+fn witness_verifiers(meta: &MetadataResponse) -> VerifierList {
     use pkcs8::DecodePublicKey;
     let identity = meta.witness.as_ref().expect("witness metadata");
-    let witness_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&identity.public_key)
-        .expect("witness SPKI must parse as ML-DSA-44");
     let name = KeyName::new(identity.name.clone()).expect("KeyName for witness");
-    SubtreeV1NoteVerifier::new(name, witness_vk)
+    let verifiers = identity
+        .public_keys
+        .iter()
+        .map(|key| {
+            assert_eq!(key.algorithm, "subtree/v1");
+            let key = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&key.public_key)
+                .expect("witness SPKI must parse as ML-DSA-44");
+            Box::new(SubtreeV1NoteVerifier::new(name.clone(), key))
+                as Box<dyn signed_note::NoteVerifier>
+        })
+        .collect();
+    VerifierList::new(verifiers)
 }
 
-/// Verify that `sigs` (returned from /add-checkpoint) contains a valid
-/// `subtree/v1` cosignature from the witness on the given checkpoint.
+fn witness_subtree_verifiers(meta: &MetadataResponse) -> Vec<SubtreeV1NoteVerifier> {
+    use pkcs8::DecodePublicKey;
+    let identity = meta.witness.as_ref().expect("witness metadata");
+    let name = KeyName::new(identity.name.clone()).expect("KeyName for witness");
+    identity
+        .public_keys
+        .iter()
+        .map(|key| {
+            assert_eq!(key.algorithm, "subtree/v1");
+            let key = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&key.public_key)
+                .expect("witness SPKI must parse as ML-DSA-44");
+            SubtreeV1NoteVerifier::new(name.clone(), key)
+        })
+        .collect()
+}
+
 fn verify_witness_signature(checkpoint: &Note, sigs: &[NoteSignature], meta: &MetadataResponse) {
-    let v = witness_verifier(meta);
+    let witness = meta.witness.as_ref().expect("witness metadata");
     let augmented = Note::new(checkpoint.text(), sigs).expect("assemble augmented note");
-    let (verified, _unverified) = augmented
-        .verify(&VerifierList::new(vec![Box::new(v)]))
+    let (verified, _) = augmented
+        .verify(&witness_verifiers(meta))
         .expect("verify witness sig");
-    assert!(!verified.is_empty(), "witness key did not sign response");
+    let expected = sigs
+        .iter()
+        .filter(|signature| signature.name().as_str() == witness.name)
+        .count();
+    assert_eq!(verified.len(), expected);
+    assert_eq!(expected, witness.public_keys.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +407,13 @@ async fn tlog_witness_end_to_end() {
     let witness = meta.witness.as_ref().expect("witness identity metadata");
     let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
     assert_eq!(witness.name, "dev.witness.example");
-    assert_ne!(witness.public_key, Vec::<u8>::new());
+    assert_eq!(witness.public_keys.len(), 2);
+    assert!(
+        witness
+            .public_keys
+            .iter()
+            .all(|key| { key.algorithm == "subtree/v1" && !key.public_key.is_empty() })
+    );
     assert!(meta.submission_prefix.starts_with("http"));
     assert!(witness.monitoring_prefix.starts_with("http"));
     assert_ne!(witness.monitoring_prefix, mirror.monitoring_prefix);
@@ -684,14 +723,13 @@ async fn tlog_witness_end_to_end() {
             String::from_utf8_lossy(&r.body)
         );
         let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
-        assert_eq!(sigs.len(), 1, "exactly one cosignature line");
-        // Verify the response is a valid subtree/v1 cosignature on the
-        // requested subtree.
-        let v = witness_verifier(&meta);
-        assert!(
-            v.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, sigs[0].signature()),
-            "witness signature must verify against the requested subtree",
-        );
+        assert_eq!(sigs.len(), witness.public_keys.len());
+        let verifiers = witness_subtree_verifiers(&meta);
+        assert!(sigs.iter().all(|signature| {
+            verifiers.iter().any(|verifier| {
+                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, signature.signature())
+            })
+        }));
     }
 
     // ----------------------- (12) /sign-subtree with checkpoint NOT cosigned by us → 403 -----------------------

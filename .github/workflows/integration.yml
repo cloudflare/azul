@@ -96,19 +96,20 @@ jobs:
         run: >-
           wrangler -e=dev dev --port 8787 --persist-to .wrangler/state --test-scheduled
           --var COSIGNERS_JSON_URL:http://127.0.0.1:8790/cosigners.json
-          --var COSIGNERS_PEM_URL:http://127.0.0.1:8790/cosigners.pem &
+          --var COSIGNERS_PEM_URL:http://127.0.0.1:8790/cosigners.pem
+          > wrangler-dev.log 2>&1 &
 
       - name: Wait for wrangler dev to be ready
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 90); do
             if curl -sf http://localhost:8787/metadata > /dev/null 2>&1; then
               echo "wrangler dev is ready"
               exit 0
             fi
-            echo "Waiting for wrangler dev... attempt $i/30"
+            echo "Waiting for wrangler dev... attempt $i/90"
             sleep 2
           done
-          echo "wrangler dev failed to start in time"
+          cat crates/mirror_worker/wrangler-dev.log
           exit 1
 
       - name: Run TLog integration tests

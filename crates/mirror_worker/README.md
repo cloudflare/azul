@@ -33,11 +33,11 @@ applied on read, so changing the list takes effect without a re-synchronization.
 Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
 The Worker only serves submission and metadata APIs.
 
-Role keys remain separate secrets:
+`MIRROR_TICKET_KEY` seals mirror upload tickets.
 
-- `WITNESS_SIGNING_KEY` signs successful `add-checkpoint` responses and witness subtree responses.
-- `MIRROR_SIGNING_KEY` signs completed mirror checkpoints and mirror subtree responses.
-- `MIRROR_TICKET_KEY` seals mirror upload tickets.
+Bind `MIRROR_SIGNING_KEY`, `MIRROR_SIGNING_KEY_NEXT`, `WITNESS_SIGNING_KEY`, and `WITNESS_SIGNING_KEY_NEXT` with `[[secrets_store_secrets]]` as needed. Each binding contains one PKCS#8 PEM private key. Local Wrangler development uses the same names in `.dev.vars`.
+
+The current key is required and the `_NEXT` key is optional. During rotation, the Worker signs with both keys. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
 
 Disabled-role secrets and R2 bindings are not loaded. Ticket and cleaner access
 is confined to mirror operations.

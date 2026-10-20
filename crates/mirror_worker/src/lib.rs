@@ -205,35 +205,78 @@ impl IdentitySigner {
     }
 }
 
-/// Cached mirror signer, so the PKCS#8 parse happens at most once per
+/// Cached mirror signers, so the PKCS#8 parse happens at most once per
 /// worker instance.
-static MIRROR_SIGNER: OnceLock<IdentitySigner> = OnceLock::new();
-static WITNESS_SIGNER: OnceLock<IdentitySigner> = OnceLock::new();
+///
+/// The mirror signs with every configured key, so a key can be rotated
+/// without a flag day: add the new key, let relying parties pick it up
+/// while both signatures are published, then remove the old one.
+static MIRROR_SIGNERS: OnceLock<Vec<IdentitySigner>> = OnceLock::new();
+static WITNESS_SIGNERS: OnceLock<Vec<IdentitySigner>> = OnceLock::new();
 
-/// Load (or return the already-cached) mirror signer.
+const MIRROR_SIGNING_KEY: &str = "MIRROR_SIGNING_KEY";
+const WITNESS_SIGNING_KEY: &str = "WITNESS_SIGNING_KEY";
+
+/// Suffix of the secret holding the incoming key during a rotation.
 ///
-/// The algorithm is derived from the PKCS#8 OID.
+/// Promotion copies the next key over the current one and then unsets the
+/// next secret, so both secrets hold the same key for part of that window.
+const NEXT_SUFFIX: &str = "_NEXT";
+
+/// Read one PKCS#8 PEM secret, from Secret Store when bound and from a
+/// plain variable otherwise. `None` means the binding is absent or empty.
+async fn read_signing_key(env: &Env, binding: &str) -> Result<Option<String>> {
+    if let Ok(store) = env.secret_store(binding) {
+        return Ok(store.get().await?.filter(|pem| !pem.trim().is_empty()));
+    }
+    Ok(env
+        .var(binding)
+        .ok()
+        .map(|pem| pem.to_string())
+        .filter(|pem| !pem.trim().is_empty()))
+}
+
+/// Load a role's signers: the current key, plus the next key while a
+/// rotation is in flight.
 ///
-/// # Errors
-///
-/// Returns an error if the `MIRROR_SIGNING_KEY` secret is missing, the PEM
-/// is malformed, or the key is neither Ed25519 nor ML-DSA-44.
-pub(crate) fn load_mirror_signer(env: &Env) -> Result<&'static IdentitySigner> {
+/// Keys are deduplicated by public key, so a promotion that has copied the
+/// next key over the current one but not yet unset `*_NEXT` signs once
+/// rather than emitting two identical signatures.
+async fn load_signing_keys(
+    env: &Env,
+    binding: &str,
+    identity_name: &str,
+) -> Result<Vec<IdentitySigner>> {
+    let current = read_signing_key(env, binding)
+        .await?
+        .ok_or_else(|| Error::from(format!("{binding} is not set")))?;
+    let mut signers = vec![build_identity_signer(identity_name, binding, &current)?];
+
+    let next_binding = format!("{binding}{NEXT_SUFFIX}");
+    if let Some(next) = read_signing_key(env, &next_binding).await? {
+        let next = build_identity_signer(identity_name, &next_binding, &next)?;
+        if next.public_key_der() != signers[0].public_key_der() {
+            signers.push(next);
+        }
+    }
+    Ok(signers)
+}
+
+pub(crate) async fn load_mirror_signers(env: &Env) -> Result<&'static [IdentitySigner]> {
     let config = CONFIG
         .mirror
         .as_ref()
         .ok_or_else(|| Error::from("mirror identity is disabled"))?;
-    if let Some(s) = MIRROR_SIGNER.get() {
-        return Ok(s);
+    if let Some(signers) = MIRROR_SIGNERS.get() {
+        return Ok(signers);
     }
-    let pem = env.secret("MIRROR_SIGNING_KEY")?.to_string();
-    let signer = build_identity_signer(config.name.as_str(), "MIRROR_SIGNING_KEY", &pem)?;
-    Ok(MIRROR_SIGNER.get_or_init(|| signer))
+    let signers = load_signing_keys(env, MIRROR_SIGNING_KEY, config.name.as_str()).await?;
+    Ok(MIRROR_SIGNERS.get_or_init(|| signers))
 }
 
 /// Build identity signing material from a PKCS#8 PEM string.
 ///
-/// Split out from [`load_mirror_signer`] so unit tests can exercise the
+/// Split out from [`load_mirror_signers`] so unit tests can exercise the
 /// parse and algorithm dispatch without a `worker::Env`.
 fn build_identity_signer(
     identity_name: &str,
@@ -276,37 +319,43 @@ fn build_identity_signer(
     }
 }
 
-pub(crate) fn load_witness_signer(env: &Env) -> Result<&'static IdentitySigner> {
+pub(crate) async fn load_witness_signers(env: &Env) -> Result<&'static [IdentitySigner]> {
     if !CONFIG.witness_enabled() {
         return Err(Error::from("witness identity is disabled"));
     }
-    if let Some(signer) = WITNESS_SIGNER.get() {
-        return Ok(signer);
+    if let Some(signers) = WITNESS_SIGNERS.get() {
+        return Ok(signers);
     }
-    let pem = env.secret("WITNESS_SIGNING_KEY")?.to_string();
     let identity = CONFIG
         .witness
         .as_ref()
         .expect("validated witness mode must have witness config");
-    let signer = build_identity_signer(identity.name.as_str(), "WITNESS_SIGNING_KEY", &pem)?;
-    Ok(WITNESS_SIGNER.get_or_init(|| signer))
+    let signers = load_signing_keys(env, WITNESS_SIGNING_KEY, identity.name.as_str()).await?;
+    Ok(WITNESS_SIGNERS.get_or_init(|| signers))
 }
 
 /// Load enabled identity keys and reject key reuse across roles.
-pub(crate) fn validate_identity_keys(env: &Env) -> Result<()> {
+///
+/// Every key of each role is compared, so a rotation cannot introduce a key
+/// that the other role already uses.
+pub(crate) async fn validate_identity_keys(env: &Env) -> Result<()> {
     if !CONFIG.witness_enabled() || CONFIG.mirror.is_none() {
         return Ok(());
     }
-    let witness = load_witness_signer(env)?;
-    let mirror = load_mirror_signer(env)?;
+    let witness = load_witness_signers(env).await?;
+    let mirror = load_mirror_signers(env).await?;
     ensure_distinct_identity_keys(witness, mirror).map_err(Error::from)
 }
 
 fn ensure_distinct_identity_keys(
-    witness: &IdentitySigner,
-    mirror: &IdentitySigner,
+    witness: &[IdentitySigner],
+    mirror: &[IdentitySigner],
 ) -> std::result::Result<(), &'static str> {
-    if witness.public_key_der() != mirror.public_key_der() {
+    if !witness.iter().any(|witness| {
+        mirror
+            .iter()
+            .any(|mirror| witness.public_key_der() == mirror.public_key_der())
+    }) {
         return Ok(());
     }
     Err("witness and mirror identities must use distinct signing keys")
@@ -413,7 +462,11 @@ mod signer_tests {
             .expect("build witness signer");
         let mirror = build_identity_signer("mirror.example", "TEST_KEY", &ed25519_pem(4))
             .expect("build mirror signer");
-        ensure_distinct_identity_keys(&witness, &mirror).unwrap();
+        ensure_distinct_identity_keys(
+            std::slice::from_ref(&witness),
+            std::slice::from_ref(&mirror),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -422,7 +475,13 @@ mod signer_tests {
             .expect("build witness signer");
         let mirror = build_identity_signer("mirror.example", "TEST_KEY", &ed25519_pem(3))
             .expect("build mirror signer");
-        assert!(ensure_distinct_identity_keys(&witness, &mirror).is_err());
+        assert!(
+            ensure_distinct_identity_keys(
+                std::slice::from_ref(&witness),
+                std::slice::from_ref(&mirror),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -552,40 +611,41 @@ mod dev_config_tests {
     }
 
     #[test]
-    fn dev_vars_mirror_signing_key_parses() {
-        let pem = dev_var("MIRROR_SIGNING_KEY");
-        let signer = super::build_identity_signer("dev.mirror.example", "MIRROR_SIGNING_KEY", &pem)
-            .expect("MIRROR_SIGNING_KEY in .dev.vars must parse");
-        assert_eq!(
-            signer.algorithm(),
-            "subtree/v1",
-            "dev MIRROR_SIGNING_KEY must load as a subtree/v1 signer",
-        );
-    }
-
-    #[test]
-    fn dev_vars_witness_signing_key_parses() {
-        let signer = super::build_identity_signer(
+    fn dev_vars_signing_keys_parse() {
+        let mirror = super::build_identity_signer(
+            "dev.mirror.example",
+            "MIRROR_SIGNING_KEY",
+            &dev_var("MIRROR_SIGNING_KEY"),
+        )
+        .expect("MIRROR_SIGNING_KEY in .dev.vars must parse");
+        let mirror_next = super::build_identity_signer(
+            "dev.mirror.example",
+            "MIRROR_SIGNING_KEY_NEXT",
+            &dev_var("MIRROR_SIGNING_KEY_NEXT"),
+        )
+        .expect("MIRROR_SIGNING_KEY_NEXT in .dev.vars must parse");
+        let witness = super::build_identity_signer(
             "dev.witness.example",
             "WITNESS_SIGNING_KEY",
             &dev_var("WITNESS_SIGNING_KEY"),
         )
         .expect("WITNESS_SIGNING_KEY in .dev.vars must parse");
-        assert_eq!(signer.algorithm(), "subtree/v1");
-    }
-
-    #[test]
-    fn dev_vars_witness_and_mirror_public_keys_differ() {
-        let witness = SigningKey::<MlDsa44>::from_pkcs8_pem(&dev_var("WITNESS_SIGNING_KEY"))
-            .expect("WITNESS_SIGNING_KEY in .dev.vars must parse");
-        let mirror = SigningKey::<MlDsa44>::from_pkcs8_pem(&dev_var("MIRROR_SIGNING_KEY"))
-            .expect("MIRROR_SIGNING_KEY in .dev.vars must parse");
-
-        assert_ne!(
-            witness.verifying_key().to_public_key_der().unwrap(),
-            mirror.verifying_key().to_public_key_der().unwrap(),
-            "dev witness and mirror identities must use distinct public keys",
-        );
+        let witness_next = super::build_identity_signer(
+            "dev.witness.example",
+            "WITNESS_SIGNING_KEY_NEXT",
+            &dev_var("WITNESS_SIGNING_KEY_NEXT"),
+        )
+        .expect("WITNESS_SIGNING_KEY_NEXT in .dev.vars must parse");
+        assert_eq!(mirror.algorithm(), "subtree/v1");
+        assert_eq!(mirror_next.algorithm(), "subtree/v1");
+        assert_eq!(witness.algorithm(), "subtree/v1");
+        assert_eq!(witness_next.algorithm(), "subtree/v1");
+        assert_ne!(mirror.public_key_der(), mirror_next.public_key_der());
+        assert_ne!(witness.public_key_der(), witness_next.public_key_der());
+        assert_ne!(mirror.public_key_der(), witness.public_key_der());
+        assert_ne!(mirror.public_key_der(), witness_next.public_key_der());
+        assert_ne!(mirror_next.public_key_der(), witness.public_key_der());
+        assert_ne!(mirror_next.public_key_der(), witness_next.public_key_der());
     }
 
     /// `MIRROR_TICKET_KEY` in `.dev.vars` is base64 of exactly 32 bytes,
