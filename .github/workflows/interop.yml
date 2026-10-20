@@ -22,7 +22,6 @@ jobs:
   interop:
     name: Interop (${{ matrix.implementation }})
     runs-on: ubuntu-latest
-    if: inputs.implementation == 'all' || inputs.implementation == matrix.implementation
     timeout-minutes: 30
     permissions:
       contents: read
@@ -44,6 +43,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check out ${{ matrix.implementation }}
+        if: inputs.implementation == 'all' || inputs.implementation == matrix.implementation
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repository }}
@@ -51,10 +51,13 @@ jobs:
           path: interop/${{ matrix.implementation }}
           persist-credentials: false
       - run: rustup update stable && rustup default stable
+        if: inputs.implementation == 'all' || inputs.implementation == matrix.implementation
       - uses: actions/setup-go@v5
+        if: inputs.implementation == 'all' || inputs.implementation == matrix.implementation
         with:
           go-version: "1.27.x"
       - name: Run interop checks
+        if: inputs.implementation == 'all' || inputs.implementation == matrix.implementation
         run: bash scripts/test-interop.sh "${{ matrix.implementation }}"
         env:
           SUNLIGHT_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}
