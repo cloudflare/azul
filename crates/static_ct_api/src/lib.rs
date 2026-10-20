@@ -43,6 +43,8 @@ pub enum StaticCTError {
     MissingPrecertIssuer,
     #[error("precertificate signing certificates are not accepted")]
     PrecertSigningCertNotAccepted,
+    #[error("chain contains a CA whose key is blocked")]
+    BlockedIssuer,
     #[error(
         "{}certificate submitted to add-{}chain", if *.is_precert { "pre-" } else { "final " }, if *.is_precert { "" } else { "pre-" }
     )]
