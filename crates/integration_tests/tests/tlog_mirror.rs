@@ -43,7 +43,9 @@ use tlog_core::{
     HASH_SIZE, Hash, HashReader, Subtree, TlogError, consistency_proof, record_hash, stored_hashes,
     subtree_consistency_proof, subtree_hash, tree_hash,
 };
-use tlog_cosignature::{SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier};
+use tlog_cosignature::{
+    CosignatureV1NoteVerifier, SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier,
+};
 use tlog_mirror::{
     AddEntriesRequestHeader, EntryPackage, MIRROR_INFO_CONTENT_TYPE, MirrorInfo, package_ranges,
 };
@@ -617,15 +619,47 @@ async fn post_sign_subtree(body: &[u8]) -> AddCheckpointResult {
     }
 }
 
-/// Build a `SubtreeV1NoteVerifier` from the mirror's `/metadata` SPKI and
-/// configured name, used to verify `sign-subtree` responses.
-fn mirror_verifier(meta: &MetadataResponse) -> SubtreeV1NoteVerifier {
+/// Build a verifier for every mirror key advertised by `/metadata`.
+fn mirror_verifiers(meta: &MetadataResponse) -> VerifierList {
     use pkcs8::DecodePublicKey;
     let identity = meta.mirror.as_ref().expect("mirror metadata");
-    let mirror_vk = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&identity.public_key)
-        .expect("mirror SPKI must parse as ML-DSA-44");
     let name = KeyName::new(identity.name.clone()).expect("KeyName for mirror");
-    SubtreeV1NoteVerifier::new(name, mirror_vk)
+    let verifiers = identity
+        .public_keys
+        .iter()
+        .map(|key| match key.algorithm.as_str() {
+            "cosignature/v1" => {
+                let key = ed25519_dalek::VerifyingKey::from_public_key_der(&key.public_key)
+                    .expect("mirror SPKI must parse as Ed25519");
+                Box::new(CosignatureV1NoteVerifier::new(name.clone(), key))
+                    as Box<dyn signed_note::NoteVerifier>
+            }
+            "subtree/v1" => {
+                let key = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&key.public_key)
+                    .expect("mirror SPKI must parse as ML-DSA-44");
+                Box::new(SubtreeV1NoteVerifier::new(name.clone(), key))
+                    as Box<dyn signed_note::NoteVerifier>
+            }
+            algorithm => panic!("unsupported mirror signature algorithm {algorithm}"),
+        })
+        .collect();
+    VerifierList::new(verifiers)
+}
+
+fn mirror_subtree_verifiers(meta: &MetadataResponse) -> Vec<SubtreeV1NoteVerifier> {
+    use pkcs8::DecodePublicKey;
+    let identity = meta.mirror.as_ref().expect("mirror metadata");
+    let name = KeyName::new(identity.name.clone()).expect("KeyName for mirror");
+    identity
+        .public_keys
+        .iter()
+        .filter(|key| key.algorithm == "subtree/v1")
+        .map(|key| {
+            let key = ml_dsa::VerifyingKey::<MlDsa44>::from_public_key_der(&key.public_key)
+                .expect("mirror SPKI must parse as ML-DSA-44");
+            SubtreeV1NoteVerifier::new(name.clone(), key)
+        })
+        .collect()
 }
 
 fn verify_mirror_signature(
@@ -635,7 +669,7 @@ fn verify_mirror_signature(
 ) {
     let augmented = Note::new(checkpoint.text(), signatures).expect("assemble augmented note");
     let (verified, _) = augmented
-        .verify(&VerifierList::new(vec![Box::new(mirror_verifier(meta))]))
+        .verify(&mirror_verifiers(meta))
         .expect("verify mirror signature");
     assert!(!verified.is_empty(), "mirror key did not sign response");
 }
@@ -678,6 +712,12 @@ struct MetadataResponse {
 struct IdentityMetadata {
     name: String,
     monitoring_prefix: String,
+    public_keys: Vec<PublicKeyMetadata>,
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+struct PublicKeyMetadata {
     #[serde_as(as = "Base64")]
     public_key: Vec<u8>,
     algorithm: String,
@@ -759,12 +799,19 @@ async fn tlog_mirror_end_to_end() {
     assert_eq!(meta.mode, "witness-and-mirror");
     let mirror = meta.mirror.as_ref().expect("mirror identity metadata");
     assert_eq!(mirror.name, "dev.mirror.example");
-    assert_ne!(mirror.public_key, Vec::<u8>::new());
-    assert_eq!(
-        mirror.algorithm, "subtree/v1",
-        "dev mirror loads ML-DSA-44 from .dev.vars; algorithm must surface as subtree/v1",
+    assert!(!mirror.public_keys.is_empty());
+    assert!(
+        mirror
+            .public_keys
+            .iter()
+            .all(|key| !key.public_key.is_empty())
     );
-    assert!(mirror.supports_sign_subtree);
+    assert!(
+        mirror
+            .public_keys
+            .iter()
+            .all(|key| { key.algorithm == "subtree/v1" && key.supports_sign_subtree })
+    );
     assert!(meta.submission_prefix.starts_with("http"));
     assert!(mirror.monitoring_prefix.starts_with("http"));
     let log_meta = meta
@@ -910,7 +957,10 @@ async fn tlog_mirror_end_to_end() {
             "empty checkpoint mirror: {:?}",
             String::from_utf8_lossy(&r.body)
         );
-        assert_eq!(parse_add_checkpoint_response(&r.body).unwrap().len(), 1);
+        assert_eq!(
+            parse_add_checkpoint_response(&r.body).unwrap().len(),
+            mirror.public_keys.len(),
+        );
 
         let served = require_local_r2_object(LOG_ORIGIN, "checkpoint").await;
         let served = Note::from_bytes(&served).expect("served empty checkpoint note");
@@ -1239,7 +1289,7 @@ async fn tlog_mirror_end_to_end() {
             String::from_utf8_lossy(&r.body),
         );
         let signatures = parse_sign_subtree_response(&r.body).expect("parse replay response");
-        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures.len(), mirror.public_keys.len());
         verify_mirror_signature(&checkpoint_600, &signatures, &meta);
     }
 
@@ -1295,7 +1345,7 @@ async fn tlog_mirror_end_to_end() {
             String::from_utf8_lossy(&r.body)
         );
         let mirror_sigs = parse_sign_subtree_response(&r.body).expect("parse mirror cosignature");
-        assert_eq!(mirror_sigs.len(), 1, "exactly one mirror cosignature line");
+        assert_eq!(mirror_sigs.len(), mirror.public_keys.len());
         let log_note = Note::from_bytes(&log.sign_checkpoint(&signer)).unwrap();
         cosigned_checkpoint =
             Note::new(log_note.text(), &mirror_sigs).expect("assemble cosigned reference note");
@@ -1348,7 +1398,7 @@ async fn tlog_mirror_end_to_end() {
     // assembled there carries that cosignature and is the reference
     // checkpoint these requests verify statelessly against.
     // =======================================================================
-    let verifier = mirror_verifier(&meta);
+    let subtree_verifiers = mirror_subtree_verifiers(&meta);
 
     // --- sign-subtree happy path (start = 0) ---
     {
@@ -1373,11 +1423,12 @@ async fn tlog_mirror_end_to_end() {
             String::from_utf8_lossy(&r.body)
         );
         let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
-        assert_eq!(sigs.len(), 1, "exactly one cosignature line");
-        assert!(
-            verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, sigs[0].signature()),
-            "mirror signature must verify against the requested subtree",
-        );
+        assert_eq!(sigs.len(), subtree_verifiers.len());
+        assert!(sigs.iter().all(|signature| {
+            subtree_verifiers.iter().any(|verifier| {
+                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, signature.signature())
+            })
+        }));
     }
 
     // --- sign-subtree with a non-zero start ---
@@ -1406,10 +1457,12 @@ async fn tlog_mirror_end_to_end() {
             String::from_utf8_lossy(&r.body)
         );
         let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
-        assert!(
-            verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, sigs[0].signature()),
-            "mirror signature must verify against the non-zero-start subtree",
-        );
+        assert_eq!(sigs.len(), subtree_verifiers.len());
+        assert!(sigs.iter().all(|signature| {
+            subtree_verifiers.iter().any(|verifier| {
+                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, signature.signature())
+            })
+        }));
     }
 
     // --- reference checkpoint NOT cosigned by this mirror -> 403 ---
@@ -1562,7 +1615,7 @@ async fn tlog_mirror_end_to_end() {
         );
         let signatures =
             parse_sign_subtree_response(&r.body).expect("parse ticketed checkpoint response");
-        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures.len(), mirror.public_keys.len());
         verify_mirror_signature(&checkpoint_3256, &signatures, &meta);
         assert_cut_tiles(LOG_ORIGIN, &log, 3256).await;
     }

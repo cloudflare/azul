@@ -6,7 +6,7 @@
 use crate::{
     CONFIG, IdentitySigner,
     cosigner_registry_do::{log_verifiers, merged_registry_logs, registry_record},
-    load_mirror_signer, load_witness_signer,
+    load_mirror_signers, load_witness_signers,
     mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, UpdatePendingResponse, state_stub},
 };
 use axum::{
@@ -60,7 +60,7 @@ async fn fetch(
     ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     crate::init_sentry(&env);
-    crate::validate_identity_keys(&env)?;
+    crate::validate_identity_keys(&env).await?;
     let wshim = Wshim::from_env(&env);
     let registry = metrics::registry();
     let response = generic_log_worker::obs::sentry::catch_unwind_and_flush(async {
@@ -189,6 +189,12 @@ struct IdentityMetadata<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
     monitoring_prefix: &'a str,
+    public_keys: Vec<PublicKeyMetadata<'a>>,
+}
+
+#[serde_as]
+#[derive(Serialize)]
+struct PublicKeyMetadata<'a> {
     #[serde_as(as = "Base64As")]
     public_key: &'a [u8],
     algorithm: &'a str,
@@ -254,20 +260,37 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
             .witness
             .as_ref()
             .expect("validated witness mode has witness config");
-        let signer = load_witness_signer(&env)?;
-        Some(identity_metadata(identity, signer))
-    } else {
-        None
-    };
-    let mirror = if let Some(identity) = CONFIG.mirror.as_ref() {
-        let signer = load_mirror_signer(&env)?;
+        let signers = load_witness_signers(&env).await?;
         Some(IdentityMetadata {
             name: identity.name.as_str(),
             description: identity.description.as_deref(),
             monitoring_prefix: &identity.monitoring_prefix,
-            public_key: signer.public_key_der(),
-            algorithm: signer.algorithm(),
-            supports_sign_subtree: signer.supports_sign_subtree(),
+            public_keys: signers
+                .iter()
+                .map(|signer| PublicKeyMetadata {
+                    public_key: signer.public_key_der(),
+                    algorithm: signer.algorithm(),
+                    supports_sign_subtree: signer.supports_sign_subtree(),
+                })
+                .collect(),
+        })
+    } else {
+        None
+    };
+    let mirror = if let Some(identity) = CONFIG.mirror.as_ref() {
+        let signers = load_mirror_signers(&env).await?;
+        Some(IdentityMetadata {
+            name: identity.name.as_str(),
+            description: identity.description.as_deref(),
+            monitoring_prefix: &identity.monitoring_prefix,
+            public_keys: signers
+                .iter()
+                .map(|signer| PublicKeyMetadata {
+                    public_key: signer.public_key_der(),
+                    algorithm: signer.algorithm(),
+                    supports_sign_subtree: signer.supports_sign_subtree(),
+                })
+                .collect(),
         })
     } else {
         None
@@ -295,20 +318,6 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
             logs: metadata_logs(dynamic_logs),
         }),
     ))
-}
-
-fn identity_metadata<'a>(
-    identity: &'a config::IdentityConfig,
-    signer: &'a IdentitySigner,
-) -> IdentityMetadata<'a> {
-    IdentityMetadata {
-        name: identity.name.as_str(),
-        description: identity.description.as_deref(),
-        monitoring_prefix: &identity.monitoring_prefix,
-        public_key: signer.public_key_der(),
-        algorithm: signer.algorithm(),
-        supports_sign_subtree: signer.supports_sign_subtree(),
-    }
 }
 
 #[worker::send]
@@ -365,15 +374,23 @@ fn verify_source_checkpoint(
 #[worker::send]
 async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::response::Response> {
     let mut signers = Vec::with_capacity(2);
-    if CONFIG.witness_enabled()
-        && let Some(signer) = load_witness_signer(&env)?.as_subtree_signer()
-    {
-        signers.push(signer);
+    if CONFIG.witness_enabled() {
+        signers.extend(
+            load_witness_signers(&env)
+                .await?
+                .iter()
+                .filter_map(IdentitySigner::as_subtree_signer),
+        );
     }
-    if CONFIG.mirror.is_some()
-        && let Some(signer) = load_mirror_signer(&env)?.as_subtree_signer()
-    {
-        signers.push(signer);
+    if CONFIG.mirror.is_some() {
+        // Every mirror key signs, so a subtree stays verifiable across a
+        // key rotation.
+        signers.extend(
+            load_mirror_signers(&env)
+                .await?
+                .iter()
+                .filter_map(IdentitySigner::as_subtree_signer),
+        );
     }
     if signers.is_empty() {
         return Ok(StatusCode::NOT_FOUND.into_response());

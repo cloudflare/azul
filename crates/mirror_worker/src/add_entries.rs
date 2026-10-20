@@ -52,7 +52,7 @@ use crate::{
     commit,
     cosigner_registry_do::log_verifiers,
     frontend_worker::{ApiResult, AppError},
-    load_mirror_signer, load_ticket_sealer,
+    load_mirror_signers, load_ticket_sealer,
     mirror_state_do::{
         AdvanceNextEntryRequest, CommitRequest, CommittedCheckpoint, MirrorStateSnapshot,
         NextEntry, PendingCheckpoint, state_stub,
@@ -583,12 +583,21 @@ async fn cosign_and_serve(
         .map_err(|e| Error::from(format!("target note parse: {e:?}")))?;
     let cp_text = CheckpointText::from_bytes(note.text())
         .map_err(|e| Error::from(format!("target checkpoint parse: {e:?}")))?;
-    let note_sig = load_mirror_signer(env)?
-        .as_checkpoint_signer()
-        .sign(now_millis(), &cp_text)
-        .map_err(|e| Error::from(format!("mirror cosign: {e:?}")))?;
-    let cosig_body =
-        tlog_witness::serialize_add_checkpoint_response(std::slice::from_ref(&note_sig));
+    // Sign with every configured mirror key. During a key rotation this is
+    // both the current and the next key, so a relying party that trusts
+    // either one accepts the response.
+    let timestamp = now_millis();
+    let note_sigs = load_mirror_signers(env)
+        .await?
+        .iter()
+        .map(|signer| {
+            signer
+                .as_checkpoint_signer()
+                .sign(timestamp, &cp_text)
+                .map_err(|e| Error::from(format!("mirror cosign: {e:?}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cosig_body = tlog_witness::serialize_add_checkpoint_response(&note_sigs);
 
     // The served object includes the mirror cosignature returned below.
     let checkpoint_obj = [target.signed_note_bytes.as_slice(), &cosig_body].concat();
