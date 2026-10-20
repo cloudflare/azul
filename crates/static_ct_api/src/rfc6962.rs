@@ -32,6 +32,7 @@ use der::{
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use sha2::{Digest, Sha256};
+use std::fmt::Write;
 use tlog_checkpoint::UnixTimestampMillis;
 use x509_cert::{
     Certificate, TbsCertificate, der::Encode, ext::pkix::ExtendedKeyUsage, impl_newtype,
@@ -71,6 +72,40 @@ pub struct GetRootsResponse {
     pub certificates: Vec<Vec<u8>>,
 }
 
+/// Hex-encoded SHA-256 fingerprints of `SubjectPublicKeyInfo`s that are not
+/// accepted in a submitted chain.
+///
+/// Fingerprinting the SPKI rather than the certificate covers every
+/// cross-signed copy of a key: a cross-sign reuses the key under a new
+/// certificate, so the certificate fingerprint changes while the SPKI does not.
+const BLOCKED_SPKI_FINGERPRINTS: [&str; 8] = [
+    "ebed6475c2c2d80fcb199f3fe8dd6e6b3ce60b77eb15d4e42c3dec0c6f5b5105",
+    "49dd353dc2b919a3770645117d0e60c16115e7d1bc259eefe734b00ea434fe5f",
+    "e0254c7fcdc265e2f0f8a428dabb75ab4ae039b4872d62f5ee57f0877d5a8a41",
+    "5c0660a2b164910d8ff589c18e14552e9e0ec237dcefe2cb736d41a4811f81a0",
+    "43bffa19d6ef651451f6841e019931e96f6f2eaeff28ab4b6f1ce4576de2717b",
+    "63ecefee431d49523bc1136c4e72d0206a477086caf606cd5cf025686c109cf8",
+    "ec4ffa1ad0ac88081314b7aaffef6a91f97cd57291bb5ba686c5415f5eb4f6b6",
+    "92c063d67e8f14db71d288e11266ffdaf69cbf115f7bab14f3bc2f68d25e0e30",
+];
+
+/// Returns the SHA-256 fingerprint of the certificate's `SubjectPublicKeyInfo`,
+/// lowercase hex-encoded.
+fn spki_fingerprint(cert: &Certificate) -> Result<String, StaticCTError> {
+    let digest: [u8; 32] =
+        Sha256::digest(cert.tbs_certificate().subject_public_key_info().to_der()?).into();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut out, "{byte:02x}").map_err(|_| StaticCTError::Malformed)?;
+    }
+    Ok(out)
+}
+
+/// Returns whether the certificate's key is on the blocklist.
+fn is_blocked(cert: &Certificate) -> Result<bool, StaticCTError> {
+    Ok(BLOCKED_SPKI_FINGERPRINTS.contains(&spki_fingerprint(cert)?.as_str()))
+}
+
 /// Validates a certificate chain according to
 /// [RFC6962](https://datatracker.ietf.org/doc/html/rfc6962) and returns a pending log entry and the
 /// inferred root, if a root had to be inferred.
@@ -94,6 +129,14 @@ pub fn partially_validate_chain(
                           chain_fingerprints: Vec<[u8; 32]>,
                           found_root_idx: Option<usize>|
      -> Result<(StaticCTPendingLogEntry, Option<usize>), StaticCTError> {
+        // Reject the chain if any CA in it has a blocked key. The leaf is
+        // excluded: only issuing CAs are blocked, and a leaf cannot sign.
+        for cert in &chain_certs {
+            if is_blocked(cert)? {
+                return Err(StaticCTError::BlockedIssuer);
+            }
+        }
+
         // Check if the CT poison extension is present. If present, it must be critical.
         let is_leaf_precert = is_precert(&leaf)?;
         if is_leaf_precert != expect_precert {
@@ -442,5 +485,51 @@ mod tests {
         let mut owned = x509_util::OwnedCertificate::from(cert);
         owned.tbs_certificate.extensions = new_exts.map(<[x509_cert::ext::Extension]>::to_vec);
         Certificate::from_der(&owned.to_der().unwrap()).unwrap()
+    }
+
+    /// The two fixtures are a blocked CA and a cross-signed copy of it. They
+    /// share a key but not a certificate, so matching on the SPKI has to reject
+    /// both.
+    #[test]
+    fn blocks_cross_signed_copy_of_blocked_ca() {
+        let cert = &Certificate::load_pem_chain(include_bytes!("../tests/blocked-ca-cert.pem"))
+            .unwrap()[0];
+        let cross_signed = &Certificate::load_pem_chain(include_bytes!(
+            "../tests/blocked-ca-cross-signed-cert.pem"
+        ))
+        .unwrap()[0];
+
+        assert_ne!(cert.to_der().unwrap(), cross_signed.to_der().unwrap());
+        assert_eq!(
+            spki_fingerprint(cert).unwrap(),
+            spki_fingerprint(cross_signed).unwrap()
+        );
+        assert!(is_blocked(cert).unwrap());
+        assert!(is_blocked(cross_signed).unwrap());
+    }
+
+    /// The blocked CAs chain to widely-used roots that must stay accepted.
+    #[test]
+    fn does_not_block_other_cas() {
+        for fixture in [
+            include_bytes!("../tests/ca-cert.pem").as_slice(),
+            include_bytes!("../tests/fake-ca-cert.pem").as_slice(),
+            include_bytes!("../tests/google-gts-root-r4.pem").as_slice(),
+        ] {
+            let cert = &Certificate::load_pem_chain(fixture).unwrap()[0];
+            assert!(!is_blocked(cert).unwrap());
+        }
+    }
+
+    #[test]
+    fn blocked_fingerprints_are_well_formed() {
+        for fp in BLOCKED_SPKI_FINGERPRINTS {
+            assert_eq!(fp.len(), 64, "{fp} is not a SHA-256 hex digest");
+            assert!(
+                fp.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "{fp} must be lowercase hex"
+            );
+        }
     }
 }
