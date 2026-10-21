@@ -1,0 +1,21 @@
+Cargo.lock
+  s_6e67e41cf84c26::t_920d68e60a9be8 3557
+crates/generic_log_worker/src/log_ops.rs
+  s_6e67e41cf84c26::t_17e1796753a2d1 1723
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "46bd7d2e76404c92a1697676c077cc6e5f47b05d",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
