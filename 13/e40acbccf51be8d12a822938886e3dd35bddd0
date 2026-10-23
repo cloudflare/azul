@@ -1,0 +1,21 @@
+.github/workflows/slow-checks.yml
+  s_6e67e41cf84c26::t_c5196070660d75 1-80
+CODEOWNERS
+  s_6e67e41cf84c26::t_d2ea77cbebffda 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "13e40acbccf51be8d12a822938886e3dd35bddd0",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
