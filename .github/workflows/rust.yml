@@ -78,8 +78,14 @@ jobs:
       - name: Fuzz parse_tile_path
         env:
           FUZZ_SECONDS: ${{ inputs.fuzz_seconds }}
+          # The workspace release profile sets lto = true, which makes rust-lld
+          # fail to link sanitizer-coverage symbols (rust-fuzz/cargo-fuzz#384).
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo +nightly fuzz run fuzz_parse_tile_path -- -max_total_time="$FUZZ_SECONDS"
       - name: Fuzz parse_checkpoint
         env:
           FUZZ_SECONDS: ${{ inputs.fuzz_seconds }}
+          # The workspace release profile sets lto = true, which makes rust-lld
+          # fail to link sanitizer-coverage symbols (rust-fuzz/cargo-fuzz#384).
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo +nightly fuzz run fuzz_parse_checkpoint -- -max_total_time="$FUZZ_SECONDS"
