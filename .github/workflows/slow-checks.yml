@@ -1,0 +1,80 @@
+name: Slow Checks Trigger
+
+# Comment `/slow-checks` on a pull request to run the manually dispatched slow
+# checks (the Rust workflow with `run_slow_checks`) against the PR branch.
+#
+# Only users listed individually in CODEOWNERS can trigger it, as with /bonk.
+# Team entries are not expanded: the default token cannot read team membership.
+#
+# `issue_comment` workflows run from the default branch with a write token, so
+# this workflow never checks out or executes PR code. It reads CODEOWNERS from
+# the default branch, so a PR cannot grant itself access, and dispatches the PR
+# branch's own Rust workflow, which runs with that workflow's permissions.
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  trigger:
+    if: >-
+      github.event.issue.pull_request
+      && github.event.sender.type != 'Bot'
+      && startsWith(github.event.comment.body, '/slow-checks')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CODEOWNERS
+          persist-credentials: false
+
+      - name: Check that the commenter is a codeowner
+        id: auth
+        env:
+          COMMENTER: ${{ github.event.comment.user.login }}
+        run: |
+          if awk '!/^[[:space:]]*#/ { for (i = 1; i <= NF; i++) print $i }' CODEOWNERS \
+              | grep -E '^@[A-Za-z0-9-]+$' \
+              | grep -qixF "@${COMMENTER}"; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+            echo "@${COMMENTER} is not listed in CODEOWNERS; ignoring /slow-checks." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Dispatch slow checks on the PR branch
+        id: dispatch
+        if: steps.auth.outputs.authorized == 'true'
+        run: |
+          IFS=$'\t' read -r branch sha cross_repo < <(
+            gh pr view "$PR" --json headRefName,headRefOid,isCrossRepository \
+              --jq '[.headRefName, .headRefOid, .isCrossRepository] | @tsv')
+
+          if [ "$cross_repo" = "true" ]; then
+            echo "handled=true" >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR" --body \
+              "\`/slow-checks\` does not run on pull requests from forks. Push the branch to this repository and comment again."
+            exit 1
+          fi
+
+          gh workflow run rust.yml --ref "$branch" -f run_slow_checks=true
+
+          encoded=$(jq -rn --arg b "$branch" '$b | @uri')
+          runs="https://github.com/${GH_REPO}/actions/workflows/rust.yml?query=event%3Aworkflow_dispatch+branch%3A${encoded}"
+          gh pr comment "$PR" --body \
+            "Started the slow checks on \`${branch}\` at \`${sha:0:12}\`: [workflow runs](${runs})."
+
+      - name: Report a dispatch failure
+        if: failure() && steps.dispatch.conclusion == 'failure' && steps.dispatch.outputs.handled != 'true'
+        run: |
+          gh pr comment "$PR" --body \
+            "Could not start the slow checks: [workflow run](https://github.com/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}). The branch's \`rust.yml\` must define \`workflow_dispatch\` with the \`run_slow_checks\` input."
