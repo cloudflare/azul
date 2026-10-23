@@ -1,0 +1,37 @@
+.github/workflows/integration.yml
+  s_6e67e41cf84c26::t_8b9addc044bcdc 116,126
+AGENTS.md
+  s_6e67e41cf84c26::t_52ce949ca5d801 49
+crates/ietf_mtc_api/README.md
+  s_6e67e41cf84c26::t_fc0bb4765401d7 25
+crates/ietf_mtc_api/src/cosigner.rs
+  s_6e67e41cf84c26::t_55f03d86e617c1 6,14,587,593-594
+crates/ietf_mtc_worker/README.md
+  s_6e67e41cf84c26::t_ffacc731242d44 41
+crates/ietf_mtc_worker/src/lib.rs
+  s_6e67e41cf84c26::t_47f71d2202031b 91
+crates/ietf_mtc_worker/test-dev.sh
+  s_6e67e41cf84c26::t_7a3c2f4cdefae7 6-7
+crates/integration_tests/src/client.rs
+  s_6e67e41cf84c26::t_c51397d9030ccc 294,297,376
+crates/integration_tests/src/lib.rs
+  s_6e67e41cf84c26::t_9b50b0a1343af8 10
+crates/integration_tests/tests/ietf_mtc_api.rs
+  s_6e67e41cf84c26::t_cee58549bfb8b4 8-9,246,306,688
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "95369895335bb18bd3b67cc6ba6aef5ef4bea3b5",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
