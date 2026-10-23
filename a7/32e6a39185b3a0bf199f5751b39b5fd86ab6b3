@@ -1,0 +1,25 @@
+crates/ct_worker/src/sequencer_do.rs
+  s_6e67e41cf84c26::t_5a1e26c5561f01 36
+crates/generic_log_worker/src/sequencer_do.rs
+  s_6e67e41cf84c26::t_9d32ec3d9e46a6 58
+crates/tlog_cosignature/src/subtree_v1.rs
+  s_6e67e41cf84c26::t_00a099a6b4c41b 18-19,27,49-51,55-57,108,111,185,188-189,204,276,281-285,288-289,292-297,301,318,340,426-428,454,457,485-493,498-499,502,509,522,533-534,544-545,552,580,582,590,601,621,623,627,629,646,693,800-801,808,822,825,830,852
+crates/tlog_witness/src/sign_subtree.rs
+  s_6e67e41cf84c26::t_253ad086cf47af 395-397
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a732e6a39185b3a0bf199f5751b39b5fd86ab6b3",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
