@@ -6,6 +6,9 @@ from this repository.
 
 Core types and logic for the [Bootstrap MTC CA](../bootstrap_mtc_worker/README.md).
 
+This preserved crate is archived and excluded from the Cargo workspace. It is
+not built or tested with the current implementation.
+
 This crate implements the bootstrap-specific protocol layer on top of the shared
 [`tlog_tiles`](../tlog_tiles/) infrastructure:
 
@@ -21,6 +24,9 @@ This crate implements the bootstrap-specific protocol layer on top of the shared
   roots for inclusion proof generation.
 - **Cosigner** — Ed25519-based subtree cosigning over the `mtc-subtree/v1` note
   format.
+
+For the current IETF draft implementation, see
+[`ietf_mtc_api`](../ietf_mtc_api/).
 
 ## License
 
