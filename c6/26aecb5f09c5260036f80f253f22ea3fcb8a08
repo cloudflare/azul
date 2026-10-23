@@ -1,0 +1,19 @@
+crates/tlog_core/src/lib.rs
+  s_6e67e41cf84c26::t_0b33b0a0f8ac11 409-411,455-460,506-514,995-998,1490-1505,1581-1583,1635-1663
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c626aecb5f09c5260036f80f253f22ea3fcb8a08",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
