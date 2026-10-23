@@ -61,6 +61,8 @@ pub struct SequencerConfig {
     /// Persist failed callback inputs and retry them before sequencing another checkpoint.
     /// The callback must be idempotent because delivery may be repeated after a delete or alarm failure.
     pub durable_checkpoint_callback: bool,
+    /// Invoke the checkpoint callback when a sequencing alarm has no pending entries.
+    pub checkpoint_callback_on_idle: bool,
 }
 
 impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
