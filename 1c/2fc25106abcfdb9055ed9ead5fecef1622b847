@@ -1,0 +1,21 @@
+crates/ct_worker/src/batcher_do.rs
+  s_6e67e41cf84c26::t_46e98e73010d3e 21
+crates/generic_log_worker/src/batcher_do.rs
+  s_6e67e41cf84c26::t_5dc08d24c63445 50,81,124-125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1c2fc25106abcfdb9055ed9ead5fecef1622b847",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
