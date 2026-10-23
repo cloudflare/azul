@@ -26,8 +26,6 @@ pub(crate) use sequence_metadata::{
 };
 
 // Algorithm OID constants.
-const OID_ED25519: der::asn1::ObjectIdentifier =
-    der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
 const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
     der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
 
@@ -90,18 +88,13 @@ pub(crate) fn load_key_pair(env: &Env, name: &str) -> Result<CachedKeys> {
     Ok(once.get_or_init(|| keys).clone())
 }
 
-/// Parse a PKCS#8 PEM key, dispatching to the correct algorithm based on the
+/// Parse an ML-DSA-44 PKCS#8 PEM key, rejecting any other algorithm by the
 /// `AlgorithmIdentifier` OID embedded in the `PrivateKeyInfo`.
 fn parse_key_pair(pem: &str) -> std::result::Result<(MtcSigningKey, MtcVerifyingKey), String> {
     let (_label, doc) = pkcs8::SecretDocument::from_pem(pem).map_err(|e| e.to_string())?;
     let pki = pkcs8::PrivateKeyInfoRef::try_from(doc.as_bytes()).map_err(|e| e.to_string())?;
 
     match pki.algorithm.oid {
-        OID_ED25519 => {
-            let sk = ed25519_dalek::SigningKey::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
-            let vk = sk.verifying_key();
-            Ok((MtcSigningKey::Ed25519(sk), MtcVerifyingKey::Ed25519(vk)))
-        }
         OID_ML_DSA_44 => {
             let sk = MlDsaSigningKey::<MlDsa44>::from_pkcs8_pem(pem).map_err(|e| e.to_string())?;
             let vk = sk.verifying_key();

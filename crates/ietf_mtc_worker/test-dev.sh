@@ -3,8 +3,8 @@
 set -e
 
 bootstrap_cert_hostname="cloudflareresearch.com"
-landmark_interval_secs=`jq '.logs.dev2.landmark_interval_secs' config.dev.json`
-submission_url=`jq -r '.logs.dev2.submission_url' config.dev.json`
+landmark_interval_secs=`jq '.logs.dev1.landmark_interval_secs' config.dev.json`
+submission_url=`jq -r '.logs.dev1.submission_url' config.dev.json`
 
 # Get a bootstrap certificate chain.
 bootstrap_cert_chain=`mktemp`

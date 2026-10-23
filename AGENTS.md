@@ -46,7 +46,7 @@ npx wrangler -e=dev dev &
 # From workspace root:
 cargo test -p integration_tests --test ietf_mtc_api
 # Override defaults:
-BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
+BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev1 cargo test -p integration_tests --test ietf_mtc_api
 
 # Worker deploy
 npx wrangler -e=${ENV} deploy

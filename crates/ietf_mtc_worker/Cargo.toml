@@ -39,7 +39,6 @@ axum.workspace = true
 config = { path = "./config", package = "ietf_mtc_worker_config" }
 der.workspace = true
 generic_log_worker.workspace = true
-ed25519-dalek.workspace = true
 getrandom_03.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true

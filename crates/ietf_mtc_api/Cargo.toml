@@ -14,7 +14,6 @@ base64.workspace = true
 byteorder.workspace = true
 rand.workspace = true
 der.workspace = true
-ed25519-dalek.workspace = true
 signature.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true

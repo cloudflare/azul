@@ -23,10 +23,6 @@
                 {
                     "bucket_name": "ietf-mtc-public-dev1",
                     "binding": "public_dev1"
-                },
-                {
-                    "bucket_name": "ietf-mtc-public-dev2",
-                    "binding": "public_dev2"
                 }
             ],
             "durable_objects": {

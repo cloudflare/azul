@@ -22,7 +22,7 @@ Key components:
   SPKI.
 - **Landmark sequence** — tracks the active landmark subtrees and their Merkle
   roots.
-- **Cosigner** — Ed25519 and ML-DSA-44 subtree cosigning over the `subtree/v1`
+- **Cosigner** — ML-DSA-44 subtree cosigning over the `subtree/v1`
   format.
 
 ## License

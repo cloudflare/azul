@@ -38,7 +38,7 @@ npx wrangler -e=dev dev
 ### Integration tests
 
 ```bash
-BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev2 cargo test -p integration_tests --test ietf_mtc_api
+BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev1 cargo test -p integration_tests --test ietf_mtc_api
 ```
 
 ## License

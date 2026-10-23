@@ -291,10 +291,10 @@ async fn get_raw_http(
 // IETF MTC client
 // ===========================================================================
 
-/// Log shard name to use for IETF MTC tests.  Defaults to `dev2` (fast landmark interval).
+/// Log shard name to use for IETF MTC tests.  Defaults to `dev1`.
 #[must_use]
 pub fn ietf_mtc_log_name() -> String {
-    std::env::var("IETF_MTC_LOG_NAME").unwrap_or_else(|_| "dev2".to_string())
+    std::env::var("IETF_MTC_LOG_NAME").unwrap_or_else(|_| "dev1".to_string())
 }
 
 // ===========================================================================
@@ -373,7 +373,7 @@ impl IetfMtcClient {
         }
     }
 
-    /// Creates a client for the default IETF MTC log (from `IETF_MTC_LOG_NAME` env / `dev2`).
+    /// Creates a client for the default IETF MTC log (from `IETF_MTC_LOG_NAME` env / `dev1`).
     #[must_use]
     pub fn default_log() -> Self {
         Self::new(ietf_mtc_log_name())

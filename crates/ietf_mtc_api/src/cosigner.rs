@@ -3,21 +3,15 @@
 
 //! Draft-06 MTC cosigner types for checkpoints, subtrees, and certificate proofs.
 //!
-//! Ed25519 and ML-DSA-44 signatures use the `subtree/v1` cosigned message. Checkpoint
+//! ML-DSA-44 signatures use the `subtree/v1` cosigned message. Checkpoint
 //! signature values carry a POSIX-seconds timestamp prefix. Subtree signature values are
 //! raw signatures and commit to timestamp zero.
 
 use byteorder::{BigEndian, ReadBytesExt};
-use ed25519_dalek::pkcs8::EncodePublicKey as Ed25519EncodePublicKey;
-use ed25519_dalek::{
-    SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
-    VerifyingKey as Ed25519VerifyingKey,
-    ed25519::signature::{self, Signer as Ed25519SignerTrait},
-};
 use ml_dsa::{
     EncodedSignature as MlDsaEncodedSignature, ExpandedSigningKey as MlDsaExpandedSigningKey,
     MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
-    signature::Verifier as MlDsaVerifier,
+    signature::{self, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
 };
 use pkcs8::EncodePublicKey as PkcsEncodePublicKey;
 use signed_note::{KeyName, NoteError, NoteSignature, NoteVerifier, SignatureType};
@@ -35,22 +29,14 @@ pub type TrustAnchorID = RelativeOid;
 // ---------------------------------------------------------------------------
 
 /// A signing key for MTC checkpoint and subtree cosignatures.
-// ML-DSA signing key is ~2.5× the size of Ed25519's; the enum is always used
-// behind indirection (via `MtcCosigner`) so the size difference is not a
-// hot-path concern.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum MtcSigningKey {
-    Ed25519(Ed25519SigningKey),
     MlDsa44(MlDsaExpandedSigningKey<MlDsa44>),
 }
 
 /// A verifying key for MTC checkpoint and subtree cosignatures.
-// ML-DSA verifying key is much larger than Ed25519's; see note on MtcSigningKey.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum MtcVerifyingKey {
-    Ed25519(Ed25519VerifyingKey),
     MlDsa44(MlDsaVerifyingKey<MlDsa44>),
 }
 
@@ -64,7 +50,6 @@ impl MtcSigningKey {
     /// be fallible.
     pub fn try_sign(&self, msg: &[u8]) -> Result<Vec<u8>, signature::Error> {
         Ok(match self {
-            Self::Ed25519(sk) => sk.sign(msg).to_bytes().to_vec(),
             Self::MlDsa44(sk) => sk.sign(msg).encode().as_slice().to_vec(),
         })
     }
@@ -73,16 +58,12 @@ impl MtcSigningKey {
 impl MtcVerifyingKey {
     fn signature_len(&self) -> usize {
         match self {
-            Self::Ed25519(_) => ed25519_dalek::SIGNATURE_LENGTH,
             Self::MlDsa44(_) => core::mem::size_of::<MlDsaEncodedSignature<MlDsa44>>(),
         }
     }
 
     fn note_key_id(&self, name: &KeyName) -> u32 {
         match self {
-            Self::Ed25519(key) => {
-                signed_note::compute_key_id(name, &[SignatureType::Ed25519 as u8], &key.to_bytes())
-            }
             Self::MlDsa44(key) => signed_note::compute_key_id(
                 name,
                 &[SignatureType::MlDsa44 as u8],
@@ -93,13 +74,6 @@ impl MtcVerifyingKey {
 
     fn verify(&self, msg: &[u8], sig_bytes: &[u8]) -> bool {
         match self {
-            Self::Ed25519(vk) => {
-                let Ok(sig_arr) = sig_bytes.try_into() else {
-                    return false;
-                };
-                let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
-                Ed25519Verifier::verify(vk, msg, &sig).is_ok()
-            }
             Self::MlDsa44(vk) => MlDsaEncodedSignature::<MlDsa44>::try_from(sig_bytes)
                 .ok()
                 .and_then(|enc| MlDsaSignature::<MlDsa44>::decode(&enc))
@@ -116,9 +90,6 @@ impl MtcVerifyingKey {
     #[must_use]
     pub fn to_public_key_der(&self) -> Vec<u8> {
         match self {
-            Self::Ed25519(vk) => Ed25519EncodePublicKey::to_public_key_der(vk)
-                .expect("Ed25519 SPKI encoding failed")
-                .to_vec(),
             Self::MlDsa44(vk) => PkcsEncodePublicKey::to_public_key_der(vk)
                 .expect("ML-DSA-44 SPKI encoding failed")
                 .to_vec(),
@@ -613,14 +584,14 @@ mod tests {
         // Make a tree head and sign it
         let tree = TreeWithTimestamp::new(tree_size, record_hash(b"hello world"), timestamp);
         let signer = {
-            let sk = Ed25519SigningKey::generate(&mut rand::rng());
+            let sk = MlDsaExpandedSigningKey::<MlDsa44>::from_seed(&ml_dsa::B32::from([6; 32]));
             let vk = sk.verifying_key();
             MtcCosigner::new_checkpoint(
                 TrustAnchorID::from_str("1.2.3").unwrap(),
                 &TrustAnchorID::from_str("4.5.6").unwrap(),
                 1,
-                MtcSigningKey::Ed25519(sk),
-                MtcVerifyingKey::Ed25519(vk),
+                MtcSigningKey::MlDsa44(sk),
+                MtcVerifyingKey::MlDsa44(vk),
             )
             .unwrap()
         };

@@ -1544,7 +1544,6 @@ dependencies = [
  "byteorder",
  "crypto-common",
  "der",
- "ed25519-dalek",
  "ml-dsa",
  "p256",
  "pkcs8",
@@ -1571,7 +1570,6 @@ version = "0.3.0"
 dependencies = [
  "axum",
  "der",
- "ed25519-dalek",
  "futures-executor",
  "generic_log_worker",
  "getrandom 0.3.4",

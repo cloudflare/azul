@@ -5,11 +5,8 @@
 //!
 //! These tests require a running `wrangler dev` instance.
 //! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
-//! Set `IETF_MTC_LOG_NAME` to choose which log shard; defaults to `dev2`.
-//!
-//! `dev1` is configured with an ML-DSA-44 signing key, and `dev2` with an
-//! Ed25519 key. Both have `landmark_interval_secs: 10` so all tests are
-//! feasible under either algorithm.
+//! Set `IETF_MTC_LOG_NAME` to choose which log shard; defaults to `dev1`, which is
+//! configured with an ML-DSA-44 signing key and `landmark_interval_secs: 10`.
 //!
 //! # Running
 //!
@@ -246,8 +243,7 @@ async fn ensure_initialized() {
 
 /// Fetch metadata and build an `MtcVerifyingKey` for the log's cosigner.
 ///
-/// Dispatches on the SPKI `AlgorithmIdentifier` OID so the same integration test
-/// can run against a log configured with Ed25519 or ML-DSA-44 signing keys.
+/// The cosigner key is a DER `SubjectPublicKeyInfo`; only ML-DSA-44 is supported.
 struct VerificationContext {
     key: MtcVerifyingKey,
     ca_id: TrustAnchorID,
@@ -301,28 +297,18 @@ impl From<MirrorMetadataIdentity> for MirrorIdentity {
 
 async fn fetch_verification_context(client: &IetfMtcClient) -> VerificationContext {
     use std::str::FromStr;
-    // RFC 8410 Ed25519.
-    const OID_ED25519: der::asn1::ObjectIdentifier =
-        der::asn1::ObjectIdentifier::new_unwrap("1.3.101.112");
     // FIPS 204 ML-DSA-44.
     const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
         der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
 
     let meta = client.get_metadata().await.expect("metadata");
 
-    // `cosigner_public_key` is DER SPKI. Parse the algorithm OID to pick the
-    // correct decoder.
+    // `cosigner_public_key` is DER SPKI; check the algorithm OID before decoding.
     let spki: spki::SubjectPublicKeyInfoOwned =
         spki::SubjectPublicKeyInfoOwned::try_from(meta.cosigner_public_key.as_slice())
             .expect("cosigner_public_key must be a valid SPKI");
 
     let vk = match spki.algorithm.oid {
-        OID_ED25519 => {
-            use pkcs8::DecodePublicKey;
-            let ed_vk = ed25519_dalek::VerifyingKey::from_public_key_der(&meta.cosigner_public_key)
-                .expect("valid Ed25519 SPKI");
-            MtcVerifyingKey::Ed25519(ed_vk)
-        }
         OID_ML_DSA_44 => {
             use pkcs8::DecodePublicKey;
             let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(
@@ -699,7 +685,7 @@ async fn add_entry_appears_in_checkpoint() {
 /// certificate once a landmark has been produced.
 ///
 /// Assumes the configured log has a short `landmark_interval_secs` (≤10s);
-/// both `dev1` and `dev2` in `config.dev.json` satisfy this. Retries for up to 30s.
+/// `dev1` in `config.dev.json` satisfies this. Retries for up to 30s.
 #[tokio::test]
 async fn get_certificate_returns_valid_cert() {
     const MAX_RETRIES: u32 = 30;
