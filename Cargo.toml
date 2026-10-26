@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "crates/ct_worker",
     "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
     "crates/integration_tests",
     "crates/length_prefixed",
     "crates/sct_validator",
@@ -43,6 +44,7 @@ exclude = [
 default-members = [
     "crates/ct_worker",
     "crates/generic_log_worker",
+    "crates/ietf_mtc_api",
     "crates/length_prefixed",
     "crates/sct_validator",
     "crates/signed_note",
