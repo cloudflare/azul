@@ -1537,6 +1537,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ietf_mtc_api"
+version = "0.3.0"
+dependencies = [
+ "base64",
+ "byteorder",
+ "crypto-common",
+ "der",
+ "ml-dsa",
+ "p256",
+ "pkcs8",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2",
+ "signature",
+ "signed_note",
+ "thiserror 2.0.17",
+ "tlog_checkpoint",
+ "tlog_core",
+ "tlog_cosignature",
+ "tlog_entry",
+ "tlog_tiles",
+ "x509-cert",
+ "x509_util",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
