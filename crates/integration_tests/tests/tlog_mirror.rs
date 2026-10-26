@@ -1288,7 +1288,7 @@ async fn tlog_mirror_end_to_end() {
             "replayed upload: body={:?}",
             String::from_utf8_lossy(&r.body),
         );
-        let signatures = parse_sign_subtree_response(&r.body).expect("parse replay response");
+        let signatures = parse_add_checkpoint_response(&r.body).expect("parse replay response");
         assert_eq!(signatures.len(), mirror.public_keys.len());
         verify_mirror_signature(&checkpoint_600, &signatures, &meta);
     }
@@ -1334,7 +1334,7 @@ async fn tlog_mirror_end_to_end() {
     // (the size-1000 log note + the mirror's cosignature) for the
     // sign-subtree steps below.
     let cp_size = log.size(); // 1000
-    let cosigned_checkpoint;
+    let cosigned_checkpoints: Vec<Note>;
     {
         let body = build_add_entries_body(LOG_ORIGIN, &log, 600, 1000, Vec::new(), None, false);
         let r = post_add_entries(&body).await;
@@ -1344,11 +1344,18 @@ async fn tlog_mirror_end_to_end() {
             "non-aligned resume: body={:?}",
             String::from_utf8_lossy(&r.body)
         );
-        let mirror_sigs = parse_sign_subtree_response(&r.body).expect("parse mirror cosignature");
+        let mirror_sigs = parse_add_checkpoint_response(&r.body).expect("parse mirror cosignature");
         assert_eq!(mirror_sigs.len(), mirror.public_keys.len());
         let log_note = Note::from_bytes(&log.sign_checkpoint(&signer)).unwrap();
-        cosigned_checkpoint =
-            Note::new(log_note.text(), &mirror_sigs).expect("assemble cosigned reference note");
+        // The spec requires exactly one signature on the reference
+        // checkpoint, and it selects the key: one reference per mirror key.
+        cosigned_checkpoints = mirror_sigs
+            .iter()
+            .map(|sig| {
+                Note::new(log_note.text(), std::slice::from_ref(sig))
+                    .expect("assemble cosigned reference note")
+            })
+            .collect();
     }
 
     wait_for_local_r2_absence(LOG_ORIGIN, &partial_600).await;
@@ -1394,11 +1401,14 @@ async fn tlog_mirror_end_to_end() {
 
     // =======================================================================
     // sign-subtree scenarios. The mirror committed size 1000 above and
-    // emitted a subtree/v1 cosignature over it; the `cosigned_checkpoint`
-    // assembled there carries that cosignature and is the reference
-    // checkpoint these requests verify statelessly against.
+    // emitted a subtree/v1 cosignature over it. Each of the
+    // `cosigned_checkpoints` assembled there carries one key's cosignature
+    // and is the reference checkpoint these requests verify statelessly
+    // against.
     // =======================================================================
     let subtree_verifiers = mirror_subtree_verifiers(&meta);
+    assert_eq!(cosigned_checkpoints.len(), subtree_verifiers.len());
+    let cosigned_checkpoint = &cosigned_checkpoints[0];
 
     // --- sign-subtree happy path (start = 0) ---
     {
@@ -1406,29 +1416,34 @@ async fn tlog_mirror_end_to_end() {
         let s_hash = log.subtree_hash(&subtree);
         let proof =
             subtree_consistency_proof(cp_size, &subtree, &log.stored).expect("subtree proof");
-        let body = serialize_sign_subtree_request(
-            subtree.lo(),
-            subtree.hi(),
-            &s_hash,
-            &[],
-            &proof,
-            &cosigned_checkpoint,
-        )
-        .unwrap();
-        let r = post_sign_subtree(&body).await;
-        assert_eq!(
-            r.status,
-            200,
-            "sign-subtree happy path: body={:?}",
-            String::from_utf8_lossy(&r.body)
-        );
-        let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
-        assert_eq!(sigs.len(), subtree_verifiers.len());
-        assert!(sigs.iter().all(|signature| {
-            subtree_verifiers.iter().any(|verifier| {
-                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, signature.signature())
-            })
-        }));
+        for reference in &cosigned_checkpoints {
+            let body = serialize_sign_subtree_request(
+                subtree.lo(),
+                subtree.hi(),
+                &s_hash,
+                &proof,
+                reference,
+            )
+            .unwrap();
+            let r = post_sign_subtree(&body).await;
+            assert_eq!(
+                r.status,
+                200,
+                "sign-subtree happy path: body={:?}",
+                String::from_utf8_lossy(&r.body)
+            );
+            let signature =
+                parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
+            let key_id = reference.signatures()[0].id();
+            let verifier = subtree_verifiers
+                .iter()
+                .find(|verifier| signed_note::NoteVerifier::key_id(*verifier) == key_id)
+                .expect("verifier for the selected key");
+            assert!(
+                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, &signature),
+                "signature must verify under the key that signed the reference checkpoint"
+            );
+        }
     }
 
     // --- sign-subtree with a non-zero start ---
@@ -1440,29 +1455,34 @@ async fn tlog_mirror_end_to_end() {
         let s_hash = log.subtree_hash(&subtree);
         let proof =
             subtree_consistency_proof(cp_size, &subtree, &log.stored).expect("subtree proof");
-        let body = serialize_sign_subtree_request(
-            subtree.lo(),
-            subtree.hi(),
-            &s_hash,
-            &[],
-            &proof,
-            &cosigned_checkpoint,
-        )
-        .unwrap();
-        let r = post_sign_subtree(&body).await;
-        assert_eq!(
-            r.status,
-            200,
-            "sign-subtree non-zero start: body={:?}",
-            String::from_utf8_lossy(&r.body)
-        );
-        let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
-        assert_eq!(sigs.len(), subtree_verifiers.len());
-        assert!(sigs.iter().all(|signature| {
-            subtree_verifiers.iter().any(|verifier| {
-                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, signature.signature())
-            })
-        }));
+        for reference in &cosigned_checkpoints {
+            let body = serialize_sign_subtree_request(
+                subtree.lo(),
+                subtree.hi(),
+                &s_hash,
+                &proof,
+                reference,
+            )
+            .unwrap();
+            let r = post_sign_subtree(&body).await;
+            assert_eq!(
+                r.status,
+                200,
+                "sign-subtree non-zero start: body={:?}",
+                String::from_utf8_lossy(&r.body)
+            );
+            let signature =
+                parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
+            let key_id = reference.signatures()[0].id();
+            let verifier = subtree_verifiers
+                .iter()
+                .find(|verifier| signed_note::NoteVerifier::key_id(*verifier) == key_id)
+                .expect("verifier for the selected key");
+            assert!(
+                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, &signature),
+                "signature must verify under the key that signed the reference checkpoint"
+            );
+        }
     }
 
     // --- reference checkpoint NOT cosigned by this mirror -> 403 ---
@@ -1472,12 +1492,21 @@ async fn tlog_mirror_end_to_end() {
         let mut other = ToyLog::new();
         other.push(b"a");
         other.push(b"b");
-        let note = Note::from_bytes(&other.sign_checkpoint(&signer)).unwrap();
+        // Keep only the log's own signature: the checkpoint then has exactly
+        // one signature, and it is not the mirror's.
+        let full = Note::from_bytes(&other.sign_checkpoint(&signer)).unwrap();
+        let log_sig: Vec<NoteSignature> = full
+            .signatures()
+            .iter()
+            .filter(|sig| sig.id() == tlog_checkpoint::CheckpointSigner::key_id(&signer))
+            .cloned()
+            .collect();
+        let note = Note::new(full.text(), &log_sig).unwrap();
         let subtree = Subtree::new(0, 1).expect("valid subtree");
         let s_hash = other.subtree_hash(&subtree);
         let proof =
             subtree_consistency_proof(other.size(), &subtree, &other.stored).expect("proof");
-        let body = serialize_sign_subtree_request(0, 1, &s_hash, &[], &proof, &note).unwrap();
+        let body = serialize_sign_subtree_request(0, 1, &s_hash, &proof, &note).unwrap();
         let r = post_sign_subtree(&body).await;
         assert_eq!(
             r.status,
@@ -1487,6 +1516,33 @@ async fn tlog_mirror_end_to_end() {
         );
     }
 
+    // --- reference checkpoint without exactly one signature -> 400 ---
+    {
+        let subtree = Subtree::new(0, 512).expect("valid subtree");
+        let s_hash = log.subtree_hash(&subtree);
+        let proof =
+            subtree_consistency_proof(cp_size, &subtree, &log.stored).expect("subtree proof");
+        let all_sigs: Vec<NoteSignature> = cosigned_checkpoints
+            .iter()
+            .flat_map(|note| note.signatures().to_vec())
+            .collect();
+        let text = cosigned_checkpoint.text();
+        for signatures in [&[][..], &all_sigs[..]] {
+            let note = Note::new(text, signatures).unwrap();
+            let body =
+                serialize_sign_subtree_request(subtree.lo(), subtree.hi(), &s_hash, &proof, &note)
+                    .unwrap();
+            let r = post_sign_subtree(&body).await;
+            assert_eq!(
+                r.status,
+                400,
+                "{} checkpoint signatures: body={:?}",
+                signatures.len(),
+                String::from_utf8_lossy(&r.body)
+            );
+        }
+    }
+
     // --- sign-subtree with end > checkpoint.size -> 400 ---
     {
         let body = serialize_sign_subtree_request(
@@ -1494,8 +1550,7 @@ async fn tlog_mirror_end_to_end() {
             cp_size + 1,
             &Hash([0u8; HASH_SIZE]),
             &[],
-            &[],
-            &cosigned_checkpoint,
+            cosigned_checkpoint,
         )
         .unwrap();
         let r = post_sign_subtree(&body).await;
@@ -1614,7 +1669,7 @@ async fn tlog_mirror_end_to_end() {
             String::from_utf8_lossy(&r.body),
         );
         let signatures =
-            parse_sign_subtree_response(&r.body).expect("parse ticketed checkpoint response");
+            parse_add_checkpoint_response(&r.body).expect("parse ticketed checkpoint response");
         assert_eq!(signatures.len(), mirror.public_keys.len());
         verify_mirror_signature(&checkpoint_3256, &signatures, &meta);
         assert_cut_tiles(LOG_ORIGIN, &log, 3256).await;

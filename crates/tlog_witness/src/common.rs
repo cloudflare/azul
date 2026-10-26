@@ -34,10 +34,8 @@ pub const MAX_CONSISTENCY_PROOF_LINES: usize = 63;
 /// line *counts* are bounded. The cap covers the worst-case
 /// well-formed `sign-subtree` request: a 1 MiB embedded checkpoint
 /// (per [`signed_note::MAX_NOTE_SIZE`]) plus a header consisting of
-/// the range/hash lines, up to 8 ML-DSA-44 cosignature lines (~3.3
-/// KiB each on the wire after base64), and up to 63 base64 proof
-/// hashes (~44 bytes each). 64 KiB of header headroom comfortably
-/// covers that.
+/// the range/hash lines and up to 63 base64 proof hashes (~44 bytes
+/// each). 64 KiB of header headroom comfortably covers that.
 ///
 /// Worker-level deployments may apply an even tighter cap before
 /// calling the parser; this constant is the minimum every caller
@@ -55,7 +53,7 @@ pub const CONTENT_TYPE_TLOG_SIZE: &str = "text/x.tlog.size";
 pub enum TlogWitnessError {
     /// The request body failed high-level structural checks (missing
     /// blank line, malformed `old` or `subtree` line, too many
-    /// proof/cosignature lines, etc.).
+    /// proof lines, etc.).
     #[error("malformed request: {0}")]
     MalformedRequest(String),
 

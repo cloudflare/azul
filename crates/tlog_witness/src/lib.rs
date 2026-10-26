@@ -21,9 +21,8 @@
 //!   endpoint.
 //! - [`MAX_CONSISTENCY_PROOF_LINES`]: the spec-mandated upper bound of 63
 //!   consistency-proof lines per request, shared by both endpoints.
-//! - [`MAX_SUBTREE_COSIGNATURE_LINES`] / [`MAX_CHECKPOINT_SIGNATURES`]:
-//!   spec-mandated upper bounds (8 each) on cosignature lines in the
-//!   `sign-subtree` request.
+//! - [`MAX_CHECKPOINT_SIGNATURES`]: upper bound on the signatures of the
+//!   reference checkpoint in a `sign-subtree` request, enforced when parsing.
 //! - [`MAX_REQUEST_BODY_SIZE`]: parser-level cap on request-body size,
 //!   shared by both endpoints, applied before any base64 decoding.
 //! - [`CONTENT_TYPE_TLOG_SIZE`]: the `text/x.tlog.size` media type used for
@@ -68,9 +67,8 @@ pub use common::{
     CONTENT_TYPE_TLOG_SIZE, MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, TlogWitnessError,
 };
 pub use sign_subtree::{
-    MAX_CHECKPOINT_SIGNATURES, MAX_SUBTREE_COSIGNATURE_LINES, SignSubtreeRequest,
-    parse_sign_subtree_request, parse_sign_subtree_response, serialize_sign_subtree_request,
-    serialize_sign_subtree_response,
+    MAX_CHECKPOINT_SIGNATURES, SignSubtreeRequest, parse_sign_subtree_request,
+    parse_sign_subtree_response, serialize_sign_subtree_request, serialize_sign_subtree_response,
 };
 pub use validation::{
     AddCheckpointValidationError, CheckpointState, CheckpointTransitionError, ProofRequirement,

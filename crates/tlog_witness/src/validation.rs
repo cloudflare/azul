@@ -109,7 +109,6 @@ pub fn verify_trusted_checkpoint_signature(
 #[derive(Debug)]
 pub struct ValidatedSignSubtreeRequest {
     subtree_hash: Hash,
-    subtree_cosignatures: Vec<signed_note::NoteSignature>,
     consistency_proof: Vec<Hash>,
     checkpoint: Note,
     checkpoint_text: CheckpointText,
@@ -120,11 +119,6 @@ impl ValidatedSignSubtreeRequest {
     #[must_use]
     pub const fn subtree_hash(&self) -> &Hash {
         &self.subtree_hash
-    }
-
-    #[must_use]
-    pub fn subtree_cosignatures(&self) -> &[signed_note::NoteSignature] {
-        &self.subtree_cosignatures
     }
 
     #[must_use]
@@ -155,6 +149,8 @@ pub enum SignSubtreeValidationError {
     Request(TlogWitnessError),
     #[error("{0}")]
     Checkpoint(MalformedCheckpointTextError),
+    #[error("reference checkpoint must carry exactly one signature, found {found}")]
+    CheckpointSignatureCount { found: usize },
     #[error("subtree end {subtree_end} > checkpoint size {checkpoint_size}")]
     SubtreeAfterCheckpoint {
         subtree_end: u64,
@@ -168,10 +164,15 @@ pub enum SignSubtreeValidationError {
 
 /// Validate the transport-neutral structural parts of a `sign-subtree` request.
 ///
+/// The reference checkpoint must carry exactly one note signature, which
+/// selects the witness key that signs the subtree
+/// ([c2sp.org/tlog-witness@v1.1.0](https://c2sp.org/tlog-witness@v1.1.0#sign-subtree)).
+///
 /// # Errors
 ///
-/// Returns a domain error for malformed wire data or checkpoint text, and for
-/// a range that is invalid or extends past the checkpoint.
+/// Returns a domain error for malformed wire data or checkpoint text, for a
+/// checkpoint without exactly one signature, and for a range that is invalid
+/// or extends past the checkpoint.
 pub fn validate_sign_subtree_request(
     body: &[u8],
 ) -> Result<ValidatedSignSubtreeRequest, SignSubtreeValidationError> {
@@ -179,10 +180,13 @@ pub fn validate_sign_subtree_request(
         subtree_start,
         subtree_end,
         subtree_hash,
-        subtree_cosignatures,
         consistency_proof,
         checkpoint,
     } = parse_sign_subtree_request(body).map_err(SignSubtreeValidationError::Request)?;
+    let found = checkpoint.signatures().len();
+    if found != 1 {
+        return Err(SignSubtreeValidationError::CheckpointSignatureCount { found });
+    }
     let checkpoint_text = CheckpointText::from_bytes(checkpoint.text())
         .map_err(SignSubtreeValidationError::Checkpoint)?;
     if subtree_end > checkpoint_text.size() {
@@ -195,7 +199,6 @@ pub fn validate_sign_subtree_request(
         .map_err(SignSubtreeValidationError::InvalidSubtree)?;
     Ok(ValidatedSignSubtreeRequest {
         subtree_hash,
-        subtree_cosignatures,
         consistency_proof,
         checkpoint,
         checkpoint_text,
@@ -463,33 +466,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn validated_subtree_retains_cosignatures() {
-        let checkpoint = Note::new(
+    fn checkpoint_with(signatures: &[NoteSignature]) -> Note {
+        Note::new(
             format!(
                 "log.example\n1\n{}\n",
                 base64::engine::general_purpose::STANDARD.encode(record_hash(b"entry").0)
             )
             .as_bytes(),
-            &[],
+            signatures,
         )
-        .unwrap();
-        let cosignature = NoteSignature::new(
-            KeyName::new("witness.example".to_owned()).unwrap(),
-            7,
-            vec![9; 64],
-        );
+        .unwrap()
+    }
+
+    fn checkpoint_signature(id: u32) -> NoteSignature {
+        NoteSignature::new(
+            KeyName::new("log.example".to_owned()).unwrap(),
+            id,
+            vec![1; 64],
+        )
+    }
+
+    /// The reference checkpoint selects the signing key, so it must carry
+    /// exactly one signature: none and several are both rejected.
+    #[test]
+    fn sign_subtree_requires_exactly_one_checkpoint_signature() {
+        for (signatures, found) in [
+            (vec![], 0),
+            (vec![checkpoint_signature(1), checkpoint_signature(2)], 2),
+        ] {
+            let body = crate::serialize_sign_subtree_request(
+                0,
+                1,
+                &record_hash(b"entry"),
+                &[],
+                &checkpoint_with(&signatures),
+            )
+            .unwrap();
+            assert!(matches!(
+                validate_sign_subtree_request(&body).unwrap_err(),
+                SignSubtreeValidationError::CheckpointSignatureCount { found: f } if f == found
+            ));
+        }
         let body = crate::serialize_sign_subtree_request(
             0,
             1,
             &record_hash(b"entry"),
-            std::slice::from_ref(&cosignature),
             &[],
-            &checkpoint,
+            &checkpoint_with(&[checkpoint_signature(1)]),
         )
         .unwrap();
-        let validated = validate_sign_subtree_request(&body).unwrap();
-        assert_eq!(validated.subtree_cosignatures().len(), 1);
-        assert_eq!(validated.subtree_cosignatures()[0].id(), 7);
+        validate_sign_subtree_request(&body).unwrap();
     }
 }
