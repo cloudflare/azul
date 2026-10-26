@@ -37,7 +37,7 @@ The Worker only serves submission and metadata APIs.
 
 Bind `MIRROR_SIGNING_KEY`, `MIRROR_SIGNING_KEY_NEXT`, `WITNESS_SIGNING_KEY`, and `WITNESS_SIGNING_KEY_NEXT` with `[[secrets_store_secrets]]` as needed. Each binding contains one PKCS#8 PEM private key. Local Wrangler development uses the same names in `.dev.vars`.
 
-The current key is required and the `_NEXT` key is optional. During rotation, the Worker signs with both keys. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
+The current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
 
 Disabled-role secrets and R2 bindings are not loaded. Ticket and cleaner access
 is confined to mirror operations.

@@ -12,7 +12,6 @@
 //! ```text
 //! subtree <start> <end>\n         ← subtree range (ASCII decimal, no leading zeros)
 //! <base64 subtree hash>\n         ← Merkle Tree hash of the subtree
-//! [— <name> <b64 cosig blob>\n]   ← 0..8 subtree cosignature lines (DoS protection)
 //! [<base64 proof hash>\n]         ← 0..63 consistency-proof hashes
 //! \n                              ← empty line separator
 //! <reference checkpoint>          ← either a signed-note checkpoint
@@ -26,49 +25,36 @@
 //! terminates with the newline that concludes the checkpoint root-hash
 //! line — no trailing blank line after the bare checkpoint body.
 //!
-//! Subtree cosignature lines are distinguished from consistency-proof
-//! lines by a leading em-dash character (U+2014, UTF-8 `0xE2 0x80 0x94`),
-//! and the spec mandates that all cosignature lines appear before any
-//! proof lines. The parser enforces this ordering.
-//!
-//! The response body (on HTTP 200) is a sequence of one or more
-//! `signed-note` signature lines for the subtree, identical in shape to
-//! the `add-checkpoint` response.
+//! The response body (on HTTP 200) is the base64-encoded subtree
+//! cosignature followed by a newline: a single line, with no key name or key
+//! ID. The cosignature is from the one witness key that signed the reference
+//! checkpoint, which the request must carry as its only note signature, so the
+//! client always knows which key produced it. A client that needs subtree
+//! cosignatures from several keys of one witness sends one request per key.
 
 use base64::prelude::*;
-use signed_note::{Note, NoteSignature};
+use signed_note::Note;
 use tlog_core::Hash;
 
 use crate::TlogWitnessError;
 use crate::common::{
-    MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, parse_proof_line, parse_signature_lines,
-    parse_tree_size_decimal, serialize_signature_lines,
+    MAX_CONSISTENCY_PROOF_LINES, MAX_REQUEST_BODY_SIZE, parse_proof_line, parse_tree_size_decimal,
 };
-
-/// Maximum number of subtree-cosignature lines a client may send in a
-/// `sign-subtree` request, per
-/// [c2sp.org/tlog-witness#sign-subtree](https://c2sp.org/tlog-witness#sign-subtree).
-///
-/// Subtree cosignature lines are an OPTIONAL DoS-protection mechanism;
-/// the spec caps them at 8 to bound the verification work the witness
-/// must do before deciding whether to cosign.
-pub const MAX_SUBTREE_COSIGNATURE_LINES: usize = 8;
 
 /// Maximum number of checkpoint signatures a client may send inside the
 /// reference checkpoint of a `sign-subtree` request, per
 /// [c2sp.org/tlog-witness#sign-subtree](https://c2sp.org/tlog-witness#sign-subtree).
 ///
-/// The signatures are OPTIONAL; if omitted, the witness is expected to
-/// statefully verify the checkpoint instead. When supplied, they let the
-/// witness verify the checkpoint statelessly via its own past
-/// cosignature.
+/// This bounds parsing. A witness accepts exactly one signature (see
+/// [`crate::validate_sign_subtree_request`]), since that signature selects the
+/// key that signs the subtree.
 pub const MAX_CHECKPOINT_SIGNATURES: usize = 8;
 
 /// A parsed `sign-subtree` request body.
 ///
-/// Subtree cosignature lines and checkpoint signatures (if any) are
-/// returned alongside the parsed checkpoint as opaque [`NoteSignature`]
-/// values; the witness applies its own trust policy to verify them.
+/// Checkpoint signatures (if any) are returned alongside the parsed
+/// checkpoint as opaque [`signed_note::NoteSignature`] values; the witness
+/// applies its own trust policy to verify them.
 #[derive(Debug)]
 pub struct SignSubtreeRequest {
     /// Subtree start index (`subtree <start> <end>` line).
@@ -77,12 +63,6 @@ pub struct SignSubtreeRequest {
     pub subtree_end: u64,
     /// Merkle Tree hash of the subtree.
     pub subtree_hash: Hash,
-    /// Subtree cosignature lines, in order. Up to
-    /// [`MAX_SUBTREE_COSIGNATURE_LINES`] entries; a DoS-protection
-    /// mechanism the client may use to demonstrate this subtree has
-    /// been seen by another known cosigner. The witness is expected
-    /// to ignore cosignatures from unknown keys.
-    pub subtree_cosignatures: Vec<NoteSignature>,
     /// Consistency proof hashes from the subtree to the reference
     /// checkpoint, per draft-ietf-plants-merkle-tree-certs §4.4. Up
     /// to [`MAX_CONSISTENCY_PROOF_LINES`] entries.
@@ -107,18 +87,13 @@ pub struct SignSubtreeRequest {
 ///
 /// Returns [`TlogWitnessError::MalformedRequest`] if the body exceeds
 /// [`MAX_REQUEST_BODY_SIZE`] or fails any structural check (missing
-/// required line, wrong line ordering, over-bound counts, malformed
+/// required line, over-bound counts, malformed
 /// `subtree` line, malformed base64) or [`TlogWitnessError::Note`] if
-/// any cosignature or checkpoint-signature line fails
-/// [`NoteSignature::from_bytes`] / the embedded note fails
+/// any checkpoint-signature line fails
+/// [`signed_note::NoteSignature::from_bytes`] / the embedded note fails
 /// [`Note::from_bytes`].
 pub fn parse_sign_subtree_request(body: &[u8]) -> Result<SignSubtreeRequest, TlogWitnessError> {
-    // Reject oversized bodies up front. The line-count caps don't
-    // bound the line *sizes* (an ML-DSA-44 cosignature line is ~3.3
-    // KiB on the wire but nothing in `NoteSignature::from_bytes`
-    // enforces that — it will base64-decode any blob) so without
-    // this cap a hostile input could feed the parser an
-    // 8-cosig × 100 MB payload.
+    // The proof-line cap does not bound line sizes.
     if body.len() > MAX_REQUEST_BODY_SIZE {
         return Err(TlogWitnessError::MalformedRequest(format!(
             "request body exceeds {MAX_REQUEST_BODY_SIZE} bytes"
@@ -126,8 +101,7 @@ pub fn parse_sign_subtree_request(body: &[u8]) -> Result<SignSubtreeRequest, Tlo
     }
 
     // Split on the first blank line. Everything before it is the
-    // subtree header (range line + hash line + cosig lines + proof
-    // lines); everything after it is the reference checkpoint (either
+    // subtree header (range line + hash line + proof lines); everything after it is the reference checkpoint (either
     // a signed-note checkpoint, which itself contains a `\n\n`
     // separator, or a bare three-line checkpoint body).
     let pos = body.windows(2).position(|w| w == b"\n\n").ok_or_else(|| {
@@ -155,40 +129,16 @@ pub fn parse_sign_subtree_request(body: &[u8]) -> Result<SignSubtreeRequest, Tlo
         .ok_or_else(|| TlogWitnessError::MalformedRequest("missing subtree hash line".into()))?;
     let subtree_hash = parse_proof_line(hash_line)?; // same shape: 32-byte hash, base64.
 
-    // Remaining header lines: cosignature lines first (lines starting
-    // with U+2014 em-dash), then proof lines. The spec requires this
-    // ordering; once the parser sees a non-cosignature line it switches
-    // to proof-line mode and rejects any subsequent cosignature lines.
-    let mut subtree_cosignatures = Vec::new();
+    // Remaining header lines are consistency-proof hashes. A line that is not
+    // a base64 hash, including a signature line, is rejected.
     let mut consistency_proof = Vec::new();
-    let mut in_proof = false;
     for line in lines {
-        if line.starts_with('\u{2014}') {
-            if in_proof {
-                return Err(TlogWitnessError::MalformedRequest(
-                    "subtree cosignature line after consistency-proof lines".into(),
-                ));
-            }
-            if subtree_cosignatures.len() >= MAX_SUBTREE_COSIGNATURE_LINES {
-                return Err(TlogWitnessError::MalformedRequest(format!(
-                    "subtree cosignatures exceed {MAX_SUBTREE_COSIGNATURE_LINES} lines"
-                )));
-            }
-            // `NoteSignature::from_bytes` expects the line WITHOUT a
-            // trailing newline (the standard base64 decoder rejects
-            // embedded whitespace), matching how `Note::from_bytes`
-            // calls it on lines produced by `split('\n')`.
-            subtree_cosignatures
-                .push(NoteSignature::from_bytes(line.as_bytes()).map_err(TlogWitnessError::Note)?);
-        } else {
-            in_proof = true;
-            if consistency_proof.len() >= MAX_CONSISTENCY_PROOF_LINES {
-                return Err(TlogWitnessError::MalformedRequest(format!(
-                    "consistency proof exceeds {MAX_CONSISTENCY_PROOF_LINES} lines"
-                )));
-            }
-            consistency_proof.push(parse_proof_line(line)?);
+        if consistency_proof.len() >= MAX_CONSISTENCY_PROOF_LINES {
+            return Err(TlogWitnessError::MalformedRequest(format!(
+                "consistency proof exceeds {MAX_CONSISTENCY_PROOF_LINES} lines"
+            )));
         }
+        consistency_proof.push(parse_proof_line(line)?);
     }
 
     // Parse the checkpoint section. Two shapes are valid: a full signed
@@ -203,7 +153,6 @@ pub fn parse_sign_subtree_request(body: &[u8]) -> Result<SignSubtreeRequest, Tlo
         subtree_start,
         subtree_end,
         subtree_hash,
-        subtree_cosignatures,
         consistency_proof,
         checkpoint,
     })
@@ -223,7 +172,6 @@ pub fn parse_sign_subtree_request(body: &[u8]) -> Result<SignSubtreeRequest, Tlo
 /// Returns [`TlogWitnessError::MalformedRequest`] if any of the
 /// spec-mandated counts are exceeded:
 ///
-/// - `subtree_cosignatures.len() > [MAX_SUBTREE_COSIGNATURE_LINES]`
 /// - `consistency_proof.len() > [MAX_CONSISTENCY_PROOF_LINES]`
 /// - the embedded checkpoint has more than [`MAX_CHECKPOINT_SIGNATURES`]
 ///   signatures.
@@ -231,15 +179,9 @@ pub fn serialize_sign_subtree_request(
     subtree_start: u64,
     subtree_end: u64,
     subtree_hash: &Hash,
-    subtree_cosignatures: &[NoteSignature],
     consistency_proof: &[Hash],
     checkpoint: &Note,
 ) -> Result<Vec<u8>, TlogWitnessError> {
-    if subtree_cosignatures.len() > MAX_SUBTREE_COSIGNATURE_LINES {
-        return Err(TlogWitnessError::MalformedRequest(format!(
-            "subtree cosignatures exceed {MAX_SUBTREE_COSIGNATURE_LINES} lines"
-        )));
-    }
     if consistency_proof.len() > MAX_CONSISTENCY_PROOF_LINES {
         return Err(TlogWitnessError::MalformedRequest(format!(
             "consistency proof exceeds {MAX_CONSISTENCY_PROOF_LINES} lines"
@@ -255,9 +197,6 @@ pub fn serialize_sign_subtree_request(
     out.extend_from_slice(format!("subtree {subtree_start} {subtree_end}\n").as_bytes());
     out.extend_from_slice(BASE64_STANDARD.encode(subtree_hash.0).as_bytes());
     out.push(b'\n');
-    for sig in subtree_cosignatures {
-        out.extend_from_slice(&sig.to_bytes());
-    }
     for h in consistency_proof {
         out.extend_from_slice(BASE64_STANDARD.encode(h.0).as_bytes());
         out.push(b'\n');
@@ -275,30 +214,43 @@ pub fn serialize_sign_subtree_request(
     Ok(out)
 }
 
-/// Serialize a `sign-subtree` success response body: one
-/// `— name b64sig\n` line per signature.
+/// Serialize a `sign-subtree` success response body: the base64 subtree
+/// cosignature followed by a newline.
 ///
-/// Per the spec the response MUST contain at least one signature line;
-/// callers should not pass an empty slice for a successful response.
+/// `signature` is the bare signature value of the subtree cosignature (for
+/// ML-DSA-44, the 2420-byte signature), with no key ID or timestamp.
 #[must_use]
-pub fn serialize_sign_subtree_response(sigs: &[NoteSignature]) -> Vec<u8> {
-    serialize_signature_lines(sigs)
+pub fn serialize_sign_subtree_response(signature: &[u8]) -> Vec<u8> {
+    let mut body = BASE64_STANDARD.encode(signature).into_bytes();
+    body.push(b'\n');
+    body
 }
 
-/// Parse a `sign-subtree` success response body into a list of
-/// [`NoteSignature`]s.
+/// Parse a `sign-subtree` success response body into the bare subtree
+/// cosignature value.
 ///
-/// Identical wire shape to [`crate::parse_add_checkpoint_response`].
-/// Callers should verify each returned signature with the appropriate
-/// [`signed_note::NoteVerifier`] before using it.
+/// The response carries no key name or key ID, so the caller identifies the
+/// signing key from the request it sent. The returned bytes must be verified
+/// with that key before use.
 ///
 /// # Errors
 ///
-/// Returns [`TlogWitnessError::MalformedResponse`] if the body is empty
-/// or not valid UTF-8, and [`TlogWitnessError::Note`] if any line fails
-/// [`NoteSignature::from_bytes`] parsing.
-pub fn parse_sign_subtree_response(body: &[u8]) -> Result<Vec<NoteSignature>, TlogWitnessError> {
-    parse_signature_lines(body)
+/// Returns [`TlogWitnessError::MalformedResponse`] if the body is not exactly
+/// one non-empty line of canonical base64 terminated by a newline.
+pub fn parse_sign_subtree_response(body: &[u8]) -> Result<Vec<u8>, TlogWitnessError> {
+    let malformed = |reason: &str| TlogWitnessError::MalformedResponse(reason.into());
+    let line = body
+        .strip_suffix(b"\n")
+        .ok_or_else(|| malformed("response must end with a newline"))?;
+    if line.contains(&b'\n') {
+        return Err(malformed("response must be a single line"));
+    }
+    if line.is_empty() {
+        return Err(malformed("response must contain a signature"));
+    }
+    BASE64_STANDARD
+        .decode(line)
+        .map_err(|_| malformed("response is not canonical base64"))
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +317,7 @@ fn parse_reference_checkpoint(bytes: &[u8]) -> Result<Note, signed_note::NoteErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signed_note::KeyName;
+    use signed_note::{KeyName, NoteSignature};
 
     fn fake_checkpoint_with_sigs(origin: &str, size: u64, hash_byte: u8, n_sigs: usize) -> Note {
         let hash_b64 = BASE64_STANDARD.encode([hash_byte; 32]);
@@ -388,29 +340,16 @@ mod tests {
         fake_checkpoint_with_sigs(origin, size, hash_byte, 0)
     }
 
-    fn fake_subtree_cosig(name: &str, key_id: u32, sig_byte: u8) -> NoteSignature {
-        NoteSignature::new(
-            KeyName::new(name.to_owned()).unwrap(),
-            key_id,
-            // ML-DSA-44 cosignatures attached as DoS protection here
-            // would be 2420-byte raw signatures, but the wire format
-            // itself doesn't constrain the blob beyond
-            // base64-decodable; 64 bytes is enough for the test.
-            vec![sig_byte; 64],
-        )
-    }
-
     /// Roundtrip with no cosigs, no proof, signed checkpoint.
     #[test]
     fn request_roundtrip_minimal_signed_checkpoint() {
         let cp = fake_signed_checkpoint("example.com/log", 42, 0xaa);
-        let body = serialize_sign_subtree_request(0, 16, &Hash([0x77u8; 32]), &[], &[], &cp)
+        let body = serialize_sign_subtree_request(0, 16, &Hash([0x77u8; 32]), &[], &cp)
             .expect("serialize");
         let parsed = parse_sign_subtree_request(&body).expect("parse");
         assert_eq!(parsed.subtree_start, 0);
         assert_eq!(parsed.subtree_end, 16);
         assert_eq!(parsed.subtree_hash.0, [0x77u8; 32]);
-        assert_eq!(parsed.subtree_cosignatures, Vec::<NoteSignature>::new());
         assert_eq!(parsed.consistency_proof, Vec::<Hash>::new());
         assert_eq!(parsed.checkpoint.text(), cp.text());
         assert_eq!(parsed.checkpoint.signatures().len(), 1);
@@ -422,7 +361,7 @@ mod tests {
     #[test]
     fn request_roundtrip_bare_checkpoint() {
         let cp = fake_bare_checkpoint("example.com/log", 100, 0xbb);
-        let body = serialize_sign_subtree_request(0, 64, &Hash([0x33u8; 32]), &[], &[], &cp)
+        let body = serialize_sign_subtree_request(0, 64, &Hash([0x33u8; 32]), &[], &cp)
             .expect("serialize");
         // Spec: when signatures are omitted, the body MUST terminate
         // with the newline that concludes the checkpoint root-hash
@@ -440,35 +379,25 @@ mod tests {
         assert_eq!(parsed.checkpoint.signatures(), &[] as &[NoteSignature]);
     }
 
-    /// Roundtrip with the full feature set: cosignatures, a
-    /// consistency proof, and a signed checkpoint.
+    /// Roundtrip with a consistency proof and a signed checkpoint.
     #[test]
     fn request_roundtrip_full() {
         let cp = fake_signed_checkpoint("example.com/log", 200, 0xcc);
-        let cosigs = vec![
-            fake_subtree_cosig("witness1.example/w", 1, 0x11),
-            fake_subtree_cosig("witness2.example/w", 2, 0x22),
-        ];
         let proof = vec![Hash([0x01u8; 32]), Hash([0x02u8; 32]), Hash([0x03u8; 32])];
-        let body =
-            serialize_sign_subtree_request(8, 128, &Hash([0x55u8; 32]), &cosigs, &proof, &cp)
-                .expect("serialize");
+        let body = serialize_sign_subtree_request(8, 128, &Hash([0x55u8; 32]), &proof, &cp)
+            .expect("serialize");
         let parsed = parse_sign_subtree_request(&body).expect("parse");
-        assert_eq!(parsed.subtree_cosignatures.len(), 2);
-        assert_eq!(parsed.subtree_cosignatures[0].id(), 1);
-        assert_eq!(parsed.subtree_cosignatures[1].id(), 2);
         assert_eq!(parsed.consistency_proof, proof);
         assert_eq!(parsed.checkpoint.text(), cp.text());
     }
 
     /// Pin the literal shape of the spec's example request body
-    /// (without subtree cosignatures and without checkpoint
-    /// signatures, which is the simpler of the two examples).
+    /// (without checkpoint signatures).
     #[test]
     fn request_matches_spec_example_shape() {
         let cp = fake_bare_checkpoint("example.com/behind-the-sofa", 14, 0x99);
         let proof = vec![Hash([1; 32]), Hash([2; 32]), Hash([3; 32]), Hash([4; 32])];
-        let body = serialize_sign_subtree_request(8, 13, &Hash([0x88u8; 32]), &[], &proof, &cp)
+        let body = serialize_sign_subtree_request(8, 13, &Hash([0x88u8; 32]), &proof, &cp)
             .expect("serialize");
         let text = std::str::from_utf8(&body).unwrap();
         assert!(
@@ -487,47 +416,31 @@ mod tests {
     }
 
     #[test]
-    fn request_rejects_oversize_cosignatures() {
-        let cp = fake_signed_checkpoint("example.com/log", 1, 0);
-        let cosigs = vec![fake_subtree_cosig("a", 0, 0); MAX_SUBTREE_COSIGNATURE_LINES + 1];
-        let err =
-            serialize_sign_subtree_request(0, 1, &Hash([0u8; 32]), &cosigs, &[], &cp).unwrap_err();
-        assert!(matches!(err, TlogWitnessError::MalformedRequest(_)));
-    }
-
-    #[test]
     fn request_rejects_oversize_proof() {
         let cp = fake_signed_checkpoint("example.com/log", 1, 0);
         let proof = vec![Hash([0u8; 32]); MAX_CONSISTENCY_PROOF_LINES + 1];
-        let err =
-            serialize_sign_subtree_request(0, 1, &Hash([0u8; 32]), &[], &proof, &cp).unwrap_err();
+        let err = serialize_sign_subtree_request(0, 1, &Hash([0u8; 32]), &proof, &cp).unwrap_err();
         assert!(matches!(err, TlogWitnessError::MalformedRequest(_)));
     }
 
     #[test]
     fn request_rejects_oversize_checkpoint_signatures() {
         let cp = fake_checkpoint_with_sigs("example.com/log", 1, 0, MAX_CHECKPOINT_SIGNATURES + 1);
-        let err =
-            serialize_sign_subtree_request(0, 1, &Hash([0u8; 32]), &[], &[], &cp).unwrap_err();
+        let err = serialize_sign_subtree_request(0, 1, &Hash([0u8; 32]), &[], &cp).unwrap_err();
         assert!(matches!(err, TlogWitnessError::MalformedRequest(_)));
     }
 
-    /// The spec requires all subtree cosignature lines to come before
-    /// any consistency-proof lines. Pin the parser's rejection of an
-    /// interleaved request.
+    /// The header after the hash line carries only consistency-proof hashes;
+    /// a signature line there is rejected.
     #[test]
-    fn request_rejects_cosignature_after_proof() {
+    fn request_rejects_signature_line_in_header() {
         let cp = fake_signed_checkpoint("example.com/log", 1, 0);
+        let signature = NoteSignature::new(KeyName::new("a".to_owned()).unwrap(), 0, vec![0; 64]);
         let mut body = Vec::new();
         body.extend_from_slice(b"subtree 0 1\n");
         body.extend_from_slice(BASE64_STANDARD.encode([0u8; 32]).as_bytes());
         body.push(b'\n');
-        // Proof first.
-        body.extend_from_slice(BASE64_STANDARD.encode([1u8; 32]).as_bytes());
-        body.push(b'\n');
-        // Then a cosig — out of order.
-        let cosig = fake_subtree_cosig("a", 0, 0);
-        body.extend_from_slice(&cosig.to_bytes());
+        body.extend_from_slice(&signature.to_bytes());
         body.push(b'\n');
         body.extend_from_slice(&cp.to_bytes());
         let err = parse_sign_subtree_request(&body).unwrap_err();
@@ -645,25 +558,40 @@ mod tests {
         assert!(matches!(err, TlogWitnessError::MalformedRequest(_)));
     }
 
-    /// Same wire shape as `add-checkpoint`, so the response helpers
-    /// behave symmetrically.
     #[test]
     fn response_roundtrip() {
-        let name = KeyName::new("witness.example/w".to_owned()).unwrap();
-        let sigs = vec![
-            NoteSignature::new(name.clone(), 1, vec![0u8; 64]),
-            NoteSignature::new(name, 2, vec![1u8; 64]),
-        ];
-        let body = serialize_sign_subtree_response(&sigs);
-        let parsed = parse_sign_subtree_response(&body).expect("parse");
-        assert_eq!(parsed.len(), 2);
+        let signature = vec![7u8; 2420];
+        let body = serialize_sign_subtree_response(&signature);
+        let line = body.strip_suffix(b"\n").expect("trailing newline");
+        assert!(!line.contains(&b'\n'), "single line");
+        assert_eq!(
+            parse_sign_subtree_response(&body).expect("parse"),
+            signature
+        );
     }
 
+    /// The response is a bare signature: a signed-note line, a second line, a
+    /// missing newline, an empty body, and non-canonical base64 are all
+    /// rejected.
     #[test]
-    fn response_rejects_empty() {
-        assert!(matches!(
-            parse_sign_subtree_response(b"").unwrap_err(),
-            TlogWitnessError::MalformedResponse(_)
-        ));
+    fn response_rejects_malformed() {
+        for body in [
+            &b""[..],
+            b"\n",
+            b"AAAA",
+            b"AAAA\nAAAA\n",
+            b"\xe2\x80\x94 witness.example/w AAAA\n",
+            // Non-zero trailing bits and missing padding are non-canonical.
+            b"AAB=\n",
+            b"AA=\n",
+        ] {
+            assert!(
+                matches!(
+                    parse_sign_subtree_response(body).unwrap_err(),
+                    TlogWitnessError::MalformedResponse(_)
+                ),
+                "{body:?} must be rejected"
+            );
+        }
     }
 }

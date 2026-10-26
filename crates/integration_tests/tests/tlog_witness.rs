@@ -675,7 +675,7 @@ async fn tlog_witness_end_to_end() {
     // submitting a fresh `add-checkpoint`, capture the witness's
     // cosignature on it, then ask `/sign-subtree` to cosign a subtree
     // of that checkpoint with a valid subtree consistency proof.
-    let cosigned_checkpoint;
+    let cosigned_checkpoints: Vec<Note>;
     {
         // The witness state is currently at size 2 (from step 3); the
         // local log is at size 5 (after pushes in steps 4 and 8). Build
@@ -692,12 +692,15 @@ async fn tlog_witness_end_to_end() {
             String::from_utf8_lossy(&r.body)
         );
         let witness_sigs = parse_add_checkpoint_response(&r.body).expect("parse response");
-        // Build an augmented note carrying the original log signature
-        // plus the witness's fresh cosignature, ready to feed back into
-        // /sign-subtree as the reference checkpoint.
-        let mut all_sigs = note.signatures().to_vec();
-        all_sigs.extend(witness_sigs);
-        cosigned_checkpoint = Note::new(note.text(), &all_sigs).expect("assemble cosigned note");
+        // /sign-subtree takes a reference checkpoint with exactly one
+        // signature, which selects the witness key. Build one reference
+        // per witness key.
+        cosigned_checkpoints = witness_sigs
+            .iter()
+            .map(|sig| {
+                Note::new(note.text(), std::slice::from_ref(sig)).expect("assemble cosigned note")
+            })
+            .collect();
     }
     let cp_size = log.size();
     {
@@ -706,30 +709,36 @@ async fn tlog_witness_end_to_end() {
         let s_hash = log.subtree_hash(&subtree);
         let proof = subtree_consistency_proof(cp_size, &subtree, &log.stored)
             .expect("subtree consistency proof");
-        let body = serialize_sign_subtree_request(
-            subtree.lo(),
-            subtree.hi(),
-            &s_hash,
-            &[],
-            &proof,
-            &cosigned_checkpoint,
-        )
-        .unwrap();
-        let r = post_sign_subtree(&body).await;
-        assert_eq!(
-            r.status,
-            200,
-            "sign-subtree happy path: body={:?}",
-            String::from_utf8_lossy(&r.body)
-        );
-        let sigs = parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
-        assert_eq!(sigs.len(), witness.public_keys.len());
         let verifiers = witness_subtree_verifiers(&meta);
-        assert!(sigs.iter().all(|signature| {
-            verifiers.iter().any(|verifier| {
-                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, signature.signature())
-            })
-        }));
+        assert_eq!(cosigned_checkpoints.len(), verifiers.len());
+        for reference in &cosigned_checkpoints {
+            let body = serialize_sign_subtree_request(
+                subtree.lo(),
+                subtree.hi(),
+                &s_hash,
+                &proof,
+                reference,
+            )
+            .unwrap();
+            let r = post_sign_subtree(&body).await;
+            assert_eq!(
+                r.status,
+                200,
+                "sign-subtree happy path: body={:?}",
+                String::from_utf8_lossy(&r.body)
+            );
+            let signature =
+                parse_sign_subtree_response(&r.body).expect("parse sign-subtree response");
+            let key_id = reference.signatures()[0].id();
+            let verifier = verifiers
+                .iter()
+                .find(|verifier| signed_note::NoteVerifier::key_id(*verifier) == key_id)
+                .expect("verifier for the selected key");
+            assert!(
+                verifier.verify_subtree(LOG_ORIGIN, &subtree, &s_hash, &signature),
+                "signature must verify under the key that signed the reference checkpoint"
+            );
+        }
     }
 
     // ----------------------- (12) /sign-subtree with checkpoint NOT cosigned by us → 403 -----------------------
@@ -742,12 +751,21 @@ async fn tlog_witness_end_to_end() {
         other_log.push(b"a");
         other_log.push(b"b");
         let cp = other_log.sign_checkpoint(&signer);
-        let note = Note::from_bytes(&cp).unwrap();
+        // Keep only the log's own signature: the checkpoint then has exactly
+        // one signature, and it is not the witness's.
+        let full = Note::from_bytes(&cp).unwrap();
+        let log_sig: Vec<NoteSignature> = full
+            .signatures()
+            .iter()
+            .filter(|sig| sig.id() == tlog_checkpoint::CheckpointSigner::key_id(&signer))
+            .cloned()
+            .collect();
+        let note = Note::new(full.text(), &log_sig).unwrap();
         let subtree = Subtree::new(0, 1).expect("valid subtree");
         let s_hash = other_log.subtree_hash(&subtree);
         let proof = subtree_consistency_proof(other_log.size(), &subtree, &other_log.stored)
             .expect("subtree consistency proof");
-        let body = serialize_sign_subtree_request(0, 1, &s_hash, &[], &proof, &note).unwrap();
+        let body = serialize_sign_subtree_request(0, 1, &s_hash, &proof, &note).unwrap();
         let r = post_sign_subtree(&body).await;
         assert_eq!(
             r.status,
@@ -767,8 +785,7 @@ async fn tlog_witness_end_to_end() {
             bogus_end,
             &Hash([0u8; HASH_SIZE]),
             &[],
-            &[],
-            &cosigned_checkpoint,
+            &cosigned_checkpoints[0],
         )
         .unwrap();
         let r = post_sign_subtree(&body).await;
@@ -793,8 +810,7 @@ async fn tlog_witness_end_to_end() {
             2, // start == end
             &Hash([0u8; HASH_SIZE]),
             &[],
-            &[],
-            &cosigned_checkpoint,
+            &cosigned_checkpoints[0],
         )
         .unwrap();
         let r = post_sign_subtree(&body).await;
@@ -811,9 +827,8 @@ async fn tlog_witness_end_to_end() {
     // The same empty subtree with the correct hash verifies against an
     // empty consistency proof, so the witness cosigns it.
     {
-        let body =
-            serialize_sign_subtree_request(2, 2, &EMPTY_HASH, &[], &[], &cosigned_checkpoint)
-                .unwrap();
+        let body = serialize_sign_subtree_request(2, 2, &EMPTY_HASH, &[], &cosigned_checkpoints[0])
+            .unwrap();
         let r = post_sign_subtree(&body).await;
         assert_eq!(
             r.status,

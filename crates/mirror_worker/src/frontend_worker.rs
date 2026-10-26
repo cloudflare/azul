@@ -24,7 +24,7 @@ use generic_log_worker::{
 };
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};
-use signed_note::{NoteSignature, VerifierList};
+use signed_note::VerifierList;
 use tlog_checkpoint::CheckpointSigner as _;
 use tlog_witness::{
     CONTENT_TYPE_TLOG_SIZE, MAX_REQUEST_BODY_SIZE, TrustedSignatureError,
@@ -383,8 +383,6 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
         );
     }
     if CONFIG.mirror.is_some() {
-        // Every mirror key signs, so a subtree stays verifiable across a
-        // key rotation.
         signers.extend(
             load_mirror_signers(&env)
                 .await?
@@ -408,15 +406,17 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
         AppError::UnprocessableEntity("subtree consistency proof failed".to_owned())
     })?;
 
-    let mut signatures: Vec<NoteSignature> = Vec::with_capacity(signers.len());
+    // The reference checkpoint carries exactly one signature, which selects
+    // the key: the subtree is cosigned by the key that signed the checkpoint,
+    // so a client that wants every key of a rotation asks once per key.
+    let mut selected = None;
     for signer in signers {
         let verifiers = VerifierList::new(vec![signer.verifier()]);
         match verify_trusted_checkpoint_signature(validated.checkpoint(), &verifiers) {
-            Ok(()) => signatures.push(signer.sign_subtree(
-                origin,
-                validated.subtree(),
-                validated.subtree_hash(),
-            )),
+            Ok(()) => {
+                selected = Some(signer);
+                break;
+            }
             Err(TrustedSignatureError::NoValidSignature(_)) => {}
             Err(TrustedSignatureError::VerifierInvariant(error)) => {
                 return Err(AppError::InternalServerError(format!(
@@ -425,13 +425,14 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
             }
         }
     }
-    if signatures.is_empty() {
+    let Some(signer) = selected else {
         return Err(AppError::ReferenceCheckpointNotCosigned);
-    }
+    };
+    let signature = signer.sign_subtree(origin, validated.subtree(), validated.subtree_hash());
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        serialize_sign_subtree_response(&signatures),
+        serialize_sign_subtree_response(signature.signature()),
     )
         .into_response())
 }
