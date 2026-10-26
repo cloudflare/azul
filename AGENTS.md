@@ -9,6 +9,7 @@ Azul is a Rust workspace implementing tiled transparency logs for deployment on 
 ```
 crates/ct_worker/      - Static CT API Worker (deployable); wrangler.jsonc here
 crates/mirror_worker/     - Configurable tlog mirror/witness Worker (deployable)
+crates/ietf_mtc_worker/ - IETF MTC CA Worker (deployable); wrangler.jsonc here
 crates/generic_log_worker/ - Shared Durable Object logic (Sequencer, Batcher, Cleaner)
 crates/tlog_tiles/     - C2SP tlog-tiles spec impl (published to crates.io)
 crates/static_ct_api/  - C2SP static-ct-api spec impl (published to crates.io)
@@ -40,6 +41,13 @@ cargo test -p integration_tests --test static_ct_api
 # Override defaults:
 BASE_URL=http://localhost:8787 LOG_NAME=dev2026h2a cargo test -p integration_tests --test static_ct_api
 
+# IETF MTC worker tests — from crates/ietf_mtc_worker/:
+npx wrangler -e=dev dev &
+# From workspace root:
+cargo test -p integration_tests --test ietf_mtc_api
+# Override defaults:
+BASE_URL=http://localhost:8787 IETF_MTC_LOG_NAME=dev1 cargo test -p integration_tests --test ietf_mtc_api
+
 # Worker deploy
 npx wrangler -e=${ENV} deploy
 npx wrangler -e=${ENV} tail
@@ -49,7 +57,7 @@ npx wrangler -e=${ENV} tail
 
 - Worker crates use `crate-type = ["cdylib"]`; library crates use `rlib`
 - Worker build is handled by `worker-build`, not `cargo build` directly — wrangler.jsonc invokes it automatically
-- Config types live in separate sub-crates such as `crates/ct_worker/config/` and `crates/mirror_worker/config/`
+- Config types live in separate sub-crates such as `crates/ct_worker/config/`, `crates/mirror_worker/config/`, and `crates/ietf_mtc_worker/config/`
 - `DEPLOY_ENV=<env>` env var must be set when invoking `worker-build` manually; wrangler.jsonc sets it per environment
 - Route HTTP with `axum::Router` (worker features `["http", "axum"]`), not the `worker::Router`. The `#[event(fetch)]` handler takes a `HttpRequest`, returns `axum::http::Response<axum::body::Body>`, and dispatches via `tower_service::Service::call`; handlers return `impl IntoResponse`. See `mirror_worker`/`ct_worker` for the pattern.
 
