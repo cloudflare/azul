@@ -13,6 +13,7 @@ on:
           - all
           - sunlight
           - tessera
+          - cactus
         default: all
 
 env:
@@ -29,10 +30,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Pinned at the uint8 log_origin switch (FiloSottile/sunlight#73).
+          # Pinned at the sign-subtree update to tlog-witness@v1.1.0, which
+          # follows the uint8 log_origin switch (FiloSottile/sunlight#73).
           - implementation: sunlight
             repository: FiloSottile/sunlight
-            revision: 42d2b79f62b160c4cf84b615b7b0360c4c41128a
+            revision: 5e015ed36b4a24de587531779c54688674fda7cd
           # Tessera still reads a uint16 log_origin length, so its cases are
           # expected to fail until that is fixed upstream.
           - implementation: tessera
@@ -62,3 +64,39 @@ jobs:
         env:
           SUNLIGHT_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}
           TESSERA_REPO: ${{ github.workspace }}/interop/${{ matrix.implementation }}
+
+  # Cactus is an MTC CA that acts as the mirror client, so the mirror_worker
+  # is the implementation under test rather than the peer.
+  cactus-client:
+    name: Interop (cactus client)
+    if: inputs.implementation == 'all' || inputs.implementation == 'cactus'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out Cactus
+        uses: actions/checkout@v4
+        with:
+          repository: mcpherrinm/cactus
+          ref: 6b5a8a4f0c7554f9e6ceb4cb7897dd39b8941773
+          path: interop/cactus
+          persist-credentials: false
+      - run: rustup update stable && rustup default stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - name: Install Worker tools
+        run: |
+          npm install --global wrangler@4.80.0
+          cargo install worker-build@0.8.5 --locked
+      - name: Run Cactus client against the mirror worker
+        run: bash scripts/test-cactus-mirror-interop.sh
+        env:
+          CACTUS_REPO: ${{ github.workspace }}/interop/cactus
