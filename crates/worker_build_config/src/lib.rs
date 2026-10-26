@@ -10,12 +10,17 @@ pub struct LoadedConfig<T> {
 #[must_use]
 /// Load and validate the Worker config selected by `DEPLOY_ENV`.
 ///
+/// `WORKER_CONFIG` names a config file to use instead of
+/// `config.<DEPLOY_ENV>.json`, so a test harness can build a Worker against a
+/// generated config without editing the checked-in ones.
+///
 /// # Panics
 ///
 /// Panics if the config or schema cannot be read, parsed, or validated.
 pub fn load<T: DeserializeOwned>(schema_contents: &str) -> LoadedConfig<T> {
     let deploy_env = env::var("DEPLOY_ENV").unwrap_or_else(|_| "dev".to_string());
-    let config_file = format!("config.{deploy_env}.json");
+    let config_file =
+        env::var("WORKER_CONFIG").unwrap_or_else(|_| format!("config.{deploy_env}.json"));
     let config_contents = fs::read_to_string(&config_file)
         .unwrap_or_else(|e| panic!("failed to read config file '{config_file}': {e}"));
     let json = serde_json::from_str(&config_contents)
@@ -46,6 +51,7 @@ impl<T> LoadedConfig<T> {
             .expect("failed to copy config file");
         println!("cargo::rustc-env=DEPLOY_ENV={}", self.deploy_env);
         println!("cargo::rerun-if-env-changed=DEPLOY_ENV");
+        println!("cargo::rerun-if-env-changed=WORKER_CONFIG");
         println!("cargo::rerun-if-changed=config.schema.json");
         println!("cargo::rerun-if-changed={}", self.config_file);
     }
