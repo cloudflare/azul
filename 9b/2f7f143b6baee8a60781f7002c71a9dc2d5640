@@ -1,0 +1,27 @@
+crates/mirror_worker/src/frontend_worker.rs
+  s_6e67e41cf84c26::t_220fb6e22a746b 27,409-412,416-419,428,430-431,435
+crates/tlog_witness/src/sign_subtree.rs
+  s_6e67e41cf84c26::t_7fcc19e548cbe3 28-33,41,48-50,217-218,220-221,223-226,229-230,232-234,238-253,563-570,573-575,577-595
+crates/tlog_witness/src/validation.rs
+  s_6e67e41cf84c26::t_30d3a79d0609db 152-153,167-170,173-175,186-189,469-470,476-501,502-514,515,518-519
+crates/worker_build_config/src/lib.rs
+  s_6e67e41cf84c26::t_8b092b929f005c 13-16,22-23,54
+scripts/test-cactus-mirror-interop.sh
+  s_6e67e41cf84c26::t_4c3187dec66747 1-10,14-30,32-43,45-63,65-84,85,90-135,192-197,199-212,214-282,311-335
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9b2f7f143b6baee8a60781f7002c71a9dc2d5640",
+  "prompts": {},
+  "sessions": {
+    "s_6e67e41cf84c26": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f73f3dc61ffeG44GS71LfQn7Ea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Luke Valenta <lvalenta@cloudflare.com>"
+    }
+  }
+}
