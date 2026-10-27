@@ -476,7 +476,7 @@ impl TlogTile {
     }
 
     /// Path returns a tile coordinate path describing t, according to
-    /// <c2sp.org/tlog-tiles>. It differs from [`tlog_tiles::Tile::path`] in
+    /// <c2sp.org/tlog-tiles>. It differs from [`Tile::path`] in
     /// that it doesn't include an explicit tile height. The `data_path`
     /// parameter should be `"entries"` for tlog-tiles, and `"data"` for
     /// static-ct-api.

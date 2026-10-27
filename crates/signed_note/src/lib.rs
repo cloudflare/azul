@@ -39,17 +39,17 @@
 //!
 //! The [`Note::new`] function accepts a text and an existing list of signatures and returns a Note.
 //!
-//! A [Signature] represents a signature on a note, verified or not
+//! A [`NoteSignature`] represents a signature on a note, verified or not
 //! ([spec](https://c2sp.org/signed-note.md#signatures)).
 //!
-//! The [`Signature::from_bytes`] function parses a note signature line and ensures that it is
+//! The [`NoteSignature::from_bytes`] function parses a note signature line and ensures that it is
 //! syntactically valid, returning a Signature.
 //!
-//! The [`Signature::to_bytes`] function encodes a signature for inclusion in a note.
+//! The [`NoteSignature::to_bytes`] function encodes a signature for inclusion in a note.
 //!
 //! ## Verifying Notes
 //!
-//! A [`Verifier`] allows verification of signatures by one server public key.  It can report the
+//! A [`NoteVerifier`] allows verification of signatures by one server public key.  It can report the
 //! name of the server and the uint32 ID of the key, and it can verify a purported signature by
 //! that key.
 //!
@@ -66,7 +66,7 @@
 //!
 //! ## Signing Notes
 //!
-//! A [`Signer`] allows signing a text with a given key. It can report the name of the server and the
+//! A [`NoteSigner`] allows signing a text with a given key. It can report the name of the server and the
 //! ID of the key and can sign a raw text using that key.
 //!
 //! The standard implementation of a Signer is constructed by [`Ed25519NoteSigner::new_from_encoded_key`] starting from
@@ -103,7 +103,7 @@
 //! introduced in the future as needed, although doing so will require deploying the new algorithms
 //! to all clients before starting to depend on them for signatures.
 //!
-//! The [`generate_key`] function generates and returns a new signer and corresponding verifier.
+//! The [`generate_encoded_ed25519_key`] function generates and returns a new signer and corresponding verifier.
 //!
 //! ## Example
 //!
@@ -139,7 +139,7 @@
 //! by a server named "`PeterNeumann`". (Although server names are canonically base URLs, the only
 //! syntactic requirement is that they not contain spaces or newlines).
 //!
-//! If [`Note::verify`] is given access to a [`Verifiers`] including the [`Verifier`] for this key, then
+//! If [`Note::verify`] is given access to a [`Verifiers`] including the [`NoteVerifier`] for this key, then
 //! it will succeed at verifying the encoded message and returning the parsed [`Note`]:
 //!
 //! ```
@@ -358,7 +358,7 @@ pub fn compute_key_id(name: &KeyName, signature_type: &[u8], pubkey: &[u8]) -> u
 
 /// [`Verifiers`] is a collection of known verifier keys.
 pub trait Verifiers {
-    /// Returns the [`Verifier`] associated with the key identified by the name and
+    /// Returns the [`NoteVerifier`] associated with the key identified by the name and
     /// id.
     ///
     /// # Errors
@@ -435,18 +435,13 @@ pub struct NoteSignature {
 }
 
 impl NoteSignature {
-    /// Returns a new signature from the given name and base64-encoded signature string.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NoteError::MalformedNote`] if the name is invalid according to [`is_key_name_valid`].
-    ///
+    /// Returns a new signature from the given key name, key ID and signature bytes.
     #[must_use]
     pub fn new(name: KeyName, id: u32, sig: Vec<u8>) -> Self {
         Self { name, id, sig }
     }
 
-    /// Parse a signature line into a [Signature].
+    /// Parse a signature line into a [`NoteSignature`].
     ///
     /// # Errors
     ///

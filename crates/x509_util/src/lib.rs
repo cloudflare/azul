@@ -289,7 +289,7 @@ pub enum ValidationError {
     MismatchingSigAlg,
 }
 
-/// An error that's returned by either our validation logic or the hook that [`validate_chain`]
+/// An error that's returned by either our validation logic or the hook that [`validate_chain_lax`]
 /// takes
 #[derive(thiserror::Error, Debug)]
 pub enum HookOrValidationError<T> {

@@ -59,7 +59,7 @@ pub trait PendingLogEntry: core::fmt::Debug + Clone + Serialize + DeserializeOwn
     const AUX_TILE_PATH: Option<PathElem>;
 
     /// Returns the auxiliary data for this entry, if configured. It is an error
-    /// to call this function if [`AUX_TILE_PATH`] is not specified.
+    /// to call this function if [`Self::AUX_TILE_PATH`] is not specified.
     fn aux_entry(&self) -> &[u8];
 
     /// The lookup key belonging to this pending log entry.

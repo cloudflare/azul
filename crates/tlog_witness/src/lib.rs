@@ -42,8 +42,8 @@
 //!   producing a `subtree/v1` signature is handled by
 //!   [`tlog_cosignature::SubtreeV1CheckpointSigner`].
 //! - Consistency-proof verification: use
-//!   [`tlog_tiles::verify_consistency_proof`] /
-//!   [`tlog_tiles::verify_subtree_consistency_proof`] directly.
+//!   [`tlog_core::verify_consistency_proof`] /
+//!   [`tlog_core::verify_subtree_consistency_proof`] directly.
 //! - Persistent state for the "latest cosigned checkpoint per origin" check
 //!   that [`add-checkpoint`][add] mandates — that is a deployment concern,
 //!   not a wire-format concern.

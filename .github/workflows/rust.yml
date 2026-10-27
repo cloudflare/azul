@@ -31,6 +31,11 @@ jobs:
       - name: Clippy (pedantic, advisory)
         run: cargo clippy --workspace --all-targets -- -Dwarnings -Dclippy::pedantic
         continue-on-error: true
+      - name: Rustdoc links (advisory)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        continue-on-error: true
       - name: Unused dependencies (advisory)
         run: cargo install cargo-shear --quiet && cargo shear
         continue-on-error: true
