@@ -10,7 +10,7 @@
 //! Merkle Tree primitives for transparency logs.
 //!
 //! This crate provides the algorithm-only Merkle math used by every
-//! transparency-log spec in this workspace: the [`Hash`] type and the
+//! transparency-log spec in this workspace: the [`Hash`](struct@Hash) type and the
 //! `record_hash` / `node_hash` / `tree_hash` / `*_hash_index` builders
 //! per [RFC 6962][rfc6962] §2.1, the inclusion-proof and consistency-
 //! proof builders/verifiers per RFC 6962 §2.1.1–§2.1.4, and the subtree
@@ -370,8 +370,7 @@ pub fn tree_hash<R: HashReader>(n: u64, r: &R) -> Result<Hash, TlogError> {
 ///
 /// # Errors
 ///
-/// Returns an error if any required index exceeds [`u64::MAX`]. See
-/// [`Subtree::hash_indexes`].
+/// Returns an error if any required index exceeds [`u64::MAX`].
 pub fn tree_hash_indexes(n: u64) -> Result<Vec<u64>, TlogError> {
     if n == 0 {
         return Ok(vec![]);
@@ -384,8 +383,7 @@ pub fn tree_hash_indexes(n: u64) -> Result<Vec<u64>, TlogError> {
 ///
 /// # Errors
 ///
-/// Returns an error if any required index exceeds [`u64::MAX`]. See
-/// [`Subtree::hash_indexes`].
+/// Returns an error if any required index exceeds [`u64::MAX`].
 pub fn subtree_hash_indexes(n: &Subtree) -> Result<Vec<u64>, TlogError> {
     n.hash_indexes()
 }

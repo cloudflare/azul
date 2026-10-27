@@ -228,7 +228,7 @@ impl VerifierList {
 
 /// Compute the key ID for a given server name and encoded public key.
 ///
-/// Key ID = SHA-256(name + "\n" + `key_data`)[:4], as recommended by
+/// Key ID = SHA-256(name + "\n" + `key_data`)\[:4\], as recommended by
 /// <https://c2sp.org/signed-note#signatures>.
 ///
 /// # Errors

@@ -55,7 +55,7 @@ impl Ed25519NoteVerifier {
             verifying_key,
         }
     }
-    /// Construct a new [Verifier] from an encoded verifier key.
+    /// Construct a new [`NoteVerifier`] from an encoded verifier key.
     ///
     /// # Errors
     ///
@@ -134,7 +134,7 @@ impl Ed25519NoteSigner {
             signing_key,
         }
     }
-    /// Construct a new [Signer] from an encoded signer key.
+    /// Construct a new [`NoteSigner`] from an encoded signer key.
     ///
     /// # Errors
     ///

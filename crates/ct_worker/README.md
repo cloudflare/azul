@@ -177,5 +177,5 @@ This project ports code from [sunlight](https://github.com/FiloSottile/sunlight)
 The project is licensed under the [BSD-3-Clause License](./LICENSE).
 
 
-location-hint: <https://developers.cloudflare.com/r2/reference/data-location/>
-secrets-docs: <https://developers.cloudflare.com/workers/configuration/secrets>
+[location-hint]: <https://developers.cloudflare.com/r2/reference/data-location/>
+[secrets-docs]: <https://developers.cloudflare.com/workers/configuration/secrets>

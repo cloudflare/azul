@@ -132,7 +132,7 @@ const CHECKPOINT_COSIGNATURE_LEN: usize = 8 + MLDSA_44_SIGNATURE_LEN;
 /// subtree per [`Subtree::new`]'s contract; the higher-level
 /// [`SubtreeV1CheckpointSigner::sign_subtree`] and
 /// [`SubtreeV1NoteVerifier::verify_subtree`] entry points take a
-/// [`&Subtree`] and so enforce this at the type level.
+/// `&`[`Subtree`] and so enforce this at the type level.
 ///
 /// # Panics
 ///
@@ -506,8 +506,8 @@ impl NoteVerifier for SubtreeV1NoteVerifier {
     /// note signature's embedded timestamp before verifying the signature
     /// itself (e.g. for ordering, rate limiting, or coarse pruning).
     /// Returning `Ok(Some(_))` means the blob has the correct envelope
-    /// shape (exactly [`CHECKPOINT_COSIGNATURE_LEN`] bytes — 8-byte
-    /// timestamp + [`MLDSA_44_SIGNATURE_LEN`]-byte tail) and the prefix
+    /// shape (exactly `CHECKPOINT_COSIGNATURE_LEN` bytes: 8-byte
+    /// timestamp + `MLDSA_44_SIGNATURE_LEN`-byte tail) and the prefix
     /// decodes as a `u64`. It does **not** mean the signature itself is
     /// valid, or that the timestamp is the one the signer actually
     /// committed to — the tail bytes are not parsed or verified here.

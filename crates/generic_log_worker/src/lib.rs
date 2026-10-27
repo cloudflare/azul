@@ -486,7 +486,7 @@ pub const CACHE_RECORD_LEN: usize = LOOKUP_KEY_LEN + 16;
 ///
 /// Used by [`SequencerMetadata`] impls that need a compact fixed-width layout
 /// for the Durable Object dedup cache storage. Any change to this format will
-/// result in a [`DedupCache::load`] error for deployed logs (which is logged
+/// result in a `DedupCache::load` error for deployed logs (which is logged
 /// and tolerated: the log continues without the short-term cache).
 ///
 /// # Panics
