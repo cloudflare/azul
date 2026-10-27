@@ -89,7 +89,7 @@ npx wrangler -e="${ENV}" kv namespace create static-ct-ccadb-roots --binding cca
 
 **Alternatively run the script [create-root-kv.sh](./scripts/create-root-kv.sh)**
 
-1.  Create the the R2 bucket for public assets, the kv namespace for per-log
+1.  Create the R2 bucket for public assets, the kv namespace for per-log
     deduplication cache and generate the [secrets][secrets-docs] for signing and witness keys.
 
 ```bash
