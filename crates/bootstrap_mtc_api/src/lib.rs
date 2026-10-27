@@ -645,7 +645,7 @@ pub fn validate_correspondence(
                         // entry with only the DigitalSignature key usage.
                         if extension != bootstrap_extension {
                             return Err(MtcError::Dynamic(format!(
-                                "boostrap extension mismatch {id}"
+                                "bootstrap extension mismatch {id}"
                             )));
                         }
                     } else {
