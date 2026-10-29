@@ -63,6 +63,73 @@ jobs:
           BASE_URL: http://localhost:8787
           LOG_NAME: dev2026h2a
 
+  integration-ietf-mtc:
+    name: IETF MTC Worker Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.80.0
+
+      - name: Install worker-build
+        run: cargo install worker-build@0.8.5 --locked
+
+      - name: Build ietf_mtc_worker (dev environment)
+        working-directory: crates/ietf_mtc_worker
+        run: DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind
+
+      - name: Build mirror_worker (combined dev environment)
+        working-directory: crates/mirror_worker
+        run: DEPLOY_ENV=dev RUSTFLAGS='-Cllvm-args=-wasm-use-legacy-eh' worker-build --release --panic-unwind
+
+      - name: Start mirror worker
+        working-directory: crates/mirror_worker
+        run: wrangler -e=dev dev --port 18788 --inspector-port 9233 --persist-to .wrangler/state &
+
+      - name: Wait for mirror worker to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:18788/metadata > /dev/null 2>&1; then
+              echo "mirror worker is ready"
+              exit 0
+            fi
+            echo "Waiting for mirror worker... attempt $i/30"
+            sleep 2
+          done
+          echo "mirror worker failed to start in time"
+          exit 1
+
+      - name: Start wrangler dev
+        working-directory: crates/ietf_mtc_worker
+        run: wrangler -e=dev dev --port 8787 --persist-to .wrangler/state &
+
+      - name: Wait for wrangler dev to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8787/logs/dev1/metadata > /dev/null 2>&1; then
+              echo "wrangler dev is ready"
+              exit 0
+            fi
+            echo "Waiting for wrangler dev... attempt $i/30"
+            sleep 2
+          done
+          echo "wrangler dev failed to start in time"
+          exit 1
+
+      - name: Run IETF MTC integration tests
+        run: cargo test -p integration_tests --test ietf_mtc_api --verbose
+        env:
+          BASE_URL: http://localhost:8787
+          MIRROR_URL: http://localhost:18788
+          IETF_MTC_LOG_NAME: dev1
+
   integration-tlog-mirror:
     name: TLog Mirror Integration Tests
     runs-on: ubuntu-latest
