@@ -143,6 +143,11 @@
                             "default": true,
                             "description": "Rejects submissions whose leaf certificate has expired."
                         },
+                        "require_server_auth_eku": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Requires the leaf certificate to carry the id-kp-serverAuth extended key usage, per RFC 6962 \u00a73.1. Required for WebPKI logs, and the default. Set to false only to skip that presence check for a non-WebPKI log. False does not require a different EKU: leaves with another EKU or no EKU can be logged if every other chain and CT validation passes."
+                        },
                         "clean_interval_secs": {
                             "type": "integer",
                             "minimum": 1,

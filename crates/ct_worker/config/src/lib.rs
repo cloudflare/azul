@@ -93,6 +93,12 @@ pub struct LogParams {
     pub enable_ccadb_roots: bool,
     #[serde(default = "default_bool::<true>")]
     pub reject_expired: bool,
+    /// Require the leaf EKU extension to contain `id-kp-serverAuth`.
+    ///
+    /// Disabling this skips only that presence check. It does not select a
+    /// different EKU policy or relax the remaining chain and CT validation.
+    #[serde(default = "default_bool::<true>")]
+    pub require_server_auth_eku: bool,
     #[serde(default = "default_u64::<60>")]
     pub clean_interval_secs: u64,
 }
@@ -139,5 +145,18 @@ mod tests {
                 "https://example.com/external-log/metadata.json",
             ]
         );
+    }
+
+    #[test]
+    fn require_server_auth_eku_defaults_to_true_and_can_be_disabled() {
+        let config: AppConfig =
+            serde_json::from_str(include_str!("../../config.dev.json")).unwrap();
+
+        // The default must stay `true`: WebPKI logs depend on it, and a default
+        // of `false` would silently relax RFC 6962 section 3.1 for every log
+        // that never opted out.
+        for (name, log) in &config.logs {
+            assert_eq!(log.require_server_auth_eku, name != "dev2027h1a", "{name}");
+        }
     }
 }
