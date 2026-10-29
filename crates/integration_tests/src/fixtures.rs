@@ -21,7 +21,10 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use const_oid::AssociatedOid;
+use const_oid::{
+    AssociatedOid, ObjectIdentifier,
+    db::rfc5280::{ID_KP_CLIENT_AUTH, ID_KP_SERVER_AUTH},
+};
 use crypto_common::Generate;
 use der::{
     Decode, Encode, Length, Writer,
@@ -167,10 +170,10 @@ pub fn make_chains(log_name: &str) -> Result<GeneratedChains> {
 
     let ca_key = SigningKey::from_pkcs8_pem(CA_KEY_PEM).context("loading CA key")?;
 
-    let leaf_der =
-        build_cert(&ca_key, not_before, not_after, false).context("building leaf cert")?;
-    let precert_der =
-        build_cert(&ca_key, not_before, not_after, true).context("building precert")?;
+    let leaf_der = build_cert(&ca_key, not_before, not_after, false, ID_KP_SERVER_AUTH)
+        .context("building leaf cert")?;
+    let precert_der = build_cert(&ca_key, not_before, not_after, true, ID_KP_SERVER_AUTH)
+        .context("building precert")?;
 
     Ok(GeneratedChains {
         chain: vec![leaf_der, ca_cert_der_bytes()],
@@ -192,8 +195,31 @@ pub fn make_expired_chain(log_name: &str) -> Result<Vec<Vec<u8>>> {
     anyhow::ensure!(not_after < chrono::Utc::now());
 
     let ca_key = SigningKey::from_pkcs8_pem(CA_KEY_PEM).context("loading CA key")?;
-    let leaf_der =
-        build_cert(&ca_key, not_before, not_after, false).context("building leaf cert")?;
+    let leaf_der = build_cert(&ca_key, not_before, not_after, false, ID_KP_SERVER_AUTH)
+        .context("building leaf cert")?;
+    Ok(vec![leaf_der, ca_cert_der_bytes()])
+}
+
+/// Generate a certificate chain whose leaf carries the `id-kp-clientAuth`
+/// extended key usage and not `id-kp-serverAuth`, with a `notAfter` inside
+/// the temporal interval of `log_name`.
+pub fn make_client_auth_chain(log_name: &str) -> Result<Vec<Vec<u8>>> {
+    let config: DevConfig =
+        serde_json::from_str(DEV_CONFIG_JSON).context("parsing config.dev.json")?;
+    let log = config
+        .logs
+        .get(log_name)
+        .with_context(|| format!("log '{log_name}' not found in config.dev.json"))?;
+    let start = log
+        .temporal_interval
+        .start_inclusive
+        .max(chrono::Utc::now());
+    let not_after = start + chrono::TimeDelta::days(30);
+    anyhow::ensure!(not_after < log.temporal_interval.end_exclusive);
+
+    let ca_key = SigningKey::from_pkcs8_pem(CA_KEY_PEM).context("loading CA key")?;
+    let leaf_der = build_cert(&ca_key, start, not_after, false, ID_KP_CLIENT_AUTH)
+        .context("building clientAuth leaf cert")?;
     Ok(vec![leaf_der, ca_cert_der_bytes()])
 }
 
@@ -212,6 +238,7 @@ fn build_cert(
     not_before: chrono::DateTime<chrono::Utc>,
     not_after: chrono::DateTime<chrono::Utc>,
     is_precert: bool,
+    eku: ObjectIdentifier,
 ) -> Result<Vec<u8>> {
     let serial = SerialNumber::from(rand::random::<u32>());
 
@@ -243,10 +270,9 @@ fn build_cert(
     )]);
     builder.add_extension(&san).context("adding SAN")?;
 
-    let eku = ExtendedKeyUsage(vec![der::asn1::ObjectIdentifier::new_unwrap(
-        "1.3.6.1.5.5.7.3.1",
-    )]);
-    builder.add_extension(&eku).context("adding EKU")?;
+    builder
+        .add_extension(&ExtendedKeyUsage(vec![eku]))
+        .context("adding EKU")?;
 
     if is_precert {
         builder
