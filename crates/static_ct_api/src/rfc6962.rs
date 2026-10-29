@@ -189,14 +189,14 @@ pub fn partially_validate_chain(
             (None, leaf.to_der()?)
         };
 
-        Ok((
-            StaticCTPendingLogEntry {
-                certificate,
-                precert_opt,
-                chain_fingerprints,
-            },
-            found_root_idx,
-        ))
+        let pending_entry = StaticCTPendingLogEntry {
+            certificate,
+            precert_opt,
+            chain_fingerprints,
+        };
+        pending_entry.check_limits()?;
+
+        Ok((pending_entry, found_root_idx))
     };
 
     // Call validation with the hook

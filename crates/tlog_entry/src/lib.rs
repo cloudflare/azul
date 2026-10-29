@@ -94,7 +94,13 @@ pub trait LogEntry: core::fmt::Debug + Sized {
 
     /// Returns the serialized form of this log entry to be included in the data
     /// tile. For tlog-tiles, this is the big-endian uint16 length-prefixed log entry.
-    fn to_data_tile_entry(&self) -> Vec<u8>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a field does not fit in its length prefix.
+    /// Submission-time validation is expected to reject such entries before
+    /// they are sequenced.
+    fn to_data_tile_entry(&self) -> std::io::Result<Vec<u8>>;
 
     /// Attempts to parse a `LogEntry` from a reader into a tile. The position of the reader is
     /// expected to be the beginning of an entry. On success, returns a log entry.
@@ -149,6 +155,12 @@ pub struct TlogTilesPendingLogEntry {
     pub data: Vec<u8>,
 }
 
+impl TlogTilesPendingLogEntry {
+    /// Maximum length of [`Self::data`]. Entry bundles use a big-endian uint16
+    /// length prefix per entry.
+    pub const MAX_DATA_LEN: usize = u16::MAX as usize;
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct TlogTilesLogEntry {
     pub inner: TlogTilesPendingLogEntry,
@@ -193,10 +205,10 @@ impl LogEntry for TlogTilesLogEntry {
         tlog_core::record_hash(&self.inner.data)
     }
 
-    fn to_data_tile_entry(&self) -> Vec<u8> {
+    fn to_data_tile_entry(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::with_capacity(2 + self.inner.data.len());
-        buffer.write_length_prefixed(&self.inner.data, 2).unwrap();
-        buffer
+        buffer.write_length_prefixed(&self.inner.data, 2)?;
+        Ok(buffer)
     }
 
     /// Parse a tlog-tiles log entry from the reader into an entry bundle. Entry
@@ -220,12 +232,42 @@ mod tests {
     fn test_parse_tile_entry() {
         let inner = TlogTilesPendingLogEntry { data: vec![1; 100] };
         let entry = TlogTilesLogEntry::new(inner, 123, 456);
-        let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
+        let tile: Vec<u8> = (0..5)
+            .flat_map(|_| entry.to_data_tile_entry().unwrap())
+            .collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {
             let parsed_entry = TlogTilesLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
             assert_eq!(entry, parsed_entry);
         }
+    }
+
+    #[test]
+    fn test_data_tile_entry_length_limit() {
+        let at_limit = TlogTilesLogEntry::new(
+            TlogTilesPendingLogEntry {
+                data: vec![1; TlogTilesPendingLogEntry::MAX_DATA_LEN],
+            },
+            0,
+            0,
+        );
+        let tile = at_limit.to_data_tile_entry().unwrap();
+        assert_eq!(
+            TlogTilesLogEntry::parse_from_tile_entry(&mut tile.as_slice()).unwrap(),
+            at_limit
+        );
+
+        let over_limit = TlogTilesLogEntry::new(
+            TlogTilesPendingLogEntry {
+                data: vec![1; TlogTilesPendingLogEntry::MAX_DATA_LEN + 1],
+            },
+            0,
+            0,
+        );
+        assert_eq!(
+            over_limit.to_data_tile_entry().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 }
