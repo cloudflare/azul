@@ -59,13 +59,11 @@ struct MtcSignature {
 }
 
 impl MtcSignature {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
-        buffer
-            .write_length_prefixed(self.cosigner_id.as_bytes(), 1)
-            .unwrap();
-        buffer.write_length_prefixed(&self.signature, 2).unwrap();
-        buffer
+        buffer.write_length_prefixed(self.cosigner_id.as_bytes(), 1)?;
+        buffer.write_length_prefixed(&self.signature, 2)?;
+        Ok(buffer)
     }
 }
 
@@ -78,31 +76,24 @@ struct MtcProof {
 }
 
 impl MtcProof {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
-        buffer.write_u64::<BigEndian>(self.start).unwrap();
-        buffer.write_u64::<BigEndian>(self.end).unwrap();
-        buffer
-            .write_length_prefixed(
-                &self
-                    .inclusion_proof
-                    .iter()
-                    .flat_map(|h| h.0.to_vec())
-                    .collect::<Vec<u8>>(),
-                2,
-            )
-            .unwrap();
-        buffer
-            .write_length_prefixed(
-                &self
-                    .signatures
-                    .iter()
-                    .flat_map(MtcSignature::to_bytes)
-                    .collect::<Vec<u8>>(),
-                2,
-            )
-            .unwrap();
-        buffer
+        buffer.write_u64::<BigEndian>(self.start)?;
+        buffer.write_u64::<BigEndian>(self.end)?;
+        buffer.write_length_prefixed(
+            &self
+                .inclusion_proof
+                .iter()
+                .flat_map(|h| h.0.to_vec())
+                .collect::<Vec<u8>>(),
+            2,
+        )?;
+        let mut signatures = Vec::new();
+        for signature in &self.signatures {
+            signatures.extend(signature.to_bytes()?);
+        }
+        buffer.write_length_prefixed(&signatures, 2)?;
+        Ok(buffer)
     }
 }
 
@@ -192,7 +183,7 @@ impl LogEntry for BootstrapMtcLogEntry {
         self.0.merkle_tree_leaf()
     }
 
-    fn to_data_tile_entry(&self) -> Vec<u8> {
+    fn to_data_tile_entry(&self) -> std::io::Result<Vec<u8>> {
         self.0.to_data_tile_entry()
     }
 
@@ -252,7 +243,7 @@ pub fn serialize_signatureless_cert(
                 inclusion_proof,
                 signatures: Vec::new(),
             }
-            .to_bytes(),
+            .to_bytes()?,
         )?,
     };
     Ok(certificate.to_der()?)
@@ -683,6 +674,19 @@ pub fn validate_correspondence(
     })
 }
 
+/// Checks that an encoded `MerkleTreeCertEntry` fits in a tlog-tiles entry
+/// bundle, which uses a uint16 length prefix per entry.
+fn check_entry_len(data: &[u8]) -> Result<(), MtcError> {
+    if data.len() > TlogTilesPendingLogEntry::MAX_DATA_LEN {
+        return Err(MtcError::Dynamic(format!(
+            "log entry is {} bytes, exceeding the {}-byte tlog-tiles entry limit",
+            data.len(),
+            TlogTilesPendingLogEntry::MAX_DATA_LEN,
+        )));
+    }
+    Ok(())
+}
+
 /// Parse and validate a bootstrap chain, returning a pending log entry.
 ///
 /// # Arguments
@@ -707,7 +711,8 @@ pub fn validate_correspondence(
 ///
 /// # Errors
 ///
-/// Returns an error if the chain is invalid.
+/// Returns an error if the chain is invalid, or if the resulting log entry or
+/// bootstrap data does not fit in its length-prefixed encoding.
 pub fn validate_chain(
     raw_chain: &[Vec<u8>],
     roots: &CertPool,
@@ -763,16 +768,17 @@ pub fn validate_chain(
         let mut bootstrap_tile_entry = Vec::new();
         bootstrap_tile_entry.write_length_prefixed(bootstrap.as_slice(), 3)?;
 
+        let data = MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
+            leaf.tbs_certificate(),
+            issuer,
+            *validity,
+        )?)
+        .encode()?;
+        check_entry_len(&data)?;
+
         let pending_entry = BootstrapMtcPendingLogEntry {
             bootstrap: bootstrap_tile_entry,
-            entry: TlogTilesPendingLogEntry {
-                data: MerkleTreeCertEntry::TbsCertEntry(tbs_cert_to_log_entry(
-                    leaf.tbs_certificate(),
-                    issuer,
-                    *validity,
-                )?)
-                .encode()?,
-            },
+            entry: TlogTilesPendingLogEntry { data },
         };
         Ok((pending_entry, found_root_idx))
     };
@@ -971,6 +977,63 @@ mod tests {
         // Unique IDs: the source cert has none, so the output should have none.
         assert!(out_tbs.issuer_unique_id().is_none());
         assert!(out_tbs.subject_unique_id().is_none());
+    }
+
+    #[test]
+    fn test_mtc_proof_to_bytes_signature_limit() {
+        use std::str::FromStr;
+
+        let proof = |signature_len: usize| MtcProof {
+            start: 0,
+            end: 1,
+            inclusion_proof: Vec::new(),
+            signatures: vec![MtcSignature {
+                cosigner_id: TrustAnchorID::from_str("1.2.3").unwrap(),
+                signature: vec![0; signature_len],
+            }],
+        };
+        // The signature list has a 2-byte length prefix, and each signature
+        // carries a 1-byte ID length, the ID, and a 2-byte signature length.
+        let id_len = TrustAnchorID::from_str("1.2.3").unwrap().as_bytes().len();
+        let max_signature_len = usize::from(u16::MAX) - (1 + id_len + 2);
+        proof(max_signature_len).to_bytes().unwrap();
+        assert_eq!(
+            proof(max_signature_len + 1).to_bytes().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            proof(usize::from(u16::MAX) + 1)
+                .to_bytes()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn test_check_entry_len() {
+        check_entry_len(&vec![0; TlogTilesPendingLogEntry::MAX_DATA_LEN]).unwrap();
+        assert!(matches!(
+            check_entry_len(&vec![0; TlogTilesPendingLogEntry::MAX_DATA_LEN + 1]),
+            Err(MtcError::Dynamic(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_chain_accepts_ordinary_entry() {
+        let chain = Certificate::load_pem_chain(include_bytes!(
+            "../../static_ct_api/tests/leaf-cert.pem"
+        ))
+        .unwrap();
+        let raw_chain = x509_util::certs_to_bytes(&chain).unwrap();
+        let roots = CertPool::new(chain.clone()).unwrap();
+        let issuer = RdnSequence::default();
+        let mut validity = Validity::new(
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(0)).unwrap()),
+            Time::UtcTime(UtcTime::from_unix_duration(Duration::from_secs(2_000_000_000)).unwrap()),
+        );
+        let (pending, _) = validate_chain(&raw_chain, &roots, &issuer, &mut validity).unwrap();
+        assert!(pending.entry.data.len() <= TlogTilesPendingLogEntry::MAX_DATA_LEN);
     }
 
     #[test]

@@ -56,7 +56,8 @@ impl MtcCosigner {
             start,
             end,
             root_hash,
-        );
+        )
+        .map_err(signature::Error::from_source)?;
 
         Ok(self.k.try_sign(&serialized)?.to_vec())
     }
@@ -168,13 +169,15 @@ impl NoteVerifier for MtcNoteVerifier {
         };
 
         // Construct message to be signed from <https://www.ietf.org/archive/id/draft-davidben-tls-merkle-tree-certs-05.html#name-signature-format>.
-        let msg = serialize_mtc_subtree_signature_input(
+        let Ok(msg) = serialize_mtc_subtree_signature_input(
             &self.cosigner_id,
             &self.log_id,
             0,
             checkpoint.size(),
             checkpoint.hash(),
-        );
+        ) else {
+            return false;
+        };
 
         self.verifying_key
             .verify(&msg, &ed25519_dalek::Signature::from_bytes(&sig_bytes))
@@ -210,26 +213,24 @@ impl NoteVerifier for MtcNoteVerifier {
 /// } MTCSubtreeSignatureInput;
 /// ```
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if writing to an internal buffer fails, which should never happen.
+/// Returns an error if either trust anchor ID is longer than 255 bytes.
 fn serialize_mtc_subtree_signature_input(
     cosigner_id: &TrustAnchorID,
     log_id: &TrustAnchorID,
     start: LeafIndex,
     end: LeafIndex,
     root_hash: &Hash,
-) -> Vec<u8> {
+) -> std::io::Result<Vec<u8>> {
     let mut buffer: Vec<u8> = b"mtc-subtree/v1\n\x00".to_vec();
-    buffer
-        .write_length_prefixed(cosigner_id.as_bytes(), 1)
-        .unwrap();
-    buffer.write_length_prefixed(log_id.as_bytes(), 1).unwrap();
-    buffer.write_u64::<BigEndian>(start).unwrap();
-    buffer.write_u64::<BigEndian>(end).unwrap();
+    buffer.write_length_prefixed(cosigner_id.as_bytes(), 1)?;
+    buffer.write_length_prefixed(log_id.as_bytes(), 1)?;
+    buffer.write_u64::<BigEndian>(start)?;
+    buffer.write_u64::<BigEndian>(end)?;
     buffer.extend(root_hash.0);
 
-    buffer
+    Ok(buffer)
 }
 
 #[cfg(test)]

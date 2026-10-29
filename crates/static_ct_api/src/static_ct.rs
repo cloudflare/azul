@@ -122,7 +122,9 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
     ///
     /// # Panics
     ///
-    /// Panics if writing to an internal buffer fails, which should never happen.
+    /// Panics if the certificate is longer than [`MAX_CERT_LEN`]. Entries
+    /// returned by [`crate::partially_validate_chain`] satisfy
+    /// [`StaticCTPendingLogEntry::check_limits`].
     fn lookup_key(&self) -> LookupKey {
         let mut buffer = Vec::new();
         if let Some(precert_data) = &self.precert_opt {
@@ -140,7 +142,9 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
                 .unwrap();
         }
         // Add certificate with a 24-bit length prefix
-        buffer.write_length_prefixed(&self.certificate, 3).unwrap();
+        buffer
+            .write_length_prefixed(&self.certificate, 3)
+            .expect("certificate exceeds MAX_CERT_LEN");
 
         // Return the full SHA-256 hash of the buffer as the lookup key. Using
         // the entire digest (rather than a truncation) is a security
@@ -149,6 +153,13 @@ impl PendingLogEntry for StaticCTPendingLogEntry {
         Sha256::digest(&buffer).into()
     }
 }
+
+/// Maximum length of an `ASN.1Cert` or `TBSCertificate` (`opaque <1..2^24-1>`).
+pub const MAX_CERT_LEN: usize = (1 << 24) - 1;
+
+/// Maximum number of 32-byte fingerprints in `TileLeaf.certificate_chain`
+/// (`Fingerprint certificate_chain<0..2^16-1>`).
+pub const MAX_CHAIN_FINGERPRINTS: usize = 0xFFFF / 32;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct PrecertData {
@@ -176,6 +187,28 @@ pub struct StaticCTPendingLogEntry {
     pub chain_fingerprints: Vec<[u8; 32]>,
 }
 
+impl StaticCTPendingLogEntry {
+    /// Checks that every field fits in its length-prefixed wire encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StaticCTError::EntryTooLarge`] if the certificate or
+    /// precertificate is longer than [`MAX_CERT_LEN`], or if there are more
+    /// than [`MAX_CHAIN_FINGERPRINTS`] chain fingerprints.
+    pub fn check_limits(&self) -> Result<(), StaticCTError> {
+        if self.certificate.len() > MAX_CERT_LEN
+            || self
+                .precert_opt
+                .as_ref()
+                .is_some_and(|p| p.pre_certificate.len() > MAX_CERT_LEN)
+            || self.chain_fingerprints.len() > MAX_CHAIN_FINGERPRINTS
+        {
+            return Err(StaticCTError::EntryTooLarge);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticCTLogEntry {
     /// The pending entry that preceded this log entry
@@ -191,7 +224,11 @@ pub struct StaticCTLogEntry {
 
 impl StaticCTLogEntry {
     /// Returns a marshaled RFC 6962 `TimestampedEntry`.
-    fn marshal_timestamped_entry(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the certificate does not fit in its length prefix.
+    fn marshal_timestamped_entry(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
         buffer.write_u64::<BigEndian>(self.timestamp).unwrap();
@@ -205,20 +242,16 @@ impl StaticCTLogEntry {
                 .write_u16::<BigEndian>(EntryType::X509Entry as u16)
                 .unwrap();
         }
-        buffer
-            .write_length_prefixed(&self.inner.certificate, 3)
-            .unwrap();
-        buffer
-            .write_length_prefixed(
-                &Extensions {
-                    leaf_index: self.leaf_index,
-                }
-                .to_bytes(),
-                2,
-            )
-            .unwrap();
+        buffer.write_length_prefixed(&self.inner.certificate, 3)?;
+        buffer.write_length_prefixed(
+            &Extensions {
+                leaf_index: self.leaf_index,
+            }
+            .to_bytes(),
+            2,
+        )?;
 
-        buffer
+        Ok(buffer)
     }
 }
 
@@ -247,7 +280,8 @@ impl LogEntry for StaticCTLogEntry {
     ///
     /// # Panics
     ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
+    /// Panics if the entry fails [`StaticCTPendingLogEntry::check_limits`].
+    /// [`LogEntry::to_data_tile_entry`] returns an error for such entries.
     fn merkle_tree_leaf(&self) -> Hash {
         tlog_core::record_hash(
             &[
@@ -255,7 +289,9 @@ impl LogEntry for StaticCTLogEntry {
                     0, // version = v1 (0)
                     0, // leaf_type = timestamped_entry (0)
                 ],
-                self.marshal_timestamped_entry().as_slice(),
+                self.marshal_timestamped_entry()
+                    .expect("certificate exceeds MAX_CERT_LEN")
+                    .as_slice(),
             ]
             .concat(),
         )
@@ -263,22 +299,18 @@ impl LogEntry for StaticCTLogEntry {
 
     /// Returns a marshaled [static-ct-api `TileLeaf`](https://c2sp.org/static-ct-api#log-entries).
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if writing to the internal buffer fails, which should never happen.
-    fn to_data_tile_entry(&self) -> Vec<u8> {
+    /// Returns an error if the entry fails [`StaticCTPendingLogEntry::check_limits`].
+    fn to_data_tile_entry(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
-        buffer.extend(self.marshal_timestamped_entry());
+        buffer.extend(self.marshal_timestamped_entry()?);
         if let Some(precert_data) = &self.inner.precert_opt {
-            buffer
-                .write_length_prefixed(&precert_data.pre_certificate, 3)
-                .unwrap();
+            buffer.write_length_prefixed(&precert_data.pre_certificate, 3)?;
         }
-        buffer
-            .write_length_prefixed(&self.inner.chain_fingerprints.concat(), 2)
-            .unwrap();
+        buffer.write_length_prefixed(&self.inner.chain_fingerprints.concat(), 2)?;
 
-        buffer
+        Ok(buffer)
     }
 
     /// Attempts to parse a `LogEntry` from a reader into a tile. The position
@@ -550,7 +582,7 @@ pub fn signed_certificate_timestamp(
         0, // sct_version = v1 (0)
         0, // signature_type = certificate_timestamp (0)
     ];
-    buffer.extend(entry.marshal_timestamped_entry());
+    buffer.extend(entry.marshal_timestamped_entry()?);
     let signature = sign(signing_key, &buffer);
     let id = log_id_from_key(signing_key.verifying_key())?.to_vec();
 
@@ -717,13 +749,60 @@ mod tests {
             chain_fingerprints: vec![[0; 32], [1; 32], [2; 32]],
         };
         let entry = StaticCTLogEntry::new(inner, 123, 456);
-        let tile: Vec<u8> = (0..5).flat_map(|_| entry.to_data_tile_entry()).collect();
+        let tile: Vec<u8> = (0..5)
+            .flat_map(|_| entry.to_data_tile_entry().unwrap())
+            .collect();
         let mut tile_reader: &[u8] = tile.as_ref();
 
         for _ in 0..5 {
             let parsed_entry = StaticCTLogEntry::parse_from_tile_entry(&mut tile_reader).unwrap();
             assert_eq!(entry, parsed_entry);
         }
+    }
+
+    #[test]
+    fn test_check_limits() {
+        let ok = StaticCTPendingLogEntry {
+            certificate: vec![1; MAX_CERT_LEN],
+            precert_opt: Some(PrecertData {
+                issuer_key_hash: [0; 32],
+                pre_certificate: vec![1; MAX_CERT_LEN],
+            }),
+            chain_fingerprints: vec![[0; 32]; MAX_CHAIN_FINGERPRINTS],
+        };
+        ok.check_limits().unwrap();
+        let entry = StaticCTLogEntry::new(ok, 0, 0);
+        let tile = entry.to_data_tile_entry().unwrap();
+        assert_eq!(
+            StaticCTLogEntry::parse_from_tile_entry(&mut tile.as_slice()).unwrap(),
+            entry
+        );
+
+        let mut bad = entry.inner.clone();
+        bad.certificate.push(0);
+        assert!(matches!(
+            bad.check_limits(),
+            Err(StaticCTError::EntryTooLarge)
+        ));
+
+        let mut bad = entry.inner.clone();
+        bad.precert_opt.as_mut().unwrap().pre_certificate.push(0);
+        assert!(matches!(
+            bad.check_limits(),
+            Err(StaticCTError::EntryTooLarge)
+        ));
+
+        let mut bad = entry.inner.clone();
+        bad.chain_fingerprints.push([0; 32]);
+        assert!(matches!(
+            bad.check_limits(),
+            Err(StaticCTError::EntryTooLarge)
+        ));
+        let bad = StaticCTLogEntry::new(bad, 0, 0);
+        assert_eq!(
+            bad.to_data_tile_entry().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

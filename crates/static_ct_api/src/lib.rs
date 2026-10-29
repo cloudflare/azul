@@ -29,6 +29,8 @@ pub enum StaticCTError {
     Malformed,
     #[error("missing leaf_index extension")]
     MissingLeafIndex,
+    #[error("certificate or chain too large to encode in a log entry")]
+    EntryTooLarge,
     #[error("unknown type")]
     UnknownType,
     #[error("trailing data")]

@@ -983,7 +983,9 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
         }
 
         let sequenced_entry = L::new(entry, n, timestamp);
-        let tile_leaf = sequenced_entry.to_data_tile_entry();
+        let tile_leaf = sequenced_entry.to_data_tile_entry().map_err(|e| {
+            SequenceError::NonFatal(format!("couldn't encode data tile entry for leaf {n}: {e}"))
+        })?;
         let merkle_tree_leaf = sequenced_entry.merkle_tree_leaf();
         metrics.seq_leaf_size.observe(tile_leaf.len().as_f64());
         data_tile.extend(tile_leaf);
@@ -2005,6 +2007,33 @@ mod tests {
         assert!(block_on(second.resolve()).is_none());
         assert!(block_on(third.resolve()).is_none());
         assert_eq!(log.sequence_state.borrow().tree.size(), 0);
+    }
+
+    #[test]
+    fn test_sequence_unencodable_entry_is_nonfatal() {
+        let mut log = TestLog::new();
+        let first = log.add_certificate();
+        log.sequence().unwrap();
+        assert_eq!(block_on(first.resolve()).unwrap().0, 0);
+
+        let unencodable = add_leaf_to_pool(
+            &log.pool_state,
+            &log.cache,
+            &log.config,
+            StaticCTPendingLogEntry {
+                certificate: vec![1; 8],
+                precert_opt: None,
+                chain_fingerprints: vec![[0; 32]; static_ct_api::MAX_CHAIN_FINGERPRINTS + 1],
+            },
+        );
+        log.sequence().unwrap();
+        assert!(block_on(unencodable.resolve()).is_none());
+        assert_eq!(log.sequence_state.borrow().tree.size(), 1);
+
+        let next = log.add_certificate();
+        log.sequence().unwrap();
+        assert_eq!(block_on(next.resolve()).unwrap().0, 1);
+        log.check(2).unwrap();
     }
 
     #[test]
