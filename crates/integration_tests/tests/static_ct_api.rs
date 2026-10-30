@@ -32,7 +32,9 @@ use integration_tests::{
         fetch_and_verify_checkpoint, fetch_checkpoint_until_size, leaf_index_from_sct,
     },
     client::{CtClient, LogMetadataResponse, OperatorListResponse},
-    fixtures::{empty_chain, garbage_chain, make_chains, make_expired_chain},
+    fixtures::{
+        empty_chain, garbage_chain, make_chains, make_client_auth_chain, make_expired_chain,
+    },
 };
 use tokio::sync::OnceCell;
 
@@ -276,6 +278,48 @@ async fn add_chain_with_expired_leaf_returns_400() {
     let chain = make_expired_chain(&client.log).expect("generating expired chain fixture");
     let (status, _) = client.add_chain(chain).await.expect("add-chain request");
     assert_eq!(status, 400, "expected 400 for expired leaf certificate");
+}
+
+/// A leaf without the `id-kp-serverAuth` EKU is rejected when
+/// `require_server_auth_eku` uses its default value.
+#[tokio::test]
+async fn add_chain_without_server_auth_eku_returns_400() {
+    let client = CtClient::new("e2etestshard");
+    let chain = make_client_auth_chain(&client.log).expect("generating clientAuth chain fixture");
+    let (status, _) = client.add_chain(chain).await.expect("add-chain request");
+    assert_eq!(status, 400, "expected 400 for leaf without serverAuth EKU");
+}
+
+/// A leaf without the `id-kp-serverAuth` EKU is accepted, and gets a valid
+/// SCT, from a log that sets `require_server_auth_eku` to false.
+#[tokio::test]
+async fn add_chain_without_server_auth_eku_accepted_when_not_required() {
+    const MAX_ATTEMPTS: u32 = 30;
+
+    let client = CtClient::new("dev2027h1a");
+    let chain = make_client_auth_chain(&client.log).expect("generating clientAuth chain fixture");
+    let meta = client.get_metadata().await.expect("metadata.json");
+
+    // This shard has its own Durable Objects, which may still be starting on a
+    // fresh wrangler dev instance. Match ensure_initialized's bounded 30 x 1s
+    // readiness window above, but retry only server errors: any other status
+    // fails at once.
+    let mut attempt = 1;
+    let sct = loop {
+        let (status, sct) = client
+            .add_chain(chain.clone())
+            .await
+            .expect("add-chain request");
+        if status < 500 || attempt == MAX_ATTEMPTS {
+            assert_eq!(status, 200, "expected 200 from add-chain");
+            break sct.unwrap();
+        }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+
+    assert_sct_structure(&sct).expect("SCT structure check");
+    assert_sct_signature(&sct, &meta, &chain[0], &chain[1]).expect("SCT signature verification");
 }
 
 /// `POST /logs/:log/ct/v1/add-chain` returns a structurally valid SCT with

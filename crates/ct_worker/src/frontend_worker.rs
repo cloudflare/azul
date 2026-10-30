@@ -330,7 +330,7 @@ async fn add_chain_or_pre_chain(
                 .unwrap_or_default(),
         ),
         expect_precert,
-        true,
+        params.require_server_auth_eku,
     ) {
         Ok(v) => v,
         Err(e) => {
