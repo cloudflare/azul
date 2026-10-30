@@ -223,9 +223,9 @@ const WITNESS_SIGNING_KEY: &str = "WITNESS_SIGNING_KEY";
 /// next secret, so both secrets hold the same key for part of that window.
 const NEXT_SUFFIX: &str = "_NEXT";
 
-/// Read one PKCS#8 PEM secret, from Secret Store when bound and from a
-/// plain variable otherwise. `None` means the binding is absent or empty.
-async fn read_signing_key(env: &Env, binding: &str) -> Result<Option<String>> {
+/// Read a secret from Secret Store when bound and from a local variable
+/// otherwise. `None` means the binding is absent or empty.
+async fn read_key_secret(env: &Env, binding: &str) -> Result<Option<String>> {
     if let Ok(store) = env.secret_store(binding) {
         return Ok(store.get().await?.filter(|pem| !pem.trim().is_empty()));
     }
@@ -247,13 +247,13 @@ async fn load_signing_keys(
     binding: &str,
     identity_name: &str,
 ) -> Result<Vec<IdentitySigner>> {
-    let current = read_signing_key(env, binding)
+    let current = read_key_secret(env, binding)
         .await?
         .ok_or_else(|| Error::from(format!("{binding} is not set")))?;
     let mut signers = vec![build_identity_signer(identity_name, binding, &current)?];
 
     let next_binding = format!("{binding}{NEXT_SUFFIX}");
-    if let Some(next) = read_signing_key(env, &next_binding).await? {
+    if let Some(next) = read_key_secret(env, &next_binding).await? {
         let next = build_identity_signer(identity_name, &next_binding, &next)?;
         if next.public_key_der() != signers[0].public_key_der() {
             signers.push(next);
@@ -375,18 +375,21 @@ static TICKET_SEALER: OnceLock<TicketSealer> = OnceLock::new();
 ///
 /// The `MIRROR_TICKET_KEY` secret is 32 raw bytes encoded as standard
 /// base64 (RFC 4648 section 4, no URL-safe variant). Operators can
-/// generate one with `head -c 32 /dev/urandom | base64` and load it via
-/// `wrangler secret put MIRROR_TICKET_KEY`.
+/// generate one with `head -c 32 /dev/urandom | base64` and bind the
+/// resulting value as `MIRROR_TICKET_KEY` from Secrets Store. Local Wrangler
+/// development can provide it in `.dev.vars` instead.
 ///
 /// # Errors
 ///
 /// Returns an error if the `MIRROR_TICKET_KEY` secret is missing, is not
 /// valid base64, or does not decode to exactly 32 bytes.
-pub(crate) fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSealer> {
+pub(crate) async fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSealer> {
     if let Some(t) = TICKET_SEALER.get() {
         return Ok(t);
     }
-    let b64 = env.secret("MIRROR_TICKET_KEY")?.to_string();
+    let b64 = read_key_secret(env, "MIRROR_TICKET_KEY")
+        .await?
+        .ok_or_else(|| Error::from("MIRROR_TICKET_KEY is not set"))?;
     let raw = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|e| Error::from(format!("MIRROR_TICKET_KEY base64 decode: {e}")))?;

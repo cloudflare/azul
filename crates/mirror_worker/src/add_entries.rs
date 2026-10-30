@@ -119,7 +119,7 @@ pub(crate) async fn add_entries(
         ));
     }
 
-    let target = match resolve_target_pending(&env, &header, &snapshot, &verifiers) {
+    let target = match resolve_target_pending(&env, &header, &snapshot, &verifiers).await {
         Ok(t) => t,
         Err(reason) => {
             log::info!(
@@ -133,7 +133,7 @@ pub(crate) async fn add_entries(
                     .as_ref()
                     .map_or(0, |committed| committed.size),
             );
-            return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
+            return Ok(mirror_info_409(&env, &snapshot, &header.log_origin).await);
         }
     };
 
@@ -147,7 +147,7 @@ pub(crate) async fn add_entries(
             us = header.upload_start,
             ne = snapshot.next_entry.size,
         );
-        return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
+        return Ok(mirror_info_409(&env, &snapshot, &header.log_origin).await);
     }
 
     // Spec (add-entries "Processing"): reject when excess_entries is too
@@ -170,7 +170,7 @@ pub(crate) async fn add_entries(
             us = header.upload_start,
             ne = snapshot.next_entry.size,
         );
-        return Ok(mirror_info_409(&env, &snapshot, &header.log_origin));
+        return Ok(mirror_info_409(&env, &snapshot, &header.log_origin).await);
     }
 
     let first_prefix = first_package_prefix(
@@ -273,12 +273,7 @@ where
             result.packages_received,
             result.frontier_size,
         );
-        return Ok(mirror_info_202(
-            env,
-            snapshot,
-            &header.log_origin,
-            result.frontier_size,
-        ));
+        return Ok(mirror_info_202(env, snapshot, &header.log_origin, result.frontier_size).await);
     }
 
     // Spec: the mirror updates its checkpoint to `upload_end` only once
@@ -297,12 +292,7 @@ where
             result.frontier_size,
             header.upload_end,
         );
-        return Ok(mirror_info_202(
-            env,
-            snapshot,
-            &header.log_origin,
-            result.frontier_size,
-        ));
+        return Ok(mirror_info_202(env, snapshot, &header.log_origin, result.frontier_size).await);
     }
 
     // Every canonical package was received. Any bytes still in the stream
@@ -636,7 +626,7 @@ async fn cosign_and_serve(
                 snapshot.clone()
             }
         };
-        return Ok(mirror_info_409(env, &fresh_snapshot, &header.log_origin));
+        return Ok(mirror_info_409(env, &fresh_snapshot, &header.log_origin).await);
     }
 
     debug_assert_eq!(
@@ -999,7 +989,7 @@ async fn fetch_snapshot(env: &Env, origin: &str) -> Result<MirrorStateSnapshot> 
 /// Returns `Err(reason)` (a static `&str` describing why) when
 /// none of these produce a target. The frontend turns the error into
 /// a 409 with `text/x.tlog.mirror-info`.
-fn resolve_target_pending(
+async fn resolve_target_pending(
     env: &Env,
     header: &AddEntriesRequestHeader,
     snapshot: &MirrorStateSnapshot,
@@ -1046,7 +1036,7 @@ fn resolve_target_pending(
     if header.ticket.is_empty() {
         return Err("upload_end does not match current pending and no ticket provided");
     }
-    let sealer = match load_ticket_sealer(env) {
+    let sealer = match load_ticket_sealer(env).await {
         Ok(m) => m,
         Err(e) => {
             // A missing/malformed MIRROR_TICKET_KEY is an operator
@@ -1207,7 +1197,7 @@ fn verify_package(
 ///   * `202 Accepted`: a partial run of packages was persisted;
 ///     `next_entry` reports the *advanced* frontier so the client
 ///     continues from there.
-fn mirror_info_response(
+async fn mirror_info_response(
     env: &Env,
     snapshot: &MirrorStateSnapshot,
     origin: &str,
@@ -1215,7 +1205,7 @@ fn mirror_info_response(
     next_entry: u64,
 ) -> axum::response::Response {
     let ticket = if let Some(pending) = &snapshot.pending {
-        match load_ticket_sealer(env) {
+        match load_ticket_sealer(env).await {
             // Bind the log origin as associated data so the ticket can
             // only be reopened for the same log.
             Ok(m) => m.seal(&pending.signed_note_bytes, origin.as_bytes()),
@@ -1242,7 +1232,7 @@ fn mirror_info_response(
 
 /// 409 Conflict carrying the mirror's current state. Advertises the
 /// persisted frontier (`next_entry.size`) as the resume point.
-fn mirror_info_409(
+async fn mirror_info_409(
     env: &Env,
     snapshot: &MirrorStateSnapshot,
     origin: &str,
@@ -1254,17 +1244,18 @@ fn mirror_info_409(
         StatusCode::CONFLICT,
         snapshot.next_entry.size,
     )
+    .await
 }
 
 /// 202 Accepted after a partial persist. Advertises the freshly-advanced
 /// persisted frontier so the client resumes appending from there.
-fn mirror_info_202(
+async fn mirror_info_202(
     env: &Env,
     snapshot: &MirrorStateSnapshot,
     origin: &str,
     next_entry: u64,
 ) -> axum::response::Response {
-    mirror_info_response(env, snapshot, origin, StatusCode::ACCEPTED, next_entry)
+    mirror_info_response(env, snapshot, origin, StatusCode::ACCEPTED, next_entry).await
 }
 
 /// A [`HashReader`] backed by a sparse `HashMap<u64, Hash>` indexed

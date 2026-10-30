@@ -33,9 +33,32 @@ applied on read, so changing the list takes effect without a re-synchronization.
 Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
 The Worker only serves submission and metadata APIs.
 
-`MIRROR_TICKET_KEY` seals mirror upload tickets.
+`MIRROR_TICKET_KEY` seals mirror upload tickets. It is a standard-base64
+encoding of 32 random bytes, for example from
+`head -c 32 /dev/urandom | base64`.
 
-Bind `MIRROR_SIGNING_KEY`, `MIRROR_SIGNING_KEY_NEXT`, `WITNESS_SIGNING_KEY`, and `WITNESS_SIGNING_KEY_NEXT` with `[[secrets_store_secrets]]` as needed. Each binding contains one PKCS#8 PEM private key. Local Wrangler development uses the same names in `.dev.vars`.
+Bind `MIRROR_TICKET_KEY`, `MIRROR_SIGNING_KEY`, `MIRROR_SIGNING_KEY_NEXT`,
+`WITNESS_SIGNING_KEY`, and `WITNESS_SIGNING_KEY_NEXT` from Secrets Store as
+needed. Each signing-key binding contains one PKCS#8 PEM private key. For
+example, add the ticket binding to the applicable Wrangler environment's
+`secrets_store_secrets` array (using your store ID):
+
+```jsonc
+"secrets_store_secrets": [
+    {
+        "binding": "MIRROR_TICKET_KEY",
+        "store_id": "<STORE_ID>",
+        "secret_name": "MIRROR_TICKET_KEY"
+    }
+]
+```
+
+Local Wrangler development uses the same binding names in `.dev.vars` when
+Secrets Store bindings are absent. When moving an existing deployment from a
+Worker secret to Secrets Store, copy the **same** base64 ticket key value into
+the store before switching the binding; changing the key invalidates tickets
+already issued to clients. Remove the old Worker secret after the new binding
+is deployed.
 
 The current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
 
