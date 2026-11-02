@@ -4,7 +4,7 @@
 //! HTTP entry point and protocol handlers.
 
 use crate::{
-    CONFIG, IdentitySigner,
+    CONFIG,
     cosigner_registry_do::{log_verifiers, merged_registry_logs, registry_record},
     load_mirror_signers, load_witness_signers,
     mirror_state_do::{PendingCheckpoint, UpdatePendingRequest, UpdatePendingResponse, state_stub},
@@ -25,7 +25,6 @@ use generic_log_worker::{
 use serde::Serialize;
 use serde_with::{base64::Base64 as Base64As, serde_as};
 use signed_note::VerifierList;
-use tlog_checkpoint::CheckpointSigner as _;
 use tlog_witness::{
     CONTENT_TYPE_TLOG_SIZE, MAX_REQUEST_BODY_SIZE, TrustedSignatureError,
     serialize_sign_subtree_response, validate_add_checkpoint_request, validate_sign_subtree_proof,
@@ -189,15 +188,15 @@ struct IdentityMetadata<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
     monitoring_prefix: &'a str,
-    public_keys: Vec<PublicKeyMetadata<'a>>,
+    public_keys: Vec<PublicKeyMetadata>,
 }
 
 #[serde_as]
 #[derive(Serialize)]
-struct PublicKeyMetadata<'a> {
+struct PublicKeyMetadata {
     #[serde_as(as = "Base64As")]
-    public_key: &'a [u8],
-    algorithm: &'a str,
+    public_key: Vec<u8>,
+    algorithm: &'static str,
     supports_sign_subtree: bool,
 }
 
@@ -268,7 +267,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
             public_keys: signers
                 .iter()
                 .map(|signer| PublicKeyMetadata {
-                    public_key: signer.public_key_der(),
+                    public_key: signer.public_key_der().to_vec(),
                     algorithm: signer.algorithm(),
                     supports_sign_subtree: signer.supports_sign_subtree(),
                 })
@@ -286,7 +285,7 @@ async fn metadata(State(env): State<Env>) -> ApiResult<impl IntoResponse> {
             public_keys: signers
                 .iter()
                 .map(|signer| PublicKeyMetadata {
-                    public_key: signer.public_key_der(),
+                    public_key: signer.public_key_der().to_vec(),
                     algorithm: signer.algorithm(),
                     supports_sign_subtree: signer.supports_sign_subtree(),
                 })
@@ -373,23 +372,21 @@ fn verify_source_checkpoint(
 
 #[worker::send]
 async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::response::Response> {
-    let mut signers = Vec::with_capacity(2);
-    if CONFIG.witness_enabled() {
-        signers.extend(
-            load_witness_signers(&env)
-                .await?
-                .iter()
-                .filter_map(IdentitySigner::as_subtree_signer),
-        );
-    }
-    if CONFIG.mirror.is_some() {
-        signers.extend(
-            load_mirror_signers(&env)
-                .await?
-                .iter()
-                .filter_map(IdentitySigner::as_subtree_signer),
-        );
-    }
+    let witness_signers = if CONFIG.witness_enabled() {
+        load_witness_signers(&env).await?
+    } else {
+        Vec::new()
+    };
+    let mirror_signers = if CONFIG.mirror.is_some() {
+        load_mirror_signers(&env).await?
+    } else {
+        Vec::new()
+    };
+    let signers: Vec<_> = witness_signers
+        .iter()
+        .chain(mirror_signers.iter())
+        .filter_map(|signer| signer.subtree_verifier().map(|verifier| (signer, verifier)))
+        .collect();
     if signers.is_empty() {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
@@ -410,8 +407,8 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
     // the key: the subtree is cosigned by the key that signed the checkpoint,
     // so a client that wants every key of a rotation asks once per key.
     let mut selected = None;
-    for signer in signers {
-        let verifiers = VerifierList::new(vec![signer.verifier()]);
+    for (signer, verifier) in signers {
+        let verifiers = VerifierList::new(vec![verifier]);
         match verify_trusted_checkpoint_signature(validated.checkpoint(), &verifiers) {
             Ok(()) => {
                 selected = Some(signer);
@@ -428,7 +425,9 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
     let Some(signer) = selected else {
         return Err(AppError::ReferenceCheckpointNotCosigned);
     };
-    let signature = signer.sign_subtree(origin, validated.subtree(), validated.subtree_hash());
+    let signature = signer
+        .sign_subtree(&env, origin, validated.subtree(), validated.subtree_hash())
+        .await?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],

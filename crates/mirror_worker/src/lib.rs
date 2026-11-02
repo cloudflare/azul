@@ -36,6 +36,7 @@ use pkcs8::{
 use signed_note::{Ed25519NoteVerifier, KeyName, NoteVerifier, VerifierList};
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
+use tlog_checkpoint::CheckpointSigner as _;
 use tlog_cosignature::{
     CosignatureV1CheckpointSigner, SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier,
 };
@@ -57,6 +58,7 @@ mod cleaner_do;
 mod commit;
 mod cosigner_registry_do;
 mod frontend_worker;
+mod key_service;
 mod mirror_state_do;
 mod observability;
 mod storage;
@@ -152,8 +154,9 @@ pub(crate) fn log_verifiers_for_keys(keys: &[LogKey]) -> VerifierList {
     VerifierList::new(verifiers)
 }
 
-/// Identity signing material selected by the PKCS#8 algorithm OID.
+/// Identity signing material selected by a key service public key or PKCS#8 OID.
 pub(crate) enum IdentitySigner {
+    KeyService(key_service::KeyServiceSigner),
     CosignatureV1 {
         signer: Box<CosignatureV1CheckpointSigner>,
         public_key_der: Vec<u8>,
@@ -168,6 +171,7 @@ impl IdentitySigner {
     /// DER-encoded `SubjectPublicKeyInfo` for the mirror's verifying key.
     pub(crate) fn public_key_der(&self) -> &[u8] {
         match self {
+            Self::KeyService(signer) => &signer.public_key_der,
             Self::CosignatureV1 { public_key_der, .. } | Self::SubtreeV1 { public_key_der, .. } => {
                 public_key_der
             }
@@ -176,6 +180,7 @@ impl IdentitySigner {
 
     pub(crate) fn algorithm(&self) -> &'static str {
         match self {
+            Self::KeyService(signer) => signer.algorithm(),
             Self::CosignatureV1 { .. } => "cosignature/v1",
             Self::SubtreeV1 { .. } => "subtree/v1",
         }
@@ -183,37 +188,54 @@ impl IdentitySigner {
 
     pub(crate) fn supports_sign_subtree(&self) -> bool {
         matches!(self, Self::SubtreeV1 { .. })
+            || matches!(self, Self::KeyService(signer) if signer.supports_sign_subtree())
     }
 
-    pub(crate) fn as_subtree_signer(&self) -> Option<&SubtreeV1CheckpointSigner> {
+    pub(crate) fn subtree_verifier(&self) -> Option<Box<dyn NoteVerifier>> {
         match self {
+            Self::KeyService(signer) => signer.subtree_verifier(),
+            Self::SubtreeV1 { signer, .. } => Some(signer.verifier()),
             Self::CosignatureV1 { .. } => None,
-            Self::SubtreeV1 { signer, .. } => Some(signer),
         }
     }
 
-    /// The inner [`CheckpointSigner`] trait object, used by the
-    /// `add-entries` handler to emit the mirror's checkpoint cosignature
-    /// on a successful upload.
-    ///
-    /// [`CheckpointSigner`]: tlog_checkpoint::CheckpointSigner
-    pub(crate) fn as_checkpoint_signer(&self) -> &dyn tlog_checkpoint::CheckpointSigner {
+    pub(crate) async fn sign_subtree(
+        &self,
+        env: &Env,
+        origin: &str,
+        subtree: &tlog_core::Subtree,
+        hash: &tlog_core::Hash,
+    ) -> Result<signed_note::NoteSignature> {
         match self {
-            Self::CosignatureV1 { signer, .. } => &**signer,
-            Self::SubtreeV1 { signer, .. } => &**signer,
+            Self::KeyService(signer) => signer.sign_subtree(env, origin, subtree, hash).await,
+            Self::SubtreeV1 { signer, .. } => Ok(signer.sign_subtree(origin, subtree, hash)),
+            Self::CosignatureV1 { .. } => {
+                Err(Error::from("Ed25519 keys do not support sign-subtree"))
+            }
+        }
+    }
+
+    /// Sign locally with a legacy key or remotely with a key service key handle.
+    pub(crate) async fn sign_checkpoint(
+        &self,
+        env: &Env,
+        timestamp: tlog_checkpoint::UnixTimestampMillis,
+        checkpoint: &tlog_checkpoint::CheckpointText,
+    ) -> Result<signed_note::NoteSignature> {
+        match self {
+            Self::KeyService(signer) => signer.sign(env, timestamp, checkpoint).await,
+            Self::CosignatureV1 { signer, .. } => signer
+                .sign(timestamp, checkpoint)
+                .map_err(|error| Error::from(format!("checkpoint signing: {error:?}"))),
+            Self::SubtreeV1 { signer, .. } => signer
+                .sign(timestamp, checkpoint)
+                .map_err(|error| Error::from(format!("checkpoint signing: {error:?}"))),
         }
     }
 }
 
-/// Cached mirror signers, so the PKCS#8 parse happens at most once per
-/// worker instance.
-///
-/// The mirror signs with every configured key, so a key can be rotated
-/// without a flag day: add the new key, let relying parties pick it up
-/// while both signatures are published, then remove the old one.
-static MIRROR_SIGNERS: OnceLock<Vec<IdentitySigner>> = OnceLock::new();
-static WITNESS_SIGNERS: OnceLock<Vec<IdentitySigner>> = OnceLock::new();
-
+/// The mirror signs with every key during a rotation. Key service keys are
+/// discovered per request so a Queue-triggered rotation needs no deploy.
 const MIRROR_SIGNING_KEY: &str = "MIRROR_SIGNING_KEY";
 const WITNESS_SIGNING_KEY: &str = "WITNESS_SIGNING_KEY";
 
@@ -236,8 +258,8 @@ async fn read_key_secret(env: &Env, binding: &str) -> Result<Option<String>> {
         .filter(|pem| !pem.trim().is_empty()))
 }
 
-/// Load a role's signers: the current key, plus the next key while a
-/// rotation is in flight.
+/// Use the key service exclusively when its logical key exists; otherwise load the
+/// legacy current and next keys.
 ///
 /// Keys are deduplicated by public key, so a promotion that has copied the
 /// next key over the current one but not yet unset `*_NEXT` signs once
@@ -247,31 +269,64 @@ async fn load_signing_keys(
     binding: &str,
     identity_name: &str,
 ) -> Result<Vec<IdentitySigner>> {
-    let current = read_key_secret(env, binding)
-        .await?
-        .ok_or_else(|| Error::from(format!("{binding} is not set")))?;
-    let mut signers = vec![build_identity_signer(identity_name, binding, &current)?];
+    let key_service_binding = match binding {
+        MIRROR_SIGNING_KEY => "MIRROR_KEY_SERVICE_KEY",
+        WITNESS_SIGNING_KEY => "WITNESS_KEY_SERVICE_KEY",
+        _ => return Err(Error::from("unknown signing key role")),
+    };
+    if let Ok(name) = env.var(key_service_binding) {
+        let name = name.to_string();
+        if name.trim().is_empty() {
+            return Err(Error::from(format!(
+                "{key_service_binding} must not be empty"
+            )));
+        }
+        if let Some(key_service_signers) = key_service::load(env, &name, identity_name).await? {
+            let signers: Vec<_> = key_service_signers
+                .into_iter()
+                .map(IdentitySigner::KeyService)
+                .collect();
+            return require_signer(signers, binding);
+        }
+    }
+
+    let mut signers: Vec<IdentitySigner> = Vec::new();
+    if let Some(current) = read_key_secret(env, binding).await? {
+        let signer = build_identity_signer(identity_name, binding, &current)?;
+        if !signers
+            .iter()
+            .any(|existing| existing.public_key_der() == signer.public_key_der())
+        {
+            signers.push(signer);
+        }
+    }
 
     let next_binding = format!("{binding}{NEXT_SUFFIX}");
     if let Some(next) = read_key_secret(env, &next_binding).await? {
         let next = build_identity_signer(identity_name, &next_binding, &next)?;
-        if next.public_key_der() != signers[0].public_key_der() {
+        if !signers
+            .iter()
+            .any(|existing| existing.public_key_der() == next.public_key_der())
+        {
             signers.push(next);
         }
+    }
+    require_signer(signers, binding)
+}
+
+fn require_signer(signers: Vec<IdentitySigner>, binding: &str) -> Result<Vec<IdentitySigner>> {
+    if signers.is_empty() {
+        return Err(Error::from(format!("{binding} has no signing key")));
     }
     Ok(signers)
 }
 
-pub(crate) async fn load_mirror_signers(env: &Env) -> Result<&'static [IdentitySigner]> {
+pub(crate) async fn load_mirror_signers(env: &Env) -> Result<Vec<IdentitySigner>> {
     let config = CONFIG
         .mirror
         .as_ref()
         .ok_or_else(|| Error::from("mirror identity is disabled"))?;
-    if let Some(signers) = MIRROR_SIGNERS.get() {
-        return Ok(signers);
-    }
-    let signers = load_signing_keys(env, MIRROR_SIGNING_KEY, config.name.as_str()).await?;
-    Ok(MIRROR_SIGNERS.get_or_init(|| signers))
+    load_signing_keys(env, MIRROR_SIGNING_KEY, config.name.as_str()).await
 }
 
 /// Build identity signing material from a PKCS#8 PEM string.
@@ -319,19 +374,15 @@ fn build_identity_signer(
     }
 }
 
-pub(crate) async fn load_witness_signers(env: &Env) -> Result<&'static [IdentitySigner]> {
+pub(crate) async fn load_witness_signers(env: &Env) -> Result<Vec<IdentitySigner>> {
     if !CONFIG.witness_enabled() {
         return Err(Error::from("witness identity is disabled"));
-    }
-    if let Some(signers) = WITNESS_SIGNERS.get() {
-        return Ok(signers);
     }
     let identity = CONFIG
         .witness
         .as_ref()
         .expect("validated witness mode must have witness config");
-    let signers = load_signing_keys(env, WITNESS_SIGNING_KEY, identity.name.as_str()).await?;
-    Ok(WITNESS_SIGNERS.get_or_init(|| signers))
+    load_signing_keys(env, WITNESS_SIGNING_KEY, identity.name.as_str()).await
 }
 
 /// Load enabled identity keys and reject key reuse across roles.
@@ -344,7 +395,7 @@ pub(crate) async fn validate_identity_keys(env: &Env) -> Result<()> {
     }
     let witness = load_witness_signers(env).await?;
     let mirror = load_mirror_signers(env).await?;
-    ensure_distinct_identity_keys(witness, mirror).map_err(Error::from)
+    ensure_distinct_identity_keys(&witness, &mirror).map_err(Error::from)
 }
 
 fn ensure_distinct_identity_keys(
@@ -456,7 +507,6 @@ mod signer_tests {
         assert!(matches!(signer, IdentitySigner::CosignatureV1 { .. }));
         assert_eq!(signer.algorithm(), "cosignature/v1");
         assert!(!signer.supports_sign_subtree());
-        assert!(signer.as_subtree_signer().is_none());
     }
 
     #[test]

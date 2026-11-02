@@ -60,7 +60,7 @@ tlog_tiles.workspace = true
 tlog_witness.workspace = true
 tokio.workspace = true
 tower-service.workspace = true
-worker = { workspace = true, features = ["http", "axum"] }
+worker = { workspace = true, features = ["http", "axum", "queue"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
