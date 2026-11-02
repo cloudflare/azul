@@ -60,7 +60,37 @@ the store before switching the binding; changing the key invalidates tickets
 already issued to clients. Remove the old Worker secret after the new binding
 is deployed.
 
-The current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
+For legacy secrets, the current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
+
+## Key service rotation Queue
+
+When `MIRROR_KEY_SERVICE_KEY` or `WITNESS_KEY_SERVICE_KEY` names a logical key
+in the key service keyring, that role uses its key service versions exclusively
+instead of the legacy signing secrets. Set `KEY_SERVICE_ACCOUNT_ID` and
+`KEY_SERVICE_KEYRING_ID` and provide the `KEY_SERVICE` cross-account binding.
+Every version must have `sign` usage and an exportable public key; non-signing
+versions cause an error rather than a legacy fallback.
+`MIRROR_TICKET_KEY` stays in Secrets Store or a Worker secret.
+
+The Rust Queue consumer in `src/key_service_rotation.rs` runs rotations with no
+public rotation endpoint or cron. The deployment configuration maintained
+outside this repo must bind a dedicated operator-only Queue as a consumer of
+this Worker (`max_batch_size: 1`, `max_concurrency: 1`) and provide the same key
+service binding and variables. Operators send a JSON message through the
+Cloudflare dashboard or the account-scoped Queues HTTP API, for example:
+
+```json
+{"role":"mirror","expected_default_version":1}
+```
+
+Use `"witness"` for the witness role and supply the **current** key service
+default version. A stale request cannot create another version. Each new version is
+created sign-enabled and then made the default. Queue delivery is at-least-once:
+if creation succeeds but promotion fails, retries refuse to create a duplicate
+and an operator must inspect the key service and finish or resolve the rotation
+manually. Keep a dead-letter queue for failed messages. The key service does
+not expose version deletion, so older versions stay sign-enabled and continue
+to cosign checkpoints.
 
 Disabled-role secrets and R2 bindings are not loaded. Ticket and cleaner access
 is confined to mirror operations.

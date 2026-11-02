@@ -577,16 +577,15 @@ async fn cosign_and_serve(
     // both the current and the next key, so a relying party that trusts
     // either one accepts the response.
     let timestamp = now_millis();
-    let note_sigs = load_mirror_signers(env)
-        .await?
-        .iter()
-        .map(|signer| {
+    let mut note_sigs = Vec::new();
+    for signer in &load_mirror_signers(env).await? {
+        note_sigs.push(
             signer
-                .as_checkpoint_signer()
-                .sign(timestamp, &cp_text)
-                .map_err(|e| Error::from(format!("mirror cosign: {e:?}")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+                .sign_checkpoint(env, timestamp, &cp_text)
+                .await
+                .map_err(|e| Error::from(format!("mirror cosign: {e:?}")))?,
+        );
+    }
     let cosig_body = tlog_witness::serialize_add_checkpoint_response(&note_sigs);
 
     // The served object includes the mirror cosignature returned below.

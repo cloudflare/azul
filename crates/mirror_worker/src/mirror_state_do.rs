@@ -374,16 +374,19 @@ impl MirrorState {
             .map_err(|error| Error::from(format!("parse checkpoint note: {error:?}")))?;
         let checkpoint = CheckpointText::from_bytes(note.text())
             .map_err(|error| Error::from(format!("parse checkpoint text: {error:?}")))?;
-        let signatures = load_witness_signers(&self.env)
-            .await?
-            .iter()
-            .map(|signer| {
+        let mut signatures = Vec::new();
+        for signer in &load_witness_signers(&self.env).await? {
+            signatures.push(
                 signer
-                    .as_checkpoint_signer()
-                    .sign(generic_log_worker::util::now_millis(), &checkpoint)
-                    .map_err(|error| Error::from(format!("witness signing: {error:?}")))
-            })
-            .collect::<Result<Vec<_>>>()?;
+                    .sign_checkpoint(
+                        &self.env,
+                        generic_log_worker::util::now_millis(),
+                        &checkpoint,
+                    )
+                    .await
+                    .map_err(|error| Error::from(format!("witness signing: {error:?}")))?,
+            );
+        }
         let response = serialize_add_checkpoint_response(&signatures);
         let mut signatures_with_checkpoint = note.signatures().to_vec();
         signatures_with_checkpoint.extend(signatures);
