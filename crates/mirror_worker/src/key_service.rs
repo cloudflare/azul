@@ -25,14 +25,6 @@ mod rotation;
 
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
-    type KeyServiceBinding;
-    #[wasm_bindgen(method, catch, js_name = getKeyring)]
-    fn get_keyring(
-        this: &KeyServiceBinding,
-        account: &str,
-        keyring: &str,
-    ) -> std::result::Result<js_sys::Promise, JsValue>;
-
     type Keyring;
     #[wasm_bindgen(method, catch, js_name = versions)]
     fn versions(this: &Keyring, name: &str) -> std::result::Result<js_sys::Promise, JsValue>;
@@ -86,19 +78,22 @@ async fn call(
         .map_err(|e| rpc_error(operation, &e))
 }
 
+// The Rust method name identifies the RPC in errors without repeating it as
+// a string at every call site. Lookups that inspect raw JS errors stay explicit.
+macro_rules! js_call {
+    ($receiver:ident.$field:tt.$method:ident($($arg:expr),* $(,)?)) => {
+        call(stringify!($method), $receiver.$field.$method($($arg),*))
+    };
+    ($receiver:ident.$method:ident($($arg:expr),* $(,)?)) => {
+        call(stringify!($method), $receiver.$method($($arg),*))
+    };
+}
+
 fn property(object: &JsValue, name: &str) -> Result<JsValue> {
     js_sys::Reflect::get(object, &JsValue::from_str(name)).map_err(|e| rpc_error(name, &e))
 }
 
-fn required_var(env: &Env, name: &str) -> Result<String> {
-    env.var(name)
-        .map(|value| value.to_string())
-        .map_err(|_| Error::from(format!("{name} must be set when using KEY_SERVICE")))
-}
-
-async fn keyring(env: &Env) -> Result<Keyring> {
-    let account = required_var(env, "KEY_SERVICE_ACCOUNT_ID")?;
-    let id = required_var(env, "KEY_SERVICE_KEYRING_ID")?;
+fn keyring(env: &Env) -> Result<Keyring> {
     let binding = js_sys::Reflect::get(env.as_ref(), &JsValue::from_str("KEY_SERVICE"))
         .map_err(|e| rpc_error("binding", &e))?;
     if binding.is_undefined() || binding.is_null() {
@@ -106,10 +101,7 @@ async fn keyring(env: &Env) -> Result<Keyring> {
             "key service binding is required for key service signing",
         ));
     }
-    let binding: KeyServiceBinding = binding.unchecked_into();
-    Ok(call("getKeyring", binding.get_keyring(&account, &id))
-        .await?
-        .unchecked_into())
+    Ok(binding.unchecked_into())
 }
 
 fn version_number(value: &JsValue) -> Result<u32> {
@@ -122,26 +114,20 @@ fn version_number(value: &JsValue) -> Result<u32> {
 }
 
 /// Rust-facing rotation operations; all key service JavaScript interop stays here.
-pub(super) struct RotationKeyring(Keyring);
-
-impl RotationKeyring {
-    pub(super) async fn open(env: &Env) -> Result<Self> {
-        Ok(Self(keyring(env).await?))
-    }
-
+impl Keyring {
     pub(super) async fn current_default(&self, name: &str) -> Result<u32> {
-        let pair = call("get", self.0.get_default(name)).await?;
+        let pair = js_call!(self.get_default(name)).await?;
         if property(&pair, "privateKey")?.is_undefined() {
             return Err(Error::from(
                 "expected an asymmetric key service signing key",
             ));
         }
-        let details = call("details", self.0.details(&pair)).await?;
+        let details = js_call!(self.details(&pair)).await?;
         version_number(&property(&details, "version")?)
     }
 
-    pub(super) async fn versions(&self, name: &str) -> Result<Vec<u32>> {
-        let versions = js_sys::Array::from(&call("versions", self.0.versions(name)).await?);
+    pub(super) async fn signing_versions(&self, name: &str) -> Result<Vec<u32>> {
+        let versions = js_sys::Array::from(&js_call!(self.versions(name)).await?);
         let mut numbers = Vec::with_capacity(versions.length() as usize);
         for version in versions.iter() {
             let number = version_number(&property(&version, "version")?)?;
@@ -171,15 +157,11 @@ impl RotationKeyring {
             .map_err(|error| rpc_error("usages", &error))?;
         js_sys::Reflect::set(&opts, &JsValue::from_str("extractable"), &JsValue::TRUE)
             .map_err(|error| rpc_error("extractable", &error))?;
-        version_number(&call("newVersion", self.0.new_version(name, &opts)).await?)
+        version_number(&js_call!(self.new_version(name, &opts)).await?)
     }
 
     pub(super) async fn promote(&self, name: &str, version: u32) -> Result<()> {
-        call(
-            "setDefaultVersion",
-            self.0.set_default_version(name, version),
-        )
-        .await?;
+        js_call!(self.set_default_version(name, version)).await?;
         Ok(())
     }
 }
@@ -192,7 +174,7 @@ async fn version_handle(keyring: &Keyring, name: &str, version: u32) -> Result<J
         &JsValue::from_f64(f64::from(version)),
     )
     .map_err(|e| rpc_error("version", &e))?;
-    call("get", keyring.get_version(name, &opts)).await
+    js_call!(keyring.get_version(name, &opts)).await
 }
 
 pub(crate) struct KeyServiceSigner {
@@ -263,7 +245,7 @@ pub(crate) async fn load(
     key_name: &str,
     identity: &str,
 ) -> Result<Option<Vec<KeyServiceSigner>>> {
-    let ring = keyring(env).await?;
+    let ring = keyring(env)?;
     let versions_promise = match ring.versions(key_name) {
         Ok(promise) => promise,
         Err(error) if is_missing_key(&error, key_name) => return Ok(None),
@@ -304,8 +286,7 @@ pub(crate) async fn load(
             ));
         }
         let der =
-            js_sys::Uint8Array::new(&call("exportKey", ring.export_key("spki", &public)).await?)
-                .to_vec();
+            js_sys::Uint8Array::new(&js_call!(ring.export_key("spki", &public)).await?).to_vec();
         let (algorithm, key_id) = parse_public_key(&der, &name)?;
         signers.push(KeyServiceSigner {
             key_name: key_name.to_owned(),
@@ -365,7 +346,7 @@ impl KeyServiceSigner {
     }
 
     async fn sign_raw(&self, env: &Env, message: &[u8]) -> Result<Vec<u8>> {
-        let ring = keyring(env).await?;
+        let ring = keyring(env)?;
         let pair = version_handle(&ring, &self.key_name, self.version).await?;
         let private = property(&pair, "privateKey")?;
         if private.is_undefined() {
@@ -373,11 +354,7 @@ impl KeyServiceSigner {
         }
         let bytes = js_sys::Uint8Array::from(message);
         Ok(js_sys::Uint8Array::new(
-            &call(
-                "sign",
-                ring.sign(&signing_algorithm(&self.algorithm), &private, &bytes),
-            )
-            .await?,
+            &js_call!(ring.sign(&signing_algorithm(&self.algorithm), &private, &bytes)).await?,
         )
         .to_vec())
     }

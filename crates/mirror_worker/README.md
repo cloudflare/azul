@@ -66,8 +66,8 @@ For legacy secrets, the current key is required and the `_NEXT` key is optional.
 
 When `MIRROR_KEY_SERVICE_KEY` or `WITNESS_KEY_SERVICE_KEY` names a logical key
 in the key service keyring, that role uses its key service versions exclusively
-instead of the legacy signing secrets. Set `KEY_SERVICE_ACCOUNT_ID` and
-`KEY_SERVICE_KEYRING_ID` and provide the `KEY_SERVICE` cross-account binding.
+instead of the legacy signing secrets. Provide the `KEY_SERVICE` cross-account
+binding, which directly exposes the keyring.
 Every version must have `sign` usage and an exportable public key; non-signing
 versions cause an error rather than a legacy fallback.
 `MIRROR_TICKET_KEY` stays in Secrets Store or a Worker secret.

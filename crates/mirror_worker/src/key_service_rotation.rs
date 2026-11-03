@@ -5,7 +5,7 @@
 //! The Queue is populated with an account-scoped API token or the dashboard;
 //! there is no public rotation endpoint or Workflow entrypoint.
 
-use super::RotationKeyring;
+use super::keyring;
 use serde::Deserialize;
 use worker::{Context, Env, Error, MessageBatch, Result, event};
 
@@ -67,9 +67,9 @@ fn decide_rotation(expected: u32, current: u32, versions: &[u32]) -> Result<Rota
 
 async fn rotate(env: &Env, request: &RotationRequest) -> Result<()> {
     let name = key_name(env, &request.role)?;
-    let ring = RotationKeyring::open(env).await?;
+    let ring = keyring(env)?;
     let current = ring.current_default(&name).await?;
-    let versions = ring.versions(&name).await?;
+    let versions = ring.signing_versions(&name).await?;
     match decide_rotation(request.expected_default_version, current, &versions)? {
         RotationDecision::AlreadyAdvanced => {
             log::warn!(
