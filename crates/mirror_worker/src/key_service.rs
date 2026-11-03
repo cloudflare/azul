@@ -63,6 +63,13 @@ extern "C" {
         name: &str,
         version: u32,
     ) -> std::result::Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = updateVersion)]
+    fn update_version(
+        this: &Keyring,
+        name: &str,
+        version: u32,
+        patch: &JsValue,
+    ) -> std::result::Result<js_sys::Promise, JsValue>;
 }
 
 fn rpc_error(operation: &str, error: &JsValue) -> Error {
@@ -78,24 +85,38 @@ async fn call(
         .map_err(|e| rpc_error(operation, &e))
 }
 
-// The Rust method name identifies the RPC in errors without repeating it as
-// a string at every call site. Lookups that inspect raw JS errors stay explicit.
-macro_rules! js_call {
+fn property(object: &JsValue, name: &str) -> Result<JsValue> {
+    js_sys::Reflect::get(object, &JsValue::from_str(name)).map_err(|e| rpc_error(name, &e))
+}
+
+// Consume the returned JS value as part of converting it to a validated array.
+#[allow(clippy::needless_pass_by_value)]
+fn as_array(object: JsValue) -> Result<js_sys::Array, Error> {
+    if !js_sys::Array::is_array(&object) {
+        return Err(Error::from("key service returned invalid versions"));
+    }
+    Ok(js_sys::Array::from(&object))
+}
+
+macro_rules! js {
     ($receiver:ident.$field:tt.$method:ident($($arg:expr),* $(,)?)) => {
         call(stringify!($method), $receiver.$field.$method($($arg),*))
     };
     ($receiver:ident.$method:ident($($arg:expr),* $(,)?)) => {
         call(stringify!($method), $receiver.$method($($arg),*))
     };
-}
-
-fn property(object: &JsValue, name: &str) -> Result<JsValue> {
-    js_sys::Reflect::get(object, &JsValue::from_str(name)).map_err(|e| rpc_error(name, &e))
+    ($receiver:ident.$field:ident) => {
+        property(&$receiver, stringify!($field))?
+    };
+    ($receiver:ident.$field:ident = $value:expr) => {
+        js_sys::Reflect::set(&$receiver, &JsValue::from_str(stringify!($field)), &$value)
+            .map_err(|error| rpc_error(stringify!($field), &error))?;
+    };
 }
 
 fn keyring(env: &Env) -> Result<Keyring> {
-    let binding = js_sys::Reflect::get(env.as_ref(), &JsValue::from_str("KEY_SERVICE"))
-        .map_err(|e| rpc_error("binding", &e))?;
+    let env_js = env.as_ref();
+    let binding = js!(env_js.KEY_SERVICE);
     if binding.is_undefined() || binding.is_null() {
         return Err(Error::from(
             "key service binding is required for key service signing",
@@ -113,68 +134,109 @@ fn version_number(value: &JsValue) -> Result<u32> {
     Ok(number as u32)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct VersionState {
+    number: u32,
+    signing: bool,
+}
+
+impl VersionState {
+    fn new(name: &str, number: u32, usages: &[String], extractable: bool) -> Result<Self> {
+        if !extractable {
+            return Err(Error::from(format!(
+                "key service key {name} version {number} must have an exportable public key"
+            )));
+        }
+        let signing = usages.iter().any(|usage| usage == "sign");
+        // Only an explicitly verify-only version represents retirement. Empty
+        // or unexpected usages are not silently interpreted as retired keys.
+        if !signing && usages != ["verify"] {
+            return Err(Error::from(format!(
+                "key service key {name} version {number} must allow signing or be verify-only"
+            )));
+        }
+        Ok(Self { number, signing })
+    }
+}
+
+fn version_states(name: &str, versions: &js_sys::Array) -> Result<Vec<VersionState>> {
+    let mut states = Vec::with_capacity(versions.length() as usize);
+    for version in versions.iter() {
+        let number = version_number(&js!(version.version))?;
+        let usages = as_array(js!(version.usages))?
+            .iter()
+            .map(|usage| {
+                usage.as_string().ok_or_else(|| {
+                    Error::from(format!(
+                        "key service key {name} version {number} has invalid usages"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let extractable = js!(version.extractable).as_bool() == Some(true);
+        if states
+            .last()
+            .is_some_and(|previous: &VersionState| previous.number >= number)
+        {
+            return Err(Error::from(format!(
+                "key service key {name} versions are not strictly increasing"
+            )));
+        }
+        states.push(VersionState::new(name, number, &usages, extractable)?);
+    }
+    if !states.iter().any(|state| state.signing) {
+        return Err(Error::from(format!(
+            "key service key {name} has no signing versions"
+        )));
+    }
+    Ok(states)
+}
+
 /// Rust-facing rotation operations; all key service JavaScript interop stays here.
 impl Keyring {
     pub(super) async fn current_default(&self, name: &str) -> Result<u32> {
-        let pair = js_call!(self.get_default(name)).await?;
-        if property(&pair, "privateKey")?.is_undefined() {
+        let pair = js!(self.get_default(name)).await?;
+        if js!(pair.privateKey).is_undefined() {
             return Err(Error::from(
                 "expected an asymmetric key service signing key",
             ));
         }
-        let details = js_call!(self.details(&pair)).await?;
-        version_number(&property(&details, "version")?)
+        let details = js!(self.details(&pair)).await?;
+        version_number(&js!(details.version))
     }
 
-    pub(super) async fn signing_versions(&self, name: &str) -> Result<Vec<u32>> {
-        let versions = js_sys::Array::from(&js_call!(self.versions(name)).await?);
-        let mut numbers = Vec::with_capacity(versions.length() as usize);
-        for version in versions.iter() {
-            let number = version_number(&property(&version, "version")?)?;
-            let usages = js_sys::Array::from(&property(&version, "usages")?);
-            if !usages.includes(&JsValue::from_str("sign"), 0)
-                || property(&version, "extractable")?.as_bool() != Some(true)
-            {
-                return Err(Error::from(format!(
-                    "key service key {name} version {number} must be sign-enabled with an exportable public key"
-                )));
-            }
-            numbers.push(number);
-        }
-        if numbers.is_empty() {
-            return Err(Error::from(format!(
-                "key service key {name} has no signing versions"
-            )));
-        }
-        Ok(numbers)
+    pub(super) async fn key_versions(&self, name: &str) -> Result<Vec<VersionState>> {
+        version_states(name, &as_array(js!(self.versions(name)).await?)?)
     }
 
     pub(super) async fn new_signing_version(&self, name: &str) -> Result<u32> {
         // Set usages atomically with creation: no inert or verify-only version.
         let opts = js_sys::Object::new();
         let usages = js_sys::Array::of2(&JsValue::from_str("sign"), &JsValue::from_str("verify"));
-        js_sys::Reflect::set(&opts, &JsValue::from_str("usages"), &usages)
-            .map_err(|error| rpc_error("usages", &error))?;
-        js_sys::Reflect::set(&opts, &JsValue::from_str("extractable"), &JsValue::TRUE)
-            .map_err(|error| rpc_error("extractable", &error))?;
-        version_number(&js_call!(self.new_version(name, &opts)).await?)
+        js!(opts.usages = usages);
+        js!(opts.extractable = JsValue::TRUE);
+        version_number(&js!(self.new_version(name, &opts)).await?)
     }
 
     pub(super) async fn promote(&self, name: &str, version: u32) -> Result<()> {
-        js_call!(self.set_default_version(name, version)).await?;
+        js!(self.set_default_version(name, version)).await?;
+        Ok(())
+    }
+
+    pub(super) async fn retire(&self, name: &str, version: u32) -> Result<()> {
+        let patch = js_sys::Object::new();
+        let usages = js_sys::Array::of1(&JsValue::from_str("verify"));
+        js!(patch.usages = usages);
+        // Preserve public-key export for verification of existing signatures.
+        js!(self.update_version(name, version, &patch)).await?;
         Ok(())
     }
 }
 
 async fn version_handle(keyring: &Keyring, name: &str, version: u32) -> Result<JsValue> {
     let opts = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &opts,
-        &JsValue::from_str("version"),
-        &JsValue::from_f64(f64::from(version)),
-    )
-    .map_err(|e| rpc_error("version", &e))?;
-    js_call!(keyring.get_version(name, &opts)).await
+    js!(opts.version = JsValue::from_f64(f64::from(version)));
+    js!(keyring.get_version(name, &opts)).await
 }
 
 pub(crate) struct KeyServiceSigner {
@@ -236,9 +298,9 @@ fn cosignature(
     Ok(NoteSignature::new(name.clone(), key_id, payload))
 }
 
-/// Discover all signing versions. `None` means the logical key does not exist;
-/// versions without signing permission and all other key service failures are errors,
-/// not a reason to use legacy secrets.
+/// Discover sign-enabled versions, excluding explicitly retired (verify-only)
+/// versions. `None` means the logical key does not exist; malformed versions
+/// and all other key service failures are errors, not a reason to use local keys.
 /// Do not cache key service versions across requests.
 pub(crate) async fn load(
     env: &Env,
@@ -252,41 +314,23 @@ pub(crate) async fn load(
         Err(error) => return Err(rpc_error("versions", &error)),
     };
     let versions = match JsFuture::from(versions_promise).await {
-        Ok(versions) => js_sys::Array::from(&versions),
+        Ok(versions) => version_states(key_name, &as_array(versions)?)?,
         Err(error) if is_missing_key(&error, key_name) => return Ok(None),
         Err(error) => return Err(rpc_error("versions", &error)),
     };
     let name = KeyName::new(identity.to_owned())
         .map_err(|e| Error::from(format!("invalid key service identity name: {e:?}")))?;
     let mut signers = Vec::new();
-    for version in versions.iter() {
-        let version_num = property(&version, "version")?
-            .as_f64()
-            .filter(|n| n.fract() == 0.0 && *n > 0.0 && *n <= f64::from(u32::MAX))
-            .ok_or_else(|| Error::from("key service returned an invalid version"))?;
-        // Checked above: finite, integral, positive, and within u32 range.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let version_num = version_num as u32;
-        let usages = js_sys::Array::from(&property(&version, "usages")?);
-        require_signing_usage(
-            key_name,
-            version_num,
-            usages.includes(&JsValue::from_str("sign"), 0),
-        )?;
-        if property(&version, "extractable")?.as_bool() != Some(true) {
-            return Err(Error::from(format!(
-                "key service key {key_name} version {version_num} must have an exportable public key"
-            )));
-        }
+    for version in versions.into_iter().filter(|version| version.signing) {
+        let version_num = version.number;
         let pair = version_handle(&ring, key_name, version_num).await?;
-        let public = property(&pair, "publicKey")?;
+        let public = js!(pair.publicKey);
         if public.is_undefined() {
             return Err(Error::from(
                 "key service signing key is not an asymmetric key pair",
             ));
         }
-        let der =
-            js_sys::Uint8Array::new(&js_call!(ring.export_key("spki", &public)).await?).to_vec();
+        let der = js_sys::Uint8Array::new(&js!(ring.export_key("spki", &public)).await?).to_vec();
         let (algorithm, key_id) = parse_public_key(&der, &name)?;
         signers.push(KeyServiceSigner {
             key_name: key_name.to_owned(),
@@ -298,15 +342,6 @@ pub(crate) async fn load(
         });
     }
     Ok(Some(signers))
-}
-
-fn require_signing_usage(key_name: &str, version: u32, can_sign: bool) -> Result<()> {
-    if !can_sign {
-        return Err(Error::from(format!(
-            "key service key {key_name} version {version} must allow signing"
-        )));
-    }
-    Ok(())
 }
 
 fn is_missing_key(error: &JsValue, key_name: &str) -> bool {
@@ -348,13 +383,13 @@ impl KeyServiceSigner {
     async fn sign_raw(&self, env: &Env, message: &[u8]) -> Result<Vec<u8>> {
         let ring = keyring(env)?;
         let pair = version_handle(&ring, &self.key_name, self.version).await?;
-        let private = property(&pair, "privateKey")?;
+        let private = js!(pair.privateKey);
         if private.is_undefined() {
             return Err(Error::from("key service signing key has no private handle"));
         }
         let bytes = js_sys::Uint8Array::from(message);
         Ok(js_sys::Uint8Array::new(
-            &js_call!(ring.sign(&signing_algorithm(&self.algorithm), &private, &bytes)).await?,
+            &js!(ring.sign(&signing_algorithm(&self.algorithm), &private, &bytes)).await?,
         )
         .to_vec())
     }
@@ -434,8 +469,8 @@ fn ml_dsa_cosignature(
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyServiceAlgorithm, KeyServiceSigner, cosignature, missing_key_message,
-        ml_dsa_cosignature, parse_public_key, require_signing_usage,
+        KeyServiceAlgorithm, KeyServiceSigner, VersionState, cosignature, missing_key_message,
+        ml_dsa_cosignature, parse_public_key,
     };
     use ed25519_dalek::SigningKey;
     use ml_dsa::{ExpandedSigningKey, MlDsa44};
@@ -470,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn only_missing_logical_key_enables_legacy_fallback() {
+    fn only_missing_logical_key_enables_local_fallback() {
         assert!(missing_key_message("key not found: witness", "witness"));
         assert!(!missing_key_message("key not found: other", "witness"));
         assert!(!missing_key_message("keyring not found", "witness"));
@@ -478,9 +513,24 @@ mod tests {
     }
 
     #[test]
-    fn every_key_service_version_must_allow_signing() {
-        assert!(require_signing_usage("mirror", 1, true).is_ok());
-        assert!(require_signing_usage("mirror", 2, false).is_err());
+    fn only_exportable_verify_only_versions_are_retired() {
+        let state = |usages: &[&str], extractable| {
+            VersionState::new(
+                "mirror",
+                1,
+                &usages
+                    .iter()
+                    .map(|usage| (*usage).to_owned())
+                    .collect::<Vec<_>>(),
+                extractable,
+            )
+        };
+        assert!(state(&["sign", "verify"], true).unwrap().signing);
+        assert!(!state(&["verify"], true).unwrap().signing);
+        assert!(state(&["verify"], false).is_err());
+        assert!(state(&["sign"], false).is_err());
+        assert!(state(&[], true).is_err());
+        assert!(state(&["encrypt"], true).is_err());
     }
 
     #[test]

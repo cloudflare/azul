@@ -215,7 +215,7 @@ impl IdentitySigner {
         }
     }
 
-    /// Sign locally with a legacy key or remotely with a key service key handle.
+    /// Sign with a local key or a remote key service.
     pub(crate) async fn sign_checkpoint(
         &self,
         env: &Env,
@@ -238,6 +238,8 @@ impl IdentitySigner {
 /// discovered per request so a Queue-triggered rotation needs no deploy.
 const MIRROR_SIGNING_KEY: &str = "MIRROR_SIGNING_KEY";
 const WITNESS_SIGNING_KEY: &str = "WITNESS_SIGNING_KEY";
+const MIRROR_KEY_SERVICE: &str = "MIRROR_KEY_SERVICE";
+const WITNESS_KEY_SERVICE: &str = "WITNESS_KEY_SERVICE";
 
 /// Suffix of the secret holding the incoming key during a rotation.
 ///
@@ -258,8 +260,8 @@ async fn read_key_secret(env: &Env, binding: &str) -> Result<Option<String>> {
         .filter(|pem| !pem.trim().is_empty()))
 }
 
-/// Use the key service exclusively when its logical key exists; otherwise load the
-/// legacy current and next keys.
+/// Use the key service exclusively when its logical key exists; otherwise load
+/// the local current and next keys.
 ///
 /// Keys are deduplicated by public key, so a promotion that has copied the
 /// next key over the current one but not yet unset `*_NEXT` signs once
@@ -267,13 +269,9 @@ async fn read_key_secret(env: &Env, binding: &str) -> Result<Option<String>> {
 async fn load_signing_keys(
     env: &Env,
     binding: &str,
+    key_service_binding: &str,
     identity_name: &str,
 ) -> Result<Vec<IdentitySigner>> {
-    let key_service_binding = match binding {
-        MIRROR_SIGNING_KEY => "MIRROR_KEY_SERVICE_KEY",
-        WITNESS_SIGNING_KEY => "WITNESS_KEY_SERVICE_KEY",
-        _ => return Err(Error::from("unknown signing key role")),
-    };
     if let Ok(name) = env.var(key_service_binding) {
         let name = name.to_string();
         if name.trim().is_empty() {
@@ -288,18 +286,13 @@ async fn load_signing_keys(
                 .collect();
             return require_signer(signers, binding);
         }
+        log::warn!("key service logical key {name} is missing; using local key for {binding}");
     }
 
-    let mut signers: Vec<IdentitySigner> = Vec::new();
-    if let Some(current) = read_key_secret(env, binding).await? {
-        let signer = build_identity_signer(identity_name, binding, &current)?;
-        if !signers
-            .iter()
-            .any(|existing| existing.public_key_der() == signer.public_key_der())
-        {
-            signers.push(signer);
-        }
-    }
+    let current = read_key_secret(env, binding)
+        .await?
+        .ok_or_else(|| Error::from(format!("{binding} is not set")))?;
+    let mut signers = vec![build_identity_signer(identity_name, binding, &current)?];
 
     let next_binding = format!("{binding}{NEXT_SUFFIX}");
     if let Some(next) = read_key_secret(env, &next_binding).await? {
@@ -326,7 +319,13 @@ pub(crate) async fn load_mirror_signers(env: &Env) -> Result<Vec<IdentitySigner>
         .mirror
         .as_ref()
         .ok_or_else(|| Error::from("mirror identity is disabled"))?;
-    load_signing_keys(env, MIRROR_SIGNING_KEY, config.name.as_str()).await
+    load_signing_keys(
+        env,
+        MIRROR_SIGNING_KEY,
+        MIRROR_KEY_SERVICE,
+        config.name.as_str(),
+    )
+    .await
 }
 
 /// Build identity signing material from a PKCS#8 PEM string.
@@ -382,7 +381,13 @@ pub(crate) async fn load_witness_signers(env: &Env) -> Result<Vec<IdentitySigner
         .witness
         .as_ref()
         .expect("validated witness mode must have witness config");
-    load_signing_keys(env, WITNESS_SIGNING_KEY, identity.name.as_str()).await
+    load_signing_keys(
+        env,
+        WITNESS_SIGNING_KEY,
+        WITNESS_KEY_SERVICE,
+        identity.name.as_str(),
+    )
+    .await
 }
 
 /// Load enabled identity keys and reject key reuse across roles.

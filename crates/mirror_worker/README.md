@@ -60,20 +60,25 @@ the store before switching the binding; changing the key invalidates tickets
 already issued to clients. Remove the old Worker secret after the new binding
 is deployed.
 
-For legacy secrets, the current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
+For local signing keys, the current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
 
 ## Key service rotation Queue
 
-When `MIRROR_KEY_SERVICE_KEY` or `WITNESS_KEY_SERVICE_KEY` names a logical key
+When `MIRROR_KEY_SERVICE` or `WITNESS_KEY_SERVICE` names a logical key
 in the key service keyring, that role uses its key service versions exclusively
-instead of the legacy signing secrets. Provide the `KEY_SERVICE` cross-account
+instead of the local signing secrets. Provide the `KEY_SERVICE` cross-account
 binding, which directly exposes the keyring.
-Every version must have `sign` usage and an exportable public key; non-signing
-versions cause an error rather than a legacy fallback.
-`MIRROR_TICKET_KEY` stays in Secrets Store or a Worker secret.
+Sign-enabled versions must have an exportable public key. A verify-only version
+with an exportable public key is retired: it is excluded from new signatures
+and `/metadata`. Other unusable versions (including non-exportable or inert
+versions) fail closed rather than triggering local-key fallback. Only a missing
+logical key uses local signing, and that fallback is logged as a warning.
+`MIRROR_TICKET_KEY` stays in Secrets Store or a Worker secret: ticket sealing
+uses a local symmetric AES-256-GCM-SIV key, not the key service's asymmetric
+signing operation.
 
-The Rust Queue consumer in `src/key_service_rotation.rs` runs rotations with no
-public rotation endpoint or cron. The deployment configuration maintained
+The Rust Queue consumer in `src/key_service_rotation.rs` runs rotations and
+retirements with no public endpoint or cron. The deployment configuration maintained
 outside this repo must bind a dedicated operator-only Queue as a consumer of
 this Worker (`max_batch_size: 1`, `max_concurrency: 1`) and provide the same key
 service binding and variables. Operators send a JSON message through the
@@ -88,9 +93,25 @@ default version. A stale request cannot create another version. Each new version
 created sign-enabled and then made the default. Queue delivery is at-least-once:
 if creation succeeds but promotion fails, retries refuse to create a duplicate
 and an operator must inspect the key service and finish or resolve the rotation
-manually. Keep a dead-letter queue for failed messages. The key service does
-not expose version deletion, so older versions stay sign-enabled and continue
-to cosign checkpoints.
+manually. Keep a dead-letter queue for failed messages. Older versions continue
+to cosign checkpoints until an operator retires them through the same Queue:
+
+```json
+{"action":"retire","role":"mirror","version":1}
+```
+
+The Worker refuses to retire the default or last signing version. Retrying an
+already retired version is harmless. Retirement replaces the specified KMS
+version's usages with `["verify"]`, retaining public-key export for existing
+signatures; it does not delete the version. Other sign-enabled versions still
+have to pass all signing and export checks. KMS control-plane writes are
+serialized per key, but data-plane readers can observe old metadata for up to
+60 seconds. Allow for that propagation before assuming signing and `/metadata`
+have stopped advertising the retired version. Clients verifying older
+signatures must retain the previously published public key, since `/metadata`
+no longer lists it. Coordinate operators: these
+read/check/write guards are not an atomic compare-and-swap against concurrent
+external changes to the same logical key.
 
 Disabled-role secrets and R2 bindings are not loaded. Ticket and cleaner access
 is confined to mirror operations.
