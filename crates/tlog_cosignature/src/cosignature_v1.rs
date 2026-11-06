@@ -1,5 +1,6 @@
 // Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+use base64::prelude::*;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use ed25519_dalek::{
     Signer as Ed25519Signer, SigningKey as Ed25519SigningKey, Verifier as Ed25519Verifier,
@@ -94,6 +95,42 @@ impl CosignatureV1NoteVerifier {
             verifying_key,
         }
     }
+
+    /// Construct a new verifier from an encoded verifier key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`NoteError`] if `vkey` is malformed or otherwise invalid.
+    pub fn new_from_encoded_key(vkey: &str) -> Result<Self, NoteError> {
+        let (name, vkey) = vkey.split_once('+').ok_or(NoteError::Format)?;
+        let name = KeyName::new(name.into()).map_err(|_| NoteError::Format)?;
+        let (id16, key64) = vkey.split_once('+').ok_or(NoteError::Format)?;
+
+        let id = u32::from_str_radix(id16, 16).map_err(|_| NoteError::Format)?;
+        let key = BASE64_STANDARD
+            .decode(key64)
+            .map_err(|_| NoteError::Format)?;
+
+        if id16.len() != 8 || key.is_empty() {
+            return Err(NoteError::Format);
+        }
+
+        if id != signed_note::compute_key_id(&name, &key[0..1], &key[1..]) {
+            return Err(NoteError::Id);
+        }
+
+        if !matches!(
+            SignatureType::try_from(key[0]),
+            Ok(SignatureType::CosignatureV1)
+        ) {
+            return Err(NoteError::Alg);
+        }
+        let key_bytes: &[u8; ed25519_dalek::PUBLIC_KEY_LENGTH] =
+            &key[1..].try_into().map_err(|_| NoteError::Format)?;
+        let verifying_key =
+            Ed25519VerifyingKey::from_bytes(key_bytes).map_err(|_| NoteError::Format)?;
+        Ok(Self::new(name, verifying_key))
+    }
 }
 
 impl NoteVerifier for CosignatureV1NoteVerifier {
@@ -172,5 +209,34 @@ mod tests {
             &checkpoint,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn new_from_encoded_key_verifies_checkpoint() {
+        use signed_note::Note;
+
+        let name = KeyName::new("log.example/origin".into()).unwrap();
+        let sk = Ed25519SigningKey::generate(&mut rand::rng());
+        let pk = sk.verifying_key().to_bytes();
+        let signer = CosignatureV1CheckpointSigner::new(name.clone(), sk);
+        let id = signed_note::compute_key_id(&name, &[0x04], pk.as_slice());
+        let key = [&[0x04], pk.as_slice()].concat();
+        let vkey = format!(
+            "log.example/origin+{id:08x}+{}",
+            BASE64_STANDARD.encode(key)
+        );
+        let parsed = CosignatureV1NoteVerifier::new_from_encoded_key(&vkey).unwrap();
+        assert_eq!(parsed.name(), &name);
+        assert_eq!(parsed.key_id(), signer.verifier().key_id());
+
+        let cp_text =
+            CheckpointText::new("log.example/origin", 42, tlog_core::Hash([0x55; 32]), &[])
+                .unwrap();
+        let sig = signer.sign(1_700_000_000_000, &cp_text).unwrap();
+        let note = Note::new(&cp_text.to_bytes(), &[sig]).unwrap();
+        let (verified, _) = note
+            .verify(&VerifierList::new(vec![Box::new(parsed)]))
+            .unwrap();
+        assert_eq!(verified.len(), 1);
     }
 }
