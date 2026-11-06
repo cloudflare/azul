@@ -68,8 +68,12 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && inputs.run_slow_checks
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: rustup update stable && rustup default stable
       # Covers the long-running sequencer tests. `integration_tests` is
       # excluded because it needs a live wrangler dev instance; the
@@ -94,3 +98,64 @@ jobs:
           # fail to link sanitizer-coverage symbols (rust-fuzz/cargo-fuzz#384).
           CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo +nightly fuzz run fuzz_parse_checkpoint -- -max_total_time="$FUZZ_SECONDS"
+
+  mtc-compatibility:
+    name: MTC Compatibility (${{ matrix.implementation }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.run_slow_checks
+    timeout-minutes: 45
+    # Entries marked `expected_failure` stay visible as a failed job without
+    # failing the run.
+    continue-on-error: ${{ matrix.expected_failure == true }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned at the sign-subtree update to tlog-witness@v1.1.0, which
+          # follows the uint8 log_origin switch (FiloSottile/sunlight#73).
+          - implementation: sunlight
+            repository: FiloSottile/sunlight
+            revision: 5e015ed36b4a24de587531779c54688674fda7cd
+          # Tessera reads a uint16 log_origin length in add-entries, so the CA
+          # cannot interoperate yet. Remove expected_failure and move the pin
+          # once https://github.com/transparency-dev/tessera/issues/1233 is
+          # fixed.
+          - implementation: tessera
+            repository: transparency-dev/tessera
+            revision: d051ea3a859675f5e4f14fbe4b2d700ce045e19e
+            expected_failure: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out mirror implementation
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.revision }}
+          path: compatibility/mirror
+          persist-credentials: false
+      - name: Check out Cactus verifier
+        uses: actions/checkout@v4
+        with:
+          repository: mcpherrinm/cactus
+          ref: 6b5a8a4f0c7554f9e6ceb4cb7897dd39b8941773
+          path: compatibility/cactus
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - name: Install Worker tools
+        run: |
+          npm install --global wrangler@4.80.0
+          cargo install worker-build@0.8.5 --locked
+      - name: Run compatibility tests
+        run: bash scripts/test-mtc-interop.sh "${{ matrix.implementation }}"
+        env:
+          MIRROR_REPO: ${{ github.workspace }}/compatibility/mirror
+          CACTUS_REPO: ${{ github.workspace }}/compatibility/cactus
