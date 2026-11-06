@@ -140,6 +140,28 @@ impl MlDsa44NoteVerifier {
     }
 }
 
+/// Timestamped Ed25519 cosignature/v1 verifier, constructed from an encoded verifier key (vkey).
+///
+/// A vkey string has the format: `<name>+<hex_key_id>+<base64_key_data>`
+/// where `key_data` is `0x04 || ed25519_public_key`.
+#[wasm_bindgen]
+pub struct CosignatureV1NoteVerifier {
+    inner: tlog_cosignature::CosignatureV1NoteVerifier,
+}
+
+#[wasm_bindgen]
+impl CosignatureV1NoteVerifier {
+    /// # Errors
+    ///
+    /// Returns a JS error string if the encoded vkey is malformed.
+    #[wasm_bindgen(constructor)]
+    pub fn new(encoded_vkey: &str) -> Result<CosignatureV1NoteVerifier, JsValue> {
+        tlog_cosignature::CosignatureV1NoteVerifier::new_from_encoded_key(encoded_vkey)
+            .map(|v| CosignatureV1NoteVerifier { inner: v })
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
 /// A collection of known verifiers for signature verification.
 ///
 /// Build one at startup from your trusted vkey strings, then call `.build()`
@@ -203,6 +225,23 @@ impl VerifierList {
     /// Returns a JS error string if `build()` has already been called.
     #[wasm_bindgen(js_name = "addMlDsa44")]
     pub fn add_ml_dsa_44(&mut self, v: MlDsa44NoteVerifier) -> Result<(), JsValue> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("cannot add verifiers after build()"))?;
+        pending.push(Box::new(v.inner));
+        Ok(())
+    }
+
+    /// Add a cosignature/v1 verifier to the list. Call this for each trusted vkey.
+    ///
+    /// Must be called before `.build()`. Consumes the verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a JS error string if `build()` has already been called.
+    #[wasm_bindgen(js_name = "addCosignatureV1")]
+    pub fn add_cosignature_v1(&mut self, v: CosignatureV1NoteVerifier) -> Result<(), JsValue> {
         let pending = self
             .pending
             .as_mut()
