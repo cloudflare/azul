@@ -52,11 +52,12 @@ use crate::{
     commit,
     cosigner_registry_do::log_verifiers,
     frontend_worker::{ApiResult, AppError},
-    load_mirror_signers, load_ticket_sealer,
+    load_mirror_signers,
     mirror_state_do::{
         AdvanceNextEntryRequest, CommitRequest, CommittedCheckpoint, MirrorStateSnapshot,
         NextEntry, PendingCheckpoint, state_stub,
     },
+    open_ticket, seal_ticket,
     storage::load_origin_bucket,
     stream_buffer::StreamBuffer,
 };
@@ -1035,21 +1036,14 @@ async fn resolve_target_pending(
     if header.ticket.is_empty() {
         return Err("upload_end does not match current pending and no ticket provided");
     }
-    let sealer = match load_ticket_sealer(env).await {
-        Ok(m) => m,
-        Err(e) => {
-            // A missing/malformed MIRROR_TICKET_KEY is an operator
-            // misconfiguration, not a client error. Surface as 409
-            // (which we'd return anyway) and log so an operator
-            // notices.
-            log::error!("add-entries: ticket sealer unavailable: {e:?}");
-            return Err("ticket key unavailable");
-        }
-    };
     // The log origin is bound as associated data, so a ticket minted
     // for one log cannot be opened against another.
-    let Ok(plaintext) = sealer.open(&header.ticket, header.log_origin.as_bytes()) else {
-        return Err("ticket authentication failed");
+    let plaintext = match open_ticket(env, &header.ticket, header.log_origin.as_bytes()).await {
+        Ok(plaintext) => plaintext,
+        Err(error) => {
+            log::error!("add-entries: cannot open ticket: {error:?}");
+            return Err("ticket authentication failed or ticket key unavailable");
+        }
     };
     // The ticket plaintext is the full signed-note bytes of a
     // previously accepted pending checkpoint. Re-parse and re-verify
@@ -1180,8 +1174,8 @@ fn verify_package(
 /// current pending tree size, the advertised `next_entry`, and a sealed
 /// ticket, at the given HTTP `status`.
 ///
-/// The ticket is sealed via [`tlog_mirror::TicketSealer`] (AES-256-GCM-SIV, log
-/// origin bound as associated data) so the client can present it on
+/// The ticket is sealed with the configured local or key-service key, with
+/// the log origin bound as associated data, so the client can present it on
 /// retry to recover the pending state without keeping it in DO storage.
 /// If sealing fails (operator misconfigured `MIRROR_TICKET_KEY`), the
 /// response still carries an empty ticket; the client falls back to a
@@ -1204,10 +1198,10 @@ async fn mirror_info_response(
     next_entry: u64,
 ) -> axum::response::Response {
     let ticket = if let Some(pending) = &snapshot.pending {
-        match load_ticket_sealer(env).await {
+        match seal_ticket(env, &pending.signed_note_bytes, origin.as_bytes()).await {
             // Bind the log origin as associated data so the ticket can
             // only be reopened for the same log.
-            Ok(m) => m.seal(&pending.signed_note_bytes, origin.as_bytes()),
+            Ok(ticket) => ticket,
             Err(e) => {
                 log::error!("add-entries: cannot seal ticket: {e:?}");
                 Vec::new()

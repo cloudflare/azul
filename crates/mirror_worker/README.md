@@ -33,9 +33,15 @@ applied on read, so changing the list takes effect without a re-synchronization.
 Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
 The Worker only serves submission and metadata APIs.
 
-`MIRROR_TICKET_KEY` seals mirror upload tickets. It is a standard-base64
-encoding of 32 random bytes, for example from
-`head -c 32 /dev/urandom | base64`.
+Mirror upload tickets use the key-service AES-256-GCM key named
+`MIRROR_TICKET_KEY` when that key exists in the `KEY_SERVICE` keyring. New
+tickets use only its newest version, regardless of the key-service default;
+each ticket records its version,
+so tickets from any still-decryptable version are accepted. The origin and
+version are authenticated. If the binding or logical key is absent, the
+Worker instead uses the local `MIRROR_TICKET_KEY` secret with AES-256-GCM-SIV.
+The local secret is standard-base64 encoding of 32 random bytes, for example
+from `head -c 32 /dev/urandom | base64`.
 
 Bind `MIRROR_TICKET_KEY`, `MIRROR_SIGNING_KEY`, `MIRROR_SIGNING_KEY_NEXT`,
 `WITNESS_SIGNING_KEY`, and `WITNESS_SIGNING_KEY_NEXT` from Secrets Store as
@@ -60,6 +66,10 @@ the store before switching the binding; changing the key invalidates tickets
 already issued to clients. Remove the old Worker secret after the new binding
 is deployed.
 
+Local and key-service ticket formats are independent: a key-service deployment
+does not try the local secret to open tickets, and a local-only deployment does
+not open key-service tickets. There is no migration path between the two modes.
+
 For local signing keys, the current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
 
 ## Key service rotation Queue
@@ -73,12 +83,33 @@ with an exportable public key is retired: it is excluded from new signatures
 and `/metadata`. Other unusable versions (including non-exportable or inert
 versions) fail closed rather than triggering local-key fallback. Only a missing
 logical key uses local signing, and that fallback is logged as a warning.
-`MIRROR_TICKET_KEY` stays in Secrets Store or a Worker secret: ticket sealing
-uses a local symmetric AES-256-GCM-SIV key, not the key service's asymmetric
-signing operation.
+Ticket sealing uses its own symmetric key, independently of the asymmetric
+signing keys. Key-service ticket-key creation, rotation, and retirement are
+operator Queue operations using the fixed name `MIRROR_TICKET_KEY` (one Queue message per line):
 
-The Rust Queue consumer in `src/key_service_rotation.rs` runs rotations and
-retirements with no public endpoint or cron. The deployment configuration maintained
+```jsonl
+{"action":"create","role":"ticket"}
+{"role":"ticket","expected_default_version":1}
+{"action":"retire","role":"ticket","version":1}
+```
+
+Creating the initial key enables key-service tickets. Rotation creates
+a new version with `encrypt` and `decrypt` permission and promotes it to the
+default. If creation succeeds but promotion fails, rerunning the same Queue
+message promotes that version instead of creating another. Ticket issuance
+uses the newest version even before promotion succeeds; once it is visible,
+it must be usable for encryption. Retirement requires
+the **oldest still-decryptable version number** and refuses the current/sole
+decryptable version. This explicit number makes Queue retries idempotent: a
+retry cannot retire the next oldest key. Retirement sets usages to `[]`, so
+the version can neither encrypt nor decrypt; the key service does not support
+deleting a version.
+Tickets issued under that version are no longer accepted once the key-service
+change propagates. Wait for outstanding tickets to finish before retiring
+their version.
+
+The Rust Queue consumer in `src/key_service_rotation.rs` runs creation,
+rotations, and retirements with no public endpoint or cron. The deployment configuration maintained
 outside this repo must bind a dedicated operator-only Queue as a consumer of
 this Worker (`max_batch_size: 1`, `max_concurrency: 1`) and provide the same key
 service binding and variables. Operators send a JSON message through the
@@ -87,6 +118,18 @@ Cloudflare dashboard or the account-scoped Queues HTTP API, for example:
 ```json
 {"role":"mirror","expected_default_version":1}
 ```
+
+For the **first** mirror or witness signing-key rotation, set
+`expected_default_version` to `0` and supply the algorithm to create the
+logical key (choose `ED25519` or `ML_DSA_44`):
+
+```json
+{"role":"mirror","expected_default_version":0,"algorithm":"ML_DSA_44"}
+```
+
+If the key already exists, retrying this initial message does not add another
+version. Later signing-key rotations omit `algorithm` and use the current
+positive default version.
 
 Use `"witness"` for the witness role and supply the **current** key service
 default version. A stale request cannot create another version. Each new version is

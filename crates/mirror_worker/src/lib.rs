@@ -417,7 +417,7 @@ fn ensure_distinct_identity_keys(
     Err("witness and mirror identities must use distinct signing keys")
 }
 
-/// Cached ticket authenticator, built lazily on first request.
+/// Cached local ticket authenticator, built lazily on first use.
 ///
 /// The mirror's ticket scheme (base64 blobs returned in the
 /// `text/x.tlog.mirror-info` 409 response body and round-tripped via the
@@ -427,7 +427,7 @@ fn ensure_distinct_identity_keys(
 /// keyed off the `MIRROR_TICKET_KEY` secret.
 static TICKET_SEALER: OnceLock<TicketSealer> = OnceLock::new();
 
-/// Load (or return the already-cached) ticket authenticator.
+/// Load (or return the already-cached) local ticket authenticator.
 ///
 /// The `MIRROR_TICKET_KEY` secret is 32 raw bytes encoded as standard
 /// base64 (RFC 4648 section 4, no URL-safe variant). Operators can
@@ -456,6 +456,28 @@ pub(crate) async fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSeale
         ))
     })?;
     Ok(TICKET_SEALER.get_or_init(|| TicketSealer::new(&key)))
+}
+
+pub(crate) async fn seal_ticket(env: &Env, payload: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
+    if key_service::ticket_key_exists(env).await? {
+        key_service::seal_ticket(env, payload, origin).await
+    } else {
+        Ok(load_ticket_sealer(env).await?.seal(payload, origin))
+    }
+}
+
+pub(crate) async fn open_ticket(env: &Env, ticket: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
+    if key_service::ticket_key_exists(env).await? {
+        key_service::open_ticket(env, ticket, origin).await
+    } else {
+        if key_service::is_service_ticket(ticket) {
+            return Err(Error::from("key service ticket key is unavailable"));
+        }
+        load_ticket_sealer(env)
+            .await?
+            .open(ticket, origin)
+            .map_err(|error| Error::from(format!("ticket authentication: {error}")))
+    }
 }
 
 #[cfg(test)]
