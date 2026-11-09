@@ -26,6 +26,12 @@ mod rotation;
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
     type Keyring;
+    #[wasm_bindgen(method, catch, js_name = create)]
+    fn create_key(
+        this: &Keyring,
+        name: &str,
+        algorithm: &str,
+    ) -> std::result::Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(method, catch, js_name = versions)]
     fn versions(this: &Keyring, name: &str) -> std::result::Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(method, catch, js_name = get)]
@@ -42,6 +48,20 @@ extern "C" {
     ) -> std::result::Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(method, catch, js_name = sign)]
     fn sign(
+        this: &Keyring,
+        algorithm: &JsValue,
+        key: &JsValue,
+        data: &js_sys::Uint8Array,
+    ) -> std::result::Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = encrypt)]
+    fn encrypt(
+        this: &Keyring,
+        algorithm: &JsValue,
+        key: &JsValue,
+        data: &js_sys::Uint8Array,
+    ) -> std::result::Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = decrypt)]
+    fn decrypt(
         this: &Keyring,
         algorithm: &JsValue,
         key: &JsValue,
@@ -119,7 +139,7 @@ fn keyring(env: &Env) -> Result<Keyring> {
     let binding = js!(env_js.KEY_SERVICE);
     if binding.is_undefined() || binding.is_null() {
         return Err(Error::from(
-            "key service binding is required for key service signing",
+            "KEY_SERVICE binding is required for key-service keys",
         ));
     }
     Ok(binding.unchecked_into())
@@ -132,6 +152,214 @@ fn version_number(value: &JsValue) -> Result<u32> {
         .ok_or_else(|| Error::from("key service returned an invalid version"))?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(number as u32)
+}
+
+// The header separates AES-GCM tickets from the unversioned local format and
+// authenticates the version used to decrypt each ticket.
+const TICKET_KEY_NAME: &str = "MIRROR_TICKET_KEY";
+const TICKET_PREFIX: &[u8; 16] = b"azul-ticket-v1\0\0";
+const TICKET_NONCE_LEN: usize = 12;
+const TICKET_TAG_LEN: usize = 16;
+const TICKET_HEADER_LEN: usize = TICKET_PREFIX.len() + 4;
+
+pub(crate) fn is_service_ticket(ticket: &[u8]) -> bool {
+    ticket.starts_with(TICKET_PREFIX)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum State {
+    EncryptDecrypt,
+    Decrypt,
+    /// Any version without decrypt permission, including an inert version.
+    Retired,
+}
+
+fn ticket_state(mut usages: impl Iterator<Item = Result<String>>) -> Result<State> {
+    let (encrypting, decrypting) =
+        usages.try_fold((false, false), |(encrypting, decrypting), usage| {
+            let usage = usage?;
+            Ok::<_, Error>((
+                encrypting || usage == "encrypt",
+                decrypting || usage == "decrypt",
+            ))
+        })?;
+    Ok(match (encrypting, decrypting) {
+        (true, true) => State::EncryptDecrypt,
+        (false, true) => State::Decrypt,
+        _ => State::Retired,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TicketVersionState {
+    number: u32,
+    state: State,
+}
+
+impl TicketVersionState {
+    const fn new(number: u32, state: State) -> Self {
+        Self { number, state }
+    }
+}
+
+fn ticket_version_states(versions: &js_sys::Array) -> Result<Vec<TicketVersionState>> {
+    let mut states = Vec::with_capacity(versions.length() as usize);
+    for version in versions.iter() {
+        let number = version_number(&js!(version.version))?;
+        let state = ticket_state(as_array(js!(version.usages))?.iter().map(|value| {
+            value
+                .as_string()
+                .ok_or_else(|| Error::from("invalid ticket key usage"))
+        }))?;
+        states.push(TicketVersionState::new(number, state));
+    }
+    sort_ticket_versions(states)
+}
+
+fn sort_ticket_versions(mut states: Vec<TicketVersionState>) -> Result<Vec<TicketVersionState>> {
+    states.sort_unstable_by_key(|state| state.number);
+    if states
+        .windows(2)
+        .any(|pair| pair[0].number == pair[1].number)
+    {
+        return Err(Error::from("ticket key has duplicate version numbers"));
+    }
+    if !states
+        .last()
+        .is_some_and(|version| version.state == State::EncryptDecrypt)
+    {
+        return Err(Error::from(
+            "key service ticket key has no usable newest version",
+        ));
+    }
+    Ok(states)
+}
+
+/// If there is no key-service binding, or no ticket key in that keyring,
+/// continue using the existing local ticket key. Other failures fail closed.
+pub(crate) async fn ticket_key_exists(env: &Env) -> Result<bool> {
+    let Ok(ring) = keyring(env) else {
+        return Ok(false);
+    };
+    let promise = match ring.versions(TICKET_KEY_NAME) {
+        Ok(promise) => promise,
+        Err(error) if is_missing_key(&error, TICKET_KEY_NAME) => return Ok(false),
+        Err(error) => return Err(rpc_error("versions", &error)),
+    };
+    match JsFuture::from(promise).await {
+        Ok(versions) => {
+            ticket_version_states(&as_array(versions)?)?;
+            Ok(true)
+        }
+        Err(error) if is_missing_key(&error, TICKET_KEY_NAME) => Ok(false),
+        Err(error) => Err(rpc_error("versions", &error)),
+    }
+}
+
+fn ticket_parts(ticket: &[u8]) -> Result<(u32, &[u8], &[u8])> {
+    if !is_service_ticket(ticket)
+        || ticket.len() < TICKET_HEADER_LEN + TICKET_NONCE_LEN + TICKET_TAG_LEN
+    {
+        return Err(Error::from("invalid key service ticket"));
+    }
+    let version = u32::from_be_bytes(
+        ticket[TICKET_PREFIX.len()..TICKET_HEADER_LEN]
+            .try_into()
+            .map_err(|_| Error::from("invalid ticket version"))?,
+    );
+    if version == 0 {
+        return Err(Error::from("invalid ticket version"));
+    }
+    Ok((
+        version,
+        &ticket[TICKET_HEADER_LEN..TICKET_HEADER_LEN + TICKET_NONCE_LEN],
+        &ticket[TICKET_HEADER_LEN + TICKET_NONCE_LEN..],
+    ))
+}
+
+fn ticket_algorithm(nonce: &[u8], aad: &[u8]) -> Result<JsValue> {
+    let algorithm = js_sys::Object::new();
+    js!(algorithm.name = JsValue::from_str("AES-GCM"));
+    js!(algorithm.iv = js_sys::Uint8Array::from(nonce));
+    js!(algorithm.additionalData = js_sys::Uint8Array::from(aad));
+    js!(algorithm.tagLength = JsValue::from_f64(128.0));
+    Ok(algorithm.into())
+}
+
+fn ticket_aad(header: &[u8], origin: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(header.len() + origin.len());
+    aad.extend_from_slice(header);
+    aad.extend_from_slice(origin);
+    aad
+}
+
+fn ticket_key(handle: &JsValue, usage: &str) -> Result<JsValue> {
+    let key_algorithm = js!(handle.algorithm);
+    if js!(handle.type).as_string().as_deref() != Some("secret")
+        || js!(key_algorithm.name).as_string().as_deref() != Some("AES-GCM")
+        || js!(key_algorithm.length).as_f64() != Some(256.0)
+        || !as_array(js!(handle.usages))?
+            .iter()
+            .any(|value| value.as_string().as_deref() == Some(usage))
+    {
+        return Err(Error::from(format!(
+            "key service ticket key must be AES-256-GCM and allow {usage}"
+        )));
+    }
+    Ok(handle.clone())
+}
+
+/// Issue a versioned ticket using the current symmetric key-service version.
+/// The version and origin are authenticated as associated data.
+pub(crate) async fn seal_ticket(env: &Env, payload: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
+    let ring = keyring(env)?;
+    let versions = ring.ticket_versions().await?;
+    let latest = versions
+        .last()
+        .ok_or_else(|| Error::from("ticket key has no versions"))?;
+    let key = version_handle(&ring, TICKET_KEY_NAME, latest.number).await?;
+    let key = ticket_key(&key, "encrypt")?;
+    ticket_key(&key, "decrypt")?;
+    let mut header = Vec::from(TICKET_PREFIX.as_slice());
+    header.extend_from_slice(&latest.number.to_be_bytes());
+    let mut nonce = [0u8; TICKET_NONCE_LEN];
+    getrandom_03::fill(&mut nonce)
+        .map_err(|error| Error::from(format!("ticket nonce: {error}")))?;
+    let aad = ticket_aad(&header, origin);
+    let algorithm = ticket_algorithm(&nonce, &aad)?;
+    let ciphertext = js_sys::Uint8Array::new(
+        &js!(ring.encrypt(&algorithm, &key, &js_sys::Uint8Array::from(payload))).await?,
+    )
+    .to_vec();
+    let mut ticket = header;
+    ticket.extend_from_slice(&nonce);
+    ticket.extend_from_slice(&ciphertext);
+    Ok(ticket)
+}
+
+/// Only versioned tickets are opened here. Never use the current default to
+/// open: tickets must survive a key-service default-version change.
+pub(crate) async fn open_ticket(env: &Env, ticket: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
+    let (version, nonce, ciphertext) = ticket_parts(ticket)?;
+    let header = &ticket[..TICKET_HEADER_LEN];
+    let ring = keyring(env)?;
+    if !ring
+        .ticket_versions()
+        .await?
+        .iter()
+        .any(|state| state.number == version && state.state != State::Retired)
+    {
+        return Err(Error::from("ticket key version is retired or unavailable"));
+    }
+    let key = ticket_key(
+        &version_handle(&ring, TICKET_KEY_NAME, version).await?,
+        "decrypt",
+    )?;
+    let algorithm = ticket_algorithm(nonce, &ticket_aad(header, origin))?;
+    Ok(js_sys::Uint8Array::new(
+        &js!(ring.decrypt(&algorithm, &key, &js_sys::Uint8Array::from(ciphertext))).await?,
+    )
+    .to_vec())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +422,47 @@ fn version_states(name: &str, versions: &js_sys::Array) -> Result<Vec<VersionSta
 
 /// Rust-facing rotation operations; all key service JavaScript interop stays here.
 impl Keyring {
+    pub(super) async fn get_ticket_default(&self) -> Result<JsValue> {
+        js!(self.get_default(TICKET_KEY_NAME)).await
+    }
+
+    pub(super) async fn current_ticket_default(&self) -> Result<u32> {
+        let key = self.get_ticket_default().await?;
+        ticket_key(&key, "encrypt")?;
+        ticket_key(&key, "decrypt")?;
+        let details = js!(self.details(&key)).await?;
+        version_number(&js!(details.version))
+    }
+
+    async fn ticket_versions(&self) -> Result<Vec<TicketVersionState>> {
+        ticket_version_states(&as_array(js!(self.versions(TICKET_KEY_NAME)).await?)?)
+    }
+
+    pub(super) async fn create_ticket_key(&self) -> Result<()> {
+        let key = js!(self.create_key(TICKET_KEY_NAME, "AES_256_GCM")).await?;
+        ticket_key(&key, "encrypt")?;
+        ticket_key(&key, "decrypt")?;
+        Ok(())
+    }
+
+    pub(super) async fn new_ticket_version(&self) -> Result<u32> {
+        let opts = js_sys::Object::new();
+        let usages =
+            js_sys::Array::of2(&JsValue::from_str("encrypt"), &JsValue::from_str("decrypt"));
+        js!(opts.usages = usages);
+        js!(opts.extractable = JsValue::FALSE);
+        version_number(&js!(self.new_version(TICKET_KEY_NAME, &opts)).await?)
+    }
+
+    pub(super) async fn retire_ticket_version(&self, version: u32) -> Result<()> {
+        let patch = js_sys::Object::new();
+        // The key-service API has no delete-version operation. An inert
+        // version cannot encrypt or decrypt new or existing tickets.
+        let usages = js_sys::Array::new();
+        js!(patch.usages = usages);
+        js!(self.update_version(TICKET_KEY_NAME, version, &patch)).await?;
+        Ok(())
+    }
     pub(super) async fn current_default(&self, name: &str) -> Result<u32> {
         let pair = js!(self.get_default(name)).await?;
         if js!(pair.privateKey).is_undefined() {
@@ -203,6 +472,31 @@ impl Keyring {
         }
         let details = js!(self.details(&pair)).await?;
         version_number(&js!(details.version))
+    }
+
+    /// Only an absent logical key is treated as uninitialized. All other
+    /// key-service failures remain errors so operator requests can be retried.
+    pub(super) async fn signing_key_exists(&self, name: &str) -> Result<bool> {
+        let promise = match self.versions(name) {
+            Ok(promise) => promise,
+            Err(error) if is_missing_key(&error, name) => return Ok(false),
+            Err(error) => return Err(rpc_error("versions", &error)),
+        };
+        match JsFuture::from(promise).await {
+            Ok(_) => Ok(true),
+            Err(error) if is_missing_key(&error, name) => Ok(false),
+            Err(error) => Err(rpc_error("versions", &error)),
+        }
+    }
+
+    pub(super) async fn create_signing_key(&self, name: &str, algorithm: &str) -> Result<()> {
+        let pair = js!(self.create_key(name, algorithm)).await?;
+        if js!(pair.publicKey).is_undefined() || js!(pair.privateKey).is_undefined() {
+            return Err(Error::from(
+                "key service did not create an asymmetric signing key",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn key_versions(&self, name: &str) -> Result<Vec<VersionState>> {
@@ -469,9 +763,12 @@ fn ml_dsa_cosignature(
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyServiceAlgorithm, KeyServiceSigner, VersionState, cosignature, missing_key_message,
-        ml_dsa_cosignature, parse_public_key,
+        KeyServiceAlgorithm, KeyServiceSigner, State, TICKET_NONCE_LEN, TICKET_PREFIX,
+        TICKET_TAG_LEN, TicketVersionState, VersionState, cosignature, is_service_ticket,
+        missing_key_message, ml_dsa_cosignature, parse_public_key, sort_ticket_versions,
+        ticket_aad, ticket_parts, ticket_state,
     };
+
     use ed25519_dalek::SigningKey;
     use ml_dsa::{ExpandedSigningKey, MlDsa44};
     use pkcs8::EncodePublicKey as _;
@@ -482,6 +779,71 @@ mod tests {
         CosignatureV1CheckpointSigner, SubtreeV1CheckpointSigner, SubtreeV1NoteVerifier,
         subtree_v1::build_cosigned_message,
     };
+
+    #[test]
+    fn ticket_state_tracks_encrypt_and_decrypt_usages() {
+        let state = |usages: &[&str]| {
+            ticket_state(usages.iter().map(|usage| Ok((*usage).to_owned()))).unwrap()
+        };
+        assert_eq!(state(&["encrypt", "decrypt"]), State::EncryptDecrypt);
+        assert_eq!(state(&["decrypt"]), State::Decrypt);
+        assert_eq!(state(&["encrypt"]), State::Retired);
+        assert_eq!(state(&[]), State::Retired);
+        assert_eq!(state(&["sign"]), State::Retired);
+        assert_eq!(state(&["decrypt", "decrypt"]), State::Decrypt);
+    }
+
+    #[test]
+    fn ticket_versions_sort_and_reject_duplicates() {
+        let active = |number| TicketVersionState::new(number, State::EncryptDecrypt);
+        let states = sort_ticket_versions(vec![active(3), active(1), active(2)]).unwrap();
+        assert_eq!(
+            states.iter().map(|state| state.number).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(sort_ticket_versions(vec![active(2), active(1), active(2)]).is_err());
+    }
+
+    #[test]
+    fn ticket_format_distinguishes_local_and_service_tickets() {
+        let local = tlog_mirror::TicketSealer::new(&[42; 32]);
+        let old_ticket = local.seal(b"signed note", b"example/log");
+        assert!(!is_service_ticket(&old_ticket));
+        assert_eq!(
+            local.open(&old_ticket, b"example/log").unwrap(),
+            b"signed note"
+        );
+        assert!(local.open(&old_ticket, b"other/log").is_err());
+
+        let mut new_ticket = TICKET_PREFIX.to_vec();
+        new_ticket.extend_from_slice(&7u32.to_be_bytes());
+        new_ticket.extend_from_slice(&[0; TICKET_NONCE_LEN]);
+        new_ticket.extend_from_slice(&[0; TICKET_TAG_LEN]);
+        assert!(is_service_ticket(&new_ticket));
+        let (version, nonce, ciphertext) = ticket_parts(&new_ticket).unwrap();
+        assert_eq!(version, 7);
+        assert_eq!(nonce.len(), TICKET_NONCE_LEN);
+        assert_eq!(ciphertext.len(), TICKET_TAG_LEN);
+        assert_ne!(
+            ticket_aad(&new_ticket[..20], b"example/log"),
+            ticket_aad(&new_ticket[..20], b"other/log")
+        );
+        assert_ne!(
+            ticket_aad(&new_ticket[..20], b"example/log"),
+            ticket_aad(&new_ticket[..20], b"example/log2")
+        );
+        let mut other_header = new_ticket[..20].to_vec();
+        other_header[19] ^= 1;
+        assert_ne!(
+            ticket_aad(&new_ticket[..20], b"example/log"),
+            ticket_aad(&other_header, b"example/log")
+        );
+        assert!(ticket_parts(&new_ticket[..new_ticket.len() - 1]).is_err());
+        new_ticket[TICKET_PREFIX.len()..20].fill(0);
+        assert!(ticket_parts(&new_ticket).is_err());
+        new_ticket[0] ^= 1;
+        assert!(!is_service_ticket(&new_ticket));
+    }
 
     #[test]
     fn key_service_signature_matches_local_cosignature_wire_format() {
