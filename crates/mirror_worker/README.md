@@ -36,10 +36,10 @@ The Worker only serves submission and metadata APIs.
 Mirror upload tickets use the key-service AES-256-GCM key named
 `MIRROR_TICKET_KEY` when that key exists in the `KEY_SERVICE` keyring. New
 tickets use only its newest version, regardless of the key-service default;
-each ticket records its version,
-so tickets from any still-decryptable version are accepted. The origin and
-version are authenticated. If the binding or logical key is absent, the
-Worker instead uses the local `MIRROR_TICKET_KEY` secret with AES-256-GCM-SIV.
+each ticket records its version, so tickets from any still-decryptable version
+are accepted. The origin and version are authenticated. If the binding or
+logical key is absent, the Worker instead uses the local `MIRROR_TICKET_KEY`
+secret with AES-256-GCM-SIV.
 The local secret is standard-base64 encoding of 32 random bytes, for example
 from `head -c 32 /dev/urandom | base64`.
 
@@ -60,15 +60,7 @@ example, add the ticket binding to the applicable Wrangler environment's
 ```
 
 Local Wrangler development uses the same binding names in `.dev.vars` when
-Secrets Store bindings are absent. When moving an existing deployment from a
-Worker secret to Secrets Store, copy the **same** base64 ticket key value into
-the store before switching the binding; changing the key invalidates tickets
-already issued to clients. Remove the old Worker secret after the new binding
-is deployed.
-
-Local and key-service ticket formats are independent: a key-service deployment
-does not try the local secret to open tickets, and a local-only deployment does
-not open key-service tickets. There is no migration path between the two modes.
+Secrets Store bindings are absent.
 
 For local signing keys, the current key is required and the `_NEXT` key is optional. During rotation, checkpoint cosignatures are produced with both keys. `sign-subtree` requires a reference checkpoint with exactly one signature and signs the subtree with the key that produced it, so a client that needs both keys' subtree cosignatures sends one request per key. If promotion temporarily leaves both secrets containing the same key, the duplicate public key is loaded once and produces one signature. Complete promotion by copying `_NEXT` to the current secret, then unsetting `_NEXT`.
 
@@ -116,15 +108,15 @@ service binding and variables. Operators send a JSON message through the
 Cloudflare dashboard or the account-scoped Queues HTTP API, for example:
 
 ```json
-{"role":"mirror","expected_default_version":1}
+{ "role": "mirror", "expected_default_version": 1 }
 ```
 
 For the **first** mirror or witness signing-key rotation, set
 `expected_default_version` to `0` and supply the algorithm to create the
-logical key (choose `ED25519` or `ML_DSA_44`):
+logical key (choose `ed25519` or `mldsa44`):
 
 ```json
-{"role":"mirror","expected_default_version":0,"algorithm":"ML_DSA_44"}
+{ "role": "mirror", "expected_default_version": 0, "algorithm": "ML_DSA_44" }
 ```
 
 If the key already exists, retrying this initial message does not add another
@@ -140,7 +132,7 @@ manually. Keep a dead-letter queue for failed messages. Older versions continue
 to cosign checkpoints until an operator retires them through the same Queue:
 
 ```json
-{"action":"retire","role":"mirror","version":1}
+{ "action": "retire", "role": "mirror", "version": 1 }
 ```
 
 The Worker refuses to retire the default or last signing version. Retrying an
