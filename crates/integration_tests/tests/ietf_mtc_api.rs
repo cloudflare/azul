@@ -1,0 +1,775 @@
+// Copyright (c) 2025 Cloudflare, Inc.
+// Licensed under the BSD-3-Clause license found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+
+//! Integration tests for the IETF MTC API (`ietf_mtc_worker`).
+//!
+//! These tests require a running `wrangler dev` instance.
+//! Set `BASE_URL` to point at the server; defaults to `http://localhost:8787`.
+//! Set `IETF_MTC_LOG_NAME` to choose which log shard; defaults to `dev1`, which is
+//! configured with an ML-DSA-44 signing key and `landmark_interval_secs: 10`.
+//!
+//! # Running
+//!
+//! ```text
+//! # From crates/ietf_mtc_worker/:
+//! npx wrangler -e=dev dev &
+//!
+//! # From workspace root:
+//! cargo test -p integration_tests --test ietf_mtc_api
+//! ```
+
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use der::Tagged;
+use ietf_mtc_api::{
+    ID_ALG_MTCPROOF, ID_RDNA_TRUSTANCHOR_ID, LandmarkSequence, MtcCheckpointNoteVerifier,
+    MtcVerifyingKey, ParsedMtcProof, TrustAnchorID, UINT48_MAX,
+};
+use integration_tests::{
+    client::{IetfMtcClient, ietf_mtc_log_name},
+    fixtures::make_ietf_mtc_csr,
+};
+use serde::Deserialize;
+use serde_with::{base64::Base64, serde_as};
+use signed_note::VerifierList;
+use tlog_checkpoint::open_checkpoint;
+use tlog_core::{
+    Hash, HashReader, Subtree, TlogError, evaluate_subtree_inclusion_proof, record_hash,
+    subtree_hash, subtree_hash_indexes,
+};
+use tlog_tiles::{PreloadedTlogTileReader, TileHashReader, TlogTileRecorder};
+use tokio::sync::OnceCell;
+use x509_cert::{
+    Certificate,
+    der::{Decode, Encode},
+    name::RdnSequence,
+};
+
+/// Extract the `MTCProof` bytes from a certificate's `signatureValue`.
+///
+/// The `signatureValue` is a DER `BIT STRING`. `raw_bytes()` returns the
+/// content octets (the unused-bits byte is handled by the `der` crate
+/// internally), which are exactly the `MTCProof` bytes.
+fn extract_mtc_proof_bytes(cert: &Certificate) -> Vec<u8> {
+    cert.signature()
+        .as_bytes()
+        .expect("signatureValue BIT STRING must have 0 unused bits")
+        .to_vec()
+}
+
+/// Compute `entry_hash` from a certificate following draft-ietf-plants-merkle-tree-certs §7.2
+/// steps 4-5.
+///
+/// Steps 4a-4c reconstruct the `TBSCertificateLogEntry` from the certificate:
+///   - Copy most TBS fields verbatim (4a)
+///   - Set `subjectPublicKeyAlgorithm` from the SPKI `algorithm` field (4b)
+///   - Set `subjectPublicKeyInfoHash` to HASH(DER(subjectPublicKeyInfo)) (4c)
+///
+/// Step 5: construct a `MerkleTreeCertEntry` of type `tbs_cert_entry` and compute
+/// `entry_hash = MTH({entry}) = HASH(0x00 || entry)` i.e. `record_hash(entry_bytes)`.
+///
+/// Also asserts that the certificate's serial number encodes `leaf_index` (§7.2 step 3).
+fn certificate_serial(cert: &Certificate) -> (u16, u64) {
+    let bytes = cert.tbs_certificate().serial_number().as_bytes();
+    assert!(bytes.len() <= 8, "certificate serial must fit uint64");
+    let mut padded = [0u8; 8];
+    padded[8 - bytes.len()..].copy_from_slice(bytes);
+    let serial = u64::from_be_bytes(padded);
+    ((serial >> 48) as u16, serial & ((1_u64 << 48) - 1))
+}
+
+fn assert_entry_and_proof_framing(entry: &[u8], proof: &[u8]) {
+    let entry_extensions_len = usize::from(u16::from_be_bytes([entry[0], entry[1]]));
+    let entry_type_offset = 2 + entry_extensions_len;
+    assert_eq!(
+        &entry[entry_type_offset..entry_type_offset + 2],
+        &1_u16.to_be_bytes(),
+        "entry type must follow its uint16-framed extensions"
+    );
+
+    let proof_extensions_len = usize::from(u16::from_be_bytes([proof[0], proof[1]]));
+    let mut offset = 2 + proof_extensions_len;
+    assert_eq!(
+        &entry[..entry_type_offset],
+        &proof[..offset],
+        "entry extensions must be copied into MTCProof"
+    );
+    offset += 12; // uint48 start and uint48 end
+    let inclusion_len = usize::from(u16::from_be_bytes([proof[offset], proof[offset + 1]]));
+    assert_eq!(inclusion_len % 32, 0, "proof hashes must be 32-byte framed");
+    offset += 2 + inclusion_len;
+    let signatures_len = (usize::from(proof[offset]) << 16)
+        | (usize::from(proof[offset + 1]) << 8)
+        | usize::from(proof[offset + 2]);
+    offset += 3 + signatures_len;
+    assert_eq!(
+        offset,
+        proof.len(),
+        "signature framing must consume MTCProof"
+    );
+}
+
+fn compute_entry_hash(
+    cert: &Certificate,
+    proof: &ParsedMtcProof,
+    log_number: u16,
+    leaf_index: u64,
+) -> Hash {
+    use der::Encode;
+    use ietf_mtc_api::{MerkleTreeCertEntry, TbsCertificateLogEntry};
+    use sha2::Digest;
+
+    // §7.2 step 3: serial number encodes `log_number || index`.
+    let tbs = cert.tbs_certificate();
+    assert_eq!(
+        certificate_serial(cert),
+        (log_number, leaf_index),
+        "serial_number must equal (log_number << 48) | index"
+    );
+
+    // §7.2 steps 4a-4c: reconstruct TBSCertificateLogEntry.
+    let spki = tbs.subject_public_key_info();
+    let spki_der = spki.to_der().expect("encoding SPKI");
+    let spki_hash =
+        der::asn1::OctetString::new(&sha2::Sha256::digest(&spki_der)[..]).expect("OctetString");
+    let log_entry = TbsCertificateLogEntry {
+        version: tbs.version(),
+        issuer: tbs.issuer().clone(),
+        validity: *tbs.validity(),
+        subject: tbs.subject().clone(),
+        // §7.2 step 4b
+        subject_public_key_info_algorithm: spki.algorithm.clone(),
+        // §7.2 step 4c
+        subject_public_key_info_hash: spki_hash,
+        issuer_unique_id: tbs.issuer_unique_id().clone(),
+        subject_unique_id: tbs.subject_unique_id().clone(),
+        extensions: tbs.extensions().cloned(),
+    };
+
+    // §7.2 step 5: entry_hash = MTH({entry}) = record_hash(entry_bytes).
+    let entry_bytes = MerkleTreeCertEntry::TbsCertEntry {
+        extensions: proof.extensions.clone(),
+        tbs_certificate: log_entry,
+    }
+    .encode()
+    .expect("encoding MerkleTreeCertEntry");
+    assert_entry_and_proof_framing(&entry_bytes, &extract_mtc_proof_bytes(cert));
+    record_hash(&entry_bytes)
+}
+
+fn assert_valid_mtc_cert(cert_der: &[u8], context: &str) -> Certificate {
+    let cert = Certificate::from_der(cert_der)
+        .unwrap_or_else(|e| panic!("{context}: not a valid DER certificate: {e}"));
+
+    assert_eq!(
+        cert.signature_algorithm().oid,
+        ID_ALG_MTCPROOF,
+        "{context}: expected id-alg-mtcproof signature algorithm, got {}",
+        cert.signature_algorithm().oid
+    );
+    assert_eq!(
+        cert.tbs_certificate().signature().oid,
+        ID_ALG_MTCPROOF,
+        "{context}: TBSCertificate.signature algorithm mismatch"
+    );
+    assert!(
+        !cert.signature().raw_bytes().is_empty(),
+        "{context}: signatureValue (MTCProof) must be non-empty"
+    );
+    assert!(
+        !cert.tbs_certificate().subject().is_empty(),
+        "{context}: subject must be non-empty"
+    );
+    let issuer = RdnSequence::from_der(
+        &cert
+            .tbs_certificate()
+            .issuer()
+            .to_der()
+            .expect("encode issuer"),
+    )
+    .expect("decode issuer RDN sequence");
+    let issuer_id = TrustAnchorID::from_rdn_sequence(&issuer).expect("issuer trust anchor ID");
+    let issuer_attribute = issuer.as_ref()[0].iter().next().expect("issuer attribute");
+    assert_eq!(issuer_attribute.oid, ID_RDNA_TRUSTANCHOR_ID);
+    assert_eq!(issuer_attribute.value.tag(), der::Tag::RelativeOid);
+    assert!(!issuer_id.as_bytes().is_empty());
+
+    cert
+}
+
+// ---------------------------------------------------------------------------
+// Initialization guard
+// ---------------------------------------------------------------------------
+
+/// Ensures the IETF MTC worker is fully live and has sequenced at least one
+/// entry before any test that depends on sequencer state runs.
+///
+/// `add-entry` is the readiness probe.
+static INITIALIZED: OnceCell<()> = OnceCell::const_new();
+
+async fn ensure_initialized() {
+    INITIALIZED
+        .get_or_init(|| async {
+            const MAX_ATTEMPTS: u32 = 30;
+            const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+            let log_name = ietf_mtc_log_name();
+            let client = IetfMtcClient::new(&log_name);
+            let csr = make_ietf_mtc_csr(&log_name).expect("make_ietf_mtc_csr for warmup");
+
+            for attempt in 0..MAX_ATTEMPTS {
+                match client.add_entry(csr.csr_der.clone()).await {
+                    Ok((200, _)) => return,
+                    Ok((status, _)) => {
+                        eprintln!(
+                            "ensure_initialized: add-entry returned {status} \
+                             (attempt {}/{MAX_ATTEMPTS}), retrying…",
+                            attempt + 1
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "ensure_initialized: add-entry error: {e} \
+                             (attempt {}/{MAX_ATTEMPTS}), retrying…",
+                            attempt + 1
+                        );
+                    }
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+
+            panic!("ietf_mtc_worker failed to initialize after {MAX_ATTEMPTS}s");
+        })
+        .await;
+}
+
+/// Fetch metadata and build an `MtcVerifyingKey` for the log's cosigner.
+///
+/// The cosigner key is a DER `SubjectPublicKeyInfo`; only ML-DSA-44 is supported.
+struct VerificationContext {
+    key: MtcVerifyingKey,
+    ca_id: TrustAnchorID,
+    log_number: u16,
+    cosigner_id: TrustAnchorID,
+    checkpoint_origin: String,
+    mirror: Option<(TrustAnchorID, MtcVerifyingKey)>,
+}
+
+#[derive(Deserialize)]
+struct MirrorMetadata {
+    mirror: Option<MirrorMetadataIdentity>,
+}
+
+#[derive(Deserialize)]
+struct MirrorMetadataIdentity {
+    name: String,
+    public_keys: Vec<MirrorMetadataKey>,
+}
+
+#[serde_as]
+#[derive(Deserialize)]
+struct MirrorMetadataKey {
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
+}
+
+#[serde_as]
+#[derive(Deserialize)]
+struct MirrorIdentity {
+    name: String,
+    #[serde_as(as = "Base64")]
+    public_key: Vec<u8>,
+}
+
+impl From<MirrorMetadataIdentity> for MirrorIdentity {
+    /// The first published key is the current signing key; later keys are
+    /// rotation candidates that the CA is not yet configured to trust.
+    fn from(identity: MirrorMetadataIdentity) -> Self {
+        let key = identity
+            .public_keys
+            .into_iter()
+            .next()
+            .expect("mirror metadata must publish a key");
+        Self {
+            name: identity.name,
+            public_key: key.public_key,
+        }
+    }
+}
+
+async fn fetch_verification_context(client: &IetfMtcClient) -> VerificationContext {
+    use std::str::FromStr;
+    // FIPS 204 ML-DSA-44.
+    const OID_ML_DSA_44: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
+
+    let meta = client.get_metadata().await.expect("metadata");
+
+    // `cosigner_public_key` is DER SPKI; check the algorithm OID before decoding.
+    let spki: spki::SubjectPublicKeyInfoOwned =
+        spki::SubjectPublicKeyInfoOwned::try_from(meta.cosigner_public_key.as_slice())
+            .expect("cosigner_public_key must be a valid SPKI");
+
+    let vk = match spki.algorithm.oid {
+        OID_ML_DSA_44 => {
+            use pkcs8::DecodePublicKey;
+            let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(
+                &meta.cosigner_public_key,
+            )
+            .expect("valid ML-DSA-44 SPKI");
+            MtcVerifyingKey::MlDsa44(vk)
+        }
+        oid => panic!("unsupported cosigner SPKI algorithm OID: {oid}"),
+    };
+
+    let ca_id = TrustAnchorID::from_str(&meta.ca_id).expect("ca_id");
+    let derived_log_id = ca_id.log_id(meta.log_number).expect("derive log_id");
+    assert_eq!(derived_log_id.to_string(), meta.log_id);
+    let cosigner_id = TrustAnchorID::from_str(&meta.cosigner_id).expect("cosigner_id");
+    assert_eq!(cosigner_id, ca_id);
+    let checkpoint_origin = derived_log_id.oid_name();
+    let mirror = if client.log == "dev1" {
+        use pkcs8::DecodePublicKey;
+        let identity = if let Ok(metadata) = std::env::var("IETF_MTC_MIRROR_IDENTITY") {
+            serde_json::from_str::<MirrorIdentity>(&metadata).expect("mirror identity JSON")
+        } else {
+            let base_url =
+                std::env::var("MIRROR_URL").unwrap_or_else(|_| "http://localhost:18788".to_owned());
+            reqwest::get(format!("{base_url}/metadata"))
+                .await
+                .expect("mirror metadata request")
+                .error_for_status()
+                .expect("mirror metadata status")
+                .json::<MirrorMetadata>()
+                .await
+                .expect("mirror metadata JSON")
+                .mirror
+                .expect("mirror identity")
+                .into()
+        };
+        let id = identity
+            .name
+            .strip_prefix("oid/1.3.6.1.4.1.")
+            .expect("mirror name must be a private-enterprise OID")
+            .parse::<TrustAnchorID>()
+            .expect("mirror cosigner ID");
+        assert_eq!(identity.name, id.oid_name());
+        let key =
+            ml_dsa::VerifyingKey::<ml_dsa::MlDsa44>::from_public_key_der(&identity.public_key)
+                .expect("mirror ML-DSA-44 SPKI");
+        Some((id, MtcVerifyingKey::MlDsa44(key)))
+    } else {
+        None
+    };
+    VerificationContext {
+        key: vk,
+        ca_id,
+        log_number: meta.log_number,
+        cosigner_id,
+        checkpoint_origin,
+        mirror,
+    }
+}
+
+/// Verify a standalone MTC certificate following draft-ietf-plants-merkle-tree-certs §7.2.
+///
+/// Steps performed:
+/// 1. Check `id-alg-mtcProof` algorithm (already done by `assert_valid_mtc_cert`).
+/// 2. Decode `signatureValue` as an `MTCProof`.
+/// 3. Check `index` is not revoked (not implemented — no revocation list in test).
+///    4-5. Reconstruct `TBSCertificateLogEntry` and compute `entry_hash`.
+/// 6. Evaluate the inclusion proof to get `expected_subtree_hash` (§4.3.2).
+/// 7. No trusted subtree predistributed in test — proceed to step 8.
+/// 8. Verify cosignatures satisfy relying party requirements (≥1 valid cosignature).
+fn verify_standalone_cert(cert: &Certificate, leaf_index: u64, context: &VerificationContext) {
+    // §7.2 step 2: decode signatureValue as MTCProof.
+    let proof_bytes = extract_mtc_proof_bytes(cert);
+    let proof =
+        ParsedMtcProof::from_bytes(&proof_bytes).expect("MTCProof must parse from signatureValue");
+
+    // §7.2 step 8: standalone certs must carry cosignatures.
+    assert!(
+        !proof.signatures.is_empty(),
+        "standalone cert must have at least one cosignature (§7.2 step 8)"
+    );
+
+    let subtree =
+        Subtree::new(proof.start, proof.end).expect("MTCProof subtree interval must be valid");
+    assert!(leaf_index < UINT48_MAX);
+    assert!(subtree.hi() <= UINT48_MAX);
+    assert!(
+        subtree.lo() <= leaf_index && leaf_index < subtree.hi(),
+        "leaf_index {leaf_index} must be within subtree [{}, {})",
+        subtree.lo(),
+        subtree.hi()
+    );
+
+    // §7.2 steps 4-5: compute entry_hash from the certificate.
+    let entry_hash = compute_entry_hash(cert, &proof, context.log_number, leaf_index);
+
+    // §7.2 step 6: evaluate the inclusion proof to get expected_subtree_hash (§4.3.2).
+    let expected_subtree_hash =
+        evaluate_subtree_inclusion_proof(&proof.inclusion_proof, &subtree, leaf_index, entry_hash)
+            .expect("inclusion proof evaluation must succeed");
+
+    // §7.2 step 8: verify cosignatures against expected_subtree_hash.
+    proof
+        .verify_cosignature(
+            &expected_subtree_hash,
+            &context.key,
+            &context.cosigner_id,
+            &context.ca_id,
+            context.log_number,
+        )
+        .expect("at least one cosignature must be valid");
+    if let Some((id, key)) = &context.mirror {
+        proof
+            .verify_cosignature(
+                &expected_subtree_hash,
+                key,
+                id,
+                &context.ca_id,
+                context.log_number,
+            )
+            .expect("configured mirror cosignature must be valid");
+    }
+}
+
+/// Verify a landmark-relative MTC certificate following draft-ietf-plants-merkle-tree-certs §7.2.
+///
+/// This implementation emits landmark-relative certs without optional GREASE cosignatures
+/// (§6.4). In a real relying party, the subtree hash would be predistributed
+/// (§7.4). In the test, a hash computed from tiles authenticated against the
+/// signed checkpoint stands in for predistributed trusted subtree info.
+///
+/// Steps performed:
+/// 1. Check `id-alg-mtcProof` (already done).
+/// 2. Decode `signatureValue` as `MTCProof`.
+///    4-5. Reconstruct `TBSCertificateLogEntry` and compute `entry_hash`.
+/// 6. Evaluate the inclusion proof to get `expected_subtree_hash` (§4.3.2).
+/// 7. Check the subtree is a landmark subtree and compare `expected_subtree_hash`
+///    against the subtree hash of the log.
+async fn verify_landmark_relative_cert(
+    client: &IetfMtcClient,
+    cert: &Certificate,
+    leaf_index: u64,
+    context: &VerificationContext,
+) {
+    // §7.2 step 2: decode signatureValue as MTCProof.
+    let proof_bytes = extract_mtc_proof_bytes(cert);
+    let proof =
+        ParsedMtcProof::from_bytes(&proof_bytes).expect("MTCProof must parse from signatureValue");
+
+    // This PoC does not emit the optional GREASE cosignatures allowed by §6.4.
+    assert!(
+        proof.signatures.is_empty(),
+        "landmark-relative cert unexpectedly contains inline cosignatures"
+    );
+
+    let subtree =
+        Subtree::new(proof.start, proof.end).expect("MTCProof subtree interval must be valid");
+    assert!(leaf_index < UINT48_MAX);
+    assert!(subtree.hi() <= UINT48_MAX);
+
+    // §7.2 steps 4-5: compute entry_hash.
+    let entry_hash = compute_entry_hash(cert, &proof, context.log_number, leaf_index);
+
+    // §7.2 step 6: evaluate the inclusion proof (§4.3.2).
+    let expected_subtree_hash =
+        evaluate_subtree_inclusion_proof(&proof.inclusion_proof, &subtree, leaf_index, entry_hash)
+            .expect("inclusion proof evaluation must succeed");
+
+    // §7.2 step 7: the subtree must be one of the CA's landmark subtrees, and
+    // its hash must match the log. The landmark sequence is the published
+    // `landmarks` resource. The trusted subtree hash is computed from tiles
+    // authenticated against the signed checkpoint, standing in for the hashes
+    // a relying party predistributes (§7.4).
+    let (landmark_content_type, landmark_text) =
+        client.get_landmark().await.expect("get landmark resource");
+    assert_eq!(landmark_content_type, "text/plain; charset=utf-8");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after epoch")
+        .as_secs();
+    let landmarks = LandmarkSequence::from_bytes(&landmark_text, usize::MAX, now_secs)
+        .expect("landmarks resource must parse");
+    assert!(
+        landmarks.subtrees().any(|candidate| candidate == subtree),
+        "certificate subtree must be a landmark subtree"
+    );
+    assert!(
+        landmarks
+            .subtrees()
+            .filter(|candidate| candidate.contains(leaf_index))
+            .all(|candidate| candidate.lo() < candidate.hi()),
+        "empty landmark subtrees must not cover certificate entries"
+    );
+
+    let checkpoint_verifier = MtcCheckpointNoteVerifier::new(
+        context.cosigner_id.clone(),
+        &context.ca_id,
+        context.log_number,
+        context.key.clone(),
+    )
+    .expect("checkpoint verifier");
+    let verifiers = VerifierList::new(vec![Box::new(checkpoint_verifier)]);
+    let checkpoint_bytes = client.get_checkpoint().await.expect("fetching checkpoint");
+    // Read the clock after fetching: the checkpoint may have been signed after
+    // the landmarks resource was read, and open_checkpoint rejects signatures
+    // from the future.
+    let now_millis: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after epoch")
+        .as_millis()
+        .try_into()
+        .expect("current time fits u64");
+    let (checkpoint, _) = open_checkpoint(
+        &context.checkpoint_origin,
+        &verifiers,
+        now_millis,
+        &checkpoint_bytes,
+    )
+    .expect("checkpoint signature");
+    assert!(
+        subtree.hi() <= checkpoint.size(),
+        "landmark subtree must lie within the checkpoint"
+    );
+
+    let trusted_subtree_hash =
+        authenticated_subtree_hash(client, checkpoint.size(), *checkpoint.hash(), &subtree).await;
+    assert_eq!(
+        expected_subtree_hash, trusted_subtree_hash,
+        "evaluated subtree hash must match the subtree hash of the log"
+    );
+}
+
+/// Compute the hash of `subtree` from the log's published tiles, authenticating
+/// every tile against the checkpoint's tree hash.
+async fn authenticated_subtree_hash(
+    client: &IetfMtcClient,
+    tree_size: u64,
+    tree_hash: Hash,
+    subtree: &Subtree,
+) -> Hash {
+    let indexes = subtree_hash_indexes(subtree).expect("subtree hash indexes");
+
+    let recorder = TlogTileRecorder::default();
+    match TileHashReader::new(tree_size, tree_hash, &recorder).read_hashes(&indexes) {
+        Err(TlogError::RecordedTilesOnly) => {}
+        other => panic!("expected the recorder to collect tiles, got {other:?}"),
+    }
+
+    let mut tiles = HashMap::new();
+    for tile in recorder.0.into_inner() {
+        let data = client
+            .get_raw(&tile.path())
+            .await
+            .unwrap_or_else(|error| panic!("fetching {}: {error}", tile.path()));
+        tiles.insert(tile, data);
+    }
+    let reader = PreloadedTlogTileReader(tiles);
+    let hash_reader = TileHashReader::new(tree_size, tree_hash, &reader);
+    subtree_hash(subtree, &hash_reader).expect("subtree hash from authenticated tiles")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// `GET /logs/:log/metadata` returns 200 with all required fields.
+#[tokio::test]
+async fn metadata_returns_valid_fields() {
+    let client = IetfMtcClient::default_log();
+    let meta = client.get_metadata().await.expect("metadata failed");
+
+    let ca_id: TrustAnchorID = meta.ca_id.parse().expect("valid ca_id");
+    let log_id: TrustAnchorID = meta.log_id.parse().expect("valid log_id");
+    assert!(meta.log_number > 0, "log_number must be positive");
+    assert_eq!(
+        ca_id.log_id(meta.log_number).expect("derive log_id"),
+        log_id,
+        "log_id must be derived from ca_id and log_number"
+    );
+    assert!(!meta.log_id.is_empty(), "log_id must be non-empty");
+    assert!(
+        meta.log_id.contains('.'),
+        "log_id must be a dotted-decimal OID, got: {}",
+        meta.log_id
+    );
+    assert!(
+        !meta.cosigner_id.is_empty(),
+        "cosigner_id must be non-empty"
+    );
+    // cosigner_public_key is a DER-encoded SubjectPublicKeyInfo. The algorithm
+    // identifier is included so clients can determine the signing algorithm.
+    assert!(
+        !meta.cosigner_public_key.is_empty(),
+        "cosigner_public_key must be non-empty"
+    );
+    assert!(
+        !meta.submission_url.is_empty(),
+        "submission_url must be set"
+    );
+}
+
+/// Requesting an unknown log name returns 400.
+#[tokio::test]
+async fn unknown_log_returns_400() {
+    let client = IetfMtcClient::new("this-log-does-not-exist");
+    let status = client.get_status("metadata").await.expect("GET request");
+    assert_eq!(status, 400, "expected 400 for unknown log");
+}
+
+/// `POST /logs/:log/add-entry` with a valid CSR returns 200 with a
+/// structurally valid standalone MTC certificate.
+#[tokio::test]
+async fn add_entry_returns_valid_response() {
+    ensure_initialized().await;
+    let client = IetfMtcClient::default_log();
+    let csr = make_ietf_mtc_csr(&client.log).expect("generating CSR");
+
+    let (status, resp) = client
+        .add_entry(csr.csr_der)
+        .await
+        .expect("add-entry request");
+    assert_eq!(status, 200, "expected 200 from add-entry");
+    let resp = resp.unwrap();
+
+    // The response is a DER-encoded standalone MTC certificate.
+    let cert = assert_valid_mtc_cert(&resp.certificate, "add-entry standalone cert");
+    let context = fetch_verification_context(&client).await;
+    let (log_number, leaf_index) = certificate_serial(&cert);
+    assert_eq!(log_number, context.log_number);
+
+    // Full signature and inclusion proof verification.
+    verify_standalone_cert(&cert, leaf_index, &context);
+    if let Ok(path) = std::env::var("IETF_MTC_CERTIFICATE_OUT") {
+        std::fs::write(path, &resp.certificate).expect("write MTC certificate");
+    }
+}
+
+/// `POST` with garbage bytes (not a valid CSR) returns 400.
+#[tokio::test]
+async fn add_entry_with_invalid_csr_returns_400() {
+    ensure_initialized().await;
+    let client = IetfMtcClient::default_log();
+    let (status, _) = client
+        .add_entry(b"this is not a valid CSR".to_vec())
+        .await
+        .expect("add-entry request");
+    assert_eq!(status, 400, "expected 400 for invalid CSR");
+}
+
+/// After `add-entry`, the index encoded in the certificate serial is covered by
+/// the checkpoint.
+#[tokio::test]
+async fn add_entry_appears_in_checkpoint() {
+    const MAX_RETRIES: u32 = 12;
+    const RETRY_DELAY_MS: u64 = 500;
+
+    ensure_initialized().await;
+    let client = IetfMtcClient::default_log();
+    let csr = make_ietf_mtc_csr(&client.log).expect("generating CSR");
+
+    let (status, resp) = client
+        .add_entry(csr.csr_der)
+        .await
+        .expect("add-entry request");
+    assert_eq!(status, 200, "expected 200 from add-entry");
+    let resp = resp.unwrap();
+
+    // The serial encodes the log number in its high 16 bits and index in its low 48 bits.
+    let cert = assert_valid_mtc_cert(&resp.certificate, "add-entry standalone cert");
+    let context = fetch_verification_context(&client).await;
+    let (log_number, leaf_index) = certificate_serial(&cert);
+    assert_eq!(log_number, context.log_number);
+    let min_size = leaf_index + 1;
+
+    let mut last_size = 0u64;
+
+    for attempt in 0..MAX_RETRIES {
+        let checkpoint_bytes = client.get_checkpoint().await.expect("fetching checkpoint");
+        let text = String::from_utf8_lossy(&checkpoint_bytes);
+        if let Some(size_str) = text.lines().nth(1)
+            && let Ok(size) = size_str.trim().parse::<u64>()
+        {
+            last_size = size;
+            if size >= min_size {
+                return;
+            }
+        }
+        if attempt + 1 < MAX_RETRIES {
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+        }
+    }
+
+    panic!("checkpoint size {last_size} never reached {min_size} after {MAX_RETRIES} retries");
+}
+
+/// After `add-entry`, `get-certificate` returns a parseable landmark-relative DER
+/// certificate once a landmark has been produced.
+///
+/// Assumes the configured log has a short `landmark_interval_secs` (≤10s);
+/// `dev1` in `config.dev.json` satisfies this. Retries for up to 30s.
+#[tokio::test]
+async fn get_certificate_returns_valid_cert() {
+    const MAX_RETRIES: u32 = 30;
+    const RETRY_DELAY_MS: u64 = 1_000;
+
+    ensure_initialized().await;
+    let log_name = ietf_mtc_log_name();
+
+    let client = IetfMtcClient::new(&log_name);
+    let csr = make_ietf_mtc_csr(&log_name).expect("generating CSR");
+    let spki_der = csr.spki_der.clone();
+
+    let (status, resp) = client
+        .add_entry(csr.csr_der)
+        .await
+        .expect("add-entry request");
+    assert_eq!(status, 200, "expected 200 from add-entry");
+    let resp = resp.unwrap();
+
+    let cert = assert_valid_mtc_cert(&resp.certificate, "add-entry standalone cert");
+    let context = fetch_verification_context(&client).await;
+    let (log_number, leaf_index) = certificate_serial(&cert);
+    assert_eq!(log_number, context.log_number);
+
+    let mut last_status = 0u16;
+
+    for attempt in 0..MAX_RETRIES {
+        let (s, cert_resp) = client
+            .get_certificate(leaf_index, spki_der.clone())
+            .await
+            .expect("get-certificate request");
+        last_status = s;
+        if s == 200 {
+            let cert_resp = cert_resp.unwrap();
+
+            let lm_cert =
+                assert_valid_mtc_cert(&cert_resp.data, "get-certificate landmark-relative cert");
+
+            assert!(
+                cert_resp.landmark_id > 0,
+                "landmark_id must be positive (index 0 is the initial null entry)"
+            );
+
+            // Full signature and inclusion proof verification for landmark-relative cert.
+            verify_landmark_relative_cert(&client, &lm_cert, leaf_index, &context).await;
+
+            return;
+        }
+        assert_eq!(s, 503, "expected 200 or 503, got {s}");
+
+        if attempt + 1 < MAX_RETRIES {
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+        }
+    }
+
+    panic!(
+        "get-certificate never returned 200 after {MAX_RETRIES} retries (last status: {last_status})"
+    );
+}

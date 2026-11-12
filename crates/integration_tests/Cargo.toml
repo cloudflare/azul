@@ -10,7 +10,7 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Integration tests for Azul workers"
+description = "Integration tests for the static CT and IETF MTC workers"
 
 [lib]
 # rlib (default) — not cdylib, so it runs in native cargo test
@@ -49,9 +49,11 @@ tokio = { version = "1", features = ["full"] }
 # Used only by the integration test binaries in tests/, not by the shared
 # support library in src/.
 flate2.workspace = true
+ietf_mtc_api.workspace = true
 jsonschema.workspace = true
 ml-dsa.workspace = true
 pkcs8.workspace = true
+spki.workspace = true
 tlog_cosignature.workspace = true
 tlog_mirror.workspace = true
 tlog_witness.workspace = true
