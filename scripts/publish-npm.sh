@@ -37,5 +37,11 @@ for dir in "$@"; do
     if [[ -n "${DRY_RUN:-}" ]]; then
         continue
     fi
-    (cd "$dir" && npm publish --access public)
+    # npm tags every publish as `latest` unless told otherwise, which would make
+    # a prerelease the default install.
+    tag=latest
+    if [[ "$version" == *-* ]]; then
+        tag=next
+    fi
+    (cd "$dir" && npm publish --access public --tag "$tag")
 done
