@@ -27,15 +27,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-workflow-${{ github.event_name }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Open release PR
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    concurrency:
-      group: release-prepare
-      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
