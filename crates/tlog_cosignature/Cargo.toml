@@ -8,6 +8,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "An implementation of c2sp.org/tlog-cosignature"
+publish = false
 categories = ["cryptography"]
 keywords = ["transparency", "cosignature", "checkpoint", "crypto", "pki"]
 

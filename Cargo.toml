@@ -129,7 +129,7 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 hex = "0.4"
 itertools = "0.14.0"
 jsonschema = "0.30"
-length_prefixed = { path = "crates/length_prefixed" }
+length_prefixed = { path = "crates/length_prefixed", version = "0.4.0" }
 libfuzzer-sys = "0.4"
 log = { version = "0.4" }
 ml-dsa = "0.1.1"
@@ -168,7 +168,7 @@ worker = "0.8.5"
 worker_build_config = { path = "crates/worker_build_config" }
 x509-cert = "0.3.0"
 
-x509_util = { path = "crates/x509_util" }
+x509_util = { path = "crates/x509_util", version = "0.4.0" }
 sct_validator = { path = "crates/sct_validator" }
 
 # sct_validator dependencies

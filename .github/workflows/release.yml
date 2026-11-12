@@ -1,0 +1,190 @@
+name: Release
+
+# Two-phase release:
+#   1. Run this workflow manually (workflow_dispatch) to open a "release: X.Y.Z"
+#      PR that bumps the workspace version.
+#   2. When that PR lands on main (any merge method), the publish jobs wait for
+#      approval of the `release` environment, then publish to crates.io and
+#      npm. The vX.Y.Z tag and GitHub release are created last, after both
+#      publishes succeed. Both publish steps skip versions already on the
+#      registry, so a failed run can be re-run.
+#
+# crates.io and npm trusted publishers must name this workflow file
+# (release.yml) and the `release` environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release: X.Y.Z[-prerelease], or major, minor, patch"
+        type: string
+        required: true
+  push:
+    branches: [ "main" ]
+    paths:
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-workflow-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Open release PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - run: rustup update stable && rustup default stable
+
+      - name: Bump version
+        id: bump
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          scripts/bump-version.sh "$VERSION"
+          echo "version=$(scripts/workspace-version.sh Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          branch="release/$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "release: $VERSION"
+          git push origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "release: $VERSION" \
+            --body "Bumps the workspace version to $VERSION. After merge, the Release workflow waits for approval of the release environment, then publishes to crates.io and npm and creates the v$VERSION tag and GitHub release."
+
+  check:
+    name: Check release commit
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The release PR is identified by its head branch (release/X.Y.Z), so
+      # detection does not depend on the merge method or commit subject.
+      - name: Check release commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(scripts/workspace-version.sh Cargo.toml)
+          echo "release=false" >> "$GITHUB_OUTPUT"
+          branches=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq '.[] | select(.head.repo.full_name == "'"$GITHUB_REPOSITORY"'") | .head.ref')
+          if ! grep -qx "release/$version" <<<"$branches"; then
+            echo "commit $GITHUB_SHA is not the merge of a release/$version PR; not releasing"
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "tag v$version already exists; not releasing"
+            exit 0
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  publish-crates:
+    name: Publish crates
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup update stable && rustup default stable
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish
+        run: scripts/publish-crates.sh
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  publish-npm:
+    name: Publish npm
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # trusted publishing requires npm >= 11.5.1
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      - run: rustup update stable && rustup default stable
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack@0.13.1 --locked
+
+      - run: wasm-pack build crates/signed_note_wasm --target web --scope cloudflare
+      - run: wasm-pack build crates/tlog_tiles_wasm --target web --scope cloudflare
+
+      - name: Rename packages to kebab-case
+        run: |
+          npm pkg set name=@cloudflare/signed-note-wasm --prefix crates/signed_note_wasm/pkg
+          npm pkg set name=@cloudflare/tlog-tiles-wasm --prefix crates/tlog_tiles_wasm/pkg
+
+      - name: Publish
+        run: scripts/publish-npm.sh crates/signed_note_wasm/pkg crates/tlog_tiles_wasm/pkg
+
+  github-release:
+    name: Tag and create GitHub release
+    needs: [check, publish-crates, publish-npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release v$VERSION already exists"
+            exit 0
+          fi
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --generate-notes
