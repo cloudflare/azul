@@ -207,7 +207,10 @@ impl IdentitySigner {
         hash: &tlog_core::Hash,
     ) -> Result<signed_note::NoteSignature> {
         match self {
-            Self::KeyService(signer) => signer.sign_subtree(env, origin, subtree, hash).await,
+            Self::KeyService(signer) => signer
+                .sign_subtree(env, origin, subtree, hash)
+                .await
+                .map_err(|e| worker::Error::from(e.to_string())),
             Self::SubtreeV1 { signer, .. } => Ok(signer.sign_subtree(origin, subtree, hash)),
             Self::CosignatureV1 { .. } => {
                 Err(Error::from("Ed25519 keys do not support sign-subtree"))
@@ -223,7 +226,10 @@ impl IdentitySigner {
         checkpoint: &tlog_checkpoint::CheckpointText,
     ) -> Result<signed_note::NoteSignature> {
         match self {
-            Self::KeyService(signer) => signer.sign(env, timestamp, checkpoint).await,
+            Self::KeyService(signer) => signer
+                .sign(env, timestamp, checkpoint)
+                .await
+                .map_err(|e| worker::Error::from(e.to_string())),
             Self::CosignatureV1 { signer, .. } => signer
                 .sign(timestamp, checkpoint)
                 .map_err(|error| Error::from(format!("checkpoint signing: {error:?}"))),
@@ -233,13 +239,6 @@ impl IdentitySigner {
         }
     }
 }
-
-/// The mirror signs with every key during a rotation. Key service keys are
-/// discovered per request so a Queue-triggered rotation needs no deploy.
-const MIRROR_SIGNING_KEY: &str = "MIRROR_SIGNING_KEY";
-const WITNESS_SIGNING_KEY: &str = "WITNESS_SIGNING_KEY";
-const MIRROR_KEY_SERVICE: &str = "MIRROR_KEY_SERVICE";
-const WITNESS_KEY_SERVICE: &str = "WITNESS_KEY_SERVICE";
 
 /// Suffix of the secret holding the incoming key during a rotation.
 ///
@@ -260,7 +259,7 @@ async fn read_key_secret(env: &Env, binding: &str) -> Result<Option<String>> {
         .filter(|pem| !pem.trim().is_empty()))
 }
 
-/// Use the key service exclusively when its logical key exists; otherwise load
+/// Use the key service exclusively when it's bound; otherwise load
 /// the local current and next keys.
 ///
 /// Keys are deduplicated by public key, so a promotion that has copied the
@@ -268,43 +267,41 @@ async fn read_key_secret(env: &Env, binding: &str) -> Result<Option<String>> {
 /// rather than emitting two identical signatures.
 async fn load_signing_keys(
     env: &Env,
-    binding: &str,
-    key_service_binding: &str,
+    key_name: key_service::SigningKeyName,
     identity_name: &str,
 ) -> Result<Vec<IdentitySigner>> {
-    if let Ok(name) = env.var(key_service_binding) {
-        let name = name.to_string();
-        if name.trim().is_empty() {
-            return Err(Error::from(format!(
-                "{key_service_binding} must not be empty"
-            )));
-        }
-        if let Some(key_service_signers) = key_service::load(env, &name, identity_name).await? {
+    match key_service::load(env, key_name, identity_name).await {
+        Ok(key_service_signers) => {
             let signers: Vec<_> = key_service_signers
                 .into_iter()
                 .map(IdentitySigner::KeyService)
                 .collect();
-            return require_signer(signers, binding);
+            require_signer(signers, key_name.as_str())
         }
-        log::warn!("key service logical key {name} is missing; using local key for {binding}");
-    }
+        Err(key_service::KeyServiceError::KeyServiceNotEnabled) => {
+            let current = read_key_secret(env, key_name.as_str())
+                .await?
+                .ok_or_else(|| Error::from(format!("{key_name} is not set")))?;
+            let mut signers = vec![build_identity_signer(
+                identity_name,
+                key_name.as_str(),
+                &current,
+            )?];
 
-    let current = read_key_secret(env, binding)
-        .await?
-        .ok_or_else(|| Error::from(format!("{binding} is not set")))?;
-    let mut signers = vec![build_identity_signer(identity_name, binding, &current)?];
-
-    let next_binding = format!("{binding}{NEXT_SUFFIX}");
-    if let Some(next) = read_key_secret(env, &next_binding).await? {
-        let next = build_identity_signer(identity_name, &next_binding, &next)?;
-        if !signers
-            .iter()
-            .any(|existing| existing.public_key_der() == next.public_key_der())
-        {
-            signers.push(next);
+            let next_binding = format!("{key_name}{NEXT_SUFFIX}", key_name = key_name.as_str());
+            if let Some(next) = read_key_secret(env, &next_binding).await? {
+                let next = build_identity_signer(identity_name, &next_binding, &next)?;
+                if !signers
+                    .iter()
+                    .any(|existing| existing.public_key_der() == next.public_key_der())
+                {
+                    signers.push(next);
+                }
+            }
+            require_signer(signers, key_name.as_str())
         }
+        Err(e) => Err(worker::Error::from(e.to_string())),
     }
-    require_signer(signers, binding)
 }
 
 fn require_signer(signers: Vec<IdentitySigner>, binding: &str) -> Result<Vec<IdentitySigner>> {
@@ -321,8 +318,7 @@ pub(crate) async fn load_mirror_signers(env: &Env) -> Result<Vec<IdentitySigner>
         .ok_or_else(|| Error::from("mirror identity is disabled"))?;
     load_signing_keys(
         env,
-        MIRROR_SIGNING_KEY,
-        MIRROR_KEY_SERVICE,
+        key_service::SigningKeyName::Mirror,
         config.name.as_str(),
     )
     .await
@@ -383,8 +379,7 @@ pub(crate) async fn load_witness_signers(env: &Env) -> Result<Vec<IdentitySigner
         .expect("validated witness mode must have witness config");
     load_signing_keys(
         env,
-        WITNESS_SIGNING_KEY,
-        WITNESS_KEY_SERVICE,
+        key_service::SigningKeyName::Witness,
         identity.name.as_str(),
     )
     .await
@@ -443,15 +438,16 @@ pub(crate) async fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSeale
     if let Some(t) = TICKET_SEALER.get() {
         return Ok(t);
     }
-    let b64 = read_key_secret(env, "MIRROR_TICKET_KEY")
+    let key_name = key_service::KeyName::Ticket.as_str();
+    let b64 = read_key_secret(env, key_name)
         .await?
-        .ok_or_else(|| Error::from("MIRROR_TICKET_KEY is not set"))?;
+        .ok_or_else(|| Error::from(format!("{key_name} is not set")))?;
     let raw = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
-        .map_err(|e| Error::from(format!("MIRROR_TICKET_KEY base64 decode: {e}")))?;
+        .map_err(|e| Error::from(format!("{key_name} base64 decode: {e}")))?;
     let key: [u8; 32] = raw.try_into().map_err(|v: Vec<u8>| {
         Error::from(format!(
-            "MIRROR_TICKET_KEY must decode to exactly 32 bytes; got {}",
+            "{key_name} must decode to exactly 32 bytes; got {}",
             v.len()
         ))
     })?;
@@ -459,24 +455,23 @@ pub(crate) async fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSeale
 }
 
 pub(crate) async fn seal_ticket(env: &Env, payload: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
-    if key_service::ticket_key_exists(env).await? {
-        key_service::seal_ticket(env, payload, origin).await
-    } else {
-        Ok(load_ticket_sealer(env).await?.seal(payload, origin))
+    match key_service::seal_ticket(env, payload, origin).await {
+        Ok(sealed) => Ok(sealed),
+        Err(key_service::KeyServiceError::KeyServiceNotEnabled) => {
+            Ok(load_ticket_sealer(env).await?.seal(payload, origin))
+        }
+        Err(e) => Err(worker::Error::from(e.to_string())),
     }
 }
 
 pub(crate) async fn open_ticket(env: &Env, ticket: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
-    if key_service::ticket_key_exists(env).await? {
-        key_service::open_ticket(env, ticket, origin).await
-    } else {
-        if key_service::is_service_ticket(ticket) {
-            return Err(Error::from("key service ticket key is unavailable"));
-        }
-        load_ticket_sealer(env)
+    match key_service::open_ticket(env, ticket, origin).await {
+        Ok(opened) => Ok(opened),
+        Err(key_service::KeyServiceError::KeyServiceNotEnabled) => load_ticket_sealer(env)
             .await?
             .open(ticket, origin)
-            .map_err(|error| Error::from(format!("ticket authentication: {error}")))
+            .map_err(|error| Error::from(format!("ticket authentication: {error}"))),
+        Err(e) => Err(worker::Error::from(e.to_string())),
     }
 }
 
