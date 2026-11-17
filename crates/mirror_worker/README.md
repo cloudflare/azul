@@ -33,13 +33,14 @@ applied on read, so changing the list takes effect without a re-synchronization.
 Witness and mirror monitoring prefixes are backed by separate public R2 buckets.
 The Worker only serves submission and metadata APIs.
 
-Mirror upload tickets use the key-service AES-256-GCM key named
-`MIRROR_TICKET_KEY` when that key exists in the `KEY_SERVICE` keyring. New
-tickets use only its newest version, regardless of the key-service default;
-each ticket records its version, so tickets from any still-decryptable version
-are accepted. The origin and version are authenticated. If the binding or
-logical key is absent, the Worker instead uses the local `MIRROR_TICKET_KEY`
-secret with AES-256-GCM-SIV.
+Mirror upload tickets use the key service AES-256-GCM key named
+`MIRROR_TICKET_KEY` when `KEY_SERVICE` is bound. New tickets use only its
+newest version, regardless of the key service default; each ticket records
+its version, so tickets from any still-decryptable version are accepted. The
+origin and version are authenticated. If `KEY_SERVICE` is bound but the logical
+key is missing, ticket operations fail rather than using a local key. Without
+`KEY_SERVICE`, the Worker uses the local `MIRROR_TICKET_KEY` secret with
+AES-256-GCM-SIV.
 The local secret is standard-base64 encoding of 32 random bytes, for example
 from `head -c 32 /dev/urandom | base64`.
 
@@ -66,26 +67,27 @@ For local signing keys, the current key is required and the `_NEXT` key is optio
 
 ## Key service rotation Queue
 
-When `MIRROR_KEY_SERVICE` or `WITNESS_KEY_SERVICE` names a logical key
-in the key service keyring, that role uses its key service versions exclusively
-instead of the local signing secrets. Provide the `KEY_SERVICE` cross-account
-binding, which directly exposes the keyring.
+When `KEY_SERVICE` is bound, mirror and witness signing use the fixed
+logical names `MIRROR_SIGNING_KEY` and `WITNESS_SIGNING_KEY` exclusively;
+the binding directly exposes the keyring. Without it, the Worker uses the
+corresponding local signing secrets.
 Sign-enabled versions must have an exportable public key. A verify-only version
-with an exportable public key is retired: it is excluded from new signatures
-and `/metadata`. Other unusable versions (including non-exportable or inert
-versions) fail closed rather than triggering local-key fallback. Only a missing
-logical key uses local signing, and that fallback is logged as a warning.
+is retired: it is excluded from new signatures and `/metadata`. Other unusable
+versions (including non-exportable signing or inert versions) fail closed. A
+missing logical key with `KEY_SERVICE` bound also fails rather than using a
+local signing key.
 Ticket sealing uses its own symmetric key, independently of the asymmetric
-signing keys. Key-service ticket-key creation, rotation, and retirement are
-operator Queue operations using the fixed name `MIRROR_TICKET_KEY` (one Queue message per line):
+signing keys. Key service ticket-key creation, rotation, and retirement are
+operator Queue operations using the fixed name `MIRROR_TICKET_KEY` (one Queue
+message per line):
 
 ```jsonl
 {"action":"create","role":"ticket"}
-{"role":"ticket","expected_default_version":1}
+{"action":"rotate","role":"ticket","expected_default_version":1}
 {"action":"retire","role":"ticket","version":1}
 ```
 
-Creating the initial key enables key-service tickets. Rotation creates
+Creating the initial key enables key service tickets. Rotation creates
 a new version with `encrypt` and `decrypt` permission and promotes it to the
 default. If creation succeeds but promotion fails, rerunning the same Queue
 message promotes that version instead of creating another. Ticket issuance
@@ -96,27 +98,27 @@ decryptable version. This explicit number makes Queue retries idempotent: a
 retry cannot retire the next oldest key. Retirement sets usages to `[]`, so
 the version can neither encrypt nor decrypt; the key service does not support
 deleting a version.
-Tickets issued under that version are no longer accepted once the key-service
+Tickets issued under that version are no longer accepted once the key service
 change propagates. Wait for outstanding tickets to finish before retiring
 their version.
 
-The Rust Queue consumer in `src/key_service_rotation.rs` runs creation,
-rotations, and retirements with no public endpoint or cron. The deployment configuration maintained
-outside this repo must bind a dedicated operator-only Queue as a consumer of
-this Worker (`max_batch_size: 1`, `max_concurrency: 1`) and provide the same key
-service binding and variables. Operators send a JSON message through the
+The Queue consumer in `src/key_service/rotation.rs` runs creation,
+rotations, and retirements with no public endpoint or cron. The deployment
+configuration maintained outside this repo must bind a dedicated operator-only
+Queue as a consumer of this Worker (`max_batch_size: 1`, `max_concurrency: 1`)
+and provide the `KEY_SERVICE` binding. Operators send a JSON message through the
 Cloudflare dashboard or the account-scoped Queues HTTP API, for example:
 
 ```json
-{ "role": "mirror", "expected_default_version": 1 }
+{ "action": "rotate", "role": "mirror", "expected_default_version": 1 }
 ```
 
-For the **first** mirror or witness signing-key rotation, set
-`expected_default_version` to `0` and supply the algorithm to create the
-logical key (choose `ed25519` or `mldsa44`):
+To create the **first** mirror or witness signing key, use `"action":"create"`
+with an algorithm (`ED25519` or `ML_DSA_44`), without
+`expected_default_version`:
 
 ```json
-{ "role": "mirror", "expected_default_version": 0, "algorithm": "ML_DSA_44" }
+{ "action": "create", "role": "mirror", "algorithm": "ML_DSA_44" }
 ```
 
 If the key already exists, retrying this initial message does not add another
@@ -124,8 +126,9 @@ version. Later signing-key rotations omit `algorithm` and use the current
 positive default version.
 
 Use `"witness"` for the witness role and supply the **current** key service
-default version. A stale request cannot create another version. Each new version is
-created sign-enabled and then made the default. Queue delivery is at-least-once:
+default version. A stale request cannot create another version. Each new
+version is created sign-enabled and then made the default. Queue delivery is
+at-least-once:
 if creation succeeds but promotion fails, retries refuse to create a duplicate
 and an operator must inspect the key service and finish or resolve the rotation
 manually. Keep a dead-letter queue for failed messages. Older versions continue
@@ -136,13 +139,14 @@ to cosign checkpoints until an operator retires them through the same Queue:
 ```
 
 The Worker refuses to retire the default or last signing version. Retrying an
-already retired version is harmless. Retirement replaces the specified KMS
-version's usages with `["verify"]`, retaining public-key export for existing
-signatures; it does not delete the version. Other sign-enabled versions still
-have to pass all signing and export checks. KMS control-plane writes are
-serialized per key, but data-plane readers can observe old metadata for up to
-60 seconds. Allow for that propagation before assuming signing and `/metadata`
-have stopped advertising the retired version. Clients verifying older
+already retired version is harmless. Retirement replaces the specified key
+service version's usages with `["verify"]`, retaining public-key export for
+existing signatures; it does not delete the version. Other sign-enabled
+versions still have to pass all signing and export checks. Key service
+control-plane writes are serialized per key, but data-plane readers can
+observe old metadata for up to 60 seconds. Allow for that propagation before
+assuming signing and `/metadata` have stopped advertising the retired version.
+Clients verifying older
 signatures must retain the previously published public key, since `/metadata`
 no longer lists it. Coordinate operators: these
 read/check/write guards are not an atomic compare-and-swap against concurrent
