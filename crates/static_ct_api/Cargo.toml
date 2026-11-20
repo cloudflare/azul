@@ -5,7 +5,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "An implementation of c2sp.org/static-ct-api"
 categories = ["cryptography"]
@@ -24,7 +23,6 @@ crate-type = ["rlib"]
 [dependencies]
 base64.workspace = true
 byteorder.workspace = true
-chrono.workspace = true
 der.workspace = true
 length_prefixed.workspace = true
 p256.workspace = true
@@ -41,3 +39,6 @@ tlog_tiles.workspace = true
 spki.workspace = true
 x509-cert.workspace = true
 x509_util.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true

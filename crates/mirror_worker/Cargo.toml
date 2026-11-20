@@ -9,7 +9,6 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 readme.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "A transparency-log witness and mirror on Cloudflare Workers"
 categories = ["cryptography"]

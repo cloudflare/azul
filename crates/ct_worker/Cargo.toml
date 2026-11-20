@@ -5,7 +5,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "An implementation of c2sp.org/static-ct-api on Cloudflare Workers"
 categories = ["cryptography"]
@@ -24,7 +23,6 @@ crate-type = ["cdylib"]
 [build-dependencies]
 chrono.workspace = true
 config = { path = "./config", package = "ct_worker_config" }
-generic_log_worker.workspace = true
 url.workspace = true
 x509-cert.workspace = true
 worker_build_config.workspace = true

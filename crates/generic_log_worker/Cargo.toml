@@ -6,7 +6,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "An implementation of a tiled Merkle Tree-backed log on Cloudflare Workers"
 categories = ["cryptography"]
@@ -14,6 +13,7 @@ keywords = ["transparency", "crypto"]
 
 [dev-dependencies]
 crypto-common.workspace = true
+p256.workspace = true
 rand.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true
@@ -31,7 +31,6 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 log = { workspace = true, features = ["kv"] }
-p256.workspace = true
 prometheus.workspace = true
 rand.workspace = true
 sentry-core.workspace = true

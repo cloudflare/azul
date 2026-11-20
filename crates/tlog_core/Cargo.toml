@@ -5,7 +5,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "RFC 6962 Merkle tree math + draft-ietf-plants-merkle-tree-certs subtree proofs"
 categories = ["cryptography"]
