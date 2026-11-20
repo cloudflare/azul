@@ -8,7 +8,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "Integration tests for Azul workers"
 

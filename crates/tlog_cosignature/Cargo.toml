@@ -5,7 +5,6 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "An implementation of c2sp.org/tlog-cosignature"
 categories = ["cryptography"]

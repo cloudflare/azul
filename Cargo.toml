@@ -68,7 +68,6 @@ authors = ["Luke Valenta <lvalenta@cloudflare.com>"]
 edition = "2024"
 license = "BSD-3-Clause"
 readme = "README.md"
-homepage = "https://github.com/cloudflare/azul"
 repository = "https://github.com/cloudflare/azul"
 description = "An implementation of the Static Certificate Transparency API on Cloudflare Workers"
 

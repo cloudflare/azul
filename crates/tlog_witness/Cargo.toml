@@ -5,7 +5,6 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 readme.workspace = true
-homepage.workspace = true
 repository.workspace = true
 description = "An implementation of the c2sp.org/tlog-witness protocol"
 categories = ["cryptography"]
