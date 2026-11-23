@@ -23,7 +23,7 @@ use generic_log_worker::key_service::{
 use std::num::NonZeroU32;
 
 pub use generic_log_worker::key_service::{
-    KeyServiceError, KeyServiceSigner, KeyUsage, VersionState,
+    KeyServiceError, KeyServiceSigner, KeyUsage, KeyVersion,
 };
 use serde::Deserialize;
 
@@ -87,14 +87,14 @@ impl std::fmt::Display for KeyName {
 }
 
 #[derive(Clone, Copy, Deserialize, Debug, PartialEq, Eq)]
-pub enum SigningAlgorithm {
+pub enum KeyAlgorithm {
     #[serde(rename = "ED25519")]
     Ed25519,
     #[serde(rename = "ML_DSA_44")]
     MlDsa44,
 }
 
-impl SigningAlgorithm {
+impl KeyAlgorithm {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Ed25519 => "ED25519",
@@ -116,20 +116,20 @@ impl Keyring {
     pub async fn signing_versions(
         &self,
         key_name: SigningKeyName,
-    ) -> Result<Vec<VersionState<key_kind::Signing>>, KeyServiceError> {
+    ) -> Result<Vec<KeyVersion<key_kind::Signing>>, KeyServiceError> {
         self.keyring.versions(key_name.as_str()).await
     }
 
     pub async fn ticket_versions(
         &self,
-    ) -> Result<Vec<VersionState<key_kind::Ticket>>, KeyServiceError> {
+    ) -> Result<Vec<KeyVersion<key_kind::Ticket>>, KeyServiceError> {
         self.keyring.versions(KeyName::Ticket.as_str()).await
     }
 
     pub async fn create_signing_key(
         &self,
         key_name: SigningKeyName,
-        algorithm: SigningAlgorithm,
+        algorithm: KeyAlgorithm,
     ) -> Result<(), KeyServiceError> {
         self.keyring
             .create_key(key_name.as_str(), algorithm.as_str())
@@ -205,7 +205,7 @@ impl Keyring {
         identity: &str,
     ) -> Result<Vec<KeyServiceSigner>, KeyServiceError> {
         self.keyring
-            .load_singing_keys(key_name.as_str(), identity)
+            .load_signing_keys(key_name.as_str(), identity)
             .await
     }
 
@@ -344,8 +344,8 @@ fn ticket_algorithm<'s>(nonce: &'s [u8], aad: &'s [u8]) -> EncryptAlgorithm<'s> 
     EncryptAlgorithm {
         name: "AES-GCM",
         iv: nonce,
-        aad,
-        tag_len: 128,
+        additional_data: aad,
+        tag_length: 128,
     }
 }
 

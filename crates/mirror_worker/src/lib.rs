@@ -159,7 +159,7 @@ pub(crate) fn log_verifiers_for_keys(keys: &[LogKey]) -> VerifierList {
 pub(crate) enum IdentitySigner {
     KeyService {
         keyring: key_service::Keyring,
-        signer: key_service::KeyServiceSigner,
+        signer: Box<key_service::KeyServiceSigner>,
     },
     CosignatureV1 {
         signer: Box<CosignatureV1CheckpointSigner>,
@@ -281,7 +281,7 @@ async fn load_signing_keys(
             .into_iter()
             .map(|signer| IdentitySigner::KeyService {
                 keyring: ring.clone(),
-                signer,
+                signer: Box::new(signer),
             })
             .collect();
         require_signer(signers, key_name.as_str())
