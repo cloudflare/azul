@@ -5,8 +5,8 @@
 //! The Queue is populated with an account-scoped API token or the dashboard;
 //! there is no public rotation endpoint or Workflow entrypoint.
 
-use super::{KeyUsage, Keyring, VersionState};
-use crate::key_service::{KeyName, KeyServiceError, SigningAlgorithm, SigningKeyName};
+use super::{KeyUsage, KeyVersion, Keyring};
+use crate::key_service::{KeyAlgorithm, KeyName, KeyServiceError, SigningKeyName};
 use generic_log_worker::key_service::{VersionNumber, key_kind};
 use serde::Deserialize;
 use worker::{Context, Env, MessageBatch, event};
@@ -24,7 +24,7 @@ enum RotationRequest {
     },
     Create {
         role: Role,
-        algorithm: Option<SigningAlgorithm>,
+        algorithm: Option<KeyAlgorithm>,
     },
 }
 
@@ -53,7 +53,7 @@ enum RotationDecision {
 fn decide_rotation<K>(
     expected: VersionNumber,
     current: VersionNumber,
-    versions: &[VersionState<K>],
+    versions: &[KeyVersion<K>],
 ) -> Result<RotationDecision, worker::Error> {
     if current != expected {
         return Ok(RotationDecision::AlreadyAdvanced);
@@ -65,7 +65,7 @@ fn decide_rotation<K>(
     }
     if !versions
         .iter()
-        .any(|version| version.number == current && version.usage == KeyUsage::SingingVerify)
+        .any(|version| version.number == current && version.usage == KeyUsage::SigningVerify)
     {
         return Err(worker::Error::from(
             "key service default version cannot sign",
@@ -77,7 +77,7 @@ fn decide_rotation<K>(
 async fn create(
     ring: &Keyring,
     role: Role,
-    algorithm: Option<SigningAlgorithm>,
+    algorithm: Option<KeyAlgorithm>,
 ) -> Result<(), KeyServiceError> {
     let name = key_name(role);
     match key_name(role) {
@@ -136,7 +136,7 @@ async fn rotate(
             }
 
             let new_version = ring
-                .new_default_version(k, KeyUsage::SingingVerify, true)
+                .new_default_version(k, KeyUsage::SigningVerify, true)
                 .await?;
             log::info!("key service rotation for {name}: default {current} -> {new_version}");
         }
@@ -167,7 +167,7 @@ enum TicketRotationDecision {
 fn decide_ticket_rotation<K>(
     expected: VersionNumber,
     current: VersionNumber,
-    versions: &[VersionState<K>],
+    versions: &[KeyVersion<K>],
 ) -> Result<TicketRotationDecision, worker::Error> {
     if current != expected {
         return Ok(TicketRotationDecision::AlreadyAdvanced);
@@ -217,11 +217,11 @@ enum RetirementDecision {
 fn decide_retirement<K>(
     version: VersionNumber,
     current: VersionNumber,
-    versions: &[VersionState<K>],
+    versions: &[KeyVersion<K>],
 ) -> Result<RetirementDecision, worker::Error> {
     if !versions
         .iter()
-        .any(|state| state.number == current && state.usage == KeyUsage::SingingVerify)
+        .any(|state| state.number == current && state.usage == KeyUsage::SigningVerify)
     {
         return Err(worker::Error::from(
             "key service default version cannot sign",
@@ -238,12 +238,12 @@ fn decide_retirement<K>(
         .ok_or_else(|| {
             worker::Error::from(format!("key service version {version} does not exist"))
         })?;
-    if target.usage != KeyUsage::SingingVerify {
+    if target.usage != KeyUsage::SigningVerify {
         return Ok(RetirementDecision::AlreadyRetired);
     }
     if versions
         .iter()
-        .filter(|state| state.usage == KeyUsage::SingingVerify)
+        .filter(|state| state.usage == KeyUsage::SigningVerify)
         .count()
         <= 1
     {
@@ -278,7 +278,7 @@ async fn retire(ring: &Keyring, role: Role, version: VersionNumber) -> Result<()
 fn decide_ticket_retirement(
     version: VersionNumber,
     current: VersionNumber,
-    versions: &[VersionState<key_kind::Ticket>],
+    versions: &[KeyVersion<key_kind::Ticket>],
 ) -> Result<RetirementDecision, worker::Error> {
     if !versions
         .last()
@@ -362,39 +362,31 @@ async fn rotation_queue(
 #[cfg(test)]
 mod tests {
     use super::{
-        RetirementDecision, Role, RotationDecision, RotationRequest, TicketRotationDecision,
-        VersionState, decide_retirement, decide_rotation, decide_ticket_retirement,
+        KeyVersion, RetirementDecision, Role, RotationDecision, RotationRequest,
+        TicketRotationDecision, decide_retirement, decide_rotation, decide_ticket_retirement,
         decide_ticket_rotation,
     };
-    use generic_log_worker::key_service::{VersionNumber, key_kind};
+    use generic_log_worker::key_service::{CryptoKeyUsage, VersionNumber, key_kind};
     use std::rc::Rc;
 
     fn n(x: u32) -> VersionNumber {
         serde_json::from_str(&x.to_string()).unwrap()
     }
 
-    fn signing_state(number: u32, signing: bool) -> VersionState<key_kind::Signing> {
+    fn signing_state(number: u32, signing: bool) -> KeyVersion<key_kind::Signing> {
         let usages = if signing {
-            vec!["sign".to_owned(), "verify".to_owned()]
+            vec![CryptoKeyUsage::Sign, CryptoKeyUsage::Verify]
         } else {
-            vec!["verify".to_owned()]
+            vec![CryptoKeyUsage::Verify]
         };
-        VersionState::new(Rc::from("MIRROR_SIGNING_KEY"), n(number), &usages).unwrap()
+        KeyVersion::new(Rc::from("MIRROR_SIGNING_KEY"), n(number), &usages).unwrap()
     }
 
-    fn ticket_state(number: u32, usages: &[&str]) -> VersionState<key_kind::Ticket> {
-        VersionState::new(
-            Rc::from("MIRROR_TICKET_KEY"),
-            n(number),
-            &usages
-                .iter()
-                .map(|usage| (*usage).to_owned())
-                .collect::<Vec<_>>(),
-        )
-        .unwrap()
+    fn ticket_state(number: u32, usages: &[CryptoKeyUsage]) -> KeyVersion<key_kind::Ticket> {
+        KeyVersion::new(Rc::from("MIRROR_TICKET_KEY"), n(number), usages).unwrap()
     }
 
-    fn states(values: &[(u32, bool)]) -> Vec<VersionState<key_kind::Signing>> {
+    fn states(values: &[(u32, bool)]) -> Vec<KeyVersion<key_kind::Signing>> {
         values
             .iter()
             .map(|&(number, signing)| signing_state(number, signing))
@@ -421,7 +413,7 @@ mod tests {
             initial,
             RotationRequest::Create {
                 role: Role::Mirror,
-                algorithm: Some(super::SigningAlgorithm::MlDsa44)
+                algorithm: Some(super::KeyAlgorithm::MlDsa44)
             }
         ));
         let ed25519: RotationRequest =
@@ -430,7 +422,7 @@ mod tests {
         assert!(matches!(
             ed25519,
             RotationRequest::Create {
-                algorithm: Some(super::SigningAlgorithm::Ed25519),
+                algorithm: Some(super::KeyAlgorithm::Ed25519),
                 role: Role::Witness,
             }
         ));
@@ -559,7 +551,7 @@ mod tests {
                     ticket_state(
                         number,
                         if decrypting {
-                            &["encrypt", "decrypt"]
+                            &[CryptoKeyUsage::Encrypt, CryptoKeyUsage::Decrypt]
                         } else {
                             &[]
                         },
@@ -597,8 +589,8 @@ mod tests {
             RetirementDecision::Retire
         );
         let decrypt_only = vec![
-            ticket_state(1, &["decrypt"]),
-            ticket_state(2, &["encrypt", "decrypt"]),
+            ticket_state(1, &[CryptoKeyUsage::Decrypt]),
+            ticket_state(2, &[CryptoKeyUsage::Encrypt, CryptoKeyUsage::Decrypt]),
         ];
         assert_eq!(
             decide_ticket_retirement(n(1), n(2), &decrypt_only).unwrap(),
