@@ -8,6 +8,7 @@ pub mod batcher_do;
 pub mod cleaner_do;
 pub mod frontend;
 pub mod hash_serde;
+pub mod key_service;
 pub mod log_ops;
 pub mod obs;
 pub mod sequencer_do;

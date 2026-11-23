@@ -84,7 +84,7 @@ mod tests {
                 .write_length_prefixed(&vec![0; len], nbytes)
                 .unwrap_err();
             assert_eq!(err.kind(), ErrorKind::InvalidInput);
-            assert!(buf.is_empty());
+            assert_eq!(buf, Vec::<u8>::new());
         }
     }
 

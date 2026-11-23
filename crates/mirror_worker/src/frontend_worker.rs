@@ -426,7 +426,7 @@ async fn sign_subtree(State(env): State<Env>, body: Bytes) -> ApiResult<axum::re
         return Err(AppError::ReferenceCheckpointNotCosigned);
     };
     let signature = signer
-        .sign_subtree(&env, origin, validated.subtree(), validated.subtree_hash())
+        .sign_subtree(origin, validated.subtree(), validated.subtree_hash())
         .await?;
     Ok((
         StatusCode::OK,

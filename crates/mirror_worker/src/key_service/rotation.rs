@@ -5,39 +5,22 @@
 //! The Queue is populated with an account-scoped API token or the dashboard;
 //! there is no public rotation endpoint or Workflow entrypoint.
 
-use super::{State, TicketVersionState, VersionState, keyring};
-use crate::key_service::{KeyName, KeyServiceError, SigningKeyName};
+use super::{KeyUsage, Keyring, VersionState};
+use crate::key_service::{KeyName, KeyServiceError, SigningAlgorithm, SigningKeyName};
+use generic_log_worker::key_service::{VersionNumber, key_kind};
 use serde::Deserialize;
-use std::num::NonZeroU32;
 use worker::{Context, Env, MessageBatch, event};
-
-#[derive(Clone, Copy, Deserialize, Debug, PartialEq, Eq)]
-enum SigningAlgorithm {
-    #[serde(rename = "ED25519")]
-    Ed25519,
-    #[serde(rename = "ML_DSA_44")]
-    MlDsa44,
-}
-
-impl SigningAlgorithm {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ed25519 => "ED25519",
-            Self::MlDsa44 => "ML_DSA_44",
-        }
-    }
-}
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
 enum RotationRequest {
     Rotate {
         role: Role,
-        expected_default_version: NonZeroU32,
+        expected_default_version: VersionNumber,
     },
     Retire {
         role: Role,
-        version: NonZeroU32,
+        version: VersionNumber,
     },
     Create {
         role: Role,
@@ -67,10 +50,10 @@ enum RotationDecision {
     AlreadyAdvanced,
 }
 
-fn decide_rotation(
-    expected: NonZeroU32,
-    current: NonZeroU32,
-    versions: &[VersionState],
+fn decide_rotation<K>(
+    expected: VersionNumber,
+    current: VersionNumber,
+    versions: &[VersionState<K>],
 ) -> Result<RotationDecision, worker::Error> {
     if current != expected {
         return Ok(RotationDecision::AlreadyAdvanced);
@@ -82,7 +65,7 @@ fn decide_rotation(
     }
     if !versions
         .iter()
-        .any(|version| version.number == current && version.signing)
+        .any(|version| version.number == current && version.usage == KeyUsage::SingingVerify)
     {
         return Err(worker::Error::from(
             "key service default version cannot sign",
@@ -92,12 +75,11 @@ fn decide_rotation(
 }
 
 async fn create(
-    env: &Env,
+    ring: &Keyring,
     role: Role,
     algorithm: Option<SigningAlgorithm>,
 ) -> Result<(), KeyServiceError> {
     let name = key_name(role);
-    let ring = keyring(env)?;
     match key_name(role) {
         KeyName::Ticket => {
             if algorithm.is_some() {
@@ -105,23 +87,25 @@ async fn create(
                     worker::Error::from("ticket key rotation does not take an algorithm").into(),
                 );
             }
-            create_ticket(env).await?
+            create_ticket(ring).await?;
         }
         KeyName::SigningKey(k) => {
             let algorithm = algorithm.ok_or_else(|| {
                 worker::Error::from("initial signing key rotation requires algorithm")
             })?;
-            if ring.signing_key_exists(k).await? {
-                // A repeated initial request must not create a second version.
-                ring.current_default(k).await?;
-                ring.key_versions(k).await?;
-                log::info!("key service signing key {name} already exists");
-            } else {
-                ring.create_signing_key(k, algorithm.as_str()).await?;
-                log::info!(
-                    "created key service signing key {name} using {}",
-                    algorithm.as_str()
-                );
+            match ring.signing_versions(k).await {
+                Err(KeyServiceError::KeyNotFound) => {
+                    ring.create_signing_key(k, algorithm).await?;
+                    log::info!(
+                        "created key service signing key {name} using {}",
+                        algorithm.as_str()
+                    );
+                }
+                Err(e) => return Err(e),
+                Ok(_) => {
+                    // A repeated initial request must not create a second version.
+                    log::info!("key service signing key {name} already exists");
+                }
             }
         }
     }
@@ -129,40 +113,38 @@ async fn create(
 }
 
 async fn rotate(
-    env: &Env,
+    ring: &Keyring,
     role: Role,
-    expected_default_version: NonZeroU32,
+    expected_default_version: VersionNumber,
 ) -> Result<(), KeyServiceError> {
     let name = key_name(role);
-    let ring = keyring(env)?;
     match key_name(role) {
         KeyName::Ticket => {
-            rotate_ticket(env, expected_default_version).await?;
+            rotate_ticket(ring, expected_default_version).await?;
         }
         KeyName::SigningKey(k) => {
             let current = ring.current_default(k).await?;
-            let versions = ring.key_versions(k).await?;
+            let versions = ring.signing_versions(k).await?;
             match decide_rotation(expected_default_version, current, &versions)? {
                 RotationDecision::AlreadyAdvanced => {
                     log::warn!(
-                        "key service rotation for {name} ignored: expected default {}, found {current}",
-                        expected_default_version
+                        "key service rotation for {name} ignored: expected default {expected_default_version}, found {current}"
                     );
                     return Ok(());
                 }
                 RotationDecision::Create => {}
             }
 
-            let new_version = ring.new_signing_version(k).await?;
-            ring.promote(k, new_version).await?;
+            let new_version = ring
+                .new_default_version(k, KeyUsage::SingingVerify, true)
+                .await?;
             log::info!("key service rotation for {name}: default {current} -> {new_version}");
         }
     }
     Ok(())
 }
 
-async fn create_ticket(env: &Env) -> Result<(), KeyServiceError> {
-    let ring = keyring(env)?;
+async fn create_ticket(ring: &Keyring) -> Result<(), KeyServiceError> {
     // Idempotent Queue redelivery.
     match ring.ticket_versions().await {
         Err(KeyServiceError::KeyNotFound) => {
@@ -178,26 +160,26 @@ async fn create_ticket(env: &Env) -> Result<(), KeyServiceError> {
 #[derive(Debug, PartialEq, Eq)]
 enum TicketRotationDecision {
     Create,
-    PromoteExisting(NonZeroU32),
+    PromoteExisting(VersionNumber),
     AlreadyAdvanced,
 }
 
-fn decide_ticket_rotation(
-    expected: NonZeroU32,
-    current: NonZeroU32,
-    versions: &[TicketVersionState],
+fn decide_ticket_rotation<K>(
+    expected: VersionNumber,
+    current: VersionNumber,
+    versions: &[VersionState<K>],
 ) -> Result<TicketRotationDecision, worker::Error> {
     if current != expected {
         return Ok(TicketRotationDecision::AlreadyAdvanced);
     }
     let latest = versions
         .last()
-        .filter(|state| state.state == State::EncryptDecrypt)
+        .filter(|state| state.usage == KeyUsage::EncryptDecrypt)
         .ok_or_else(|| worker::Error::from("ticket key has no usable newest version"))?;
     if latest.number == current {
         return Ok(TicketRotationDecision::Create);
     }
-    if current.checked_add(1) == Some(latest.number) {
+    if current.next() == Some(latest.number) {
         return Ok(TicketRotationDecision::PromoteExisting(latest.number));
     }
     Err(worker::Error::from(
@@ -205,19 +187,23 @@ fn decide_ticket_rotation(
     ))
 }
 
-async fn rotate_ticket(env: &Env, expected: NonZeroU32) -> Result<(), KeyServiceError> {
-    let ring = keyring(env)?;
-    let current = ring.current_ticket_default().await?;
+async fn rotate_ticket(ring: &Keyring, expected: VersionNumber) -> Result<(), KeyServiceError> {
+    let current = ring.current_default(KeyName::Ticket).await?;
     let versions = ring.ticket_versions().await?;
     let version = match decide_ticket_rotation(expected, current, &versions)? {
         TicketRotationDecision::AlreadyAdvanced => {
             log::warn!("ticket key rotation ignored: expected default {expected}, found {current}");
             return Ok(());
         }
-        TicketRotationDecision::Create => ring.new_ticket_version().await?,
-        TicketRotationDecision::PromoteExisting(version) => version,
+        TicketRotationDecision::Create => {
+            ring.new_default_version(KeyName::Ticket, KeyUsage::EncryptDecrypt, false)
+                .await?
+        }
+        TicketRotationDecision::PromoteExisting(version) => {
+            ring.promote(KeyName::Ticket, version).await?;
+            version
+        }
     };
-    ring.promote(KeyName::Ticket, version).await?;
     log::info!("ticket key rotated: default {current} -> {version}");
     Ok(())
 }
@@ -228,14 +214,14 @@ enum RetirementDecision {
     AlreadyRetired,
 }
 
-fn decide_retirement(
-    version: NonZeroU32,
-    current: NonZeroU32,
-    versions: &[VersionState],
+fn decide_retirement<K>(
+    version: VersionNumber,
+    current: VersionNumber,
+    versions: &[VersionState<K>],
 ) -> Result<RetirementDecision, worker::Error> {
     if !versions
         .iter()
-        .any(|state| state.number == current && state.signing)
+        .any(|state| state.number == current && state.usage == KeyUsage::SingingVerify)
     {
         return Err(worker::Error::from(
             "key service default version cannot sign",
@@ -252,10 +238,15 @@ fn decide_retirement(
         .ok_or_else(|| {
             worker::Error::from(format!("key service version {version} does not exist"))
         })?;
-    if !target.signing {
+    if target.usage != KeyUsage::SingingVerify {
         return Ok(RetirementDecision::AlreadyRetired);
     }
-    if versions.iter().filter(|state| state.signing).count() <= 1 {
+    if versions
+        .iter()
+        .filter(|state| state.usage == KeyUsage::SingingVerify)
+        .count()
+        <= 1
+    {
         return Err(worker::Error::from(
             "cannot retire the last signing version",
         ));
@@ -263,16 +254,15 @@ fn decide_retirement(
     Ok(RetirementDecision::Retire)
 }
 
-async fn retire(env: &Env, role: Role, version: NonZeroU32) -> Result<(), KeyServiceError> {
+async fn retire(ring: &Keyring, role: Role, version: VersionNumber) -> Result<(), KeyServiceError> {
     match key_name(role) {
-        KeyName::Ticket => retire_ticket(env, version).await,
+        KeyName::Ticket => retire_ticket(ring, version).await,
         KeyName::SigningKey(k) => {
-            let ring = keyring(env)?;
             let current = ring.current_default(k).await?;
-            let versions = ring.key_versions(k).await?;
+            let versions = ring.signing_versions(k).await?;
             match decide_retirement(version, current, &versions)? {
                 RetirementDecision::AlreadyRetired => {
-                    log::info!("key service key {k} version {version} already retired",);
+                    log::info!("key service key {k} version {version} already retired");
                     Ok(())
                 }
                 RetirementDecision::Retire => {
@@ -286,13 +276,13 @@ async fn retire(env: &Env, role: Role, version: NonZeroU32) -> Result<(), KeySer
 }
 
 fn decide_ticket_retirement(
-    version: NonZeroU32,
-    current: NonZeroU32,
-    versions: &[TicketVersionState],
+    version: VersionNumber,
+    current: VersionNumber,
+    versions: &[VersionState<key_kind::Ticket>],
 ) -> Result<RetirementDecision, worker::Error> {
     if !versions
         .last()
-        .is_some_and(|state| state.number == current && state.state == State::EncryptDecrypt)
+        .is_some_and(|state| state.number == current && state.usage == KeyUsage::EncryptDecrypt)
     {
         return Err(worker::Error::from(
             "ticket key default is not the newest usable version",
@@ -304,7 +294,7 @@ fn decide_ticket_retirement(
         .ok_or_else(|| {
             worker::Error::from(format!("ticket key version {version} does not exist"))
         })?;
-    if target.state == State::Retired {
+    if target.usage == KeyUsage::Retired {
         return Ok(RetirementDecision::AlreadyRetired);
     }
     if version == current {
@@ -314,7 +304,7 @@ fn decide_ticket_retirement(
     }
     if versions
         .iter()
-        .find(|state| state.state != State::Retired)
+        .find(|state| state.usage != KeyUsage::Retired)
         .map(|state| state.number)
         != Some(version)
     {
@@ -325,16 +315,15 @@ fn decide_ticket_retirement(
     Ok(RetirementDecision::Retire)
 }
 
-async fn retire_ticket(env: &Env, version: NonZeroU32) -> Result<(), KeyServiceError> {
-    let ring = keyring(env)?;
-    let current = ring.current_ticket_default().await?;
+async fn retire_ticket(ring: &Keyring, version: VersionNumber) -> Result<(), KeyServiceError> {
+    let current = ring.current_default(KeyName::Ticket).await?;
     let versions = ring.ticket_versions().await?;
     match decide_ticket_retirement(version, current, &versions)? {
         RetirementDecision::AlreadyRetired => {
             log::info!("ticket key version {version} already retired");
         }
         RetirementDecision::Retire => {
-            ring.retire_ticket_version(version).await?;
+            ring.retire(KeyName::Ticket, version).await?;
             log::info!("ticket key version {version} retired");
         }
     }
@@ -349,14 +338,19 @@ async fn rotation_queue(
     _ctx: Context,
 ) -> Result<(), worker::Error> {
     crate::init_sentry(&env);
+    let Some(keyring) = Keyring::new(&env) else {
+        return Err(worker::Error::from("keyring not configured"));
+    };
     for message in batch.messages()? {
         let result = match message.body() {
             RotationRequest::Rotate {
                 role,
                 expected_default_version,
-            } => rotate(&env, *role, *expected_default_version).await,
-            RotationRequest::Retire { role, version } => retire(&env, *role, *version).await,
-            RotationRequest::Create { role, algorithm } => create(&env, *role, *algorithm).await,
+            } => rotate(&keyring, *role, *expected_default_version).await,
+            RotationRequest::Retire { role, version } => retire(&keyring, *role, *version).await,
+            RotationRequest::Create { role, algorithm } => {
+                create(&keyring, *role, *algorithm).await
+            }
         };
         if let Err(e) = result {
             return Err(worker::Error::from(e.to_string()));
@@ -368,23 +362,42 @@ async fn rotation_queue(
 #[cfg(test)]
 mod tests {
     use super::{
-        RetirementDecision, Role, RotationDecision, RotationRequest, State, TicketRotationDecision,
-        TicketVersionState, VersionState, decide_retirement, decide_rotation,
-        decide_ticket_retirement, decide_ticket_rotation,
+        RetirementDecision, Role, RotationDecision, RotationRequest, TicketRotationDecision,
+        VersionState, decide_retirement, decide_rotation, decide_ticket_retirement,
+        decide_ticket_rotation,
     };
-    use std::num::NonZeroU32;
+    use generic_log_worker::key_service::{VersionNumber, key_kind};
+    use std::rc::Rc;
 
-    fn n(x: u32) -> NonZeroU32 {
-        NonZeroU32::new(x).unwrap()
+    fn n(x: u32) -> VersionNumber {
+        serde_json::from_str(&x.to_string()).unwrap()
     }
 
-    fn states(values: &[(u32, bool)]) -> Vec<VersionState> {
+    fn signing_state(number: u32, signing: bool) -> VersionState<key_kind::Signing> {
+        let usages = if signing {
+            vec!["sign".to_owned(), "verify".to_owned()]
+        } else {
+            vec!["verify".to_owned()]
+        };
+        VersionState::new(Rc::from("MIRROR_SIGNING_KEY"), n(number), &usages).unwrap()
+    }
+
+    fn ticket_state(number: u32, usages: &[&str]) -> VersionState<key_kind::Ticket> {
+        VersionState::new(
+            Rc::from("MIRROR_TICKET_KEY"),
+            n(number),
+            &usages
+                .iter()
+                .map(|usage| (*usage).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    fn states(values: &[(u32, bool)]) -> Vec<VersionState<key_kind::Signing>> {
         values
             .iter()
-            .map(|&(number, signing)| VersionState {
-                number: n(number),
-                signing,
-            })
+            .map(|&(number, signing)| signing_state(number, signing))
             .collect()
     }
 
@@ -543,12 +556,12 @@ mod tests {
             values
                 .iter()
                 .map(|&(number, decrypting)| {
-                    TicketVersionState::new(
-                        n(number),
+                    ticket_state(
+                        number,
                         if decrypting {
-                            State::EncryptDecrypt
+                            &["encrypt", "decrypt"]
                         } else {
-                            State::Retired
+                            &[]
                         },
                     )
                 })
@@ -584,8 +597,8 @@ mod tests {
             RetirementDecision::Retire
         );
         let decrypt_only = vec![
-            TicketVersionState::new(n(1), State::Decrypt),
-            TicketVersionState::new(n(2), State::EncryptDecrypt),
+            ticket_state(1, &["decrypt"]),
+            ticket_state(2, &["encrypt", "decrypt"]),
         ];
         assert_eq!(
             decide_ticket_retirement(n(1), n(2), &decrypt_only).unwrap(),

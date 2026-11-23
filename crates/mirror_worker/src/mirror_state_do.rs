@@ -378,11 +378,7 @@ impl MirrorState {
         for signer in &load_witness_signers(&self.env).await? {
             signatures.push(
                 signer
-                    .sign_checkpoint(
-                        &self.env,
-                        generic_log_worker::util::now_millis(),
-                        &checkpoint,
-                    )
+                    .sign_checkpoint(generic_log_worker::util::now_millis(), &checkpoint)
                     .await
                     .map_err(|error| Error::from(format!("witness signing: {error:?}")))?,
             );

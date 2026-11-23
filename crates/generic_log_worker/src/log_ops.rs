@@ -1682,7 +1682,7 @@ mod tests {
         log.config.checkpoint_callback_on_idle = true;
         log.config.checkpoint_callback = Box::new(move |_, _, old_size, new_size, checkpoint| {
             assert_eq!(old_size, new_size);
-            assert!(!checkpoint.is_empty());
+            assert_ne!(checkpoint, &[] as &[u8]);
             callback_calls.set(callback_calls.get() + 1);
             Box::pin(async { Ok(()) })
         });

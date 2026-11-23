@@ -44,6 +44,7 @@ use tlog_mirror::TicketSealer;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+use crate::key_service::KeyServiceSignerExt as _;
 /// Initialize Sentry from the `SENTRY_DSN` environment variable.
 ///
 /// Does nothing when the variable is absent or empty, allowing
@@ -156,7 +157,10 @@ pub(crate) fn log_verifiers_for_keys(keys: &[LogKey]) -> VerifierList {
 
 /// Identity signing material selected by a key service public key or PKCS#8 OID.
 pub(crate) enum IdentitySigner {
-    KeyService(key_service::KeyServiceSigner),
+    KeyService {
+        keyring: key_service::Keyring,
+        signer: key_service::KeyServiceSigner,
+    },
     CosignatureV1 {
         signer: Box<CosignatureV1CheckpointSigner>,
         public_key_der: Vec<u8>,
@@ -171,7 +175,7 @@ impl IdentitySigner {
     /// DER-encoded `SubjectPublicKeyInfo` for the mirror's verifying key.
     pub(crate) fn public_key_der(&self) -> &[u8] {
         match self {
-            Self::KeyService(signer) => &signer.public_key_der,
+            Self::KeyService { signer, .. } => &signer.public_key_der,
             Self::CosignatureV1 { public_key_der, .. } | Self::SubtreeV1 { public_key_der, .. } => {
                 public_key_der
             }
@@ -180,7 +184,7 @@ impl IdentitySigner {
 
     pub(crate) fn algorithm(&self) -> &'static str {
         match self {
-            Self::KeyService(signer) => signer.algorithm(),
+            Self::KeyService { signer, .. } => signer.algorithm(),
             Self::CosignatureV1 { .. } => "cosignature/v1",
             Self::SubtreeV1 { .. } => "subtree/v1",
         }
@@ -188,12 +192,12 @@ impl IdentitySigner {
 
     pub(crate) fn supports_sign_subtree(&self) -> bool {
         matches!(self, Self::SubtreeV1 { .. })
-            || matches!(self, Self::KeyService(signer) if signer.supports_sign_subtree())
+            || matches!(self, Self::KeyService{ signer, .. } if signer.supports_sign_subtree())
     }
 
     pub(crate) fn subtree_verifier(&self) -> Option<Box<dyn NoteVerifier>> {
         match self {
-            Self::KeyService(signer) => signer.subtree_verifier(),
+            Self::KeyService { signer, .. } => signer.subtree_verifier(),
             Self::SubtreeV1 { signer, .. } => Some(signer.verifier()),
             Self::CosignatureV1 { .. } => None,
         }
@@ -201,14 +205,13 @@ impl IdentitySigner {
 
     pub(crate) async fn sign_subtree(
         &self,
-        env: &Env,
         origin: &str,
         subtree: &tlog_core::Subtree,
         hash: &tlog_core::Hash,
     ) -> Result<signed_note::NoteSignature> {
         match self {
-            Self::KeyService(signer) => signer
-                .sign_subtree(env, origin, subtree, hash)
+            Self::KeyService { keyring, signer } => keyring
+                .sign_subtree(origin, subtree, hash, signer)
                 .await
                 .map_err(|e| worker::Error::from(e.to_string())),
             Self::SubtreeV1 { signer, .. } => Ok(signer.sign_subtree(origin, subtree, hash)),
@@ -221,13 +224,12 @@ impl IdentitySigner {
     /// Sign with a local key or a remote key service.
     pub(crate) async fn sign_checkpoint(
         &self,
-        env: &Env,
         timestamp: tlog_checkpoint::UnixTimestampMillis,
         checkpoint: &tlog_checkpoint::CheckpointText,
     ) -> Result<signed_note::NoteSignature> {
         match self {
-            Self::KeyService(signer) => signer
-                .sign(env, timestamp, checkpoint)
+            Self::KeyService { keyring, signer } => keyring
+                .sign(timestamp, checkpoint, signer)
                 .await
                 .map_err(|e| worker::Error::from(e.to_string())),
             Self::CosignatureV1 { signer, .. } => signer
@@ -270,37 +272,40 @@ async fn load_signing_keys(
     key_name: key_service::SigningKeyName,
     identity_name: &str,
 ) -> Result<Vec<IdentitySigner>> {
-    match key_service::load(env, key_name, identity_name).await {
-        Ok(key_service_signers) => {
-            let signers: Vec<_> = key_service_signers
-                .into_iter()
-                .map(IdentitySigner::KeyService)
-                .collect();
-            require_signer(signers, key_name.as_str())
-        }
-        Err(key_service::KeyServiceError::KeyServiceNotEnabled) => {
-            let current = read_key_secret(env, key_name.as_str())
-                .await?
-                .ok_or_else(|| Error::from(format!("{key_name} is not set")))?;
-            let mut signers = vec![build_identity_signer(
-                identity_name,
-                key_name.as_str(),
-                &current,
-            )?];
+    if let Some(ring) = key_service::Keyring::new(env) {
+        let signers = ring
+            .load_signing_keys(key_name, identity_name)
+            .await
+            .map_err(|e| Error::from(e.to_string()))?;
+        let signers: Vec<_> = signers
+            .into_iter()
+            .map(|signer| IdentitySigner::KeyService {
+                keyring: ring.clone(),
+                signer,
+            })
+            .collect();
+        require_signer(signers, key_name.as_str())
+    } else {
+        let current = read_key_secret(env, key_name.as_str())
+            .await?
+            .ok_or_else(|| Error::from(format!("{key_name} is not set")))?;
+        let mut signers = vec![build_identity_signer(
+            identity_name,
+            key_name.as_str(),
+            &current,
+        )?];
 
-            let next_binding = format!("{key_name}{NEXT_SUFFIX}", key_name = key_name.as_str());
-            if let Some(next) = read_key_secret(env, &next_binding).await? {
-                let next = build_identity_signer(identity_name, &next_binding, &next)?;
-                if !signers
-                    .iter()
-                    .any(|existing| existing.public_key_der() == next.public_key_der())
-                {
-                    signers.push(next);
-                }
+        let next_binding = format!("{key_name}{NEXT_SUFFIX}", key_name = key_name.as_str());
+        if let Some(next) = read_key_secret(env, &next_binding).await? {
+            let next = build_identity_signer(identity_name, &next_binding, &next)?;
+            if !signers
+                .iter()
+                .any(|existing| existing.public_key_der() == next.public_key_der())
+            {
+                signers.push(next);
             }
-            require_signer(signers, key_name.as_str())
         }
-        Err(e) => Err(worker::Error::from(e.to_string())),
+        require_signer(signers, key_name.as_str())
     }
 }
 
@@ -455,23 +460,25 @@ pub(crate) async fn load_ticket_sealer(env: &Env) -> Result<&'static TicketSeale
 }
 
 pub(crate) async fn seal_ticket(env: &Env, payload: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
-    match key_service::seal_ticket(env, payload, origin).await {
-        Ok(sealed) => Ok(sealed),
-        Err(key_service::KeyServiceError::KeyServiceNotEnabled) => {
-            Ok(load_ticket_sealer(env).await?.seal(payload, origin))
-        }
-        Err(e) => Err(worker::Error::from(e.to_string())),
+    match key_service::Keyring::new(env) {
+        Some(ring) => ring
+            .seal_ticket(payload, origin)
+            .await
+            .map_err(|e| Error::from(e.to_string())),
+        None => Ok(load_ticket_sealer(env).await?.seal(payload, origin)),
     }
 }
 
 pub(crate) async fn open_ticket(env: &Env, ticket: &[u8], origin: &[u8]) -> Result<Vec<u8>> {
-    match key_service::open_ticket(env, ticket, origin).await {
-        Ok(opened) => Ok(opened),
-        Err(key_service::KeyServiceError::KeyServiceNotEnabled) => load_ticket_sealer(env)
+    match key_service::Keyring::new(env) {
+        Some(ring) => ring
+            .open_ticket(ticket, origin)
+            .await
+            .map_err(|e| Error::from(e.to_string())),
+        None => load_ticket_sealer(env)
             .await?
             .open(ticket, origin)
             .map_err(|error| Error::from(format!("ticket authentication: {error}"))),
-        Err(e) => Err(worker::Error::from(e.to_string())),
     }
 }
 

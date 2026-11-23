@@ -582,7 +582,7 @@ async fn cosign_and_serve(
     for signer in &load_mirror_signers(env).await? {
         note_sigs.push(
             signer
-                .sign_checkpoint(env, timestamp, &cp_text)
+                .sign_checkpoint(timestamp, &cp_text)
                 .await
                 .map_err(|e| Error::from(format!("mirror cosign: {e:?}")))?,
         );
