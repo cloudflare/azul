@@ -144,17 +144,37 @@ fn as_array(object: JsValue) -> Result<js_sys::Array, worker::Error> {
 }
 
 macro_rules! js {
-    ($receiver:ident.$field:ident.$method:ident($($arg:expr),* $(,)?)) => {
-        call(stringify!($method), $receiver.$field.$method($($arg),*)).await?
+    // Peel off Rust fields until the receiver is a parenthesized expression.
+    ($receiver:ident.$field:ident.$($rest:tt)+) => {
+        js!(($receiver.$field).$($rest)+)
     };
+    // Forward a method call on a simple receiver to the expression form.
     ($receiver:ident.$method:ident($($arg:expr),* $(,)?)) => {
-        call(stringify!($method), $receiver.$method($($arg),*)).await?
+        js!(($receiver).$method($($arg),*))
     };
+    // Forward a property read on a simple receiver.
     ($receiver:ident.$field:ident) => {
-        property(&$receiver, stringify!($field))?
+        js!(($receiver).$field)
     };
+    // Forward a property write on a simple receiver.
     ($receiver:ident.$field:ident = $value:expr) => {
-        js_sys::Reflect::set(&$receiver, &JsValue::from_str(stringify!($field)), &$value)
+        js!(($receiver).$field = $value)
+    };
+    // Continue peeling Rust fields from a parenthesized receiver.
+    (($receiver:expr).$field:ident.$($rest:tt)+) => {
+        js!((($receiver).$field).$($rest)+)
+    };
+    // Await a JS method's promise and translate its errors.
+    (($receiver:expr).$method:ident($($arg:expr),* $(,)?)) => {
+        call(stringify!($method), ($receiver).$method($($arg),*)).await?
+    };
+    // Read a JS property and translate reflection errors.
+    (($receiver:expr).$field:ident) => {
+        property(&($receiver), stringify!($field))?
+    };
+    // Write a JS property and translate reflection errors.
+    (($receiver:expr).$field:ident = $value:expr) => {
+        js_sys::Reflect::set(&($receiver), &JsValue::from_str(stringify!($field)), &$value)
             .map_err(|error| rpc_error(stringify!($field), &error))?;
     };
 }
@@ -291,19 +311,24 @@ impl Keyring {
             .into_iter()
             .filter(|version| version.usage == KeyUsage::SingingVerify)
         {
-            let pair = version_handle(&self.js, key_name, version.number).await?;
-            let public = js!(pair.publicKey);
+            let handle = version_handle(&self.js, key_name, version.number).await?;
+            let public = js!(handle.publicKey);
             if public.is_undefined() {
                 return Err(KeyServiceError::InvalidArgument(
                     "key service signing key is not an asymmetric key pair".into(),
+                ));
+            }
+            if js!(handle.privateKey).is_undefined() {
+                return Err(KeyServiceError::Internal(
+                    "key service signing key has no private handle".into(),
                 ));
             }
             let der = js_sys::Uint8Array::new(&js!(self.js.export_key("spki", &public))).to_vec();
             let (algorithm, key_id) = parse_public_key(&der, &name)?;
             signers.push(KeyServiceSigner {
                 keyring: self.clone(),
-                key_name: key_name.to_string(),
                 version,
+                handle,
                 public_key_der: der,
                 name: name.clone(),
                 key_id,
@@ -322,18 +347,10 @@ impl Keyring {
         signer: &KeyServiceSigner,
         message: &[u8],
     ) -> Result<Vec<u8>, KeyServiceError> {
-        let pair = version_handle(&self.js, &signer.key_name, signer.version.number).await?;
-        let private = js!(pair.privateKey);
-        if private.is_undefined() {
-            return Err(KeyServiceError::Internal(
-                "key service signing key has no private handle".into(),
-            ));
-        }
-        let bytes = js_sys::Uint8Array::from(message);
         Ok(js_sys::Uint8Array::new(&js!(self.js.sign(
             &signing_algorithm(&signer.algorithm),
-            &private,
-            &bytes
+            &js!(signer.handle.privateKey),
+            &js_sys::Uint8Array::from(message)
         )))
         .to_vec())
     }
@@ -348,10 +365,9 @@ impl Keyring {
         key: &VersionState<key_kind::Ticket>,
         payload: &[u8],
     ) -> Result<Vec<u8>, KeyServiceError> {
-        let key = version_handle(&self.js, &key.name, key.number).await?;
         Ok(js_sys::Uint8Array::new(&js!(self.js.encrypt(
             &algorithm.to_js()?,
-            &key,
+            &version_handle(&self.js, &key.name, key.number).await?,
             &js_sys::Uint8Array::from(payload),
         )))
         .to_vec())
@@ -367,10 +383,9 @@ impl Keyring {
         key: &VersionState<key_kind::Ticket>,
         payload: &[u8],
     ) -> Result<Vec<u8>, KeyServiceError> {
-        let key = version_handle(&self.js, &key.name, key.number).await?;
         Ok(js_sys::Uint8Array::new(&js!(self.js.decrypt(
             &algorithm.to_js()?,
-            &key,
+            &version_handle(&self.js, &key.name, key.number).await?,
             &js_sys::Uint8Array::from(payload),
         )))
         .to_vec())
@@ -563,8 +578,8 @@ async fn version_handle(
 
 pub struct KeyServiceSigner {
     pub keyring: Keyring,
-    pub key_name: String,
     pub version: VersionState<key_kind::Signing>,
+    pub handle: JsValue,
     pub public_key_der: Vec<u8>,
     pub name: signed_note::KeyName,
     pub key_id: u32,
@@ -623,10 +638,29 @@ fn missing_key_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyUsage, VersionState, key_kind, missing_key_message};
+    use super::{KeyUsage, VersionState, call, key_kind, missing_key_message, property, rpc_error};
 
     use crate::key_service::VersionNumber;
     use std::{num::NonZeroU32, rc::Rc};
+    use worker::{js_sys, wasm_bindgen::JsValue};
+
+    #[test]
+    fn js_accepts_expression_receivers() {
+        // Compile the expansions without executing JS operations on the native test runner.
+        async fn check(signer: &super::KeyServiceSigner) -> Result<(), worker::Error> {
+            struct Wrapper<'a> {
+                signer: &'a super::KeyServiceSigner,
+            }
+            let wrapper = Wrapper { signer };
+            let _ = js!(signer.keyring.js.get_default("key"));
+            let _ = js!(wrapper.signer.handle.privateKey);
+            let _ = js!((signer.handle.clone()).privateKey);
+            js!(wrapper.signer.handle.version = JsValue::TRUE);
+            js!((worker::js_sys::Object::new()).version = JsValue::TRUE);
+            Ok(())
+        }
+        let _ = check;
+    }
 
     fn n(x: u32) -> VersionNumber {
         VersionNumber(NonZeroU32::new(x).unwrap())
