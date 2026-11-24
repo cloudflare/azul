@@ -21,6 +21,7 @@ mod batcher_do;
 mod ccadb_roots_cron;
 mod cleaner_do;
 mod frontend_worker;
+mod key_service;
 mod sequence_metadata;
 mod sequencer_do;
 

@@ -9,13 +9,14 @@
 mod rpc;
 
 use rpc::{
-    CloudflareCryptoKeyPair, ExportKeyFormat, GetKeyOptions, KeyServiceRpc, KeyVersionPatch,
-    KeyVersionResponse,
+    Algorithm, CloudflareCryptoKeyPair, ExportKeyFormat, GetKeyOptions, KeyServiceRpc,
+    KeyVersionPatch, KeyVersionResponse,
 };
 pub use rpc::{CryptoKeyUsage, EncryptAlgorithm};
 
 use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey as _};
 use ml_dsa::{MlDsa44, VerifyingKey as MlDsaVerifyingKey};
+use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use signed_note::{self, SignatureType, compute_key_id};
 use worker::Env;
 
@@ -232,6 +233,46 @@ impl Keyring {
             .await
     }
 
+    /// Load a P-256 signing key at the requested version.
+    ///
+    /// # Errors
+    /// Returns an error if lookup, public-key export, or P-256 decoding fails.
+    pub async fn load_p256_key(
+        &self,
+        name: &str,
+        version: VersionNumber,
+    ) -> Result<P256Key, KeyServiceError> {
+        let pair = self
+            .rpc
+            .get(name, Some(&GetKeyOptions { version }))
+            .await?
+            .into_pair()?;
+        let der = self
+            .rpc
+            .export_key(ExportKeyFormat::Spki, &pair.public_key)
+            .await?;
+        let verifying_key = P256VerifyingKey::from_public_key_der(&der)
+            .map_err(|e| KeyServiceError::Internal(format!("{name} is not a P-256 key: {e}")))?;
+        Ok(P256Key {
+            pair,
+            verifying_key,
+        })
+    }
+
+    /// Sign with a CT shard key; the key service returns a 64-byte IEEE P1363 signature.
+    ///
+    /// # Errors
+    /// Returns an error if the key service fails to sign.
+    pub async fn sign_p256(
+        &self,
+        key: &P256Key,
+        message: &[u8],
+    ) -> Result<Vec<u8>, KeyServiceError> {
+        self.rpc
+            .sign(Algorithm::EcdsaSha256, &key.pair.private_key, message)
+            .await
+    }
+
     /// Encrypt a payload using a ticket-key version.
     ///
     /// # Errors
@@ -288,6 +329,11 @@ impl Keyring {
     ) -> Result<Vec<KeyVersion<Kind>>, KeyServiceError> {
         version_states(key_name, self.rpc.versions(key_name).await?)
     }
+}
+
+pub struct P256Key {
+    pair: CloudflareCryptoKeyPair,
+    pub verifying_key: P256VerifyingKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,12 +492,12 @@ fn parse_public_key(
     Ok((KeyServiceAlgorithm::MlDsa44(key), id))
 }
 
-fn signing_algorithm(algorithm: &KeyServiceAlgorithm) -> &'static str {
+fn signing_algorithm(algorithm: &KeyServiceAlgorithm) -> Algorithm {
     match algorithm {
-        KeyServiceAlgorithm::Ed25519 => "Ed25519",
+        KeyServiceAlgorithm::Ed25519 => Algorithm::Ed25519,
         // key service signs ML-DSA-44 with an empty context and rejects a `context`
         // property, even when its value is an empty Uint8Array.
-        KeyServiceAlgorithm::MlDsa44(_) => "ML-DSA-44",
+        KeyServiceAlgorithm::MlDsa44(_) => Algorithm::MlDsa44,
     }
 }
 

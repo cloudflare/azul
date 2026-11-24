@@ -5,7 +5,7 @@
 
 use futures_util::future::try_join_all;
 use signed_note::{KeyName, VerifierList};
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, future::Future, rc::Rc, time::Duration};
 use tlog_tiles::{PathElem, TlogTile};
 use worker::{Bucket, Env, Error as WorkerError, Object, Request, Response, State, Storage};
 
@@ -26,18 +26,26 @@ const STEP: u64 = TlogTile::FULL_WIDTH as u64;
 const CLEANED_SIZE_KEY: &str = "cleaned_size";
 const CURRENT_SIZE_KEY: &str = "current_size";
 
-pub struct CleanerConfig {
+pub trait CheckpointVerifierSource {
+    /// Load the keys used to verify a checkpoint.
+    ///
+    /// # Errors
+    /// Returns an error if the verifier keys cannot be loaded.
+    fn verifiers(&self) -> impl Future<Output = Result<Rc<VerifierList>, WorkerError>> + '_;
+}
+
+pub struct CleanerConfig<V: CheckpointVerifierSource> {
     pub name: String,
     pub origin: KeyName,
     pub data_path: PathElem,
     pub aux_path: Option<PathElem>,
-    pub verifiers: VerifierList,
+    pub verifiers: V,
     pub clean_interval: Duration,
 }
 
-pub struct GenericCleaner {
+pub struct GenericCleaner<V: CheckpointVerifierSource> {
     state: State,
-    config: CleanerConfig,
+    config: CleanerConfig<V>,
     storage: Storage,
     bucket: Bucket,
     cleaned_size: RefCell<u64>,
@@ -47,14 +55,14 @@ pub struct GenericCleaner {
     wshim: Option<obs::Wshim>,
 }
 
-impl GenericCleaner {
+impl<V: CheckpointVerifierSource> GenericCleaner<V> {
     /// Return a new partial tile cleaner.
     ///
     /// # Panics
     ///
     /// Panics if we can't get a handle for the public bucket.
     #[must_use]
-    pub fn new(state: State, env: &Env, config: CleanerConfig) -> Self {
+    pub fn new(state: State, env: &Env, config: CleanerConfig<V>) -> Self {
         let bucket = load_public_bucket(env, &config.name).unwrap();
         let wshim = obs::Wshim::from_env(env).ok();
         Self {
@@ -291,9 +299,10 @@ impl GenericCleaner {
             .ok_or("missing object body")?
             .bytes()
             .await?;
+        let verifiers = self.config.verifiers.verifiers().await?;
         let checkpoint = tlog_checkpoint::open_checkpoint(
             self.config.origin.as_str(),
-            &self.config.verifiers,
+            verifiers.as_ref(),
             now_millis(),
             &checkpoint_bytes,
         )

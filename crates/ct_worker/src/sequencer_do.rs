@@ -6,13 +6,45 @@
 use std::time::Duration;
 
 use crate::{CONFIG, StaticCTSequenceMetadata, init_sentry, load_checkpoint_signers, load_origin};
-use generic_log_worker::{GenericSequencer, SequencerConfig, empty_checkpoint_callback};
+use generic_log_worker::key_service::Keyring;
+use generic_log_worker::{
+    CheckpointSource, GenericSequencer, SequencerConfig, empty_checkpoint_callback,
+};
+use signed_note::{NoteSignature, VerifierList};
 use static_ct_api::StaticCTLogEntry;
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+enum ShardCheckpointSource {
+    Local(Vec<Box<dyn CheckpointSigner>>),
+    Service(crate::key_service::ShardCheckpointSigner),
+}
+
+impl CheckpointSource for ShardCheckpointSource {
+    async fn sign(
+        &self,
+        timestamp: UnixTimestampMillis,
+        checkpoint: &CheckpointText,
+    ) -> std::result::Result<Vec<NoteSignature>, String> {
+        match self {
+            Self::Local(signers) => signers.sign(timestamp, checkpoint).await,
+            Self::Service(signer) => signer.sign(timestamp, checkpoint).await,
+        }
+    }
+
+    async fn verifiers(&self) -> std::result::Result<VerifierList, String> {
+        match self {
+            Self::Local(signers) => signers.verifiers().await,
+            Self::Service(signer) => signer.verifiers().await,
+        }
+    }
+}
+
 #[durable_object(alarm)]
-struct Sequencer(GenericSequencer<StaticCTLogEntry, StaticCTSequenceMetadata>);
+struct Sequencer(
+    GenericSequencer<StaticCTLogEntry, StaticCTSequenceMetadata, ShardCheckpointSource>,
+);
 
 // SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
 // is required by `wasm-bindgen` when building with `panic=unwind`.
@@ -27,8 +59,14 @@ impl DurableObject for Sequencer {
         let params = &CONFIG.logs[&name];
 
         let config = SequencerConfig {
+            checkpoint_source: if let Some(ring) = Keyring::new(&env) {
+                ShardCheckpointSource::Service(crate::key_service::ShardCheckpointSigner::new(
+                    ring, &name,
+                ))
+            } else {
+                ShardCheckpointSource::Local(load_checkpoint_signers(&env, &name))
+            },
             origin: load_origin(&name),
-            checkpoint_signers: load_checkpoint_signers(&env, &name),
             checkpoint_extension: Box::new(|_| vec![]), // no checkpoint extensions for CT
             sequence_interval: Duration::from_millis(params.sequence_interval_millis),
             max_sequence_skips: params.max_sequence_skips,

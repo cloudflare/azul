@@ -20,7 +20,8 @@
 
 use crate::SequencerMetadata;
 use crate::{
-    CacheRead, CacheWrite, LockBackend, LookupKey, ObjectBackend, SequencerConfig,
+    CacheRead, CacheWrite, CheckpointSource, LockBackend, LookupKey, ObjectBackend,
+    SequencerConfig,
     obs::metrics::{AsF64, SequencerMetrics, millis_diff_as_secs},
     util::now_millis,
 };
@@ -29,7 +30,7 @@ use futures_util::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use signed_note::VerifierList;
+use signed_note::{Note, VerifierList};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::{
@@ -39,7 +40,7 @@ use std::{
     sync::LazyLock,
 };
 use thiserror::Error;
-use tlog_checkpoint::{TreeWithTimestamp, UnixTimestampMillis};
+use tlog_checkpoint::{CheckpointText, TreeWithTimestamp, UnixTimestampMillis};
 use tlog_core::{HASH_SIZE, Hash, HashReader, Proof, Subtree, TlogError};
 use tlog_entry::{LogEntry, PendingLogEntry, TileIterator};
 use tlog_tiles::{PreloadedTlogTileReader, TileHashReader, TlogTile, TlogTileRecorder};
@@ -55,6 +56,39 @@ pub const CHECKPOINT_KEY: &str = "checkpoint";
 /// Path used to store staging bundles in the lock backend.
 const STAGING_KEY: &str = "staging";
 const PENDING_CHECKPOINT_CALLBACK_KEY: &str = "pending-checkpoint-callback";
+
+async fn sign_checkpoint<S: CheckpointSource>(
+    tree: &TreeWithTimestamp,
+    config: &SequencerConfig<S>,
+    extensions: &[&str],
+) -> Result<Vec<u8>, anyhow::Error> {
+    let text = CheckpointText::new(
+        config.origin.as_str(),
+        tree.size(),
+        *tree.hash(),
+        extensions,
+    )?;
+    let signatures = config
+        .checkpoint_source
+        .sign(tree.time(), &text)
+        .await
+        .map_err(|e| anyhow!(e))?;
+    // Preserve the grease signatures emitted by the local checkpoint path.
+    let greased = tree.sign(config.origin.as_str(), extensions, &[], &mut rand::rng())?;
+    let mut all_signatures = Note::from_bytes(&greased)?.signatures().to_vec();
+    all_signatures.extend(signatures);
+    Ok(Note::new(&text.to_bytes(), &all_signatures)?.to_bytes())
+}
+
+async fn checkpoint_verifiers<S: CheckpointSource>(
+    config: &SequencerConfig<S>,
+) -> Result<VerifierList, anyhow::Error> {
+    config
+        .checkpoint_source
+        .verifiers()
+        .await
+        .map_err(|e| anyhow!(e))
+}
 
 #[derive(Serialize, Deserialize)]
 struct PendingCheckpointCallback {
@@ -262,7 +296,7 @@ pub(crate) enum CreateError {
 /// If the log already exists, returns an [`CreateError::LogExists`]
 /// to allow the caller to differentiate it from other errors.
 pub(crate) async fn create_log(
-    config: &SequencerConfig,
+    config: &SequencerConfig<impl CheckpointSource>,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
 ) -> Result<(), CreateError> {
@@ -294,22 +328,16 @@ pub(crate) async fn create_log(
     let tree = TreeWithTimestamp::new(0, tlog_core::EMPTY_HASH, timestamp);
 
     // Construct the checkpoint signers
-    let dyn_signers = config
-        .checkpoint_signers
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>();
     // Construct the checkpoint extension
     let extensions = (config.checkpoint_extension)(timestamp);
 
-    let sth = tree
-        .sign(
-            config.origin.as_str(),
-            &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
-            &dyn_signers,
-            &mut rand::rng(),
-        )
-        .map_err(|e| anyhow!("failed to sign checkpoint: {e}"))?;
+    let sth = sign_checkpoint(
+        &tree,
+        config,
+        &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(|e| anyhow!("failed to sign checkpoint: {e}"))?;
     lock.put(CHECKPOINT_KEY, &sth)
         .await
         .map_err(|e| anyhow!("failed to upload checkpoint to lock backend: {e}"))?;
@@ -330,7 +358,7 @@ impl SequenceState {
     /// This will return an error if the log has not been created, or if recovery fails.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn load<L: LogEntry>(
-        config: &SequencerConfig,
+        config: &SequencerConfig<impl CheckpointSource>,
         object: &impl ObjectBackend,
         lock: &impl LockBackend,
     ) -> Result<Self, anyhow::Error> {
@@ -344,13 +372,7 @@ impl SequenceState {
         );
 
         // Construct the VerifierList containing the signing and witness pubkeys
-        let verifiers = VerifierList::new(
-            config
-                .checkpoint_signers
-                .iter()
-                .map(|s| s.verifier())
-                .collect(),
-        );
+        let verifiers = checkpoint_verifiers(config).await?;
 
         let (c, timestamp) = tlog_checkpoint::open_checkpoint(
             config.origin.as_str(),
@@ -744,7 +766,7 @@ pub(crate) enum PendingSource {
 pub(crate) fn add_leaf_to_pool<E, M>(
     state: &RefCell<PoolState<E, M>>,
     cache: &impl CacheRead<M>,
-    config: &SequencerConfig,
+    config: &SequencerConfig<impl CheckpointSource>,
     entry: E,
 ) -> AddLeafResult<M>
 where
@@ -778,7 +800,7 @@ where
 pub(crate) async fn sequence<L: LogEntry, M: SequencerMetadata>(
     pool_state: &RefCell<PoolState<L::Pending, M>>,
     sequence_state: &RefCell<SequenceState>,
-    config: &SequencerConfig,
+    config: &SequencerConfig<impl CheckpointSource>,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &impl CacheWrite<M>,
@@ -855,7 +877,7 @@ pub(crate) async fn sequence<L: LogEntry, M: SequencerMetadata>(
 }
 
 pub(crate) async fn retry_checkpoint_callback(
-    config: &SequencerConfig,
+    config: &SequencerConfig<impl CheckpointSource>,
     lock: &impl LockBackend,
 ) -> Result<(), anyhow::Error> {
     if !config.durable_checkpoint_callback {
@@ -919,7 +941,7 @@ fn checked_new_tree_size(
 #[allow(clippy::too_many_lines)]
 async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
     sequence_state: &RefCell<SequenceState>,
-    config: &SequencerConfig,
+    config: &SequencerConfig<impl CheckpointSource>,
     object: &impl ObjectBackend,
     lock: &impl LockBackend,
     cache: &impl CacheWrite<M>,
@@ -1097,20 +1119,14 @@ async fn sequence_entries<L: LogEntry, M: SequencerMetadata>(
             timestamp,
         )
         .map_err(|e| SequenceError::NonFatal(format!("couldn't compute tree head: {e}")))?;
-        let dyn_signers = config
-            .checkpoint_signers
-            .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>();
         let extensions = (config.checkpoint_extension)(timestamp);
-        let checkpoint = tree
-            .sign(
-                config.origin.as_str(),
-                &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
-                &dyn_signers,
-                &mut rand::rng(),
-            )
-            .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
+        let checkpoint = sign_checkpoint(
+            &tree,
+            config,
+            &extensions.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|e| SequenceError::NonFatal(format!("couldn't sign checkpoint: {e}")))?;
         SequenceState {
             tree,
             checkpoint,
@@ -2274,7 +2290,7 @@ mod tests {
             EcdsaSigningKey::generate_from_rng(&mut rand::rng()),
         )
         .unwrap();
-        log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
+        log.config.checkpoint_source = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
             &log.object,
@@ -2286,7 +2302,7 @@ mod tests {
             log.config.origin.clone(),
             Ed25519SigningKey::generate(&mut rand::rng()),
         );
-        log.config.checkpoint_signers = vec![Box::new(checkpoint_signer)];
+        log.config.checkpoint_source = vec![Box::new(checkpoint_signer)];
         block_on(SequenceState::load::<StaticCTLogEntry>(
             &log.config,
             &log.object,
@@ -2886,7 +2902,7 @@ mod tests {
     }
 
     struct TestLog {
-        config: SequencerConfig,
+        config: SequencerConfig<Vec<Box<dyn CheckpointSigner>>>,
         pool_state: RefCell<PoolState<StaticCTPendingLogEntry, SequenceMetadata>>,
         sequence_state: RefCell<SequenceState>,
         lock: TestLockBackend,
@@ -2923,7 +2939,7 @@ mod tests {
             let config = SequencerConfig {
                 name: "TestLog".to_string(),
                 origin,
-                checkpoint_signers,
+                checkpoint_source: checkpoint_signers,
                 checkpoint_extension,
                 sequence_interval: Duration::from_secs(1),
                 max_sequence_skips: 0,
@@ -3035,7 +3051,7 @@ mod tests {
         fn check(&self, size: u64) -> anyhow::Result<u64> {
             let sth = block_on(self.object.fetch(CHECKPOINT_KEY))?
                 .ok_or(anyhow!("no checkpoint in object storage"))?;
-            let first_signer = &self.config.checkpoint_signers[0];
+            let first_signer = &self.config.checkpoint_source[0];
             let n = Note::from_bytes(&sth).map_err(|e| anyhow!(e))?;
             let (verified_sigs, _) = n
                 .verify(&VerifierList::new(vec![first_signer.verifier()]))
@@ -3055,7 +3071,7 @@ mod tests {
             {
                 let sth: Vec<u8> =
                     block_on(self.lock.get(CHECKPOINT_KEY)).map_err(|e| anyhow!(e))?;
-                let first_signer = &self.config.checkpoint_signers[0];
+                let first_signer = &self.config.checkpoint_source[0];
                 let n = Note::from_bytes(&sth).map_err(|e| anyhow!(e))?;
                 let (verified_sigs, _) = n
                     .verify(&VerifierList::new(vec![first_signer.verifier()]))

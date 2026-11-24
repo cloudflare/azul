@@ -363,12 +363,14 @@ async fn add_pre_chain_returns_valid_sct() {
         .expect("pre-chain SCT signature verification");
 }
 
-/// Submitting the same chain twice returns identical SCTs (deduplication).
+/// Deduplication retains the timestamp and leaf index; key service ECDSA signatures
+/// need not be byte-identical on repeated signing.
 #[tokio::test]
-async fn add_chain_deduplication_returns_identical_sct() {
+async fn add_chain_deduplication_preserves_entry_identity() {
     ensure_initialized().await;
     let client = CtClient::default_log();
     let chains = make_chains(&client.log).expect("generating chain fixtures");
+    let meta = client.get_metadata().await.expect("metadata.json");
 
     let (s1, sct1) = client
         .add_chain(chains.chain.clone())
@@ -385,10 +387,13 @@ async fn add_chain_deduplication_returns_identical_sct() {
     let sct1 = sct1.unwrap();
     let sct2 = sct2.unwrap();
 
-    // Identical leaf → same leaf_index, timestamp, and signature.
+    // Identical leaf → same leaf_index and timestamp; both signatures verify.
     assert_eq!(sct1.timestamp, sct2.timestamp, "timestamps must match");
     assert_eq!(sct1.extensions, sct2.extensions, "extensions must match");
-    assert_eq!(sct1.signature, sct2.signature, "signatures must match");
+    assert_sct_signature(&sct1, &meta, &chains.chain[0], &chains.chain[1])
+        .expect("first SCT signature verification");
+    assert_sct_signature(&sct2, &meta, &chains.chain[0], &chains.chain[1])
+        .expect("second SCT signature verification");
 }
 
 /// After a successful `add-chain`, the checkpoint is signed correctly and its
