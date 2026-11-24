@@ -2,7 +2,7 @@
 //! RPC types follow the binding's TypeScript declarations.
 //! `CryptoKey` objects retain their JavaScript identity across deserialization.
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
 use wasm_bindgen::{JsCast as _, JsValue};
 use worker::{Env, js_sys, wasm_bindgen, wasm_bindgen_futures::JsFuture};
 
@@ -208,6 +208,34 @@ pub struct EncryptAlgorithm<'s> {
     pub tag_length: u8,
 }
 
+/// Signing algorithms used by the key-service binding.
+pub(super) enum Algorithm {
+    Ed25519,
+    MlDsa44,
+    EcdsaSha256,
+}
+
+impl Serialize for Algorithm {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Ed25519 => serializer.serialize_str("Ed25519"),
+            Self::MlDsa44 => serializer.serialize_str("ML-DSA-44"),
+            Self::EcdsaSha256 => {
+                #[derive(Serialize)]
+                struct EcdsaAlgorithm {
+                    name: &'static str,
+                    hash: &'static str,
+                }
+                EcdsaAlgorithm {
+                    name: "ECDSA",
+                    hash: "SHA-256",
+                }
+                .serialize(serializer)
+            }
+        }
+    }
+}
+
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
     type JsKeyring;
@@ -226,7 +254,7 @@ extern "C" {
     #[wasm_bindgen(method, catch, js_name = sign)]
     fn sign(
         this: &JsKeyring,
-        algorithm: &str,
+        algorithm: &JsValue,
         key: &JsValue,
         data: &js_sys::Uint8Array,
     ) -> Result<js_sys::Promise, JsValue>;
@@ -409,14 +437,15 @@ impl KeyServiceRpc {
 
     pub(super) async fn sign(
         &self,
-        algorithm: &str,
+        algorithm: Algorithm,
         key: &CloudflareCryptoKey,
         message: &[u8],
     ) -> Result<Vec<u8>, KeyServiceError> {
+        let algorithm = encode(&algorithm)?;
         let value = call(
             "sign",
             self.js
-                .sign(algorithm, key.as_js(), &js_sys::Uint8Array::from(message)),
+                .sign(&algorithm, key.as_js(), &js_sys::Uint8Array::from(message)),
         )
         .await?;
         Ok(js_sys::Uint8Array::new(&value).to_vec())
@@ -475,9 +504,25 @@ impl KeyServiceRpc {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloudflareCryptoKeyFields, CloudflareCryptoKeyPair, CryptoKeyType, CryptoKeyTypeProbe,
-        CryptoKeyUsage, ExportKeyFormat, missing_key_message,
+        Algorithm, CloudflareCryptoKeyFields, CloudflareCryptoKeyPair, CryptoKeyType,
+        CryptoKeyTypeProbe, CryptoKeyUsage, ExportKeyFormat, missing_key_message,
     };
+
+    #[test]
+    fn signing_algorithms_match_key_service_shapes() {
+        assert_eq!(
+            serde_json::to_value(Algorithm::Ed25519).unwrap(),
+            serde_json::json!("Ed25519")
+        );
+        assert_eq!(
+            serde_json::to_value(Algorithm::MlDsa44).unwrap(),
+            serde_json::json!("ML-DSA-44")
+        );
+        assert_eq!(
+            serde_json::to_value(Algorithm::EcdsaSha256).unwrap(),
+            serde_json::json!({"name": "ECDSA", "hash": "SHA-256"})
+        );
+    }
 
     #[test]
     fn crypto_key_metadata_matches_binding_interface() {

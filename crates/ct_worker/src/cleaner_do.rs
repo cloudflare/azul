@@ -1,15 +1,34 @@
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use crate::{CONFIG, init_sentry, load_checkpoint_signers, load_origin};
-use generic_log_worker::{CleanerConfig, GenericCleaner};
+use generic_log_worker::{
+    CheckpointVerifierSource, CleanerConfig, GenericCleaner, key_service::Keyring,
+};
 use signed_note::VerifierList;
 use static_ct_api::StaticCTPendingLogEntry;
 use tlog_entry::PendingLogEntry;
 #[allow(clippy::wildcard_imports)]
 use worker::*;
 
+enum CleanerVerifiers {
+    Local(Rc<VerifierList>),
+    Service { ring: Keyring, shard: String },
+}
+
+impl CheckpointVerifierSource for CleanerVerifiers {
+    async fn verifiers(&self) -> Result<Rc<VerifierList>> {
+        match self {
+            Self::Local(verifiers) => Ok(Rc::clone(verifiers)),
+            Self::Service { ring, shard } => crate::key_service::load_shard_verifiers(ring, shard)
+                .await
+                .map(Rc::new)
+                .map_err(Error::from),
+        }
+    }
+}
+
 #[durable_object(alarm)]
-struct Cleaner(GenericCleaner);
+struct Cleaner(GenericCleaner<CleanerVerifiers>);
 
 // SAFETY: Durable Objects are single-threaded; the `RefUnwindSafe` bound
 // is required by `wasm-bindgen` when building with `panic=unwind`.
@@ -27,12 +46,19 @@ impl DurableObject for Cleaner {
             origin: load_origin(&name),
             data_path: StaticCTPendingLogEntry::DATA_TILE_PATH,
             aux_path: StaticCTPendingLogEntry::AUX_TILE_PATH,
-            verifiers: VerifierList::new(
-                load_checkpoint_signers(&env, &name)
-                    .iter()
-                    .map(|s| s.verifier())
-                    .collect(),
-            ),
+            verifiers: if let Some(ring) = Keyring::new(&env) {
+                CleanerVerifiers::Service {
+                    ring,
+                    shard: name.clone(),
+                }
+            } else {
+                CleanerVerifiers::Local(Rc::new(VerifierList::new(
+                    load_checkpoint_signers(&env, &name)
+                        .iter()
+                        .map(|s| s.verifier())
+                        .collect(),
+                )))
+            },
             clean_interval: Duration::from_secs(params.clean_interval_secs),
             name,
         };

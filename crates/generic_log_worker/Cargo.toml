@@ -13,7 +13,6 @@ keywords = ["transparency", "crypto"]
 
 [dev-dependencies]
 crypto-common.workspace = true
-p256.workspace = true
 rand.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true
@@ -33,6 +32,7 @@ getrandom_03.workspace = true
 hex.workspace = true
 log = { workspace = true, features = ["kv"] }
 ml-dsa.workspace = true
+p256.workspace = true
 prometheus.workspace = true
 rand.workspace = true
 sentry-core.workspace = true

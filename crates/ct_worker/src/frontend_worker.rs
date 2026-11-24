@@ -3,7 +3,9 @@
 
 //! Entrypoint for the static CT submission APIs.
 
-use crate::{CONFIG, StaticCTSequenceMetadata, init_sentry, load_roots, load_signing_key};
+use crate::{
+    CONFIG, StaticCTSequenceMetadata, init_sentry, key_service::load_shard_signing_key, load_roots,
+};
 use config::{EndpointInfo, IntendedUse, LogStatus, TemporalInterval};
 use generic_log_worker::{
     ENTRY_ENDPOINT, ObjectBucket, batcher_id_from_lookup_key, deserialize,
@@ -243,7 +245,8 @@ async fn log_metadata(
     PathParams { log }: PathParams,
 ) -> ApiResult<impl IntoResponse> {
     let params = &CONFIG.logs[&log];
-    let verifying_key = load_signing_key(&env, &log)?.verifying_key();
+    let signing_key = load_shard_signing_key(&env, &log).await?;
+    let verifying_key = signing_key.verifying_key();
     let log_id = &static_ct_api::log_id_from_key(verifying_key).map_err(|e| e.to_string())?;
     let key = verifying_key
         .to_public_key_der()
@@ -342,7 +345,7 @@ async fn add_chain_or_pre_chain(
     // Retrieve the sequenced entry for this pending log entry by first checking the
     // deduplication cache and then sending a request to the DO to sequence the entry.
     let lookup_key = pending_entry.lookup_key();
-    let signing_key = load_signing_key(env, log)?;
+    let signing_key = load_shard_signing_key(env, log).await?;
 
     // Check if entry is cached and return right away if so.
     if params.enable_dedup
@@ -353,8 +356,7 @@ async fn add_chain_or_pre_chain(
         log::debug!("{log}: Entry is cached");
         let entry =
             StaticCTLogEntry::new(pending_entry, metadata.leaf_index(), metadata.timestamp());
-        let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-            .map_err(|e| e.to_string())?;
+        let sct = signing_key.sign_sct(&entry).await?;
         return Ok((StatusCode::OK, Json(sct)).into_response());
     }
 
@@ -430,8 +432,7 @@ async fn add_chain_or_pre_chain(
         leaf_index: metadata.leaf_index(),
         timestamp: metadata.timestamp(),
     };
-    let sct = static_ct_api::signed_certificate_timestamp(signing_key, &entry)
-        .map_err(|e| e.to_string())?;
+    let sct = signing_key.sign_sct(&entry).await?;
     Ok((StatusCode::OK, Json(sct)).into_response())
 }
 

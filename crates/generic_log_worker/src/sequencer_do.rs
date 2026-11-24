@@ -18,8 +18,9 @@ use crate::{
 };
 use futures_util::future::join_all;
 use log::{error, info};
-use signed_note::KeyName;
-use tlog_checkpoint::{CheckpointSigner, UnixTimestampMillis};
+use rand::seq::SliceRandom as _;
+use signed_note::{KeyName, NoteSignature, VerifierList};
+use tlog_checkpoint::{CheckpointSigner, CheckpointText, UnixTimestampMillis};
 use tlog_entry::{LogEntry, PendingLogEntryBlob};
 use tokio::sync::{Mutex, RwLock};
 use worker::{Env, Error as WorkerError, Request, Response, State};
@@ -29,12 +30,12 @@ use worker::{Env, Error as WorkerError, Request, Response, State};
 // It should hold at least <maximum-entries-per-second> x <kv-eventual-consistency-time (60s)> entries.
 const MEMORY_CACHE_SIZE: usize = 300_000;
 
-pub struct GenericSequencer<L: LogEntry, M: SequencerMetadata> {
+pub struct GenericSequencer<L: LogEntry, M: SequencerMetadata, S: CheckpointSource> {
     env: Env,
     do_state: State,                     // implements LockBackend
     public_bucket: RwLock<ObjectBucket>, // implements ObjectBackend
     cache: DedupCache<M>,                // implements CacheRead, CacheWrite
-    config: SequencerConfig,
+    config: SequencerConfig<S>,
     sequence_state: RefCell<SequenceState>,
     pool_state: RefCell<PoolState<L::Pending, M>>,
     initialized: RefCell<bool>,
@@ -44,10 +45,10 @@ pub struct GenericSequencer<L: LogEntry, M: SequencerMetadata> {
 }
 
 /// Configuration for a CT log.
-pub struct SequencerConfig {
+pub struct SequencerConfig<S: CheckpointSource> {
     pub name: String,
     pub origin: KeyName,
-    pub checkpoint_signers: Vec<Box<dyn CheckpointSigner>>,
+    pub checkpoint_source: S,
     /// A function that takes a Unix timestamp in milliseconds and returns
     /// extension lines to be included in the checkpoint
     pub checkpoint_extension: Box<dyn Fn(UnixTimestampMillis) -> Vec<String>>,
@@ -65,14 +66,60 @@ pub struct SequencerConfig {
     pub checkpoint_callback_on_idle: bool,
 }
 
-impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
+/// Signs checkpoints and loads the public keys needed to verify them.
+pub trait CheckpointSource {
+    /// Produce signatures over a checkpoint.
+    ///
+    /// # Errors
+    /// Returns an error if a signing key cannot be used.
+    fn sign<'a>(
+        &'a self,
+        timestamp: UnixTimestampMillis,
+        checkpoint: &'a CheckpointText,
+    ) -> impl Future<Output = Result<Vec<NoteSignature>, String>> + 'a;
+
+    /// Load the checkpoint verification keys.
+    ///
+    /// # Errors
+    /// Returns an error if the keys cannot be loaded.
+    fn verifiers(&self) -> impl Future<Output = Result<VerifierList, String>> + '_;
+}
+
+impl CheckpointSource for Vec<Box<dyn CheckpointSigner>> {
+    fn sign<'a>(
+        &'a self,
+        timestamp: UnixTimestampMillis,
+        checkpoint: &'a CheckpointText,
+    ) -> impl Future<Output = Result<Vec<NoteSignature>, String>> + 'a {
+        let mut signers = self.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        signers.shuffle(&mut rand::rng());
+        std::future::ready(
+            signers
+                .into_iter()
+                .map(|signer| {
+                    signer
+                        .sign(timestamp, checkpoint)
+                        .map_err(|e| e.to_string())
+                })
+                .collect(),
+        )
+    }
+
+    fn verifiers(&self) -> impl Future<Output = Result<VerifierList, String>> + '_ {
+        std::future::ready(Ok(VerifierList::new(
+            self.iter().map(|signer| signer.verifier()).collect(),
+        )))
+    }
+}
+
+impl<L: LogEntry, M: SequencerMetadata, S: CheckpointSource> GenericSequencer<L, M, S> {
     /// Return a new sequencer with the given config.
     ///
     /// # Panics
     ///
     /// Panics if we can't get a handle for the public bucket.
     #[must_use]
-    pub fn new(state: State, env: Env, config: SequencerConfig) -> Self {
+    pub fn new(state: State, env: Env, config: SequencerConfig<S>) -> Self {
         let public_bucket = ObjectBucket {
             bucket: load_public_bucket(&env, &config.name).unwrap(),
             metrics: None,
@@ -230,7 +277,7 @@ impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
     }
 }
 
-impl<L: LogEntry, M: SequencerMetadata> GenericSequencer<L, M> {
+impl<L: LogEntry, M: SequencerMetadata, S: CheckpointSource> GenericSequencer<L, M, S> {
     // Initialize the durable object when it is started on a new machine (e.g., after eviction or a deployment).
     async fn initialize(&self, metrics: &SequencerMetrics) -> Result<(), WorkerError> {
         // This can be triggered by the alarm() or fetch() handlers, so lock state to avoid a race condition.

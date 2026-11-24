@@ -228,7 +228,11 @@ impl StaticCTLogEntry {
     /// # Errors
     ///
     /// Returns an error if the certificate does not fit in its length prefix.
-    fn marshal_timestamped_entry(&self) -> std::io::Result<Vec<u8>> {
+    ///
+    /// # Panics
+    ///
+    /// Writing fixed-width integers to an in-memory buffer cannot fail.
+    pub fn marshal_timestamped_entry(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
         buffer.write_u64::<BigEndian>(self.timestamp).unwrap();
@@ -610,6 +614,16 @@ pub fn signed_certificate_timestamp(
 #[must_use]
 pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     let sig: EcdsaSignature = signing_key.sign(msg);
+    encode_digitally_signed(&sig)
+}
+
+/// Encodes a P-256 ECDSA signature as TLS `DigitallySigned` (SHA-256/ECDSA).
+///
+/// # Panics
+///
+/// Panics if writing to an internal buffer fails, which should never happen.
+#[must_use]
+pub fn encode_digitally_signed(sig: &EcdsaSignature) -> Vec<u8> {
     let sig_der = sig.to_der();
     let sig_bytes = sig_der.as_bytes();
 
@@ -618,7 +632,7 @@ pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
     digitally_signed.push(4); // hash = sha256
     digitally_signed.push(3); // signature = ecdsa
     digitally_signed
-        .write_u16::<BigEndian>(u16::try_from(sig_bytes.len() & 0xFFFF).unwrap())
+        .write_u16::<BigEndian>(u16::try_from(sig_bytes.len()).unwrap())
         .unwrap();
     digitally_signed.extend(sig_bytes);
 
@@ -640,7 +654,8 @@ pub fn sign(signing_key: &EcdsaSigningKey, msg: &[u8]) -> Vec<u8> {
 /// # Panics
 ///
 /// Panics if writing to an internal buffer fails, which should never happen.
-fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Hash) -> Vec<u8> {
+#[must_use]
+pub fn serialize_sth_signature_input(timestamp: u64, tree_size: u64, root_hash: &Hash) -> Vec<u8> {
     let mut buffer = Vec::new();
 
     buffer.write_u8(0).unwrap(); // version = 0 (v1)
