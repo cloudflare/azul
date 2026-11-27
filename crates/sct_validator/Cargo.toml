@@ -8,6 +8,7 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "WASM-compatible SCT (Signed Certificate Timestamp) validation for CT compliance"
+publish = false
 
 [dependencies]
 base64.workspace = true
